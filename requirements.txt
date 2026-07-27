@@ -1,0 +1,9 @@
+# Minimum versions; pip will pick the newest compatible wheels for your Python.
+# Floating (>=) avoids the "no wheel for Python 3.14, must compile from source"
+# trap that pinned older versions hit.
+PyQt6>=6.7
+httpx>=0.27
+pydantic>=2.9
+zeroconf>=0.131
+websocket-client>=1.8
+PyYAML>=6.0

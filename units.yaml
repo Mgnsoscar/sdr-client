@@ -1,0 +1,13 @@
+# SDR Broadcaster Control — known units
+#
+# The GUI loads this on startup. You can also add units from within the app
+# (and it will save back here). Hostnames resolve via mDNS (.local); IPs work
+# too and skip mDNS for that unit.
+
+webhook_port: 8766       # port the GUI listens on for unit events
+api_key: ""              # shared secret, if your agents require one (else leave blank)
+
+units:
+  - hostname: 169.254.61.247
+  # - hostname: hostname.local
+  # - hostname: 192.168.1.42      # an IP also works (skips mDNS for this unit)
