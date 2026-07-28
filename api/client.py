@@ -112,7 +112,10 @@ class AgentClient:
         # bug. RLock because _request may re-enter via retry.
         self._lock = threading.RLock()
 
-        headers = {"Content-Type": "application/json"}
+        # No hardcoded Content-Type: httpx sets it per request from the body type
+        # (application/json for json=, multipart/form-data + boundary for files=).
+        # A fixed default would clobber the multipart boundary type on uploads.
+        headers = {}
         if api_key:
             headers["X-API-Key"] = api_key
         self._headers = headers
@@ -194,8 +197,7 @@ class AgentClient:
             client = self._client
         try:
             if files is not None:
-                resp = client.request(method, path, params=params, files=files,
-                                      headers={"Content-Type": None})
+                resp = client.request(method, path, params=params, files=files)
             else:
                 resp = client.request(method, path, json=json, params=params)
         except self._TRANSPORT_ERRORS as exc:
