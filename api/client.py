@@ -405,6 +405,21 @@ class AgentClient:
     def delete_script(self, name: str) -> dict:
         return self._request("DELETE", f"/scripts/{name}")
 
+    def get_script_params(self, name: str) -> dict:
+        """Statically-extracted argparse parameters for a script (for building a form)."""
+        return self._request("GET", f"/scripts/{name}/params")
+
+    def create_task(self, spec: dict) -> dict:
+        """Create a task from a spec (name, command, working_dir, env, autostart,
+        restart_on_crash) — the agent appends it to tasks.yaml and reloads live."""
+        return self._request("POST", "/tasks", json=spec)
+
+    def update_task(self, name: str, spec: dict) -> dict:
+        return self._request("PUT", f"/tasks/{name}", json=spec)
+
+    def delete_task(self, name: str) -> dict:
+        return self._request("DELETE", f"/tasks/{name}")
+
     def get_tasks_yaml(self) -> str:
         data = self._request("GET", "/config/tasks-yaml")
         return data.get("content", "")
