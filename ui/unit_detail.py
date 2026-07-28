@@ -298,7 +298,7 @@ class UnitDetail(QWidget):
             self._tasks_panel.update_tasks(tasksv)
             # Keep the Logs panel's task selector in sync with available tasks.
             if self._logs_panel is not None:
-                self._logs_panel.set_tasks([t.name for t in tasksv])
+                self._logs_panel.set_tasks(tasksv)
         # Header status from system reachability
         sysv = snap.system.get(self.hostname)
         if isinstance(sysv, m.SystemHealth):

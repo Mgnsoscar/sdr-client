@@ -27,7 +27,8 @@ from . import models as m
 logger = logging.getLogger(__name__)
 
 DEFAULT_PORT = 8765
-DEFAULT_TIMEOUT = 10.0   # seconds
+DEFAULT_TIMEOUT = 10.0   # seconds (read/write/pool)
+DEFAULT_CONNECT_TIMEOUT = 2.0   # seconds — fail fast on an unreachable unit
 
 
 # ── Exceptions ─────────────────────────────────────────────────────────────────
@@ -70,6 +71,7 @@ class AgentClient:
         api_key: str = "",
         port: int = DEFAULT_PORT,
         timeout: float = DEFAULT_TIMEOUT,
+        connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
         use_https: bool = False,
         keepalive_expiry: float = 120.0,
     ):
@@ -85,6 +87,7 @@ class AgentClient:
         self.api_key = api_key
         self.port = port
         self.timeout = timeout
+        self.connect_timeout = connect_timeout
         self.use_https = use_https
         self.keepalive_expiry = keepalive_expiry
         self.scheme = "https" if use_https else "http"
@@ -153,8 +156,11 @@ class AgentClient:
             base = self.base_url
             headers = self._headers
 
+        # Short connect timeout so an unreachable unit fails fast (it shows as
+        # offline in ~2s, not ~10s); read/write stay generous for slow endpoints.
+        timeout = httpx.Timeout(self.timeout, connect=self.connect_timeout)
         return httpx.Client(
-            base_url=base, headers=headers, timeout=self.timeout, transport=transport
+            base_url=base, headers=headers, timeout=timeout, transport=transport
         )
 
     # ── Low-level request helper ───────────────────────────────────────────────
@@ -163,9 +169,12 @@ class AgentClient:
     # server returning an HTTP error status). A stale keep-alive connection that
     # was silently dropped while idle surfaces as one of these — and is safe to
     # retry once on a fresh connection.
+    # NOTE: ConnectTimeout is intentionally NOT retried — it means a *new*
+    # connection couldn't be established (the unit is unreachable), so retrying
+    # only doubles the wait before the unit shows offline. Stale keep-alive drops
+    # surface as the errors below on a *reused* connection and are worth one retry.
     _TRANSPORT_ERRORS = (
         httpx.ConnectError,
-        httpx.ConnectTimeout,
         httpx.ReadTimeout,
         httpx.ReadError,
         httpx.RemoteProtocolError,   # server closed an idle keep-alive connection
