@@ -8,6 +8,6 @@ webhook_port: 8766       # port the GUI listens on for unit events
 api_key: ""              # shared secret, if your agents require one (else leave blank)
 
 units:
-  - hostname: 169.254.61.247
+  #- hostname: 169.254.61.247
   # - hostname: hostname.local
-  # - hostname: 192.168.1.42      # an IP also works (skips mDNS for this unit)
+  - hostname: 192.168.100.100      # an IP also works (skips mDNS for this unit)

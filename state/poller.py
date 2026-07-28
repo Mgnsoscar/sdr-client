@@ -81,19 +81,33 @@ class Poller:
     # ── One-shot polls (also usable directly, e.g. for an eager first paint) ────
 
     def poll_fast_once(self) -> FastSnapshot:
-        snap = FastSnapshot(
-            health=self.fleet.health_all(),
-            system=self.fleet.system_all(),
-            tasks=self.fleet.tasks_all(),
-            runs=self.fleet.list_runs_all(),
-        )
+        # Build sequentially, checking the stop flag between calls. Each fleet
+        # call can block on connection timeouts to an unreachable unit, so this
+        # lets a shutdown interrupt the cycle promptly instead of grinding
+        # through every timeout (and colliding with interpreter teardown).
+        snap = FastSnapshot()
+        if self._stop.is_set():
+            return snap
+        snap.health = self.fleet.health_all()
+        if self._stop.is_set():
+            return snap
+        snap.system = self.fleet.system_all()
+        if self._stop.is_set():
+            return snap
+        snap.tasks = self.fleet.tasks_all()
+        if self._stop.is_set():
+            return snap
+        snap.runs = self.fleet.list_runs_all()
         return snap
 
     def poll_slow_once(self) -> SlowSnapshot:
-        snap = SlowSnapshot(
-            sdr=self.fleet.sdr_all(),
-            info=self.fleet.info_all(),
-        )
+        snap = SlowSnapshot()
+        if self._stop.is_set():
+            return snap
+        snap.sdr = self.fleet.sdr_all()
+        if self._stop.is_set():
+            return snap
+        snap.info = self.fleet.info_all()
         return snap
 
     # ── Loops ──────────────────────────────────────────────────────────────────
@@ -102,9 +116,11 @@ class Poller:
         while not self._stop.is_set():
             try:
                 snap = self.poll_fast_once()
-                if self._fast_cb:
+                if self._fast_cb and not self._stop.is_set():
                     self._fast_cb(snap)
             except Exception:
+                if self._stop.is_set():
+                    break   # shutting down — a failed cycle here is expected, stay quiet
                 logger.exception("Fast poll cycle failed")
             self._stop.wait(self.fast_interval_s)
 
@@ -114,9 +130,11 @@ class Poller:
         while not self._stop.is_set():
             try:
                 snap = self.poll_slow_once()
-                if self._slow_cb:
+                if self._slow_cb and not self._stop.is_set():
                     self._slow_cb(snap)
             except Exception:
+                if self._stop.is_set():
+                    break   # shutting down — stay quiet
                 logger.exception("Slow poll cycle failed")
             self._stop.wait(self.slow_interval_s)
 

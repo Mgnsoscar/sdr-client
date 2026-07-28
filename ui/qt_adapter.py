@@ -67,6 +67,7 @@ class DataHub(QObject):
         self.log_tailer = LogTailer()
         self._api_secret = api_secret
         self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="hub-action")
+        self._stopped = False
 
         # Wire the data layer's callbacks to signal emissions. Emitting a Qt signal
         # from a worker thread is safe and is delivered to the GUI thread via the
@@ -100,6 +101,11 @@ class DataHub(QObject):
         logger.info("DataHub started")
 
     def stop(self) -> None:
+        # Idempotent: closeEvent and main() both call this, so the second call
+        # should be a no-op rather than repeating the work (and double-logging).
+        if self._stopped:
+            return
+        self._stopped = True
         self.poller.stop()
         self.streams.stop()
         self.log_tailer.stop()

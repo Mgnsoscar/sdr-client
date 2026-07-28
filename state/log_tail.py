@@ -64,6 +64,11 @@ class _TailThread(threading.Thread):
             while not self._stop.is_set():
                 try:
                     msg = self._ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    # No data within the read timeout — this is normal for an idle
+                    # task (nothing being logged). Loop back, re-check the stop
+                    # flag, and keep waiting instead of killing the tail thread.
+                    continue
                 except (websocket.WebSocketConnectionClosedException, OSError):
                     break
                 if msg is None or msg == "":

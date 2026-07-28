@@ -93,14 +93,20 @@ class Fleet:
             return {}
 
         results: Dict[str, object] = {}
-        with ThreadPoolExecutor(max_workers=min(self._max_workers, len(targets))) as pool:
-            future_to_unit = {pool.submit(fn, c): c.hostname for c in targets}
-            for fut in as_completed(future_to_unit):
-                hostname = future_to_unit[fut]
-                try:
-                    results[hostname] = fut.result()
-                except Exception as exc:   # noqa: BLE001 — capture everything per unit
-                    results[hostname] = exc
+        try:
+            with ThreadPoolExecutor(max_workers=min(self._max_workers, len(targets))) as pool:
+                future_to_unit = {pool.submit(fn, c): c.hostname for c in targets}
+                for fut in as_completed(future_to_unit):
+                    hostname = future_to_unit[fut]
+                    try:
+                        results[hostname] = fut.result()
+                    except Exception as exc:   # noqa: BLE001 — capture everything per unit
+                        results[hostname] = exc
+        except RuntimeError:
+            # Raised by pool.submit() when the interpreter is shutting down
+            # ("cannot schedule new futures after interpreter shutdown"). Honour
+            # the "never raises" contract — return whatever we managed to collect.
+            pass
         return results
 
     # ── Broadcast operations ──────────────────────────────────────────────────────
