@@ -50,14 +50,14 @@ class UnitCard(QFrame):
 
     def set_connection(self, connected: Optional[bool]) -> None:
         """Connection/stream status: True online, False offline, None unknown."""
-        self._online = connected  # <-- add this line
+        self._online = connected
         if connected is True:
             ...
         else:
             self._dot.set_color(Palette.IDLE)
             self._conn.setText("—")
 
-    def is_online(self) -> bool:  # <-- add this method
+    def is_online(self) -> bool:
         """True only if the latest connection/stream update said online."""
         return self._online is True
 

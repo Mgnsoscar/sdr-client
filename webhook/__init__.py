@@ -1,7 +1,7 @@
 """
 Webhook package — event classification + the outbound SSE stream client.
 
-The client used to run an inbound HTTP receiver (WebhookReceiver) that agents
+The client used to run an inbound HTTP receiver that agents
 POSTed to. That required the laptop to accept inbound connections, which laptop
 firewalls block without admin. It has been replaced by an outbound SSE stream
 (EventStreamManager in webhook/stream_client.py): the laptop opens a long-lived

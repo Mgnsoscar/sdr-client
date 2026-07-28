@@ -3,7 +3,7 @@ Event classification for events arriving from an agent.
 
 Wraps a raw event payload (delivered over the SSE stream) in the matching
 client-side model based on its "type" discriminator. This was previously part
-of webhook/receiver.py (the inbound HTTP server), which has been removed — the
+of the inbound webhook receiver (since removed) — the
 client now reads events via an outbound SSE stream (see webhook/stream_client.py),
 so the classification logic lives here in a neutral module both can import.
 

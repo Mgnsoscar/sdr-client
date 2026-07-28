@@ -1,9 +1,8 @@
 """
 Small network helpers for the client.
 
-The webhook receiver binds 0.0.0.0, but agents need a concrete address to POST
-to. local_ip() returns the laptop's primary LAN IP — the one the Pis can reach
-this laptop at — so we can build the webhook URL to register with each agent.
+local_ip() returns the laptop's primary LAN IP — the address on the same
+network as the units.
 """
 from __future__ import annotations
 

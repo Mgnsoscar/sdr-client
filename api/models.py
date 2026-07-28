@@ -137,13 +137,8 @@ class SdrStatus(BaseModel):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Webhooks
+# Events (SSE stream payloads)
 # ══════════════════════════════════════════════════════════════════════════════
-
-class WebhookRegistration(BaseModel):
-    url: str
-    secret: str = ""
-
 
 class CrashEvent(BaseModel):
     type: str = "crash"

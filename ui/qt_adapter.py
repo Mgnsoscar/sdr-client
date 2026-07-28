@@ -1,19 +1,19 @@
 """
 Qt adapter — the threading bridge between the pure-Python data layer and the UI.
 
-The Fleet, WebhookReceiver, and Poller all run work on background threads and
+The Fleet, the SSE event streams, and the Poller all run work on background threads and
 communicate via plain callbacks. Qt widgets, however, may only be touched on the
 GUI thread. This adapter is the single place that crosses that boundary:
 
-  - It owns the Fleet, WebhookReceiver, and Poller.
-  - It registers callbacks on the receiver/poller that simply EMIT Qt signals.
+  - It owns the Fleet, the SSE event stream manager, and the Poller.
+  - It registers callbacks on the streams/poller that simply EMIT Qt signals.
   - Because the adapter is a QObject and the signals are connected with the
     default AutoConnection, Qt automatically queues the emission onto the GUI
     thread when it originates from a worker thread. So slots connected to these
     signals run safely on the UI thread.
 
 The UI connects to:
-    event_received(object)   # a CrashEvent | EventWebhook | SequenceWebhook | dict
+    event_received(object)   # a CrashEvent | EventWebhook | SequenceWebhook | TaskEvent | dict
     fast_update(object)      # a FastSnapshot
     slow_update(object)      # a SlowSnapshot
 
