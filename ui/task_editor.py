@@ -268,7 +268,12 @@ class TaskEditorDialog(QDialog):
 
     def _label_for(self, spec: dict) -> QLabel:
         flag = spec["flags"][0] if spec["flags"] else spec["dest"]
-        text = flag + (" *" if spec.get("required") else "")
+        text: str = flag + (" *" if spec.get("required") else "")
+
+        if text.startswith("-"): text = text[1:]
+        elif text.startswith("--"): text = text[2:]
+        text = text.replace("-", " ")
+
         lbl = QLabel(text)
         if spec.get("help"):
             lbl.setToolTip(spec["help"])

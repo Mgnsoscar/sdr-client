@@ -21,8 +21,8 @@ from typing import Dict, Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QStackedWidget,
-    QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from api import Fleet
@@ -30,6 +30,7 @@ from api import models as m
 from .qt_adapter import DataHub
 from .logs_panel import LogsPanel
 from .scripts_panel import ScriptsPanel
+from .task_editor import TaskEditorDialog
 from .theme import Palette
 from .widgets import StatusPill
 
@@ -77,12 +78,18 @@ class _TaskRow(QFrame):
         # Buttons
         self._start = QPushButton("Start")
         self._stop = QPushButton("Stop")
+        self._edit = QPushButton("Edit")
+        self._delete = QPushButton("Delete")
         for b in (self._start, self._stop):
             b.setFixedWidth(72)
+        for b in (self._edit, self._delete):
+            b.setFixedWidth(62)
         self._start.clicked.connect(self._on_start)
         self._stop.clicked.connect(self._on_stop)
-        lay.addWidget(self._start)
-        lay.addWidget(self._stop)
+        self._edit.clicked.connect(self._on_edit)
+        self._delete.clicked.connect(self._on_delete)
+        for b in (self._start, self._stop, self._edit, self._delete):
+            lay.addWidget(b)
 
         self.update_status(task)
 
@@ -105,11 +112,14 @@ class _TaskRow(QFrame):
         running = st in (m.ProcessState.RUNNING, m.ProcessState.STARTING)
         self._start.setEnabled(not running)
         self._stop.setEnabled(running or st == m.ProcessState.CRASHED)
+        # A running task can't be deleted (the agent refuses); edit is allowed anytime.
+        self._delete.setEnabled(not running)
+        self._edit.setEnabled(True)
 
     # ── Actions ────────────────────────────────────────────────────────────────
 
     def _busy(self, label: str) -> None:
-        for b in (self._start, self._stop):
+        for b in (self._start, self._stop, self._edit, self._delete):
             b.setEnabled(False)
         self._info.setText(label)
 
@@ -125,6 +135,26 @@ class _TaskRow(QFrame):
         self.hub.run_async(
             f"task_stop:{self.hostname}:{self.task_name}",
             lambda: self.hub.fleet.get(self.hostname).stop_task(self.task_name),
+        )
+
+    def _on_edit(self) -> None:
+        TaskEditorDialog(self.hub, self.hostname,
+                         existing_name=self.task_name, parent=self.window()).exec()
+
+    def _on_delete(self) -> None:
+        resp = QMessageBox.question(
+            self, "Delete task",
+            f"Delete task '{self.task_name}' from {self.hostname}?\n"
+            f"This removes it from tasks.yaml on the unit.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        self._busy("deleting…")
+        self.hub.run_async(
+            f"task_delete:{self.hostname}:{self.task_name}",
+            lambda: self.hub.fleet.get(self.hostname).delete_task(self.task_name),
         )
 
 
@@ -143,6 +173,14 @@ class _TasksPanel(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.addStretch(1)
+        self._new_btn = QPushButton("New task")
+        self._new_btn.setObjectName("primary")
+        self._new_btn.clicked.connect(self._on_new_task)
+        header.addWidget(self._new_btn)
+        lay.addLayout(header)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -185,6 +223,9 @@ class _TasksPanel(QWidget):
                 row = self._rows.get(t.name)
                 if row is not None:
                     row.update_status(t)
+
+    def _on_new_task(self) -> None:
+        TaskEditorDialog(self.hub, self.hostname, parent=self.window()).exec()
 
 
 # ── Detail view shell ────────────────────────────────────────────────────────

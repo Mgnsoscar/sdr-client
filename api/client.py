@@ -19,6 +19,7 @@ import threading
 import time
 from enum import Enum
 from typing import List, Optional
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -381,10 +382,14 @@ class AgentClient:
         """WebSocket URL for live log streaming (used by a separate stream thread)."""
         ws_scheme = "wss" if self.base_url.startswith("https") else "ws"
         host_port = self.base_url.split("://", 1)[1]
-        url = f"{ws_scheme}://{host_port}/tasks/{name}/logs/stream?lines={lines}"
+        # URL-encode the task name (it may contain spaces or other characters) and
+        # the query string. A raw space here yields a malformed request line that
+        # uvicorn rejects with 400 "Invalid HTTP request received".
+        params = {"lines": lines}
         if self.api_key:
-            url += f"&api_key={self.api_key}"
-        return url
+            params["api_key"] = self.api_key
+        return (f"{ws_scheme}://{host_port}"
+                f"/tasks/{quote(name, safe='')}/logs/stream?{urlencode(params)}")
 
     # ══════════════════════════════════════════════════════════════════════════
     # Scripts & task registry
