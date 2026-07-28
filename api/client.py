@@ -395,6 +395,14 @@ class AgentClient:
         files = {"file": (filename, content, "text/x-python")}
         return self._request("POST", "/scripts/upload", files=files)
 
+    def get_script(self, name: str) -> str:
+        """Return a script's source text."""
+        data = self._request("GET", f"/scripts/{name}")
+        return data.get("content", "")
+
+    def delete_script(self, name: str) -> dict:
+        return self._request("DELETE", f"/scripts/{name}")
+
     def get_tasks_yaml(self) -> str:
         data = self._request("GET", "/config/tasks-yaml")
         return data.get("content", "")
