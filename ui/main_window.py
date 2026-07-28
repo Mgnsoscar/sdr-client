@@ -184,8 +184,18 @@ class MainWindow(QMainWindow):
     def _on_task_done(self, label: str, result) -> None:
         if label == "panic_all":
             self._report_panic_result(result)
-        elif isinstance(result, Exception):
+            return
+        if isinstance(result, Exception):
             logger.error("Action '%s' failed: %s", label, result)
+            self.statusBar().showMessage(self._format_action_error(label, result), 6000)
+
+    @staticmethod
+    def _format_action_error(label: str, err: Exception) -> str:
+        parts = label.split(":")               # "task_start:<host>:<task>"
+        if len(parts) == 3 and parts[0].startswith("task_"):
+            verb = parts[0].split("_", 1)[1]
+            return f"Failed to {verb} '{parts[2]}': {err}"
+        return f"Action '{label}' failed: {err}"
 
     # ── Clock indicator ─────────────────────────────────────────────────────────
 

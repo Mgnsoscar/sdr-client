@@ -93,8 +93,7 @@ class UnitsTab(QWidget):
 
     def _update_summary(self) -> None:
         total = len(self._cards)
-        online = sum(1 for c in self._cards.values()
-                     if c._conn.text() == "online")  # simple read of current state
+        online = sum(1 for c in self._cards.values() if c.is_online())
         self._summary.setText(f"{online}/{total} online")
 
     # ── Navigation ───────────────────────────────────────────────────────────

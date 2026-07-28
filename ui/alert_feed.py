@@ -62,6 +62,11 @@ def _describe(ev) -> tuple[str, bool]:
         return (f"{ev.unit_id} · {ev.sequence_name}: {verb}{extra}",
                 ev.type in _ALERT_TYPES)
 
+    if isinstance(ev, m.TaskEvent):
+        verb = {"task_started": "task started", "task_stopped": "task stopped",
+                "task_restarted": "task restarted"}.get(ev.type, ev.type)
+        return (f"{ev.unit_id} · {ev.task_name}: {verb}", False)
+
     # Unknown / raw dict — show its type and unit if present
     if isinstance(ev, dict):
         return (f"{ev.get('unit_id','?')} · {ev.get('type','event')}",

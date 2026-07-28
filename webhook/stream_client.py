@@ -28,7 +28,7 @@ from api import models as m
 logger = logging.getLogger(__name__)
 
 # Reuse the same classification the webhook receiver used.
-from webhook.receiver import _classify, ReceivedEvent  # noqa: E402
+from webhook.classify import classify, ReceivedEvent  # noqa: E402
 
 EventCallback = Callable[[ReceivedEvent], None]
 # Optional per-unit stream-status callback: fn(unit_id, connected: bool)
@@ -113,7 +113,7 @@ class _StreamThread(threading.Thread):
         except json.JSONDecodeError:
             logger.debug("[%s] bad SSE data: %r", self._client.hostname, data)
             return
-        event = _classify(payload)
+        event = classify(payload)
         try:
             self._on_event(event)
         except Exception:
