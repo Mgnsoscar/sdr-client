@@ -6,9 +6,8 @@ live status) above a row of sub-tabs:
 
     Tasks  |  Logs  |  Sequences  |  Scripts
 
-This module builds the shell + the Tasks panel (the core control surface: each
-task with start/stop and live state). The other three panels are
-placeholders, filled in subsequent steps.
+This module builds the shell + the Tasks, Logs, and Scripts panels. The
+Sequences panel is still a placeholder, filled in a subsequent step.
 
 Data:
   - Task state is fed from the poller's fast snapshot (on_fast_update), so the
@@ -30,6 +29,7 @@ from api import Fleet
 from api import models as m
 from .qt_adapter import DataHub
 from .logs_panel import LogsPanel
+from .scripts_panel import ScriptsPanel
 from .theme import Palette
 from .widgets import StatusPill
 
@@ -239,6 +239,7 @@ class UnitDetail(QWidget):
         self._sub_stack = QStackedWidget()
         self._tasks_panel: Optional[_TasksPanel] = None  # built per-unit in set_unit
         self._logs_panel: Optional["LogsPanel"] = None   # built per-unit in set_unit
+        self._scripts_panel: Optional["ScriptsPanel"] = None  # built per-unit in set_unit
         self._placeholders: Dict[str, QWidget] = {}
         outer.addWidget(self._sub_stack, stretch=1)
 
@@ -270,16 +271,22 @@ class UnitDetail(QWidget):
 
         self._tasks_panel = _TasksPanel(hostname, self.hub)
         self._logs_panel = LogsPanel(hostname, self.hub)
+        self._scripts_panel = ScriptsPanel(hostname, self.hub)
         self._sub_stack.addWidget(self._tasks_panel)                       # 0 Tasks
         self._sub_stack.addWidget(self._logs_panel)                        # 1 Logs
         self._sub_stack.addWidget(self._placeholder("Sequences & runs — coming next."))  # 2
-        self._sub_stack.addWidget(self._placeholder("Scripts & tasks.yaml — coming next."))  # 3
+        self._sub_stack.addWidget(self._scripts_panel)                     # 3 Scripts
         self._select_subtab(0)
 
     def _select_subtab(self, idx: int) -> None:
         self._sub_stack.setCurrentIndex(idx)
         for i, b in enumerate(self._subtab_buttons):
             b.setChecked(i == idx)
+        # Let a panel refresh itself when it becomes visible (e.g. Scripts fetches
+        # its list on first show rather than being polled).
+        w = self._sub_stack.currentWidget()
+        if hasattr(w, "on_shown"):
+            w.on_shown()
 
     def _handle_back(self) -> None:
         # Close any live log tail before leaving the unit.
@@ -298,7 +305,7 @@ class UnitDetail(QWidget):
             self._tasks_panel.update_tasks(tasksv)
             # Keep the Logs panel's task selector in sync with available tasks.
             if self._logs_panel is not None:
-                self._logs_panel.set_tasks([t.name for t in tasksv])
+                self._logs_panel.set_tasks(tasksv)
         # Header status from system reachability
         sysv = snap.system.get(self.hostname)
         if isinstance(sysv, m.SystemHealth):

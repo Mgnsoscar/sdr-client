@@ -1,14 +1,14 @@
 """
 SSE event stream client.
 
-Replaces the inbound webhook receiver. Instead of the Pi connecting to the
+Replaces the old inbound-webhook approach. Instead of the Pi connecting to the
 laptop (blocked by laptop firewalls without admin), the laptop opens an outbound
 GET to each unit's /events/stream and holds it open, reading Server-Sent Events
 as they arrive. Outbound on the existing agent port — no firewall rule, no admin.
 
 One StreamThread per unit holds that unit's connection. It parses SSE frames,
-wraps each event in the matching client model (reusing the same classification
-as the old receiver), and hands it to a callback — the same callback the alert
+wraps each event in the matching client model (via the shared classifier in
+webhook.classify), and hands it to a callback — the same callback the alert
 feed consumes. On disconnect it retries with backoff, so units coming and going
 self-heal, and the connection state per unit is observable.
 """
@@ -27,8 +27,8 @@ from api import models as m
 
 logger = logging.getLogger(__name__)
 
-# Reuse the same classification the webhook receiver used.
-from webhook.receiver import _classify, ReceivedEvent  # noqa: E402
+# Shared event classification (see webhook/classify.py).
+from webhook.classify import classify, ReceivedEvent  # noqa: E402
 
 EventCallback = Callable[[ReceivedEvent], None]
 # Optional per-unit stream-status callback: fn(unit_id, connected: bool)
@@ -113,7 +113,7 @@ class _StreamThread(threading.Thread):
         except json.JSONDecodeError:
             logger.debug("[%s] bad SSE data: %r", self._client.hostname, data)
             return
-        event = _classify(payload)
+        event = classify(payload)
         try:
             self._on_event(event)
         except Exception:
@@ -122,8 +122,8 @@ class _StreamThread(threading.Thread):
 
 class EventStreamManager:
     """
-    Manages one SSE stream per unit in the fleet. Mirrors the old WebhookReceiver's
-    role (feed events to a callback) but with outbound, firewall-friendly streams.
+    Manages one SSE stream per unit in the fleet — feeds events to a callback via
+    outbound, firewall-friendly streams (no inbound listener needed).
     """
 
     def __init__(self, api_key: str = ""):

@@ -1,19 +1,19 @@
 """
 Qt adapter — the threading bridge between the pure-Python data layer and the UI.
 
-The Fleet, WebhookReceiver, and Poller all run work on background threads and
+The Fleet, the SSE event streams, and the Poller all run work on background threads and
 communicate via plain callbacks. Qt widgets, however, may only be touched on the
 GUI thread. This adapter is the single place that crosses that boundary:
 
-  - It owns the Fleet, WebhookReceiver, and Poller.
-  - It registers callbacks on the receiver/poller that simply EMIT Qt signals.
+  - It owns the Fleet, the SSE event stream manager, and the Poller.
+  - It registers callbacks on the streams/poller that simply EMIT Qt signals.
   - Because the adapter is a QObject and the signals are connected with the
     default AutoConnection, Qt automatically queues the emission onto the GUI
     thread when it originates from a worker thread. So slots connected to these
     signals run safely on the UI thread.
 
 The UI connects to:
-    event_received(object)   # a CrashEvent | EventWebhook | SequenceWebhook | dict
+    event_received(object)   # a CrashEvent | EventWebhook | SequenceWebhook | TaskEvent | dict
     fast_update(object)      # a FastSnapshot
     slow_update(object)      # a SlowSnapshot
 
@@ -67,6 +67,7 @@ class DataHub(QObject):
         self.log_tailer = LogTailer()
         self._api_secret = api_secret
         self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="hub-action")
+        self._stopped = False
 
         # Wire the data layer's callbacks to signal emissions. Emitting a Qt signal
         # from a worker thread is safe and is delivered to the GUI thread via the
@@ -100,6 +101,11 @@ class DataHub(QObject):
         logger.info("DataHub started")
 
     def stop(self) -> None:
+        # Idempotent: closeEvent and main() both call this, so the second call
+        # should be a no-op rather than repeating the work (and double-logging).
+        if self._stopped:
+            return
+        self._stopped = True
         self.poller.stop()
         self.streams.stop()
         self.log_tailer.stop()

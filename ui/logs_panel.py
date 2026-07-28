@@ -36,6 +36,9 @@ class LogsPanel(QWidget):
         self.hub = hub
         self._current_task: Optional[str] = None
         self._tailing = False
+        self._task_states: dict = {}       # task_name -> ProcessState (from fast poll)
+        self._connected = False            # is the tail WebSocket currently up?
+        self._connect_detail = ""
         self._build()
 
         # Subscribe to the hub's log signals. These are shared (one tailer), so the
@@ -98,21 +101,25 @@ class LogsPanel(QWidget):
 
     # ── Population ─────────────────────────────────────────────────────────────
 
-    def set_tasks(self, task_names: List[str]) -> None:
-        """Populate the task selector (called when entering the unit / on updates)."""
+    def set_tasks(self, tasks: List[m.ProcessStatus]) -> None:
+        """Populate the task selector and remember each task's state, so the panel
+        can show whether tailed output is live or just a stopped task's last
+        recorded log. Called on every fast poll update."""
+        self._task_states = {t.name: t.state for t in tasks}
+        names = [t.name for t in tasks]
         current = self._task_combo.currentText()
-        names = list(task_names)
-        # Only rebuild if the set changed, to avoid disrupting selection.
+        # Only rebuild the combo if the set changed, to avoid disrupting selection.
         existing = [self._task_combo.itemText(i) for i in range(self._task_combo.count())]
-        if names == existing:
-            return
-        self._task_combo.blockSignals(True)
-        self._task_combo.clear()
-        self._task_combo.addItems(names)
-        # restore previous selection if still present
-        if current in names:
-            self._task_combo.setCurrentText(current)
-        self._task_combo.blockSignals(False)
+        if names != existing:
+            self._task_combo.blockSignals(True)
+            self._task_combo.clear()
+            self._task_combo.addItems(names)
+            if current in names:
+                self._task_combo.setCurrentText(current)
+            self._task_combo.blockSignals(False)
+        # A task may have started/stopped while tailing — refresh the indicator.
+        if self._tailing:
+            self._refresh_status()
 
     # ── Tail control ───────────────────────────────────────────────────────────
 
@@ -134,14 +141,22 @@ class LogsPanel(QWidget):
         self._tailing = True
         self._tail_btn.setText("Stop")
         self._view.clear()
-        self._append(f"— tailing {task_name} on {self.hostname} —\n")
+        if self._task_states.get(task_name) == m.ProcessState.RUNNING:
+            self._append(f"— tailing {task_name} on {self.hostname} (running) —\n")
+        else:
+            self._append(
+                f"— {task_name} on {self.hostname} is not running; showing the "
+                f"last recorded log (may be from a previous run) —\n"
+            )
         self.hub.start_log_tail(self.hostname, task_name, lines=200)
 
     def _stop_tail(self) -> None:
         self._tailing = False
+        self._connected = False
         self._tail_btn.setText("Tail")
         self.hub.stop_log_tail()
         self._status.setText("stopped")
+        self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
 
     def on_leave(self) -> None:
         """Called when the user navigates away from this unit — close the tail."""
@@ -158,12 +173,24 @@ class LogsPanel(QWidget):
     def _on_log_status(self, connected: bool, detail: str) -> None:
         if not self._tailing:
             return
-        if connected:
+        self._connected = connected
+        self._connect_detail = detail
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        """Reflect both the stream connection and whether the task is running, so a
+        stopped task's backlog is never mistaken for live output."""
+        if not self._tailing:
+            return
+        if not self._connected:
+            self._status.setText(f"○ {self._connect_detail or 'disconnected'}")
+            self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+        elif self._task_states.get(self._current_task) == m.ProcessState.RUNNING:
             self._status.setText("● live")
             self._status.setStyleSheet(f"font-size: 11px; color: {Palette.ONLINE};")
         else:
-            self._status.setText(f"○ {detail or 'disconnected'}")
-            self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+            self._status.setText("○ not running · last recorded log")
+            self._status.setStyleSheet(f"font-size: 11px; color: {Palette.ARMED};")
 
     # ── View helpers ───────────────────────────────────────────────────────────
 

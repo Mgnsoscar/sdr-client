@@ -5,7 +5,8 @@ Run:
     python main.py
 
 Loads units.yaml, builds the fleet, warms up connections in the background,
-starts the webhook receiver + poller, registers webhooks, and shows the window.
+opens an outbound SSE event stream per unit and starts the poller, then shows
+the window.
 """
 from __future__ import annotations
 
