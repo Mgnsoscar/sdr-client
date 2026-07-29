@@ -52,7 +52,8 @@ def _describe(ev) -> tuple[str, bool]:
 
     if isinstance(ev, m.SequenceWebhook):
         verb = {
-            "sequence_started":  "on air",
+            "sequence_started":  "started",     # first step fired (warm-up begins)
+            "sequence_on_air":   "on air",      # on_air_at (T0) reached — RF live
             "sequence_step":     "step fired",
             "sequence_stopped":  "off air",
             "sequence_aborted":  "ABORTED",

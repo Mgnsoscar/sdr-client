@@ -175,6 +175,7 @@ class TaskEvent(BaseModel):
 
 
 class SequenceWebhook(BaseModel):
+    # sequence_started | sequence_on_air | sequence_step | sequence_stopped | sequence_aborted | sequence_modified
     type: str
     unit_id: str
     run_id: str
