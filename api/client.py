@@ -19,6 +19,7 @@ import threading
 import time
 from enum import Enum
 from typing import List, Optional
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -381,10 +382,14 @@ class AgentClient:
         """WebSocket URL for live log streaming (used by a separate stream thread)."""
         ws_scheme = "wss" if self.base_url.startswith("https") else "ws"
         host_port = self.base_url.split("://", 1)[1]
-        url = f"{ws_scheme}://{host_port}/tasks/{name}/logs/stream?lines={lines}"
+        # URL-encode the task name (it may contain spaces or other characters) and
+        # the query string. A raw space here yields a malformed request line that
+        # uvicorn rejects with 400 "Invalid HTTP request received".
+        params = {"lines": lines}
         if self.api_key:
-            url += f"&api_key={self.api_key}"
-        return url
+            params["api_key"] = self.api_key
+        return (f"{ws_scheme}://{host_port}"
+                f"/tasks/{quote(name, safe='')}/logs/stream?{urlencode(params)}")
 
     # ══════════════════════════════════════════════════════════════════════════
     # Scripts & task registry
@@ -404,6 +409,21 @@ class AgentClient:
 
     def delete_script(self, name: str) -> dict:
         return self._request("DELETE", f"/scripts/{name}")
+
+    def get_script_params(self, name: str) -> dict:
+        """Statically-extracted argparse parameters for a script (for building a form)."""
+        return self._request("GET", f"/scripts/{name}/params")
+
+    def create_task(self, spec: dict) -> dict:
+        """Create a task from a spec (name, command, working_dir, env, autostart,
+        restart_on_crash) — the agent appends it to tasks.yaml and reloads live."""
+        return self._request("POST", "/tasks", json=spec)
+
+    def update_task(self, name: str, spec: dict) -> dict:
+        return self._request("PUT", f"/tasks/{name}", json=spec)
+
+    def delete_task(self, name: str) -> dict:
+        return self._request("DELETE", f"/tasks/{name}")
 
     def get_tasks_yaml(self) -> str:
         data = self._request("GET", "/config/tasks-yaml")
