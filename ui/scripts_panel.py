@@ -74,6 +74,8 @@ class ScriptsPanel(QWidget):
         self._pending_download: Optional[str] = None
         self._dirty = False           # unsaved edits in the viewer?
         self._loading = False         # suppress dirty while setting text programmatically
+        self._clean_text = ""         # last saved/loaded content (dirty = differs from this)
+        self._pending_save_text = ""  # content sent to the last save, applied on success
         self._build()
         self.hub.task_done.connect(self._on_task_done)
 
@@ -192,16 +194,20 @@ class ScriptsPanel(QWidget):
         )
 
     def _on_text_changed(self) -> None:
-        if self._loading or self._dirty:
+        if self._loading:
             return
-        self._dirty = True
-        self._set_status("unsaved changes", warn=True)
+        dirty = self._view.toPlainText() != self._clean_text
+        if dirty == self._dirty:
+            return
+        self._dirty = dirty
+        self._set_status("unsaved changes" if dirty else (self._selected or ""), warn=dirty)
 
     def _on_save(self) -> None:
         name = self._selected
         if not name:
             return
-        content = self._view.toPlainText().encode("utf-8")
+        self._pending_save_text = self._view.toPlainText()
+        content = self._pending_save_text.encode("utf-8")
         self._set_status(f"saving {name}…")
         self.hub.run_async(
             f"scripts_save:{self.hostname}:{name}",
@@ -302,15 +308,19 @@ class ScriptsPanel(QWidget):
         elif op == "scripts_get":
             name = ":".join(parts[2:])
             if name == self._selected:
+                content = result if isinstance(result, str) else str(result)
+                self._clean_text = content
                 self._loading = True
-                self._view.setPlainText(result if isinstance(result, str) else str(result))
+                self._view.setPlainText(content)
                 self._loading = False
                 self._dirty = False
                 self._set_status(name)
         elif op == "scripts_save":
             name = ":".join(parts[2:])
-            self._dirty = False
-            self._set_status(f"saved {name}")
+            self._clean_text = self._pending_save_text
+            self._dirty = self._view.toPlainText() != self._clean_text
+            self._set_status(f"saved {name}" if not self._dirty else "unsaved changes",
+                             warn=self._dirty)
         elif op == "scripts_download":
             target = self._pending_download
             self._pending_download = None
@@ -366,6 +376,7 @@ class ScriptsPanel(QWidget):
             self._loading = True
             self._view.clear()
             self._loading = False
+            self._clean_text = ""
             self._dirty = False
             self._selected = None
             self._delete_btn.setEnabled(False)
