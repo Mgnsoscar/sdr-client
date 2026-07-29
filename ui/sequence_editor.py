@@ -1,15 +1,16 @@
 """
-SequenceEditorDialog — create a new sequence for one unit.
+SequenceEditorDialog — create or edit a sequence for one unit.
 
 Name + description on top, a visual drag-and-drop TimelineEditor as the body.
 On open it fetches the unit's task list (so the timeline's task pickers are
-populated) and pre-seeds the simplest valid sequence — one on-air step and one
-off-air step — so the operator starts from something sensible.
+populated). Creating pre-seeds the simplest valid sequence — one on-air step and
+one off-air step — so the operator starts from something sensible; editing loads
+the existing sequence's steps onto the timeline instead.
 
 Client-side validation mirrors the agent's rules (≥1 on-air + ≥1 off-air step,
 every step has a known task), so mistakes surface instantly instead of coming
-back as a 400. Save builds a CreateSequenceRequest and calls create_sequence,
-which the agent stores in sequences.json.
+back as a 400. Save builds a CreateSequenceRequest and calls create_sequence (or
+update_sequence when editing), which the agent stores in sequences.json.
 
 Network calls go through the DataHub's run_async and return on the shared
 task_done signal, filtered here to this host + operations. The modal exec loop
@@ -17,7 +18,7 @@ still processes those queued signals, so results arrive while the dialog is open
 """
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -31,16 +32,24 @@ from .timeline_editor import TimelineEditor
 
 
 class SequenceEditorDialog(QDialog):
-    def __init__(self, hub: DataHub, hostname: str, parent=None):
+    def __init__(self, hub: DataHub, hostname: str,
+                 sequence: Optional[m.Sequence] = None, parent=None):
         super().__init__(parent)
         self.hub = hub
         self.hostname = hostname
+        self._sequence = sequence            # None -> create, else edit
+        self._editing = sequence is not None
         self._saving = False
-        self._seeded = False
+        # In edit mode we load the existing steps, never seed a default pair.
+        self._seeded = self._editing
 
-        self.setWindowTitle("New sequence")
+        self.setWindowTitle("Edit sequence" if self._editing else "New sequence")
         self.setMinimumSize(780, 460)
         self._build()
+        if self._editing:
+            self._name.setText(sequence.name)
+            self._desc.setText(sequence.description)
+            self._timeline.set_steps(sequence.steps)
         self.hub.task_done.connect(self._on_task_done)
         self.finished.connect(lambda _=0: self._disconnect())
         self._load()
@@ -145,10 +154,17 @@ class SequenceEditorDialog(QDialog):
         self._saving = True
         self._buttons.setEnabled(False)
         self._set_status("saving…")
-        self.hub.run_async(
-            f"seqdlg_save:{self.hostname}:{req.name}",
-            lambda: self.hub.fleet.get(self.hostname).create_sequence(req),
-        )
+        if self._editing:
+            seq_id = self._sequence.id
+            self.hub.run_async(
+                f"seqdlg_save:{self.hostname}:{req.name}",
+                lambda: self.hub.fleet.get(self.hostname).update_sequence(seq_id, req),
+            )
+        else:
+            self.hub.run_async(
+                f"seqdlg_save:{self.hostname}:{req.name}",
+                lambda: self.hub.fleet.get(self.hostname).create_sequence(req),
+            )
 
     # ── Misc ─────────────────────────────────────────────────────────────────
 
