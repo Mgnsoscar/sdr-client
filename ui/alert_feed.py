@@ -55,7 +55,8 @@ def _describe(ev) -> tuple[str, bool]:
             "sequence_started":  "started",     # first step fired (warm-up begins)
             "sequence_on_air":   "on air",      # on_air_at (T0) reached — RF live
             "sequence_step":     "step fired",
-            "sequence_stopped":  "off air",
+            "sequence_off_air":  "off air",     # on_air_end (T_end) reached — RF off
+            "sequence_stopped":  "complete",    # every step (incl. cool-down) has fired
             "sequence_aborted":  "ABORTED",
             "sequence_modified": "window changed",
         }.get(ev.type, ev.type)
