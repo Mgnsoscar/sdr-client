@@ -19,10 +19,12 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
+import yaml
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from api import Fleet
@@ -160,6 +162,19 @@ class _TaskRow(QFrame):
 
 # ── Tasks panel ──────────────────────────────────────────────────────────────
 
+def _import_task_set(client, tasks):
+    """Create each task via the client (skipping name conflicts). Worker thread."""
+    out = []
+    for t in tasks:
+        name = t.get("name", "?")
+        try:
+            client.create_task(dict(t))
+            out.append((name, None))
+        except Exception as exc:  # noqa: BLE001 — AgentError etc., reported per task
+            out.append((name, str(exc)))
+    return out
+
+
 class _TasksPanel(QWidget):
     """Scrollable list of task rows for one unit."""
 
@@ -169,6 +184,8 @@ class _TasksPanel(QWidget):
         self.hub = hub
         self._rows: Dict[str, _TaskRow] = {}
         self._known: list[str] = []
+        self._export_path: Optional[str] = None
+        self.hub.task_done.connect(self._on_io_done)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -176,6 +193,12 @@ class _TasksPanel(QWidget):
 
         header = QHBoxLayout()
         header.addStretch(1)
+        self._export_btn = QPushButton("Export…")
+        self._export_btn.clicked.connect(self._on_export)
+        header.addWidget(self._export_btn)
+        self._import_btn = QPushButton("Import…")
+        self._import_btn.clicked.connect(self._on_import)
+        header.addWidget(self._import_btn)
         self._new_btn = QPushButton("New task")
         self._new_btn.setObjectName("primary")
         self._new_btn.clicked.connect(self._on_new_task)
@@ -226,6 +249,78 @@ class _TasksPanel(QWidget):
 
     def _on_new_task(self) -> None:
         TaskEditorDialog(self.hub, self.hostname, parent=self.window()).exec()
+
+    # ── Export / import (deploy a task set across units) ─────────────────────
+
+    def _on_export(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export tasks", "tasks.yaml", "YAML (*.yaml *.yml)")
+        if not path:
+            return
+        self._export_path = path
+        self.hub.run_async(
+            f"tasksio_export:{self.hostname}",
+            lambda: self.hub.fleet.get(self.hostname).get_tasks_yaml())
+
+    def _on_import(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import tasks", "", "YAML (*.yaml *.yml)")
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                doc = yaml.safe_load(fh)
+        except (OSError, yaml.YAMLError) as exc:
+            QMessageBox.warning(self, "Import failed", f"Could not read file:\n{exc}")
+            return
+        if isinstance(doc, dict):
+            tasks = doc.get("tasks") or []
+        elif isinstance(doc, list):
+            tasks = doc
+        else:
+            tasks = []
+        tasks = [t for t in tasks if isinstance(t, dict) and t.get("name")]
+        if not tasks:
+            QMessageBox.information(self, "Import", "No tasks found in that file.")
+            return
+        if QMessageBox.question(
+            self, "Import tasks",
+            f"Create {len(tasks)} task(s) on {self.hostname}?\n"
+            f"Existing tasks with the same name are skipped.",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        client = self.hub.fleet.get(self.hostname)
+        self.hub.run_async(f"tasksio_import:{self.hostname}",
+                           lambda: _import_task_set(client, tasks))
+
+    def _on_io_done(self, label: str, result) -> None:
+        parts = label.split(":")
+        if not label.startswith("tasksio_") or len(parts) < 2 or parts[1] != self.hostname:
+            return
+        op = parts[0]
+        if op == "tasksio_export":
+            target = self._export_path
+            self._export_path = None
+            if isinstance(result, Exception) or not target:
+                QMessageBox.warning(self, "Export failed", f"{result}")
+                return
+            try:
+                with open(target, "w", encoding="utf-8", newline="") as fh:
+                    fh.write(result if isinstance(result, str) else str(result))
+            except OSError as exc:
+                QMessageBox.warning(self, "Export failed", f"Could not write file:\n{exc}")
+                return
+            QMessageBox.information(self, "Export", f"Tasks written to\n{target}")
+        elif op == "tasksio_import":
+            if isinstance(result, Exception) or not isinstance(result, list):
+                QMessageBox.warning(self, "Import failed", f"{result}")
+                return
+            ok = [n for n, e in result if e is None]
+            bad = [(n, e) for n, e in result if e is not None]
+            msg = f"Created {len(ok)} task(s)."
+            if bad:
+                msg += "\n\nSkipped / failed:\n" + "\n".join(f"• {n}: {e}" for n, e in bad)
+            QMessageBox.information(self, "Import complete", msg)
 
 
 # ── Detail view shell ────────────────────────────────────────────────────────
