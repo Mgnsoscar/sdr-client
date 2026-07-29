@@ -23,7 +23,7 @@ import os
 from typing import List, Optional, Tuple
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QFontMetricsF
 from PyQt6.QtWidgets import (
     QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox,
     QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
@@ -140,6 +140,9 @@ class ScriptsPanel(QWidget):
         mono.setStyleHint(QFont.StyleHint.Monospace)
         mono.setPointSize(10)
         self._view.setFont(mono)
+        # Render a Tab as four characters wide (Qt's default is a fixed 80px,
+        # which looks far wider than four spaces in a monospace font).
+        self._view.setTabStopDistance(QFontMetricsF(mono).horizontalAdvance(" ") * 4)
         self._view.setPlaceholderText("Select a script to view or edit its contents.")
         self._view.setStyleSheet(
             f"QPlainTextEdit {{ background: #1E2530; color: #D6DCE5; "
