@@ -58,14 +58,19 @@ def _fmt_offset(offset_s: float) -> str:
 
 def summarize(seq: m.Sequence) -> str:
     """A one-line 'on-air: … · off-air: …' digest of a sequence's steps."""
-    def glyph(action) -> str:
-        a = action.value if hasattr(action, "value") else str(action)
-        return "▶" if a == "start" else "⏹"
+    def action_of(s) -> str:
+        return s.action.value if hasattr(s.action, "value") else str(s.action)
+
+    def desc(s) -> str:
+        glyph = "▶" if action_of(s) == "start" else "⏹"
+        args = getattr(s, "args", None) or []
+        argstr = f" {' '.join(args)}" if (action_of(s) == "start" and args) else ""
+        return f"{glyph} {s.task_name}{argstr} {_fmt_offset(s.offset_s)}"
 
     on = sorted((s for s in seq.steps if s.anchor == "start"), key=lambda s: s.offset_s)
     off = sorted((s for s in seq.steps if s.anchor == "stop"), key=lambda s: s.offset_s)
-    on_txt = ", ".join(f"{glyph(s.action)} {s.task_name} {_fmt_offset(s.offset_s)}" for s in on)
-    off_txt = ", ".join(f"{glyph(s.action)} {s.task_name} {_fmt_offset(s.offset_s)}" for s in off)
+    on_txt = ", ".join(desc(s) for s in on)
+    off_txt = ", ".join(desc(s) for s in off)
     parts = []
     if on_txt:
         parts.append(f"on-air: {on_txt}")

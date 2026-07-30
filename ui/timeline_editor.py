@@ -28,14 +28,15 @@ to `api.models.SequenceStep` for saving. No network I/O happens here.
 from __future__ import annotations
 
 import itertools
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+import shlex
+from dataclasses import dataclass, field
+from typing import Callable, List, Optional, Tuple
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
-    QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import models as m
@@ -50,7 +51,7 @@ HEADROOM_S = 30.0      # seconds of extra drag room kept beyond the furthest pil
 MIN_SIDE_S = 60.0      # each side is at least this many seconds wide
 SNAP_S = 1.0           # drag snaps offsets to this granularity (seconds)
 
-PILL_W = 158           # uniform pill width (keeps lane math deterministic)
+PILL_W = 190           # uniform pill width (keeps lane math deterministic)
 PILL_H = 32
 LANE_VGAP = 8          # vertical gap between stacked lanes
 PILLS_TOP = 26         # y of the first lane
@@ -113,6 +114,7 @@ class _TLStep:
     offset_s: float
     action: str          # "start" | "stop"
     task_name: str
+    args: List[str] = field(default_factory=list)   # extra CLI args on start
     uid: int = 0
 
     def __post_init__(self):
@@ -169,13 +171,16 @@ class _TaskPill(QWidget):
         self._glyph.setText("▶" if start else "⏹")
         self._glyph.setStyleSheet(f"background: transparent; color: {fg}; font-size: 12px;")
         name = self.step.task_name or "(no task)"
+        # Args only apply to a start; show them inline so per-value steps read apart.
+        argstr = " ".join(self.step.args) if (start and self.step.args) else ""
+        label = f"{name} {argstr}".strip()
         self._name.setStyleSheet(
             f"background: transparent; color: {Palette.TEXT if known else Palette.CRASH}; "
             f"font-size: 12px; font-weight: 600;")
         fm = self._name.fontMetrics()
-        self._name.setText(fm.elidedText(name, Qt.TextElideMode.ElideRight, 96))
+        self._name.setText(fm.elidedText(label, Qt.TextElideMode.ElideRight, 128))
         self.set_offset_display(self.step.offset_s)
-        tip = f"{'start' if start else 'stop'} {name} · {_fmt_offset(self.step.offset_s)} " \
+        tip = f"{'start' if start else 'stop'} {label} · {_fmt_offset(self.step.offset_s)} " \
               f"from {'on-air' if self.step.anchor == 'start' else 'off-air'}"
         if not known:
             tip += "  ⚠ task not found on this unit"
@@ -354,7 +359,7 @@ class _TimelineCanvas(QWidget):
         self.changed.emit()
 
     def edit_pill(self, pill: _TaskPill) -> None:
-        dlg = _PillEditor(pill.step, self._editor.available_tasks(), self)
+        dlg = _PillEditor(pill.step, self._editor, self)
         result = dlg.exec()
         if result == _PillEditor.REMOVE:
             self.remove_pill(pill)
@@ -429,21 +434,24 @@ class _TimelineCanvas(QWidget):
 # ── Small modal editor for one pill ──────────────────────────────────────────
 
 class _PillEditor(QDialog):
-    """Edit a single step: task, action, anchor, offset — or remove it."""
+    """Edit a single step: task, action, anchor, offset, args — or remove it."""
 
     REMOVE = 2   # custom result code (distinct from Accepted=1 / Rejected=0)
 
-    def __init__(self, step: _TLStep, tasks: List[str], parent=None):
+    def __init__(self, step: _TLStep, editor: "TimelineEditor", parent=None):
         super().__init__(parent)
         self._step = step
+        self._editor = editor
         self.setWindowTitle("Edit step")
-        self.setMinimumWidth(320)
+        self.setMinimumWidth(360)
 
         outer = QVBoxLayout(self)
         form = QFormLayout()
         form.setSpacing(8)
 
+        # Task row: dropdown + an inline "New…" that creates a task on the unit.
         self._task = QComboBox()
+        tasks = editor.available_tasks()
         if tasks:
             self._task.addItems(tasks)
         # Keep the current task selectable even if it isn't in the unit's list.
@@ -451,12 +459,24 @@ class _PillEditor(QDialog):
             self._task.addItem(step.task_name)
         if step.task_name:
             self._task.setCurrentText(step.task_name)
-        form.addRow("Task", self._task)
+        self._new_task = QPushButton("New…")
+        self._new_task.setFixedWidth(56)
+        self._new_task.setToolTip("Create a new task on this unit without leaving the sequence")
+        self._new_task.clicked.connect(self._on_new_task)
+        task_row = QHBoxLayout()
+        task_row.setContentsMargins(0, 0, 0, 0)
+        task_row.setSpacing(6)
+        task_row.addWidget(self._task, stretch=1)
+        task_row.addWidget(self._new_task)
+        task_host = QWidget()
+        task_host.setLayout(task_row)
+        form.addRow("Task", task_host)
 
         self._action = QComboBox()
         self._action.addItem("▶ start", "start")
         self._action.addItem("⏹ stop", "stop")
         self._action.setCurrentIndex(0 if step.action == "start" else 1)
+        self._action.currentIndexChanged.connect(self._sync_args_enabled)
         form.addRow("Action", self._action)
 
         self._anchor = QComboBox()
@@ -473,9 +493,16 @@ class _PillEditor(QDialog):
         self._offset.setValue(float(step.offset_s))
         form.addRow("Offset", self._offset)
 
+        # Per-step arguments appended to the task's command on start (e.g. --gain 20),
+        # so one task can be reused with different values.
+        self._args = QLineEdit(shlex.join(step.args) if step.args else "")
+        self._args.setPlaceholderText("e.g. --gain 20   (appended to the task's command)")
+        form.addRow("Arguments", self._args)
+
         outer.addLayout(form)
 
-        hint = QLabel("Negative offset = before the anchor; positive = after.")
+        hint = QLabel("Negative offset = before the anchor; positive = after.  "
+                      "Arguments apply to a start action only.")
         hint.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         hint.setWordWrap(True)
         outer.addWidget(hint)
@@ -491,11 +518,31 @@ class _PillEditor(QDialog):
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
 
+        self._sync_args_enabled()
+
+    def _sync_args_enabled(self) -> None:
+        self._args.setEnabled(self._action.currentData() == "start")
+
+    def _on_new_task(self) -> None:
+        name = self._editor.create_task_interactively()
+        if name:
+            if self._task.findText(name) < 0:
+                self._task.addItem(name)
+            self._task.setCurrentText(name)
+
     def _accept(self) -> None:
         self._step.task_name = self._task.currentText().strip()
         self._step.action = self._action.currentData()
         self._step.anchor = self._anchor.currentData()
         self._step.offset_s = round(self._offset.value(), 1)
+        raw = self._args.text().strip()
+        if self._step.action == "start" and raw:
+            try:
+                self._step.args = shlex.split(raw)
+            except ValueError:
+                self._step.args = raw.split()
+        else:
+            self._step.args = []
         self.accept()
 
 
@@ -509,6 +556,9 @@ class TimelineEditor(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._tasks: List[str] = []
+        # Optional hook set by the host dialog: opens a task editor and returns the
+        # new task's name (or None). Lets a step create a task inline.
+        self._task_creator: Optional[Callable[[], Optional[str]]] = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -544,17 +594,34 @@ class TimelineEditor(QWidget):
 
     def set_tasks(self, names: List[str]) -> None:
         self._tasks = list(names)
-        no_tasks = not self._tasks
-        self._add_on.setEnabled(not no_tasks)
-        self._add_off.setEnabled(not no_tasks)
-        if no_tasks:
-            self._hint.setText("this unit has no tasks — add tasks first")
+        # Add buttons stay enabled even with no tasks: a step can create one inline
+        # via the "New…" button in its editor.
+        if not self._tasks:
+            self._hint.setText("no tasks yet — add a step and use “New…” to create one")
         else:
             self._hint.setText("Drag pills to set timing · click a pill to edit")
         self._canvas.refresh_pills()
 
     def available_tasks(self) -> List[str]:
         return self._tasks
+
+    def set_task_creator(self, fn: Callable[[], Optional[str]]) -> None:
+        self._task_creator = fn
+
+    def add_task(self, name: str) -> None:
+        """Register a newly-created task name so pickers and validation see it."""
+        if name and name not in self._tasks:
+            self._tasks.append(name)
+            self._canvas.refresh_pills()
+
+    def create_task_interactively(self) -> Optional[str]:
+        """Open the host's task editor; on success register + return the new name."""
+        if self._task_creator is None:
+            return None
+        name = self._task_creator()
+        if name:
+            self.add_task(name)
+        return name
 
     # ── Add / load / read steps ──────────────────────────────────────────────
 
@@ -573,7 +640,8 @@ class TimelineEditor(QWidget):
             action = s.action.value if hasattr(s.action, "value") else str(s.action)
             self._canvas.add_step(
                 _TLStep(anchor=s.anchor, offset_s=float(s.offset_s),
-                        action=action, task_name=s.task_name))
+                        action=action, task_name=s.task_name,
+                        args=list(getattr(s, "args", []) or [])))
 
     def seed_default(self) -> None:
         """Pre-populate the simplest valid sequence: one on-air, one off-air step."""
@@ -589,6 +657,7 @@ class TimelineEditor(QWidget):
                 offset_s=s.offset_s,
                 action=m.StepAction(s.action),
                 task_name=s.task_name,
+                args=list(s.args) if s.action == "start" else [],
             ))
         return out
 

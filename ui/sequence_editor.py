@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
 
 from api import models as m
 from .qt_adapter import DataHub
+from .task_editor import TaskEditorDialog
 from .theme import Palette
 from .timeline_editor import TimelineEditor
 
@@ -75,6 +76,7 @@ class SequenceEditorDialog(QDialog):
 
         self._timeline = TimelineEditor()
         self._timeline.changed.connect(self._revalidate)
+        self._timeline.set_task_creator(self._create_task)
         outer.addWidget(self._timeline, stretch=1)
 
         self._status = QLabel("loading tasks…")
@@ -165,6 +167,19 @@ class SequenceEditorDialog(QDialog):
                 f"seqdlg_save:{self.hostname}:{req.name}",
                 lambda: self.hub.fleet.get(self.hostname).create_sequence(req),
             )
+
+    # ── Inline task creation ─────────────────────────────────────────────────
+
+    def _create_task(self) -> Optional[str]:
+        """Open the task editor for this unit; return the new task's name or None.
+
+        Wired into the timeline as its task_creator, so a step can spin up a task
+        without leaving the sequence editor. The new task is registered on the unit
+        by the task editor (create → tasks.yaml + live reload)."""
+        dlg = TaskEditorDialog(self.hub, self.hostname, parent=self)
+        if dlg.exec():
+            return dlg.created_name
+        return None
 
     # ── Misc ─────────────────────────────────────────────────────────────────
 

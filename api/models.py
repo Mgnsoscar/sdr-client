@@ -225,6 +225,7 @@ class SequenceStep(BaseModel):
     offset_s: float
     action: StepAction
     task_name: str
+    args: List[str] = []               # extra CLI args appended to the task on start
     inject_resume_offset: bool = False
 
 
@@ -249,6 +250,7 @@ class StepFire(BaseModel):
     fire_at: str
     fired_actual: Optional[str] = None
     resume_offset_s: Optional[float] = None
+    args: List[str] = []
 
 
 class SequenceRun(BaseModel):

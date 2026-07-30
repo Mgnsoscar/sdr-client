@@ -47,6 +47,9 @@ class TaskEditorDialog(QDialog):
         self._pending_prefill: Optional[List[str]] = None  # command args awaiting the form
         self._edit_script: Optional[str] = None            # script to select once loaded
         self._saving = False
+        # Set to the task's name on a successful save, so a caller that opened this
+        # dialog to create a task inline can learn which task was created.
+        self.created_name: Optional[str] = None
 
         self.setWindowTitle("Edit task" if existing_name else "New task")
         self.setMinimumWidth(580)
@@ -211,6 +214,7 @@ class TaskEditorDialog(QDialog):
             if isinstance(result, Exception):
                 self._set_status(f"save failed: {result}", error=True)
             else:
+                self.created_name = self._name.text().strip()
                 self.accept()
             return
 
