@@ -99,6 +99,35 @@ def arm_now_request(seq: m.Sequence, now: Optional[datetime] = None) -> m.ArmSeq
     )
 
 
+def _parse_iso(ts: str) -> datetime:
+    """Parse an ISO-8601 timestamp to an aware UTC datetime."""
+    dt = datetime.fromisoformat(ts)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _arm_now(client, seq: m.Sequence) -> m.SequenceRun:
+    """
+    Arm a sequence to run now, basing the on-air time on the AGENT's clock rather
+    than the laptop's. The agent schedules and fires steps against its own clock,
+    so if the two clocks aren't in sync (e.g. a Pi with no NTP on an isolated
+    ethernet link), a laptop-computed on_air_at lands at the wrong Pi-time and the
+    run just sits armed. Reading the unit's utc_now first makes Start skew-proof.
+    Falls back to the laptop clock if /system is unavailable. Runs on a worker
+    thread (two quick calls: /system then arm).
+    """
+    now = None
+    try:
+        health = client.system()
+        if health.utc_now:
+            now = _parse_iso(health.utc_now)
+    except Exception:  # noqa: BLE001 — best-effort; fall back to the laptop clock
+        now = None
+    req = arm_now_request(seq, now=now)
+    return client.arm_sequence(seq.id, req)
+
+
 def _abort_runs(client, run_ids: List[str]) -> List[Result]:
     """Cancel/abort each run id; runs on a worker thread."""
     out: List[Result] = []
@@ -244,11 +273,11 @@ class SequencesPanel(QWidget):
             self._refresh()
 
     def _on_start(self, seq: m.Sequence) -> None:
-        req = arm_now_request(seq)
+        client = self.hub.fleet.get(self.hostname)
         self._set_status(f"arming {seq.name or seq.id}…")
         self.hub.run_async(
             f"seq_arm:{self.hostname}:{seq.id}",
-            lambda: self.hub.fleet.get(self.hostname).arm_sequence(seq.id, req),
+            lambda: _arm_now(client, seq),
         )
 
     def _on_stop(self, seq: m.Sequence) -> None:
