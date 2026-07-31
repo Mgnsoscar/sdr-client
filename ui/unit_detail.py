@@ -125,6 +125,13 @@ class _TaskRow(QFrame):
             b.setEnabled(False)
         self._info.setText(label)
 
+    def set_error(self, msg: str) -> None:
+        """Show an action error and re-enable the buttons (the next poll will
+        settle the exact enabled-state)."""
+        self._info.setText(msg)
+        for b in (self._start, self._stop, self._edit, self._delete):
+            b.setEnabled(True)
+
     def _on_start(self) -> None:
         self._busy("starting…")
         self.hub.run_async(
@@ -186,6 +193,9 @@ class _TasksPanel(QWidget):
         self._known: list[str] = []
         self._export_path: Optional[str] = None
         self.hub.task_done.connect(self._on_io_done)
+        # Update a row the instant its start/stop/restart returns, instead of
+        # waiting for the next poll tick.
+        self.hub.task_done.connect(self._on_task_action_done)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -249,6 +259,31 @@ class _TasksPanel(QWidget):
 
     def _on_new_task(self) -> None:
         TaskEditorDialog(self.hub, self.hostname, parent=self.window()).exec()
+
+    def _on_task_action_done(self, label: str, result) -> None:
+        """Reflect a start/stop/restart/delete result on its row immediately,
+        rather than waiting for the next poll tick."""
+        parts = label.split(":", 2)   # "task_<verb>:<host>:<task>" (task may hold ':')
+        if len(parts) != 3 or parts[1] != self.hostname:
+            return
+        op = parts[0]
+        if op not in ("task_start", "task_stop", "task_restart", "task_delete"):
+            return
+        name = parts[2]
+        row = self._rows.get(name)
+        if op == "task_delete":
+            if isinstance(result, Exception):
+                if row is not None:
+                    row.set_error(f"delete failed: {result}")
+            else:
+                self.hub.refresh_now()   # task gone — drop it from the list at once
+            return
+        if row is None:
+            return
+        if isinstance(result, m.ProcessStatus):
+            row.update_status(result)
+        elif isinstance(result, Exception):
+            row.set_error(str(result))
 
     # ── Export / import (deploy a task set across units) ─────────────────────
 
@@ -413,6 +448,10 @@ class UnitDetail(QWidget):
         self._sub_stack.addWidget(self._placeholder("Sequences & runs — coming next."))  # 2
         self._sub_stack.addWidget(self._scripts_panel)                     # 3 Scripts
         self._select_subtab(0)
+
+        # Pull fresh data now so the task list / status appear immediately, rather
+        # than blank until the next poll tick (up to fast_interval_s away).
+        self.hub.refresh_now()
 
     def _select_subtab(self, idx: int) -> None:
         self._sub_stack.setCurrentIndex(idx)
