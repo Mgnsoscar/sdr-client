@@ -139,6 +139,8 @@ class _TimelineCanvas(QWidget):
         self._c_on, self._c_off = self._on, self._off
         self._lane_of: Dict[int, int] = {}
         self._lane_y: Dict[int, int] = {}
+        self._band_index: Dict[int, int] = {}   # uid -> slot index in the on-air band
+        self._n_band = 0
         self._baseline = self._content_h - BASELINE_FROM_BOTTOM
         self.setMouseTracking(True)
         self.relayout()
@@ -202,9 +204,7 @@ class _TimelineCanvas(QWidget):
         return f"⚡ {item.task_name or '(no task)'}".strip()
 
     def _bar_label(self, item) -> str:
-        name = item.task_name or "(no task)"
-        n = len(_arg_pairs(item.args)) if item.args else 0
-        return f"{name}   · {n} arg{'s' if n != 1 else ''}" if n else name
+        return item.task_name or "(no task)"
 
     # ── Inline argument panel (shown by default; toggled by the caret) ────────
 
@@ -224,14 +224,21 @@ class _TimelineCanvas(QWidget):
     def _panel_height(self, item) -> int:
         return PANEL_TOP_PAD + len(_arg_pairs(item.args)) * ARG_ROW_H + PANEL_BOT_PAD
 
+    def _run_cx(self, item) -> float:
+        """Centre x of a one-shot: an ordered slot if it fires during on-air (the
+        band is not to scale), otherwise its to-scale warm-up / cool-down x."""
+        idx = self._band_index.get(item.uid)
+        if idx is not None:
+            return tlm.band_x(idx, self._n_band, self._on, self._off)
+        return tlm.offset_to_x(item.anchor, item.offset, self._on, self._off)
+
     def _item_left(self, item) -> float:
         """Left x the item's name/panel starts at (for panel anchoring/packing)."""
         if item.kind == "bar":
             sx = tlm.offset_to_x("start", item.start_offset, self._on, self._off)
             px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off)
             return min(sx, px)
-        cx = tlm.offset_to_x(item.anchor, item.offset, self._on, self._off)
-        return cx - self._run_width(item) / 2
+        return self._run_cx(item) - self._run_width(item) / 2
 
     def _foot_h(self, item) -> int:
         """Total vertical footprint: name row + caption row + panel (if expanded)."""
@@ -248,7 +255,7 @@ class _TimelineCanvas(QWidget):
             px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off)
             left, right = sx - HANDLE_W, px + HANDLE_W
         else:
-            cx = tlm.offset_to_x(item.anchor, item.offset, self._on, self._off)
+            cx = self._run_cx(item)
             w = self._run_width(item)
             left, right = cx - w / 2, cx + w / 2
         if self._expanded(item):
@@ -277,6 +284,11 @@ class _TimelineCanvas(QWidget):
         Each lane's height is the tallest footprint of the items in it (an expanded
         task is taller), and lanes stack with cumulative y so an expanded panel or
         an offset caption never overlaps the task below it."""
+        # Order the during-on-air one-shots into their band slots first — the band
+        # width (and therefore the anchors) depends on how many there are.
+        band = tlm.band_runs_sorted(self._items)
+        self._band_index = {it.uid: i for i, it in enumerate(band)}
+        self._n_band = len(band)
         # Un-centered content anchors + intrinsic content width.
         self._c_on, self._c_off, self._content_w = tlm.compute_anchors(self._items)
         self._on, self._off = self._c_on, self._c_off   # for shift-invariant lane packing
@@ -329,7 +341,7 @@ class _TimelineCanvas(QWidget):
                 g["start_x"] = tlm.offset_to_x("start", it.start_offset, self._on, self._off)
                 g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off)
             else:
-                g["cx"] = tlm.offset_to_x(it.anchor, it.offset, self._on, self._off)
+                g["cx"] = self._run_cx(it)
                 g["w"] = self._run_width(it)
             if self._expanded(it):
                 g["panel"] = (self._item_left(it) + 2, y + LANE_H + CAPTION_H,
