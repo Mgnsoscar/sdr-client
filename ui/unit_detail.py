@@ -32,6 +32,7 @@ from api import models as m
 from .qt_adapter import DataHub
 from .logs_panel import LogsPanel
 from .scripts_panel import ScriptsPanel
+from .sequences_panel import SequencesPanel
 from .task_editor import TaskEditorDialog
 from .theme import Palette
 from .widgets import StatusPill
@@ -414,6 +415,7 @@ class UnitDetail(QWidget):
         self._tasks_panel: Optional[_TasksPanel] = None  # built per-unit in set_unit
         self._logs_panel: Optional["LogsPanel"] = None   # built per-unit in set_unit
         self._scripts_panel: Optional["ScriptsPanel"] = None  # built per-unit in set_unit
+        self._sequences_panel: Optional["SequencesPanel"] = None  # built per-unit in set_unit
         self._placeholders: Dict[str, QWidget] = {}
         outer.addWidget(self._sub_stack, stretch=1)
 
@@ -445,10 +447,11 @@ class UnitDetail(QWidget):
 
         self._tasks_panel = _TasksPanel(hostname, self.hub)
         self._logs_panel = LogsPanel(hostname, self.hub)
+        self._sequences_panel = SequencesPanel(hostname, self.hub)
         self._scripts_panel = ScriptsPanel(hostname, self.hub)
         self._sub_stack.addWidget(self._tasks_panel)                       # 0 Tasks
         self._sub_stack.addWidget(self._logs_panel)                        # 1 Logs
-        self._sub_stack.addWidget(self._placeholder("Sequences & runs — coming next."))  # 2
+        self._sub_stack.addWidget(self._sequences_panel)                   # 2 Sequences
         self._sub_stack.addWidget(self._scripts_panel)                     # 3 Scripts
         self._select_subtab(0)
 

@@ -45,8 +45,9 @@ class SequenceState(str, Enum):
 
 
 class StepAction(str, Enum):
-    START = "start"
-    STOP  = "stop"
+    START = "start"   # launch a long-running task (paired with a STOP)
+    STOP  = "stop"    # stop a long-running task
+    RUN   = "run"     # fire-and-exit one-shot: launch, self-terminates, no stop
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -175,6 +176,7 @@ class TaskEvent(BaseModel):
 
 
 class SequenceWebhook(BaseModel):
+    # sequence_started | sequence_on_air | sequence_step | sequence_off_air | sequence_stopped | sequence_aborted | sequence_modified
     type: str
     unit_id: str
     run_id: str
@@ -224,6 +226,8 @@ class SequenceStep(BaseModel):
     offset_s: float
     action: StepAction
     task_name: str
+    args: List[str] = []               # CLI args for this step's start/run
+    replace_args: bool = False         # True: args are the complete set (replace task defaults)
     inject_resume_offset: bool = False
 
 
@@ -248,6 +252,8 @@ class StepFire(BaseModel):
     fire_at: str
     fired_actual: Optional[str] = None
     resume_offset_s: Optional[float] = None
+    args: List[str] = []
+    replace_args: bool = False
 
 
 class SequenceRun(BaseModel):
