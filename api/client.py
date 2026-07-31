@@ -391,6 +391,16 @@ class AgentClient:
         return (f"{ws_scheme}://{host_port}"
                 f"/tasks/{quote(name, safe='')}/logs/stream?{urlencode(params)}")
 
+    def sequence_log_stream_url(self, seq_id: str, lines: int = 200) -> str:
+        """WebSocket URL for a sequence run's log (whole-run timeline + output)."""
+        ws_scheme = "wss" if self.base_url.startswith("https") else "ws"
+        host_port = self.base_url.split("://", 1)[1]
+        params = {"lines": lines}
+        if self.api_key:
+            params["api_key"] = self.api_key
+        return (f"{ws_scheme}://{host_port}"
+                f"/sequences/{quote(seq_id, safe='')}/logs/stream?{urlencode(params)}")
+
     # ══════════════════════════════════════════════════════════════════════════
     # Scripts & task registry
     # ══════════════════════════════════════════════════════════════════════════
