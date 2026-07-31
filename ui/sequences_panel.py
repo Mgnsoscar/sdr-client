@@ -5,6 +5,8 @@ Lists the sequences stored on this unit (GET /sequences), each with a short
 timeline summary and a live run-state pill, and lets you:
 
   - New     → create a sequence (SequenceEditorDialog)
+  - Export  → save every sequence on this unit to a portable YAML file
+  - Import  → create sequences from a YAML file (existing names skipped)
   - Edit    → change an existing sequence (same dialog, prefilled)
   - Start   → arm it to run now (open-ended): fires the on-air steps as soon as
               the warm-up lead-in allows, then stays on air until stopped
@@ -24,16 +26,20 @@ Operation labels (parsed back in _on_task_done):
     seq_arm:<host>:<seq_id>
     seq_stop:<host>:<seq_id>
     seq_delete:<host>:<seq_id>
+    seqio_export:<host>
+    seqio_import:<host>
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
+import yaml
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import models as m
@@ -141,6 +147,41 @@ def _abort_runs(client, run_ids: List[str]) -> List[Result]:
     return out
 
 
+def sequences_to_yaml(seqs: List[m.Sequence]) -> str:
+    """Serialize sequences to a portable YAML document ({sequences: [...]}).
+
+    Only the definition travels — name, description, and steps — not the unit's
+    generated id or any run state, so the file re-creates cleanly on any unit.
+    """
+    docs = []
+    for seq in seqs:
+        # mode="json" turns the StepAction enum into a plain string so PyYAML's
+        # safe_dump can render it (and the file stays human-readable).
+        docs.append({
+            "name": seq.name,
+            "description": seq.description,
+            "steps": [s.model_dump(mode="json") for s in seq.steps],
+        })
+    return yaml.safe_dump({"sequences": docs}, sort_keys=False, allow_unicode=True)
+
+
+def _import_sequences(client, requests) -> List[Result]:
+    """Create each sequence via the client (skipping name conflicts). Worker thread."""
+    existing = {s.name for s in client.list_sequences()}
+    out: List[Result] = []
+    for name, req in requests:
+        if name in existing:
+            out.append((name, "skipped (name already exists)"))
+            continue
+        try:
+            client.create_sequence(req)
+            existing.add(name)
+            out.append((name, None))
+        except Exception as exc:  # noqa: BLE001 — CreateSequence errors, reported per item
+            out.append((name, str(exc)))
+    return out
+
+
 class _SequenceRow(QFrame):
     """One sequence: name, summary, run-state pill, and action buttons."""
 
@@ -208,8 +249,10 @@ class SequencesPanel(QWidget):
         self._runs: List[m.SequenceRun] = []
         self._seq_loaded = False
         self._runs_pending = False
+        self._export_path: Optional[str] = None
         self._build()
         self.hub.task_done.connect(self._on_task_done)
+        self.hub.task_done.connect(self._on_io_done)
         # Live-refresh run state when a sequence lifecycle event arrives.
         self.hub.event_received.connect(self._on_event)
 
@@ -226,6 +269,15 @@ class SequencesPanel(QWidget):
         self._refresh_btn = QPushButton("Refresh")
         self._refresh_btn.clicked.connect(self._refresh)
         row.addWidget(self._refresh_btn)
+        self._export_btn = QPushButton("Export…")
+        self._export_btn.setToolTip("Save every sequence on this unit to a YAML file")
+        self._export_btn.clicked.connect(self._on_export)
+        row.addWidget(self._export_btn)
+        self._import_btn = QPushButton("Import…")
+        self._import_btn.setToolTip("Create sequences from a YAML file "
+                                    "(existing names are skipped)")
+        self._import_btn.clicked.connect(self._on_import)
+        row.addWidget(self._import_btn)
         self._status = QLabel("")
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         row.addWidget(self._status)
@@ -319,6 +371,110 @@ class SequencesPanel(QWidget):
             f"seq_delete:{self.hostname}:{seq.id}",
             lambda: self.hub.fleet.get(self.hostname).delete_sequence(seq.id),
         )
+
+    # ── Export / import (deploy a sequence set across units) ─────────────────
+
+    def _on_export(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export sequences", "sequences.yaml", "YAML (*.yaml *.yml)")
+        if not path:
+            return
+        self._export_path = path
+        self._set_status("exporting…")
+        # Pull a fresh list so the file reflects the unit, not a stale in-memory view.
+        self.hub.run_async(
+            f"seqio_export:{self.hostname}",
+            lambda: self.hub.fleet.get(self.hostname).list_sequences())
+
+    def _on_import(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import sequences", "", "YAML (*.yaml *.yml)")
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                doc = yaml.safe_load(fh)
+        except (OSError, yaml.YAMLError) as exc:
+            QMessageBox.warning(self, "Import failed", f"Could not read file:\n{exc}")
+            return
+        if isinstance(doc, dict):
+            raw = doc.get("sequences") or []
+        elif isinstance(doc, list):
+            raw = doc
+        else:
+            raw = []
+
+        requests: List[Tuple[str, m.CreateSequenceRequest]] = []
+        bad_parse: List[str] = []
+        for entry in raw:
+            if not isinstance(entry, dict) or not entry.get("name"):
+                continue
+            name = entry["name"]
+            try:
+                req = m.CreateSequenceRequest(
+                    name=name,
+                    description=entry.get("description", "") or "",
+                    steps=entry.get("steps", []) or [],
+                )
+            except Exception as exc:  # noqa: BLE001 — malformed step schema
+                bad_parse.append(f"• {name}: {exc}")
+                continue
+            requests.append((name, req))
+
+        if not requests:
+            msg = "No valid sequences found in that file."
+            if bad_parse:
+                msg += "\n\n" + "\n".join(bad_parse)
+            QMessageBox.information(self, "Import", msg)
+            return
+
+        prompt = (f"Create {len(requests)} sequence(s) on {self.hostname}?\n"
+                  f"Existing sequences with the same name are skipped.")
+        if bad_parse:
+            prompt += f"\n\n{len(bad_parse)} entry(ies) could not be read and will be ignored."
+        if QMessageBox.question(self, "Import sequences", prompt) != \
+                QMessageBox.StandardButton.Yes:
+            return
+        client = self.hub.fleet.get(self.hostname)
+        self._set_status("importing…")
+        self.hub.run_async(f"seqio_import:{self.hostname}",
+                           lambda: _import_sequences(client, requests))
+
+    def _on_io_done(self, label: str, result) -> None:
+        parts = label.split(":")
+        if not label.startswith("seqio_") or len(parts) < 2 or parts[1] != self.hostname:
+            return
+        op = parts[0]
+        if op == "seqio_export":
+            target = self._export_path
+            self._export_path = None
+            if isinstance(result, Exception) or not target:
+                self._set_status("export failed", error=True)
+                QMessageBox.warning(self, "Export failed", f"{result}")
+                return
+            seqs = result if isinstance(result, list) else []
+            try:
+                with open(target, "w", encoding="utf-8", newline="") as fh:
+                    fh.write(sequences_to_yaml(seqs))
+            except OSError as exc:
+                self._set_status("export failed", error=True)
+                QMessageBox.warning(self, "Export failed", f"Could not write file:\n{exc}")
+                return
+            self._set_status(f"exported {len(seqs)} sequence(s)")
+            QMessageBox.information(
+                self, "Export", f"{len(seqs)} sequence(s) written to\n{target}")
+        elif op == "seqio_import":
+            if isinstance(result, Exception) or not isinstance(result, list):
+                self._set_status("import failed", error=True)
+                QMessageBox.warning(self, "Import failed", f"{result}")
+                return
+            ok = [n for n, e in result if e is None]
+            bad = [(n, e) for n, e in result if e is not None]
+            msg = f"Created {len(ok)} sequence(s)."
+            if bad:
+                msg += "\n\nSkipped / failed:\n" + "\n".join(f"• {n}: {e}" for n, e in bad)
+            QMessageBox.information(self, "Import complete", msg)
+            self._refresh()
 
     # ── Live events ──────────────────────────────────────────────────────────
 
