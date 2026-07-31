@@ -147,6 +147,9 @@ class _TimelineCanvas(QWidget):
         self._label_font = QFont(); self._label_font.setPointSize(10); self._label_font.setBold(True)
         self._cap_font = QFont(); self._cap_font.setPointSize(8)
         self._content_w, self._content_h = tlm.EDGE_PAD, 210
+        self._c_on, self._c_off = self._on, self._off
+        self._lane_of: Dict[int, int] = {}
+        self._baseline = self._content_h - BASELINE_FROM_BOTTOM
         self.setMouseTracking(True)
         self.relayout()
 
@@ -238,23 +241,44 @@ class _TimelineCanvas(QWidget):
         return lane_of
 
     def relayout(self) -> None:
-        self._on, self._off, width = tlm.compute_anchors(self._items)
-        lanes = self._assign_lanes()
-        n_lanes = (max(lanes.values()) + 1) if lanes else 1
-        height = LANES_TOP + n_lanes * (LANE_H + LANE_VGAP) + BASELINE_FROM_BOTTOM
-        height = max(height, 210)
-        # Content size drives the scroll extents; the host QScrollArea is
-        # widget-resizable, so the canvas STRETCHES to fill a wider viewport
-        # (height stays exactly the content height) and only scrolls when the
-        # content is wider/taller than the viewport.
-        self._content_w, self._content_h = int(width), int(height)
+        """Recompute content metrics (depend only on the items), then place."""
+        # Un-centered content anchors + intrinsic content width.
+        self._c_on, self._c_off, self._content_w = tlm.compute_anchors(self._items)
+        self._on, self._off = self._c_on, self._c_off   # for shift-invariant lane packing
+        self._lane_of = self._assign_lanes()
+        n_lanes = (max(self._lane_of.values()) + 1) if self._lane_of else 1
+        self._content_h = max(210, LANES_TOP + n_lanes * (LANE_H + LANE_VGAP) + BASELINE_FROM_BOTTOM)
+        # The host QScrollArea is widget-resizable: minimums let the canvas STRETCH
+        # to fill a bigger viewport (never shrinking below the content), and only
+        # scroll when the content is larger.
         self.setMinimumWidth(self._content_w)
-        self.setFixedHeight(self._content_h)
+        self.setMinimumHeight(self._content_h)
         self.updateGeometry()
+        self._place()
+
+    def resizeEvent(self, e):  # noqa: N802
+        # Re-place on every resize so the on-air band re-centres in the new width.
+        self._place()
+        super().resizeEvent(e)
+
+    def _place(self) -> None:
+        """Position anchors + items for the current widget size: centre the on-air
+        band horizontally, and keep the axis top-anchored (extra height spills
+        below it)."""
+        avail_w = max(self.width(), self._content_w)
+        mid0 = (self._c_on + self._c_off) / 2.0
+        shift = avail_w / 2.0 - mid0
+        shift = max(0.0, min(shift, max(0.0, avail_w - self._content_w)))
+        self._on = self._c_on + shift
+        self._off = self._c_off + shift
+        # Baseline is measured from the CONTENT height (top-anchored), not the
+        # widget's actual height — so a taller widget leaves empty space at the
+        # bottom rather than pushing the axis down.
+        self._baseline = self._content_h - BASELINE_FROM_BOTTOM
 
         self._geom = {}
         for it in self._items:
-            lane = lanes.get(it.uid, 0)
+            lane = self._lane_of.get(it.uid, 0)
             y = LANES_TOP + lane * (LANE_H + LANE_VGAP)
             if it.kind == "bar":
                 sx = tlm.offset_to_x("start", it.start_offset, self._on, self._off)
@@ -271,7 +295,7 @@ class _TimelineCanvas(QWidget):
     def paintEvent(self, _e):  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        baseline = self.height() - BASELINE_FROM_BOTTOM
+        baseline = int(self._baseline)
         on_x, off_x = int(self._on), int(self._off)
 
         # On-air band (the fixed, not-to-scale middle) — a faint fill so it reads
