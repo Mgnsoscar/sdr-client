@@ -590,6 +590,8 @@ class _TimelineCanvas(QWidget):
             "item": it, "part": part, "press_x": pos.x(), "moved": False,
             "start0": getattr(it, "start_offset", 0.0),
             "stop0": getattr(it, "stop_offset", 0.0),
+            "off0": getattr(it, "offset", 0.0),
+            "grab_cx": self._geom.get(it.uid, {}).get("cx", pos.x()),
         }
 
     def _toggle_collapsed(self, it) -> None:
@@ -619,6 +621,23 @@ class _TimelineCanvas(QWidget):
         self._drag["moved"] = True
         it, part = self._drag["item"], self._drag["part"]
         x = pos.x()
+        if part == "run_body":
+            # A one-shot keeps its anchor (changed only in the editor); dragging
+            # only changes the offset, counting from the value it had — so grabbing
+            # a pill that sits in an ordered band slot never jumps its seconds. The
+            # pill follows the cursor freely (across the opposite anchor is fine to
+            # pile on seconds); relayout re-slots it into the band on release.
+            dx = x - self._drag["press_x"]
+            it.offset = tlm._snap(self._drag["off0"] + dx / tlm.SCALE)
+            g = self._geom.get(it.uid)
+            if g:
+                new_cx = self._drag["grab_cx"] + dx
+                if "panel" in g:
+                    g["panel"] = (new_cx - g["w"] / 2 + 2, g["panel"][1],
+                                  g["panel"][2], g["panel"][3])
+                g["cx"] = new_cx
+                self.update()
+            return
         mid = tlm.midpoint(self._on, self._off)
         if part == "bar_start":
             it.start_offset = tlm.resolve_bar_start(x, self._on, self._off)
@@ -628,8 +647,6 @@ class _TimelineCanvas(QWidget):
             ds = tlm._snap((x - self._drag["press_x"]) / tlm.SCALE)
             it.start_offset = min(self._drag["start0"] + ds, (mid - self._on) / tlm.SCALE)
             it.stop_offset = max(self._drag["stop0"] + ds, (mid - self._off) / tlm.SCALE)
-        elif part == "run_body":
-            it.anchor, it.offset = tlm.resolve_run(x, self._on, self._off)
         self._live_relayout(it)
 
     def _live_relayout(self, it) -> None:

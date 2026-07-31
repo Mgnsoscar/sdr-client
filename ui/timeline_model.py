@@ -167,12 +167,9 @@ def resolve_bar_stop(center_x: float, on_air_x: float, off_air_x: float) -> floa
     return _snap((x - off_air_x) / SCALE)
 
 
-def resolve_run(center_x: float, on_air_x: float, off_air_x: float) -> Tuple[str, float]:
-    """New (anchor, offset) for a run point at center_x. Left of the midpoint is
-    on-air, right is off-air — so a run re-anchors by crossing the middle."""
-    if center_x < midpoint(on_air_x, off_air_x):
-        return "start", _snap((center_x - on_air_x) / SCALE)
-    return "stop", _snap((center_x - off_air_x) / SCALE)
+# A one-shot's anchor is set only in the editor, never by dragging — so there is
+# no drag-time re-anchor resolver. Dragging changes only its offset (see the
+# canvas), and band_runs_sorted / band_x place it in fire order on release.
 
 
 # ── Task command → script + default args ─────────────────────────────────────
