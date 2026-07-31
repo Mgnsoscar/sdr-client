@@ -149,8 +149,9 @@ class TaskEditorDialog(QDialog):
         self.existing_name = existing_name        # None -> create, else edit
         self._param_specs: Dict[str, list] = {}   # script -> [param dict, ...]
         self._param_widgets: Dict[str, tuple] = {}  # dest -> (widget, spec)
-        self._pending_prefill: Optional[List[str]] = None  # command args awaiting the form
+        self._pending_prefill: Optional[List[str]] = None  # edit-mode command args to prefill
         self._edit_script: Optional[str] = None            # script to select once loaded
+        self._params_inflight: set = set()         # scripts whose params fetch is in flight
         self._saving = False
 
         self.setWindowTitle("Edit task" if existing_name else "New task")
@@ -283,6 +284,9 @@ class TaskEditorDialog(QDialog):
         if script in self._param_specs:
             self._build_param_form(script)
             return
+        if script in self._params_inflight:
+            return   # a fetch is already on its way; its result will build the form
+        self._params_inflight.add(script)
         self._set_status(f"loading parameters for {script}…")
         self.hub.run_async(
             f"taskdlg_params:{self.hostname}:{script}",
@@ -309,6 +313,11 @@ class TaskEditorDialog(QDialog):
         if len(parts) < 2 or parts[1] != self.hostname:
             return
         op = parts[0]
+
+        # A params fetch is done (success or failure) — clear its in-flight marker
+        # so the script can be re-fetched later if needed.
+        if op == "taskdlg_params":
+            self._params_inflight.discard(":".join(parts[2:]))
 
         if op == "taskdlg_save":
             self._saving = False
@@ -367,11 +376,15 @@ class TaskEditorDialog(QDialog):
             self._params_form.addRow(label, widget)
 
         self._set_status("")
-        # If we're editing, prefill values from the pending command now that the
-        # form exists.
-        if self._pending_prefill is not None:
+        # Prefill values on edit. Keyed to the edit script and deliberately NOT
+        # consumed: the form for one script can be (re)built several times (a
+        # redundant params result, reselecting the script), and consuming the
+        # prefill after the first build left later rebuilds empty — the
+        # "sometimes the fields are blank" race. Re-applying each build is
+        # idempotent (the build wipes the widgets first), and it only ever targets
+        # the edit script, so it never bleeds into a different script's form.
+        if self._pending_prefill is not None and script == self._edit_script:
             self._apply_prefill(self._pending_prefill)
-            self._pending_prefill = None
         self._update_preview()
 
     def _label_for(self, spec: dict) -> QLabel:
