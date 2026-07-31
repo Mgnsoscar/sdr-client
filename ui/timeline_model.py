@@ -75,7 +75,7 @@ class RunItem:
 
 # ── Coordinate mapping ───────────────────────────────────────────────────────
 
-def compute_anchors(items) -> Tuple[float, float, int]:
+def compute_anchors(items, zoom: float = 1.0) -> Tuple[float, float, int]:
     """Return (on_air_x, off_air_x, canvas_width). Everything is placed to scale
     from its anchor (SCALE px/s). Warm-up (left of ON-AIR) and cool-down (right of
     OFF-AIR) grow to hold their items plus headroom.
@@ -86,7 +86,12 @@ def compute_anchors(items) -> Tuple[float, float, int]:
     off-air-anchored points (a negative off-air offset — one-shots or a bar's stop)
     fill it from the right, and the band is kept wide enough (plus BAND_PAD) that
     the two groups never overlap — so the last on-air point is always left of the
-    first off-air point."""
+    first off-air point.
+
+    `zoom` scales the horizontal (time) axis only: pixels-per-second and the band's
+    pixel dimensions are multiplied by it, while EDGE_PAD (the fixed edge margin)
+    is not — so zooming spreads items apart without changing the edge inset."""
+    eff = SCALE * zoom
     left_s = MIN_SIDE_S
     right_s = MIN_SIDE_S
     max_on = 0.0    # largest positive on-air offset that lands in the band
@@ -113,10 +118,10 @@ def compute_anchors(items) -> Tuple[float, float, int]:
                 max_off = max(max_off, -it.offset)
     left_s += HEADROOM_S
     right_s += HEADROOM_S
-    band_gap = max(MIDDLE_GAP, (max_on + max_off) * SCALE + BAND_PAD)
-    on_air_x = EDGE_PAD + left_s * SCALE
+    band_gap = max(MIDDLE_GAP * zoom, (max_on + max_off) * eff + BAND_PAD * zoom)
+    on_air_x = EDGE_PAD + left_s * eff
     off_air_x = on_air_x + band_gap
-    width = int(off_air_x + right_s * SCALE + EDGE_PAD)
+    width = int(off_air_x + right_s * eff + EDGE_PAD)
     return on_air_x, off_air_x, width
 
 
@@ -133,8 +138,9 @@ def anchor_x(anchor: str, on_air_x: float, off_air_x: float) -> float:
     return on_air_x if anchor == "start" else off_air_x
 
 
-def offset_to_x(anchor: str, offset: float, on_air_x: float, off_air_x: float) -> float:
-    return anchor_x(anchor, on_air_x, off_air_x) + offset * SCALE
+def offset_to_x(anchor: str, offset: float, on_air_x: float, off_air_x: float,
+                zoom: float = 1.0) -> float:
+    return anchor_x(anchor, on_air_x, off_air_x) + offset * SCALE * zoom
 
 
 def _snap(v: float) -> float:
@@ -148,18 +154,20 @@ def midpoint(on_air_x: float, off_air_x: float) -> float:
 
 # ── Drag resolution ──────────────────────────────────────────────────────────
 
-def resolve_bar_start(center_x: float, on_air_x: float, off_air_x: float) -> float:
+def resolve_bar_start(center_x: float, on_air_x: float, off_air_x: float,
+                      zoom: float = 1.0) -> float:
     """New start_offset for a bar's start handle at center_x. Constrained to the
     on-air side (can't cross the gap midpoint)."""
     x = min(center_x, midpoint(on_air_x, off_air_x))
-    return _snap((x - on_air_x) / SCALE)
+    return _snap((x - on_air_x) / (SCALE * zoom))
 
 
-def resolve_bar_stop(center_x: float, on_air_x: float, off_air_x: float) -> float:
+def resolve_bar_stop(center_x: float, on_air_x: float, off_air_x: float,
+                     zoom: float = 1.0) -> float:
     """New stop_offset for a bar's stop handle at center_x. Constrained to the
     off-air side (can't cross the gap midpoint)."""
     x = max(center_x, midpoint(on_air_x, off_air_x))
-    return _snap((x - off_air_x) / SCALE)
+    return _snap((x - off_air_x) / (SCALE * zoom))
 
 
 # A one-shot's anchor is set only in the editor, never by dragging — so there is
