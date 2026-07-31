@@ -30,7 +30,7 @@ from typing import Dict, List, Optional, Tuple
 # ── Geometry constants ───────────────────────────────────────────────────────
 SCALE = 3.0            # px per second in the warm-up / cool-down zones
 MIDDLE_GAP = 220       # base px between ON-AIR and OFF-AIR (the on-air band)
-BAND_SLOT = 150        # px reserved per one-shot inside the (not-to-scale) band
+BAND_PAD = 130         # min px gap between the on-air and off-air groups in the band
 EDGE_PAD = 70          # px of empty space beyond the furthest item on each side
 HEADROOM_S = 30.0      # seconds of extra drag room kept beyond the furthest item
 MIN_SIDE_S = 60.0      # each side is at least this many seconds wide
@@ -76,62 +76,57 @@ class RunItem:
 # ── Coordinate mapping ───────────────────────────────────────────────────────
 
 def compute_anchors(items) -> Tuple[float, float, int]:
-    """Return (on_air_x, off_air_x, canvas_width). Warm-up (left) and cool-down
-    (right) are sized to scale to hold their items plus headroom; the on-air band
-    in the middle is NOT to scale — it widens only to give each during-on-air
-    one-shot its own ordered slot. On-air one-shots (a positive on-air offset or a
-    negative off-air offset) live in the band and don't stretch the sides."""
+    """Return (on_air_x, off_air_x, canvas_width). Everything is placed to scale
+    from its anchor (SCALE px/s). Warm-up (left of ON-AIR) and cool-down (right of
+    OFF-AIR) grow to hold their items plus headroom.
+
+    The on-air band in the middle is also to scale, but it WIDENS so every point
+    that fires during on-air stays ordered: on-air-anchored points (a positive
+    on-air offset — one-shots or a bar's start) fill the band from the left, and
+    off-air-anchored points (a negative off-air offset — one-shots or a bar's stop)
+    fill it from the right, and the band is kept wide enough (plus BAND_PAD) that
+    the two groups never overlap — so the last on-air point is always left of the
+    first off-air point."""
     left_s = MIN_SIDE_S
     right_s = MIN_SIDE_S
+    max_on = 0.0    # largest positive on-air offset that lands in the band
+    max_off = 0.0   # largest |negative off-air offset| that lands in the band
     for it in items:
         if it.kind == "bar":
             if it.start_offset < 0:
                 left_s = max(left_s, -it.start_offset)
+            elif it.start_offset > 0:
+                max_on = max(max_on, it.start_offset)
             if it.stop_offset > 0:
                 right_s = max(right_s, it.stop_offset)
-        else:  # run
-            if it.anchor == "start" and it.offset < 0:
+            elif it.stop_offset < 0:
+                max_off = max(max_off, -it.stop_offset)
+        elif it.anchor == "start":
+            if it.offset < 0:
                 left_s = max(left_s, -it.offset)
-            if it.anchor == "stop" and it.offset > 0:
+            elif it.offset > 0:
+                max_on = max(max_on, it.offset)
+        else:  # run, off-air anchored
+            if it.offset > 0:
                 right_s = max(right_s, it.offset)
+            elif it.offset < 0:
+                max_off = max(max_off, -it.offset)
     left_s += HEADROOM_S
     right_s += HEADROOM_S
-    n_band = sum(1 for it in items if is_band_run(it))
-    band_gap = max(MIDDLE_GAP, n_band * BAND_SLOT)
+    band_gap = max(MIDDLE_GAP, (max_on + max_off) * SCALE + BAND_PAD)
     on_air_x = EDGE_PAD + left_s * SCALE
     off_air_x = on_air_x + band_gap
     width = int(off_air_x + right_s * SCALE + EDGE_PAD)
     return on_air_x, off_air_x, width
 
 
-# ── On-air band: ordered (not-to-scale) one-shots ────────────────────────────
-
 def is_band_run(item) -> bool:
     """True for a one-shot that fires DURING on-air — an on-air-anchored step with
-    a positive offset, or an off-air-anchored step with a negative one. These sit
-    in the ordered on-air band rather than the to-scale warm-up / cool-down."""
+    a positive offset, or an off-air-anchored step with a negative one."""
     if getattr(item, "kind", None) != "run":
         return False
     return (item.anchor == "start" and item.offset > 0) or \
            (item.anchor == "stop" and item.offset < 0)
-
-
-def band_runs_sorted(items) -> List:
-    """Band one-shots in fire order: every on-air-anchored one (by offset) before
-    every off-air-anchored one (by offset) — so the last on-air task always comes
-    before the first off-air task."""
-    band = [it for it in items if is_band_run(it)]
-    band.sort(key=lambda it: (0 if it.anchor == "start" else 1, it.offset, it.uid))
-    return band
-
-
-def band_x(index: int, count: int, on_air_x: float, off_air_x: float) -> float:
-    """x for the index-th of `count` ordered band one-shots: a fixed slot spacing
-    (BAND_SLOT) centred in the band, so pills never overlap and stay in one row."""
-    center = midpoint(on_air_x, off_air_x)
-    if count <= 0:
-        return center
-    return center + (index - (count - 1) / 2.0) * BAND_SLOT
 
 
 def anchor_x(anchor: str, on_air_x: float, off_air_x: float) -> float:
@@ -168,8 +163,9 @@ def resolve_bar_stop(center_x: float, on_air_x: float, off_air_x: float) -> floa
 
 
 # A one-shot's anchor is set only in the editor, never by dragging — so there is
-# no drag-time re-anchor resolver. Dragging changes only its offset (see the
-# canvas), and band_runs_sorted / band_x place it in fire order on release.
+# no drag-time re-anchor resolver. Dragging changes only its offset (to scale from
+# its fixed anchor; see the canvas), and compute_anchors widens the band so the
+# on-air-anchored points stay ordered before the off-air-anchored ones.
 
 
 # ── Task command → script + default args ─────────────────────────────────────

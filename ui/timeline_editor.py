@@ -139,8 +139,6 @@ class _TimelineCanvas(QWidget):
         self._c_on, self._c_off = self._on, self._off
         self._lane_of: Dict[int, int] = {}
         self._lane_y: Dict[int, int] = {}
-        self._band_index: Dict[int, int] = {}   # uid -> slot index in the on-air band
-        self._n_band = 0
         self._baseline = self._content_h - BASELINE_FROM_BOTTOM
         self.setMouseTracking(True)
         self.relayout()
@@ -225,11 +223,8 @@ class _TimelineCanvas(QWidget):
         return PANEL_TOP_PAD + len(_arg_pairs(item.args)) * ARG_ROW_H + PANEL_BOT_PAD
 
     def _run_cx(self, item) -> float:
-        """Centre x of a one-shot: an ordered slot if it fires during on-air (the
-        band is not to scale), otherwise its to-scale warm-up / cool-down x."""
-        idx = self._band_index.get(item.uid)
-        if idx is not None:
-            return tlm.band_x(idx, self._n_band, self._on, self._off)
+        """Centre x of a one-shot — to scale from its anchor (the band widens to
+        keep on-air-anchored points left of off-air-anchored ones)."""
         return tlm.offset_to_x(item.anchor, item.offset, self._on, self._off)
 
     def _item_left(self, item) -> float:
@@ -284,11 +279,6 @@ class _TimelineCanvas(QWidget):
         Each lane's height is the tallest footprint of the items in it (an expanded
         task is taller), and lanes stack with cumulative y so an expanded panel or
         an offset caption never overlaps the task below it."""
-        # Order the during-on-air one-shots into their band slots first — the band
-        # width (and therefore the anchors) depends on how many there are.
-        band = tlm.band_runs_sorted(self._items)
-        self._band_index = {it.uid: i for i, it in enumerate(band)}
-        self._n_band = len(band)
         # Un-centered content anchors + intrinsic content width.
         self._c_on, self._c_off, self._content_w = tlm.compute_anchors(self._items)
         self._on, self._off = self._c_on, self._c_off   # for shift-invariant lane packing
@@ -590,8 +580,6 @@ class _TimelineCanvas(QWidget):
             "item": it, "part": part, "press_x": pos.x(), "moved": False,
             "start0": getattr(it, "start_offset", 0.0),
             "stop0": getattr(it, "stop_offset", 0.0),
-            "off0": getattr(it, "offset", 0.0),
-            "grab_cx": self._geom.get(it.uid, {}).get("cx", pos.x()),
         }
 
     def _toggle_collapsed(self, it) -> None:
@@ -623,20 +611,11 @@ class _TimelineCanvas(QWidget):
         x = pos.x()
         if part == "run_body":
             # A one-shot keeps its anchor (changed only in the editor); dragging
-            # only changes the offset, counting from the value it had — so grabbing
-            # a pill that sits in an ordered band slot never jumps its seconds. The
-            # pill follows the cursor freely (across the opposite anchor is fine to
-            # pile on seconds); relayout re-slots it into the band on release.
-            dx = x - self._drag["press_x"]
-            it.offset = tlm._snap(self._drag["off0"] + dx / tlm.SCALE)
-            g = self._geom.get(it.uid)
-            if g:
-                new_cx = self._drag["grab_cx"] + dx
-                if "panel" in g:
-                    g["panel"] = (new_cx - g["w"] / 2 + 2, g["panel"][1],
-                                  g["panel"][2], g["panel"][3])
-                g["cx"] = new_cx
-                self.update()
+            # only moves the offset, measured to scale from that fixed anchor — so
+            # the seconds scale with the distance to the anchor and never jump.
+            anchor_x = self._on if it.anchor == "start" else self._off
+            it.offset = tlm._snap((x - anchor_x) / tlm.SCALE)
+            self._live_relayout(it)
             return
         mid = tlm.midpoint(self._on, self._off)
         if part == "bar_start":
@@ -660,6 +639,8 @@ class _TimelineCanvas(QWidget):
             g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off)
         else:
             g["cx"] = tlm.offset_to_x(it.anchor, it.offset, self._on, self._off)
+        if "panel" in g:
+            g["panel"] = (self._item_left(it) + 2, g["panel"][1], g["panel"][2], g["panel"][3])
         self.update()
 
     def mouseReleaseEvent(self, e):  # noqa: N802
