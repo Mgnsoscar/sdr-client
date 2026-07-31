@@ -139,6 +139,22 @@ def resolve_run(center_x: float, on_air_x: float, off_air_x: float) -> Tuple[str
     return "stop", _snap((center_x - off_air_x) / SCALE)
 
 
+# ── Task command → script + default args ─────────────────────────────────────
+
+def script_of_command(command: List[str]) -> Tuple[str, List[str]]:
+    """Split a task command into (script_filename, default_args).
+
+    A task command is ``[interpreter, <dir>/<script>.py, *args]``. The script's
+    parameter schema is fetched by its basename (e.g. "freq.py"); the args after
+    it are the task's default values, used to pre-fill the step's parameter form.
+    Returns ("", []) if the command has no .py script element.
+    """
+    for i, a in enumerate(command):
+        if isinstance(a, str) and a.endswith(".py"):
+            return a.rsplit("/", 1)[-1], list(command[i + 1:])
+    return "", []
+
+
 # ── Item ⇄ step conversion (the agent's flat step list) ──────────────────────
 
 def _action_of(step: dict) -> str:

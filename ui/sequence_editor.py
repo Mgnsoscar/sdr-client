@@ -18,7 +18,9 @@ still processes those queued signals, so results arrive while the dialog is open
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
+
+import yaml
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -77,6 +79,7 @@ class SequenceEditorDialog(QDialog):
         self._timeline = TimelineEditor()
         self._timeline.changed.connect(self._revalidate)
         self._timeline.set_task_creator(self._create_task)
+        self._timeline.set_context(self.hub, self.hostname)
         outer.addWidget(self._timeline, stretch=1)
 
         self._status = QLabel("loading tasks…")
@@ -97,6 +100,12 @@ class SequenceEditorDialog(QDialog):
             f"seqdlg_tasks:{self.hostname}",
             lambda: self.hub.fleet.get(self.hostname).list_tasks(),
         )
+        # tasks.yaml gives each task's command, from which the step editor derives
+        # the task's script (for its parameter form) and default arg values.
+        self.hub.run_async(
+            f"seqdlg_yaml:{self.hostname}",
+            lambda: self.hub.fleet.get(self.hostname).get_tasks_yaml(),
+        )
 
     def _on_task_done(self, label: str, result) -> None:
         if not label.startswith("seqdlg_"):
@@ -113,6 +122,10 @@ class SequenceEditorDialog(QDialog):
                 self._set_status(f"save failed: {result}", error=True)
             else:
                 self.accept()
+            return
+
+        if op == "seqdlg_yaml":
+            self._timeline.set_task_commands(self._parse_task_commands(result))
             return
 
         if op == "seqdlg_tasks":
@@ -167,6 +180,23 @@ class SequenceEditorDialog(QDialog):
                 f"seqdlg_save:{self.hostname}:{req.name}",
                 lambda: self.hub.fleet.get(self.hostname).create_sequence(req),
             )
+
+    @staticmethod
+    def _parse_task_commands(result) -> Dict[str, List[str]]:
+        """task_name -> command list, parsed from a tasks.yaml document."""
+        if not isinstance(result, str) or not result.strip():
+            return {}
+        try:
+            doc = yaml.safe_load(result) or {}
+        except yaml.YAMLError:
+            return {}
+        out: Dict[str, List[str]] = {}
+        for entry in (doc.get("tasks") or []):
+            name = entry.get("name")
+            cmd = entry.get("command")
+            if name and isinstance(cmd, list):
+                out[name] = list(cmd)
+        return out
 
     # ── Inline task creation ─────────────────────────────────────────────────
 
