@@ -316,6 +316,9 @@ class TaskEditorDialog(QDialog):
             if isinstance(result, Exception):
                 self._set_status(f"save failed: {result}", error=True)
             else:
+                # Pull fresh data now so the new/edited task shows immediately,
+                # instead of waiting for the next poll tick.
+                self.hub.refresh_now()
                 self.accept()
             return
 
