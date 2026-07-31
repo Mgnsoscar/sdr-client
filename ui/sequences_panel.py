@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
 from api import models as m
 from .qt_adapter import DataHub
 from .sequence_editor import SequenceEditorDialog
+from .sequence_log_dialog import SequenceLogDialog
 from .theme import Palette
 from .widgets import StatusPill
 
@@ -144,7 +145,7 @@ class _SequenceRow(QFrame):
     """One sequence: name, summary, run-state pill, and action buttons."""
 
     def __init__(self, seq: m.Sequence, active_run: Optional[m.SequenceRun],
-                 on_start, on_stop, on_edit, on_delete):
+                 on_start, on_stop, on_edit, on_delete, on_log):
         super().__init__()
         self.seq = seq
         self.setObjectName("card")
@@ -175,22 +176,26 @@ class _SequenceRow(QFrame):
 
         self._start = QPushButton("Start")
         self._stop = QPushButton("Stop")
+        self._log = QPushButton("Log")
         self._edit = QPushButton("Edit")
         self._delete = QPushButton("Delete")
-        for b in (self._start, self._stop, self._edit, self._delete):
+        for b in (self._start, self._stop, self._log, self._edit, self._delete):
             b.setFixedWidth(66)
         self._start.setToolTip("Arm & run now (open-ended) — fires the on-air steps; "
                                "use Stop to end")
         self._stop.setToolTip("Stop this run — cancels if armed, aborts if running "
                               "(stops every task it touches)")
+        self._log.setToolTip("View this sequence's run log — the whole run's timeline "
+                             "and each step's output, live")
         self._start.setEnabled(not active)
         self._stop.setEnabled(active)
         self._delete.setEnabled(not active)   # the agent refuses to delete an active one
         self._start.clicked.connect(lambda: on_start(seq))
         self._stop.clicked.connect(lambda: on_stop(seq))
+        self._log.clicked.connect(lambda: on_log(seq))
         self._edit.clicked.connect(lambda: on_edit(seq))
         self._delete.clicked.connect(lambda: on_delete(seq))
-        for b in (self._start, self._stop, self._edit, self._delete):
+        for b in (self._start, self._stop, self._log, self._edit, self._delete):
             lay.addWidget(b, alignment=Qt.AlignmentFlag.AlignTop)
 
 
@@ -271,6 +276,12 @@ class SequencesPanel(QWidget):
         dlg = SequenceEditorDialog(self.hub, self.hostname, sequence=seq, parent=self.window())
         if dlg.exec():
             self._refresh()
+
+    def _on_log(self, seq: m.Sequence) -> None:
+        # Non-modal so the operator can watch the run log while working elsewhere.
+        dlg = SequenceLogDialog(self.hub, self.hostname, seq, parent=self.window())
+        dlg.setModal(False)
+        dlg.show()
 
     def _on_start(self, seq: m.Sequence) -> None:
         client = self.hub.fleet.get(self.hostname)
@@ -401,6 +412,7 @@ class SequencesPanel(QWidget):
                 seq, active,
                 on_start=self._on_start, on_stop=self._on_stop,
                 on_edit=self._on_edit, on_delete=self._on_delete,
+                on_log=self._on_log,
             ))
         suffix = f" · {active_n} active" if active_n else ""
         self._set_status(f"{len(self._sequences)} sequence(s){suffix}")

@@ -38,10 +38,10 @@ class _TailThread(threading.Thread):
         self._on_text = on_text
         self._on_status = on_status
         self._ws: Optional[websocket.WebSocket] = None
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
         # Closing the socket unblocks the recv loop.
         if self._ws is not None:
             try:
@@ -61,7 +61,7 @@ class _TailThread(threading.Thread):
         if self._on_status:
             self._on_status(True, "")
         try:
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 try:
                     msg = self._ws.recv()
                 except websocket.WebSocketTimeoutException:
@@ -87,7 +87,7 @@ class _TailThread(threading.Thread):
                 except Exception:
                     pass
                 self._ws = None
-            if self._on_status and not self._stop.is_set():
+            if self._on_status and not self._stop_event.is_set():
                 self._on_status(False, "stream ended")
 
 
