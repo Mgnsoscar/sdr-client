@@ -58,7 +58,7 @@ from .theme import Palette
 LANES_TOP = 34              # y of the first lane
 LANE_H = 34                 # bar / pill (name row) height
 LANE_VGAP = 12              # vertical gap between lanes
-CAPTION_H = 14              # the offset-seconds caption row under a name
+CAPTION_H = 17              # the offset-timing chip row under a name
 AXIS_GAP = 14               # min gap between the lowest task and the time axis
 BASELINE_FROM_BOTTOM = 50   # baseline sits this far above the canvas bottom
 HANDLE_W = 12               # drawn width of a bar's grip
@@ -87,6 +87,16 @@ def _fmt_offset(offset_s: float) -> str:
     if n < 0:
         return f"{n}s"
     return "0s"
+
+
+def _timing_text(offset_s: float, side: str, with_side: bool) -> str:
+    """Readable timing label for a chip. Exactly on the anchor reads as the anchor
+    name ('on-air'/'off-air') rather than an ambiguous '0s'; otherwise the signed
+    offset, optionally with the side it's measured from."""
+    label = "on-air" if side == "start" else "off-air"
+    if offset_s == 0:
+        return label
+    return f"{_fmt_offset(offset_s)} · {label}" if with_side else _fmt_offset(offset_s)
 
 
 def _arg_pairs(args: List[str]) -> List[Tuple[str, Optional[str]]]:
@@ -407,6 +417,19 @@ class _TimelineCanvas(QWidget):
         p.setPen(QColor(Palette.SURFACE))
         p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), "▴" if self._expanded(it) else "▾")
 
+    def _paint_timing(self, p, cx, top_y, text):
+        """A small opaque pill holding a task's timing, so it stays legible even
+        sitting on top of an anchor line or the shaded on-air band."""
+        p.setFont(self._cap_font)
+        fm = QFontMetrics(self._cap_font)
+        w = fm.horizontalAdvance(text) + 12
+        r = QRectF(cx - w / 2, top_y, w, CAPTION_H - 1)
+        p.setPen(QPen(QColor(Palette.BORDER), 1))
+        p.setBrush(QBrush(QColor(Palette.SURFACE)))
+        p.drawRoundedRect(r, (CAPTION_H - 1) / 2, (CAPTION_H - 1) / 2)
+        p.setPen(QColor(Palette.TEXT_MUTED))
+        p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
+
     def _paint_panel(self, p, it, g, border):
         """The inline flag → value argument panel drawn under a task."""
         if "panel" not in g:
@@ -470,15 +493,10 @@ class _TimelineCanvas(QWidget):
         if it.args:
             self._paint_caret(p, it, g, border)
 
-        # Offset captions under each handle.
-        p.setFont(self._cap_font)
-        p.setPen(QColor(Palette.TEXT_FAINT))
-        p.drawText(int(sx) - 30, int(y + LANE_H + 1), 60, CAPTION_H,
-                   int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
-                   _fmt_offset(it.start_offset))
-        p.drawText(int(px) - 30, int(y + LANE_H + 1), 60, CAPTION_H,
-                   int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
-                   _fmt_offset(it.stop_offset))
+        # Timing chips under each handle (side is implied by the handle).
+        cap_y = int(y + LANE_H + 1)
+        self._paint_timing(p, sx, cap_y, _timing_text(it.start_offset, "start", with_side=False))
+        self._paint_timing(p, px, cap_y, _timing_text(it.stop_offset, "stop", with_side=False))
         self._paint_panel(p, it, g, border)
 
     def _paint_run(self, p, it):
@@ -499,12 +517,9 @@ class _TimelineCanvas(QWidget):
                    int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), label)
         if it.args:
             self._paint_caret(p, it, g, border)
-        p.setFont(self._cap_font)
-        p.setPen(QColor(Palette.TEXT_FAINT))
-        side = "on-air" if it.anchor == "start" else "off-air"
-        p.drawText(int(cx) - 50, int(y + LANE_H + 1), 100, CAPTION_H,
-                   int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
-                   f"{_fmt_offset(it.offset)} {side}")
+        # Timing chip under the pill (a run re-anchors, so keep the side label).
+        self._paint_timing(p, cx, int(y + LANE_H + 1),
+                           _timing_text(it.offset, it.anchor, with_side=True))
         self._paint_panel(p, it, g, border)
 
     # ── Hit-testing ───────────────────────────────────────────────────────────
