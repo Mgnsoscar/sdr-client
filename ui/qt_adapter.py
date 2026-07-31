@@ -130,6 +130,29 @@ class DataHub(QObject):
 
         self._executor.submit(_wrapped)
 
+    # ── Immediate refresh ────────────────────────────────────────────────────────
+
+    def refresh_now(self) -> None:
+        """
+        Run one fast-tier poll immediately (off the GUI thread) and emit
+        fast_update, instead of waiting up to fast_interval_s for the next tick.
+
+        Called when a unit view opens and after a task action, so the UI reflects
+        the new state right away rather than lagging a whole poll cycle behind.
+        """
+        if self._stopped:
+            return
+
+        def _run():
+            try:
+                snap = self.poller.poll_fast_once()
+            except Exception:   # noqa: BLE001 — a failed ad-hoc poll is non-fatal
+                return
+            if not self._stopped:
+                self.fast_update.emit(snap)
+
+        self._executor.submit(_run)
+
     # ── Convenience: panic all ───────────────────────────────────────────────────
 
     def panic_all(self) -> None:
