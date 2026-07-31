@@ -42,12 +42,11 @@ from __future__ import annotations
 import shlex
 from typing import Callable, Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import QPoint, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QFrame,
-    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import models as m
@@ -57,16 +56,27 @@ from .theme import Palette
 
 # ── View geometry (paint sizes; timing geometry lives in timeline_model) ──────
 LANES_TOP = 34              # y of the first lane
-LANE_H = 34                 # bar / pill height
+LANE_H = 34                 # bar / pill (name row) height
 LANE_VGAP = 12              # vertical gap between lanes
+CAPTION_H = 14              # the offset-seconds caption row under a name
+AXIS_GAP = 14               # min gap between the lowest task and the time axis
 BASELINE_FROM_BOTTOM = 50   # baseline sits this far above the canvas bottom
 HANDLE_W = 12               # drawn width of a bar's grip
 HANDLE_HIT = 11             # px each side of a handle centre that grabs it
 RUN_MIN_W = 120             # minimum run-pill width
 RUN_MAX_W = 260
-CARET_W = 20                # width of the ▾ "show arguments" zone on an item
+CARET_W = 20                # width of the ▾/▴ expand-collapse zone on an item
 TICK_S = 30                 # a faint tick + label every this many seconds
 DRAG_THRESHOLD = 4          # px of movement before a press counts as a drag
+
+# Inline argument panel (shown under a task by default; collapsed via the caret)
+ARG_ROW_H = 16              # height of one flag → value row
+PANEL_TOP_PAD = 5
+PANEL_BOT_PAD = 7
+PANEL_H_PAD = 10            # horizontal padding inside the panel
+PANEL_MIN_W = 112
+
+DRAG_PARTS = ("bar_start", "bar_stop", "bar_body", "run_body")
 
 
 def _fmt_offset(offset_s: float) -> str:
@@ -97,40 +107,6 @@ def _arg_pairs(args: List[str]) -> List[Tuple[str, Optional[str]]]:
     return pairs
 
 
-class _ArgsPopup(QFrame):
-    """A small frameless popup listing an item's arguments as flag → value rows."""
-
-    def __init__(self, task_name: str, args: List[str], parent=None):
-        super().__init__(parent, Qt.WindowType.Popup)
-        self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setStyleSheet(
-            f"QFrame {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER_STRONG}; "
-            f"border-radius: 8px; }}")
-        grid = QGridLayout(self)
-        grid.setContentsMargins(12, 10, 12, 10)
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(4)
-
-        title = QLabel(task_name or "(no task)")
-        title.setStyleSheet(f"color: {Palette.TEXT}; font-weight: 600; border: none;")
-        grid.addWidget(title, 0, 0, 1, 2)
-
-        pairs = _arg_pairs(args)
-        if not pairs:
-            none = QLabel("no arguments")
-            none.setStyleSheet(f"color: {Palette.TEXT_FAINT}; font-size: 11px; border: none;")
-            grid.addWidget(none, 1, 0, 1, 2)
-        for r, (flag, val) in enumerate(pairs, start=1):
-            fl = QLabel(flag or "(positional)")
-            fl.setStyleSheet(f"color: {Palette.TEXT_MUTED}; font-size: 11px; border: none;")
-            grid.addWidget(fl, r, 0)
-            vl = QLabel("✓" if val is None else val)
-            vl.setStyleSheet(
-                f"color: {Palette.TEXT}; font-size: 11px; font-weight: 600; border: none;")
-            vl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            grid.addWidget(vl, r, 1)
-
-
 # ── The canvas: paints bars + pills and handles all dragging / hit-testing ────
 
 class _TimelineCanvas(QWidget):
@@ -144,11 +120,15 @@ class _TimelineCanvas(QWidget):
         self._off = float(tlm.EDGE_PAD + tlm.MIDDLE_GAP)
         self._geom: Dict[int, dict] = {}             # uid -> paint/hit geometry
         self._drag: Optional[dict] = None
+        self._collapsed: set = set()                 # uids collapsed to name-only
         self._label_font = QFont(); self._label_font.setPointSize(10); self._label_font.setBold(True)
         self._cap_font = QFont(); self._cap_font.setPointSize(8)
+        self._arg_font = QFont(); self._arg_font.setPointSize(9)
+        self._arg_font_b = QFont(); self._arg_font_b.setPointSize(9); self._arg_font_b.setBold(True)
         self._content_w, self._content_h = tlm.EDGE_PAD, 210
         self._c_on, self._c_off = self._on, self._off
         self._lane_of: Dict[int, int] = {}
+        self._lane_y: Dict[int, int] = {}
         self._baseline = self._content_h - BASELINE_FROM_BOTTOM
         self.setMouseTracking(True)
         self.relayout()
@@ -184,11 +164,13 @@ class _TimelineCanvas(QWidget):
 
     def remove_item(self, uid: int) -> None:
         self._items = [it for it in self._items if it.uid != uid]
+        self._collapsed.discard(uid)
         self.relayout()
         self.changed.emit()
 
     def clear(self) -> None:
         self._items = []
+        self._collapsed.clear()
         self.relayout()
         self.changed.emit()
 
@@ -214,15 +196,54 @@ class _TimelineCanvas(QWidget):
         n = len(_arg_pairs(item.args)) if item.args else 0
         return f"{name}   · {n} arg{'s' if n != 1 else ''}" if n else name
 
-    def _span(self, item) -> Tuple[float, float]:
-        """Horizontal [left, right] the item occupies (for lane packing)."""
+    # ── Inline argument panel (shown by default; toggled by the caret) ────────
+
+    def _expanded(self, item) -> bool:
+        return bool(item.args) and item.uid not in self._collapsed
+
+    def _panel_width(self, item) -> int:
+        fmf = QFontMetrics(self._arg_font)
+        fmv = QFontMetrics(self._arg_font_b)
+        w = PANEL_MIN_W
+        for flag, val in _arg_pairs(item.args):
+            row = fmf.horizontalAdvance(flag or "(positional)") + 18 \
+                + fmv.horizontalAdvance("✓" if val is None else str(val))
+            w = max(w, row + 2 * PANEL_H_PAD)
+        return int(min(w, RUN_MAX_W + 60))
+
+    def _panel_height(self, item) -> int:
+        return PANEL_TOP_PAD + len(_arg_pairs(item.args)) * ARG_ROW_H + PANEL_BOT_PAD
+
+    def _item_left(self, item) -> float:
+        """Left x the item's name/panel starts at (for panel anchoring/packing)."""
         if item.kind == "bar":
             sx = tlm.offset_to_x("start", item.start_offset, self._on, self._off)
             px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off)
-            return sx - HANDLE_W, px + HANDLE_W
+            return min(sx, px)
         cx = tlm.offset_to_x(item.anchor, item.offset, self._on, self._off)
-        w = self._run_width(item)
-        return cx - w / 2, cx + w / 2
+        return cx - self._run_width(item) / 2
+
+    def _foot_h(self, item) -> int:
+        """Total vertical footprint: name row + caption row + panel (if expanded)."""
+        h = LANE_H + CAPTION_H
+        if self._expanded(item):
+            h += self._panel_height(item)
+        return h
+
+    def _span(self, item) -> Tuple[float, float]:
+        """Horizontal [left, right] the item occupies (for lane packing) — includes
+        the inline argument panel when it's expanded."""
+        if item.kind == "bar":
+            sx = tlm.offset_to_x("start", item.start_offset, self._on, self._off)
+            px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off)
+            left, right = sx - HANDLE_W, px + HANDLE_W
+        else:
+            cx = tlm.offset_to_x(item.anchor, item.offset, self._on, self._off)
+            w = self._run_width(item)
+            left, right = cx - w / 2, cx + w / 2
+        if self._expanded(item):
+            right = max(right, self._item_left(item) + self._panel_width(item))
+        return left, right
 
     def _assign_lanes(self) -> Dict[int, int]:
         placed: List[List[Tuple[float, float]]] = []
@@ -241,13 +262,28 @@ class _TimelineCanvas(QWidget):
         return lane_of
 
     def relayout(self) -> None:
-        """Recompute content metrics (depend only on the items), then place."""
+        """Recompute content metrics (depend only on the items), then place.
+
+        Each lane's height is the tallest footprint of the items in it (an expanded
+        task is taller), and lanes stack with cumulative y so an expanded panel or
+        an offset caption never overlaps the task below it."""
         # Un-centered content anchors + intrinsic content width.
         self._c_on, self._c_off, self._content_w = tlm.compute_anchors(self._items)
         self._on, self._off = self._c_on, self._c_off   # for shift-invariant lane packing
         self._lane_of = self._assign_lanes()
         n_lanes = (max(self._lane_of.values()) + 1) if self._lane_of else 1
-        self._content_h = max(210, LANES_TOP + n_lanes * (LANE_H + LANE_VGAP) + BASELINE_FROM_BOTTOM)
+
+        row_h: Dict[int, int] = {}
+        for it in self._items:
+            lane = self._lane_of[it.uid]
+            row_h[lane] = max(row_h.get(lane, LANE_H + CAPTION_H), self._foot_h(it))
+        self._lane_y = {}
+        y = LANES_TOP
+        for lane in range(n_lanes):
+            self._lane_y[lane] = y
+            y += row_h.get(lane, LANE_H + CAPTION_H) + LANE_VGAP
+        stack_bottom = y - LANE_VGAP
+        self._content_h = max(210, stack_bottom + AXIS_GAP + BASELINE_FROM_BOTTOM)
         # The host QScrollArea is widget-resizable: minimums let the canvas STRETCH
         # to fill a bigger viewport (never shrinking below the content), and only
         # scroll when the content is larger.
@@ -263,31 +299,33 @@ class _TimelineCanvas(QWidget):
 
     def _place(self) -> None:
         """Position anchors + items for the current widget size: centre the on-air
-        band horizontally, and keep the axis top-anchored (extra height spills
-        below it)."""
+        band horizontally, keep the tasks top-anchored, and pin the time axis to
+        the bottom (extra height opens a gap in the middle)."""
         avail_w = max(self.width(), self._content_w)
         mid0 = (self._c_on + self._c_off) / 2.0
         shift = avail_w / 2.0 - mid0
         shift = max(0.0, min(shift, max(0.0, avail_w - self._content_w)))
         self._on = self._c_on + shift
         self._off = self._c_off + shift
-        # Baseline is measured from the CONTENT height (top-anchored), not the
-        # widget's actual height — so a taller widget leaves empty space at the
-        # bottom rather than pushing the axis down.
-        self._baseline = self._content_h - BASELINE_FROM_BOTTOM
+        # Tasks are laid out from the top (lane y's); the axis rides the widget
+        # bottom, so a taller widget grows the gap between them.
+        self._baseline = max(self._content_h, self.height()) - BASELINE_FROM_BOTTOM
 
         self._geom = {}
         for it in self._items:
-            lane = self._lane_of.get(it.uid, 0)
-            y = LANES_TOP + lane * (LANE_H + LANE_VGAP)
+            y = self._lane_y.get(self._lane_of.get(it.uid, 0), LANES_TOP)
+            g = {"kind": it.kind, "y": y}
             if it.kind == "bar":
-                sx = tlm.offset_to_x("start", it.start_offset, self._on, self._off)
-                px = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off)
-                self._geom[it.uid] = {"kind": "bar", "y": y, "start_x": sx, "stop_x": px}
+                g["start_x"] = tlm.offset_to_x("start", it.start_offset, self._on, self._off)
+                g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off)
             else:
-                cx = tlm.offset_to_x(it.anchor, it.offset, self._on, self._off)
-                w = self._run_width(it)
-                self._geom[it.uid] = {"kind": "run", "y": y, "cx": cx, "w": w}
+                g["cx"] = tlm.offset_to_x(it.anchor, it.offset, self._on, self._off)
+                g["w"] = self._run_width(it)
+            if self._expanded(it):
+                g["panel"] = (self._item_left(it) + 2, y + LANE_H + CAPTION_H,
+                              self._panel_width(it), self._panel_height(it))
+            g["foot_h"] = self._foot_h(it)
+            self._geom[it.uid] = g
         self.update()
 
     # ── Painting ──────────────────────────────────────────────────────────────
@@ -357,8 +395,9 @@ class _TimelineCanvas(QWidget):
         p.drawText(x - 60, baseline + 8, 120, 16,
                    int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop), label)
 
-    def _paint_caret(self, p, cx, y, color):
-        """A small rounded ▾ chip that reveals the item's arguments on click."""
+    def _paint_caret(self, p, it, g, color):
+        """A small rounded chip that expands (▾) or collapses (▴) the arg panel."""
+        cx, y = self._caret_center(it, g), g["y"]
         r = QRectF(cx - CARET_W / 2, y + 6, CARET_W, LANE_H - 12)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(QColor(color)))
@@ -366,18 +405,47 @@ class _TimelineCanvas(QWidget):
         f = QFont(); f.setPointSize(9); f.setBold(True)
         p.setFont(f)
         p.setPen(QColor(Palette.SURFACE))
-        p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), "▾")
+        p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), "▴" if self._expanded(it) else "▾")
+
+    def _paint_panel(self, p, it, g, border):
+        """The inline flag → value argument panel drawn under a task."""
+        if "panel" not in g:
+            return
+        px, py, pw, ph = g["panel"]
+        rect = QRectF(px, py, pw, ph)
+        p.setPen(QPen(QColor(Palette.BORDER), 1))
+        p.setBrush(QBrush(QColor(Palette.SURFACE_ALT)))
+        p.drawRoundedRect(rect, 6, 6)
+        # a slim accent stripe in the item's colour
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(border)))
+        p.drawRoundedRect(QRectF(px, py + 3, 3, ph - 6), 1.5, 1.5)
+
+        fmv = QFontMetrics(self._arg_font_b)
+        row_y = py + PANEL_TOP_PAD
+        for flag, val in _arg_pairs(it.args):
+            p.setFont(self._arg_font)
+            p.setPen(QColor(Palette.TEXT_MUTED))
+            p.drawText(int(px + PANEL_H_PAD), int(row_y), int(pw - 2 * PANEL_H_PAD), ARG_ROW_H,
+                       int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                       flag or "(positional)")
+            p.setFont(self._arg_font_b)
+            p.setPen(QColor(Palette.TEXT))
+            vtext = "✓" if val is None else str(val)
+            vw = fmv.horizontalAdvance(vtext)
+            p.drawText(int(px + pw - PANEL_H_PAD - vw), int(row_y), vw, ARG_ROW_H,
+                       int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), vtext)
+            row_y += ARG_ROW_H
 
     def _paint_bar(self, p, it):
         g = self._geom[it.uid]
         y, sx, px = g["y"], g["start_x"], g["stop_x"]
         known = self.task_known(it.task_name)
         border = QColor(Palette.ONLINE if known else Palette.CRASH)
-        body = QColor(Palette.SURFACE)
         left = min(sx, px)
         rect = QRectF(left, y, max(HANDLE_W * 2.0, abs(px - sx)), LANE_H)
         p.setPen(QPen(border, 2))
-        p.setBrush(QBrush(body))
+        p.setBrush(QBrush(QColor(Palette.SURFACE)))
         p.drawRoundedRect(rect, 9, 9)
 
         # Two handle grips.
@@ -400,17 +468,18 @@ class _TimelineCanvas(QWidget):
         p.drawText(rect.adjusted(HANDLE_W + 2, 0, -(HANDLE_W + 2 + (CARET_W if it.args else 0)), 0),
                    int(Qt.AlignmentFlag.AlignCenter), label)
         if it.args:
-            self._paint_caret(p, self._caret_center(it, g), y, border)
+            self._paint_caret(p, it, g, border)
 
         # Offset captions under each handle.
         p.setFont(self._cap_font)
         p.setPen(QColor(Palette.TEXT_FAINT))
-        p.drawText(int(sx) - 30, int(y + LANE_H + 1), 60, 12,
+        p.drawText(int(sx) - 30, int(y + LANE_H + 1), 60, CAPTION_H,
                    int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
                    _fmt_offset(it.start_offset))
-        p.drawText(int(px) - 30, int(y + LANE_H + 1), 60, 12,
+        p.drawText(int(px) - 30, int(y + LANE_H + 1), 60, CAPTION_H,
                    int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
                    _fmt_offset(it.stop_offset))
+        self._paint_panel(p, it, g, border)
 
     def _paint_run(self, p, it):
         g = self._geom[it.uid]
@@ -429,13 +498,14 @@ class _TimelineCanvas(QWidget):
         p.drawText(rect.adjusted(10, 0, -(6 + (CARET_W if it.args else 0)), 0),
                    int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), label)
         if it.args:
-            self._paint_caret(p, self._caret_center(it, g), y, border)
+            self._paint_caret(p, it, g, border)
         p.setFont(self._cap_font)
         p.setPen(QColor(Palette.TEXT_FAINT))
         side = "on-air" if it.anchor == "start" else "off-air"
-        p.drawText(int(cx) - 50, int(y + LANE_H + 1), 100, 12,
+        p.drawText(int(cx) - 50, int(y + LANE_H + 1), 100, CAPTION_H,
                    int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
                    f"{_fmt_offset(it.offset)} {side}")
+        self._paint_panel(p, it, g, border)
 
     # ── Hit-testing ───────────────────────────────────────────────────────────
 
@@ -452,20 +522,26 @@ class _TimelineCanvas(QWidget):
             g = self._geom.get(it.uid)
             if not g:
                 continue
-            if not (g["y"] - 2 <= y <= g["y"] + LANE_H + 2):
-                continue
-            if it.args and abs(x - self._caret_center(it, g)) <= CARET_W / 2:
-                return it, "caret"
-            if g["kind"] == "bar":
-                if abs(x - g["start_x"]) <= HANDLE_HIT:
-                    return it, "bar_start"
-                if abs(x - g["stop_x"]) <= HANDLE_HIT:
-                    return it, "bar_stop"
-                if min(g["start_x"], g["stop_x"]) <= x <= max(g["start_x"], g["stop_x"]):
-                    return it, "bar_body"
-            else:
-                if abs(x - g["cx"]) <= g["w"] / 2:
+            top = g["y"]
+            # Name row: handles / body / caret (draggable + caret toggle).
+            if top - 2 <= y <= top + LANE_H + 2:
+                if it.args and abs(x - self._caret_center(it, g)) <= CARET_W / 2:
+                    return it, "caret"
+                if g["kind"] == "bar":
+                    if abs(x - g["start_x"]) <= HANDLE_HIT:
+                        return it, "bar_start"
+                    if abs(x - g["stop_x"]) <= HANDLE_HIT:
+                        return it, "bar_stop"
+                    if min(g["start_x"], g["stop_x"]) <= x <= max(g["start_x"], g["stop_x"]):
+                        return it, "bar_body"
+                elif abs(x - g["cx"]) <= g["w"] / 2:
                     return it, "run_body"
+            # Caption + inline-panel rows below: a click there opens the editor.
+            if top + LANE_H < y <= top + g.get("foot_h", LANE_H) + 2:
+                if "panel" in g:
+                    pxx, pyy, pw, ph = g["panel"]
+                    if pxx <= x <= pxx + pw and pyy - 2 <= y <= pyy + ph + 2:
+                        return it, "open"
         return None
 
     # ── Mouse ─────────────────────────────────────────────────────────────────
@@ -481,7 +557,7 @@ class _TimelineCanvas(QWidget):
         it, part = hit
         if part == "caret":
             self._drag = None
-            self._show_args_popup(it, e.globalPosition().toPoint())
+            self._toggle_collapsed(it)
             return
         self._drag = {
             "item": it, "part": part, "press_x": pos.x(), "moved": False,
@@ -489,11 +565,12 @@ class _TimelineCanvas(QWidget):
             "stop0": getattr(it, "stop_offset", 0.0),
         }
 
-    def _show_args_popup(self, it, global_pos: QPoint) -> None:
-        popup = _ArgsPopup(it.task_name, list(it.args), self)
-        popup.adjustSize()
-        popup.move(global_pos + QPoint(-8, 10))
-        popup.show()
+    def _toggle_collapsed(self, it) -> None:
+        if it.uid in self._collapsed:
+            self._collapsed.discard(it.uid)
+        else:
+            self._collapsed.add(it.uid)
+        self.relayout()   # heights change → re-pack lanes
 
     def mouseMoveEvent(self, e):  # noqa: N802
         pos = e.position()
@@ -508,6 +585,8 @@ class _TimelineCanvas(QWidget):
             return
         if not (e.buttons() & Qt.MouseButton.LeftButton):
             return
+        if self._drag["part"] not in DRAG_PARTS:
+            return   # e.g. a click in the panel/caption region — never a drag
         if not self._drag["moved"] and abs(pos.x() - self._drag["press_x"]) < DRAG_THRESHOLD:
             return
         self._drag["moved"] = True
