@@ -43,8 +43,6 @@ class SequenceEditorDialog(QDialog):
         self._sequence = sequence            # None -> create, else edit
         self._editing = sequence is not None
         self._saving = False
-        # In edit mode we load the existing steps, never seed a default pair.
-        self._seeded = self._editing
 
         self.setWindowTitle("Edit sequence" if self._editing else "New sequence")
         self.setMinimumSize(780, 460)
@@ -135,9 +133,6 @@ class SequenceEditorDialog(QDialog):
                 return
             names = [t.name for t in result] if isinstance(result, list) else []
             self._timeline.set_tasks(names)
-            if names and not self._seeded:
-                self._timeline.seed_default()
-                self._seeded = True
             self._revalidate()
 
     # ── Validation / save ────────────────────────────────────────────────────

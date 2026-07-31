@@ -1063,11 +1063,6 @@ class TimelineEditor(QWidget):
         } for s in steps]
         self._canvas.set_items(tlm.steps_to_items(dicts))
 
-    def seed_default(self) -> None:
-        """Pre-populate the simplest valid sequence: one duration task."""
-        t = self._tasks[0] if self._tasks else ""
-        self._canvas.add_item(tlm.BarItem(task_name=t, start_offset=0.0, stop_offset=0.0))
-
     def steps(self) -> List[m.SequenceStep]:
         out: List[m.SequenceStep] = []
         for d in tlm.items_to_steps(self._canvas.items()):
