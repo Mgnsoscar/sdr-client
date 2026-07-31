@@ -35,6 +35,57 @@ from .theme import Palette
 DEFAULT_SCRIPTS_DIR = "/opt/sdr-agent/scripts"
 
 
+# ── paramkit-schema helpers ──────────────────────────────────────────────────
+# The agent's /scripts/{name}/params returns a superset schema: classic argparse
+# fields plus (for paramkit scripts) kind/unit/min/max/presets. These helpers
+# interpret the richer fields; on a plain argparse schema they're all no-ops.
+
+def _fmt_value(v) -> str:
+    """Compact command-line string for a value (2.412e9 → '2412000000')."""
+    if isinstance(v, bool):
+        return str(v)
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _num_or_none(s):
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_preset_value(spec: dict, text: str) -> str:
+    """A presets-combo shows a preset label (or a raw value the operator typed);
+    map it to the value string that belongs on the command line."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    for p in spec.get("presets") or []:
+        if text == str(p.get("label")) or text == str(p.get("key")):
+            return _fmt_value(p.get("value"))
+    return text   # a raw value
+
+
+def _preset_label_for_value(spec: dict, val: str):
+    """Reverse (for prefill on edit): the preset label whose value equals `val`,
+    else None."""
+    fv = _num_or_none(val)
+    for p in spec.get("presets") or []:
+        pv = p.get("value")
+        if str(pv) == val or _fmt_value(pv) == val or (fv is not None and pv == fv):
+            return str(p.get("label"))
+    return None
+
+
+def _range_hint(spec: dict) -> str:
+    lo, hi = spec.get("min"), spec.get("max")
+    if lo is None and hi is None:
+        return ""
+    return f"{'' if lo is None else _fmt_value(lo)}..{'' if hi is None else _fmt_value(hi)}"
+
+
 class TaskEditorDialog(QDialog):
     def __init__(self, hub: DataHub, hostname: str,
                  existing_name: Optional[str] = None, parent=None):
@@ -274,6 +325,9 @@ class TaskEditorDialog(QDialog):
         elif text.startswith("--"): text = text[2:]
         text = text.replace("-", " ")
 
+        if spec.get("unit"):
+            text = f"{text}  [{spec['unit']}]"
+
         lbl = QLabel(text)
         if spec.get("help"):
             lbl.setToolTip(spec["help"])
@@ -285,6 +339,28 @@ class TaskEditorDialog(QDialog):
             w = QCheckBox()
             w.setChecked(bool(default))
             w.stateChanged.connect(self._update_preview)
+        elif spec.get("presets"):
+            # A numeric parameter with named presets: an editable dropdown of the
+            # preset labels. Selecting one uses its value; typing a raw value works
+            # too. (paramkit schema only.)
+            w = QComboBox()
+            w.setEditable(True)
+            for p in spec["presets"]:
+                w.addItem(str(p["label"]))
+            if default is not None:
+                lbl = _preset_label_for_value(spec, _fmt_value(default))
+                w.setCurrentText(lbl if lbl is not None else _fmt_value(default))
+            else:
+                w.setCurrentText("")
+            ph = "pick a preset or type a value"
+            if spec.get("unit"):
+                ph += f" [{spec['unit']}]"
+            rng = _range_hint(spec)
+            if rng:
+                ph += f" ({rng})"
+            if w.lineEdit() is not None:
+                w.lineEdit().setPlaceholderText(ph)
+            w.currentTextChanged.connect(self._update_preview)
         elif spec.get("choices"):
             w = QComboBox()
             w.addItems([str(c) for c in spec["choices"]])
@@ -294,9 +370,16 @@ class TaskEditorDialog(QDialog):
         else:
             w = QLineEdit()
             if default is not None:
-                w.setText(str(default))
+                w.setText(_fmt_value(default))
             hint = spec.get("type") or "text"
-            w.setPlaceholderText(f"{hint}{' (required)' if spec.get('required') else ''}")
+            if spec.get("unit"):
+                hint += f" [{spec['unit']}]"
+            rng = _range_hint(spec)
+            if rng:
+                hint += f" ({rng})"
+            if spec.get("required"):
+                hint += " (required)"
+            w.setPlaceholderText(hint)
             w.textChanged.connect(self._update_preview)
         if spec.get("help"):
             w.setToolTip(spec["help"])
@@ -367,7 +450,10 @@ class TaskEditorDialog(QDialog):
                 i += 1
             elif i + 1 < len(args):
                 val = args[i + 1]
-                if isinstance(w, QComboBox):
+                if spec.get("presets") and isinstance(w, QComboBox):
+                    lbl = _preset_label_for_value(spec, val)
+                    w.setCurrentText(lbl if lbl is not None else val)
+                elif isinstance(w, QComboBox):
                     w.setCurrentText(val)
                 elif isinstance(w, QLineEdit):
                     w.setText(val)
@@ -393,7 +479,12 @@ class TaskEditorDialog(QDialog):
                 if isinstance(w, QCheckBox) and w.isChecked() and flag:
                     cmd.append(flag)
             else:
-                val = (w.currentText() if isinstance(w, QComboBox) else w.text()).strip()
+                if spec.get("presets") and isinstance(w, QComboBox):
+                    val = _resolve_preset_value(spec, w.currentText())
+                elif isinstance(w, QComboBox):
+                    val = w.currentText().strip()
+                else:
+                    val = w.text().strip()
                 if val == "":
                     continue
                 if flag:
@@ -437,23 +528,41 @@ class TaskEditorDialog(QDialog):
             return
         missing = []
         bad_type = []
+        bad_range = []
         for dest, (w, spec) in self._param_widgets.items():
-            if spec.get("is_flag") or isinstance(w, QComboBox):
+            if spec.get("is_flag"):
                 continue
-            val = w.text().strip()
+            # Effective value for this widget (resolving a preset selection).
+            if spec.get("presets") and isinstance(w, QComboBox):
+                val = _resolve_preset_value(spec, w.currentText())
+            elif isinstance(w, QComboBox):
+                continue   # fixed-choice dropdown — always a valid option
+            else:
+                val = w.text().strip()
             flag = spec["flags"][0] if spec["flags"] else dest
             if spec.get("required") and val == "":
                 missing.append(flag)
-            elif val != "" and spec.get("type") in ("int", "float"):
+                continue
+            if val == "":
+                continue
+            if spec.get("type") in ("int", "float"):
                 try:
-                    (int if spec["type"] == "int" else float)(val)
+                    num = int(val, 0) if spec["type"] == "int" else float(val)
                 except ValueError:
                     bad_type.append(f"{flag} ({spec['type']})")
+                    continue
+                lo, hi = spec.get("min"), spec.get("max")
+                if (lo is not None and num < lo) or (hi is not None and num > hi):
+                    unit = f" {spec['unit']}" if spec.get("unit") else ""
+                    bad_range.append(f"{flag} (allowed {_range_hint(spec)}{unit})")
         if missing:
             self._set_status("required parameter(s) missing: " + ", ".join(missing), error=True)
             return
         if bad_type:
             self._set_status("invalid value for: " + ", ".join(bad_type), error=True)
+            return
+        if bad_range:
+            self._set_status("out of range: " + ", ".join(bad_range), error=True)
             return
         env = self._parse_env()
         if env is None:
