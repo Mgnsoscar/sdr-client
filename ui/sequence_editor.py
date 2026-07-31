@@ -29,7 +29,6 @@ from PyQt6.QtWidgets import (
 
 from api import models as m
 from .qt_adapter import DataHub
-from .task_editor import TaskEditorDialog
 from .theme import Palette
 from .timeline_editor import TimelineEditor
 
@@ -43,8 +42,6 @@ class SequenceEditorDialog(QDialog):
         self._sequence = sequence            # None -> create, else edit
         self._editing = sequence is not None
         self._saving = False
-        # In edit mode we load the existing steps, never seed a default pair.
-        self._seeded = self._editing
 
         self.setWindowTitle("Edit sequence" if self._editing else "New sequence")
         self.setMinimumSize(780, 460)
@@ -78,7 +75,6 @@ class SequenceEditorDialog(QDialog):
 
         self._timeline = TimelineEditor()
         self._timeline.changed.connect(self._revalidate)
-        self._timeline.set_task_creator(self._create_task)
         self._timeline.set_context(self.hub, self.hostname)
         outer.addWidget(self._timeline, stretch=1)
 
@@ -135,9 +131,6 @@ class SequenceEditorDialog(QDialog):
                 return
             names = [t.name for t in result] if isinstance(result, list) else []
             self._timeline.set_tasks(names)
-            if names and not self._seeded:
-                self._timeline.seed_default()
-                self._seeded = True
             self._revalidate()
 
     # ── Validation / save ────────────────────────────────────────────────────
@@ -197,19 +190,6 @@ class SequenceEditorDialog(QDialog):
             if name and isinstance(cmd, list):
                 out[name] = list(cmd)
         return out
-
-    # ── Inline task creation ─────────────────────────────────────────────────
-
-    def _create_task(self) -> Optional[str]:
-        """Open the task editor for this unit; return the new task's name or None.
-
-        Wired into the timeline as its task_creator, so a step can spin up a task
-        without leaving the sequence editor. The new task is registered on the unit
-        by the task editor (create → tasks.yaml + live reload)."""
-        dlg = TaskEditorDialog(self.hub, self.hostname, parent=self)
-        if dlg.exec():
-            return dlg.created_name
-        return None
 
     # ── Misc ─────────────────────────────────────────────────────────────────
 

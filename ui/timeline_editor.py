@@ -40,7 +40,7 @@ the canvas; the step editor fetches a script's parameter schema via the hub.
 from __future__ import annotations
 
 import shlex
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen
@@ -717,7 +717,7 @@ class StepEditorDialog(QDialog):
         form = QFormLayout()
         form.setSpacing(8)
 
-        # Task (source) + inline New… to create a task from a script.
+        # Task — only tasks already defined on the unit are selectable.
         self._task = QComboBox()
         tasks = self._editor.available_tasks()
         if tasks:
@@ -727,14 +727,7 @@ class StepEditorDialog(QDialog):
         if item.task_name:
             self._task.setCurrentText(item.task_name)
         self._task.currentTextChanged.connect(lambda t: self._select_task(t))
-        self._new_task = QPushButton("New…")
-        self._new_task.setFixedWidth(56)
-        self._new_task.setToolTip("Create a task from a script without leaving the sequence")
-        self._new_task.clicked.connect(self._on_new_task)
-        trow = QHBoxLayout(); trow.setContentsMargins(0, 0, 0, 0); trow.setSpacing(6)
-        trow.addWidget(self._task, stretch=1); trow.addWidget(self._new_task)
-        thost = QWidget(); thost.setLayout(trow)
-        form.addRow("Task", thost)
+        form.addRow("Task", self._task)
 
         # Type: duration bar vs one-shot pill.
         self._type = QComboBox()
@@ -836,13 +829,6 @@ class StepEditorDialog(QDialog):
         self._set_row_visible(self._run_off, not is_bar)
 
     # ── Task → script → parameter form ────────────────────────────────────────
-
-    def _on_new_task(self) -> None:
-        name = self._editor.create_task_interactively()
-        if name:
-            if self._task.findText(name) < 0:
-                self._task.addItem(name)
-            self._task.setCurrentText(name)
 
     def _select_task(self, task: str, initial: bool = False) -> None:
         if not initial:
@@ -963,7 +949,6 @@ class TimelineEditor(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._tasks: List[str] = []
-        self._task_creator: Optional[Callable[[], Optional[str]]] = None
         # Injected by the host dialog so the step editor can fetch parameters and
         # derive a task's script + default args.
         self._hub = None
@@ -1028,29 +1013,13 @@ class TimelineEditor(QWidget):
     def set_tasks(self, names: List[str]) -> None:
         self._tasks = list(names)
         if not self._tasks:
-            self._hint.setText("no tasks yet — add one and use “New…” to create it")
+            self._hint.setText("no tasks on this unit — define one in the Tasks tab first")
         else:
             self._hint.setText("Drag handles to set timing · click to edit")
         self._canvas.relayout()
 
     def available_tasks(self) -> List[str]:
         return self._tasks
-
-    def set_task_creator(self, fn: Callable[[], Optional[str]]) -> None:
-        self._task_creator = fn
-
-    def add_task(self, name: str) -> None:
-        if name and name not in self._tasks:
-            self._tasks.append(name)
-            self._canvas.relayout()
-
-    def create_task_interactively(self) -> Optional[str]:
-        if self._task_creator is None:
-            return None
-        name = self._task_creator()
-        if name:
-            self.add_task(name)
-        return name
 
     # ── Add / load / read steps ──────────────────────────────────────────────
 
@@ -1062,11 +1031,6 @@ class TimelineEditor(QWidget):
             "replace_args": bool(getattr(s, "replace_args", False)),
         } for s in steps]
         self._canvas.set_items(tlm.steps_to_items(dicts))
-
-    def seed_default(self) -> None:
-        """Pre-populate the simplest valid sequence: one duration task."""
-        t = self._tasks[0] if self._tasks else ""
-        self._canvas.add_item(tlm.BarItem(task_name=t, start_offset=0.0, stop_offset=0.0))
 
     def steps(self) -> List[m.SequenceStep]:
         out: List[m.SequenceStep] = []
