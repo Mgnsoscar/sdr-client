@@ -24,9 +24,9 @@ import yaml
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QScrollArea,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
+    QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
+    QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from .qt_adapter import DataHub
@@ -84,6 +84,60 @@ def _range_hint(spec: dict) -> str:
     if lo is None and hi is None:
         return ""
     return f"{'' if lo is None else _fmt_value(lo)}..{'' if hi is None else _fmt_value(hi)}"
+
+
+_INT32 = 2_000_000_000
+
+
+def _decimals_for(step) -> int:
+    """How many decimal places a QDoubleSpinBox needs to represent `step`."""
+    s = repr(float(step))
+    if "e" in s or "E" in s:
+        return 6
+    if "." in s:
+        return len(s.split(".", 1)[1].rstrip("0"))
+    return 0
+
+
+def _use_spinbox(spec: dict) -> bool:
+    """Render a stepper only when a step is declared for a numeric param without
+    presets (and, for ints, the bounds fit a QSpinBox)."""
+    if not spec.get("step") or spec.get("presets"):
+        return False
+    if spec.get("type") not in ("int", "float"):
+        return False
+    if spec.get("type") == "int":
+        for b in (spec.get("min"), spec.get("max")):
+            if b is not None and not (-_INT32 <= b <= _INT32):
+                return False
+    return True
+
+
+def _make_spinbox(spec: dict):
+    """Build a QSpinBox / QDoubleSpinBox from a paramkit numeric spec with a step."""
+    is_int = spec.get("type") == "int"
+    step = spec.get("step") or (1 if is_int else 1.0)
+    lo, hi = spec.get("min"), spec.get("max")
+    if is_int:
+        w = QSpinBox()
+        w.setRange(int(lo) if lo is not None else -_INT32,
+                   int(hi) if hi is not None else _INT32)
+        w.setSingleStep(max(1, int(step)))
+    else:
+        w = QDoubleSpinBox()
+        w.setDecimals(_decimals_for(step))
+        w.setRange(float(lo) if lo is not None else -1e12,
+                   float(hi) if hi is not None else 1e12)
+        w.setSingleStep(float(step))
+    if spec.get("unit"):
+        w.setSuffix(f" {spec['unit']}")
+    default = spec.get("default")
+    if default is not None:
+        try:
+            w.setValue(int(default) if is_int else float(default))
+        except (TypeError, ValueError):
+            pass
+    return w
 
 
 class TaskEditorDialog(QDialog):
@@ -361,6 +415,10 @@ class TaskEditorDialog(QDialog):
             if w.lineEdit() is not None:
                 w.lineEdit().setPlaceholderText(ph)
             w.currentTextChanged.connect(self._update_preview)
+        elif _use_spinbox(spec):
+            # A numeric parameter with a declared step: a stepper. (paramkit only.)
+            w = _make_spinbox(spec)
+            w.valueChanged.connect(self._update_preview)
         elif spec.get("choices"):
             w = QComboBox()
             w.addItems([str(c) for c in spec["choices"]])
@@ -453,6 +511,10 @@ class TaskEditorDialog(QDialog):
                 if spec.get("presets") and isinstance(w, QComboBox):
                     lbl = _preset_label_for_value(spec, val)
                     w.setCurrentText(lbl if lbl is not None else val)
+                elif isinstance(w, (QSpinBox, QDoubleSpinBox)):
+                    n = _num_or_none(val)
+                    if n is not None:
+                        w.setValue(int(n) if isinstance(w, QSpinBox) else n)
                 elif isinstance(w, QComboBox):
                     w.setCurrentText(val)
                 elif isinstance(w, QLineEdit):
@@ -481,6 +543,8 @@ class TaskEditorDialog(QDialog):
             else:
                 if spec.get("presets") and isinstance(w, QComboBox):
                     val = _resolve_preset_value(spec, w.currentText())
+                elif isinstance(w, (QSpinBox, QDoubleSpinBox)):
+                    val = _fmt_value(w.value())
                 elif isinstance(w, QComboBox):
                     val = w.currentText().strip()
                 else:
@@ -535,6 +599,8 @@ class TaskEditorDialog(QDialog):
             # Effective value for this widget (resolving a preset selection).
             if spec.get("presets") and isinstance(w, QComboBox):
                 val = _resolve_preset_value(spec, w.currentText())
+            elif isinstance(w, (QSpinBox, QDoubleSpinBox)):
+                continue   # bounded stepper — value is always valid
             elif isinstance(w, QComboBox):
                 continue   # fixed-choice dropdown — always a valid option
             else:
