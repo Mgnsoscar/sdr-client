@@ -18,20 +18,21 @@ Two kinds of timeline object, matching the two ways a task runs:
     exits. There can be many of these (e.g. one attenuator-set per value), and
     they don't occupy a task slot, so nothing needs to stop them.
 
-Because the length of the on-air window is NOT part of the sequence (it's chosen
-at arm time), the middle band between the two anchors is drawn at a FIXED width —
-the busiest region, so it's given the most room — and is not to scale. Each side
-(warm-up / cool-down) IS to scale at a fixed pixels-per-second, so dragging maps
-linearly to an offset.
+Everything is placed to scale from its anchor at a fixed pixels-per-second, so
+dragging maps linearly to an offset. The on-air band between the anchors is to
+scale too, but it widens as needed so on-air-anchored points always stay left of
+off-air-anchored ones (their exact window length isn't known until arm time).
 
 Interaction:
   - Drag a bar's START handle (on-air side) or STOP handle (off-air side); neither
     crosses the middle. Drag the bar body to shift both together.
-  - Drag a run pill across the middle to re-anchor it (on-air ↔ off-air).
+  - Drag a run pill to change its offset (its anchor is set only in the editor).
   - Click a bar or pill to open its editor: pick the task, choose its parameters
     with the full parameter form (pre-filled from the task, never mutating it),
     set the offsets, or Remove it.
   - "+ Duration" / "+ One-shot" add a new object.
+  - Zoom the time axis horizontally with Ctrl+scroll (mouse) or a pinch
+    (touchpad); the zoom readout in the toolbar resets to 100% on click.
 
 All geometry / conversion logic lives in timeline_model.py (no Qt, unit-tested);
 this module is the Qt view + the step editor over it. No network I/O happens in
@@ -42,7 +43,7 @@ from __future__ import annotations
 import shlex
 from typing import Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
@@ -66,8 +67,15 @@ HANDLE_HIT = 11             # px each side of a handle centre that grabs it
 RUN_MIN_W = 120             # minimum run-pill width
 RUN_MAX_W = 260
 CARET_W = 20                # width of the ▾/▴ expand-collapse zone on an item
-TICK_S = 30                 # a faint tick + label every this many seconds
+TICK_S = 30                 # base tick interval (seconds); adapts with zoom
 DRAG_THRESHOLD = 4          # px of movement before a press counts as a drag
+
+# Horizontal (time-axis) zoom
+ZOOM_MIN = 0.25             # zoomed all the way out
+ZOOM_MAX = 6.0              # zoomed all the way in
+ZOOM_WHEEL = 0.0018         # zoom change per unit of Ctrl+wheel angle-delta
+MIN_TICK_PX = 46            # keep tick labels at least this far apart
+TICK_CHOICES = (5, 10, 15, 30, 60, 120, 300, 600)
 
 # Inline argument panel (shown under a task by default; collapsed via the caret)
 ARG_ROW_H = 16              # height of one flag → value row
@@ -140,8 +148,18 @@ class _TimelineCanvas(QWidget):
         self._lane_of: Dict[int, int] = {}
         self._lane_y: Dict[int, int] = {}
         self._baseline = self._content_h - BASELINE_FROM_BOTTOM
+        self._zoom = 1.0                 # horizontal (time-axis) zoom factor
+        self._scroll = None              # host QScrollArea, for zoom-to-cursor
         self.setMouseTracking(True)
+        self.grabGesture(Qt.GestureType.PinchGesture)   # touchpad pinch (where routed as a gesture)
         self.relayout()
+
+    def _eff(self) -> float:
+        """Effective pixels-per-second at the current zoom."""
+        return tlm.SCALE * self._zoom
+
+    def set_scroll_area(self, scroll) -> None:
+        self._scroll = scroll
 
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(self._content_w, self._content_h)
@@ -225,13 +243,13 @@ class _TimelineCanvas(QWidget):
     def _run_cx(self, item) -> float:
         """Centre x of a one-shot — to scale from its anchor (the band widens to
         keep on-air-anchored points left of off-air-anchored ones)."""
-        return tlm.offset_to_x(item.anchor, item.offset, self._on, self._off)
+        return tlm.offset_to_x(item.anchor, item.offset, self._on, self._off, self._zoom)
 
     def _item_left(self, item) -> float:
         """Left x the item's name/panel starts at (for panel anchoring/packing)."""
         if item.kind == "bar":
-            sx = tlm.offset_to_x("start", item.start_offset, self._on, self._off)
-            px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off)
+            sx = tlm.offset_to_x("start", item.start_offset, self._on, self._off, self._zoom)
+            px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off, self._zoom)
             return min(sx, px)
         return self._run_cx(item) - self._run_width(item) / 2
 
@@ -246,8 +264,8 @@ class _TimelineCanvas(QWidget):
         """Horizontal [left, right] the item occupies (for lane packing) — includes
         the inline argument panel when it's expanded."""
         if item.kind == "bar":
-            sx = tlm.offset_to_x("start", item.start_offset, self._on, self._off)
-            px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off)
+            sx = tlm.offset_to_x("start", item.start_offset, self._on, self._off, self._zoom)
+            px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off, self._zoom)
             left, right = sx - HANDLE_W, px + HANDLE_W
         else:
             cx = self._run_cx(item)
@@ -280,7 +298,7 @@ class _TimelineCanvas(QWidget):
         task is taller), and lanes stack with cumulative y so an expanded panel or
         an offset caption never overlaps the task below it."""
         # Un-centered content anchors + intrinsic content width.
-        self._c_on, self._c_off, self._content_w = tlm.compute_anchors(self._items)
+        self._c_on, self._c_off, self._content_w = tlm.compute_anchors(self._items, self._zoom)
         self._on, self._off = self._c_on, self._c_off   # for shift-invariant lane packing
         self._lane_of = self._assign_lanes()
         n_lanes = (max(self._lane_of.values()) + 1) if self._lane_of else 1
@@ -328,8 +346,8 @@ class _TimelineCanvas(QWidget):
             y = self._lane_y.get(self._lane_of.get(it.uid, 0), LANES_TOP)
             g = {"kind": it.kind, "y": y}
             if it.kind == "bar":
-                g["start_x"] = tlm.offset_to_x("start", it.start_offset, self._on, self._off)
-                g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off)
+                g["start_x"] = tlm.offset_to_x("start", it.start_offset, self._on, self._off, self._zoom)
+                g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off, self._zoom)
             else:
                 g["cx"] = self._run_cx(it)
                 g["w"] = self._run_width(it)
@@ -381,8 +399,18 @@ class _TimelineCanvas(QWidget):
                 self._paint_run(p, it)
         p.end()
 
+    def _tick_interval(self) -> int:
+        """Seconds between ticks — the smallest 'nice' value whose on-screen
+        spacing stays ≥ MIN_TICK_PX at the current zoom, so labels never crowd."""
+        eff = self._eff()
+        for t in TICK_CHOICES:
+            if t * eff >= MIN_TICK_PX:
+                return t
+        return TICK_CHOICES[-1]
+
     def _paint_ticks(self, p, baseline, anchor_x, negative):
-        step_px = TICK_S * tlm.SCALE
+        tick_s = self._tick_interval()
+        step_px = tick_s * self._eff()
         i = 1
         while True:
             x = anchor_x - i * step_px if negative else anchor_x + i * step_px
@@ -393,7 +421,7 @@ class _TimelineCanvas(QWidget):
             p.setPen(QPen(QColor(Palette.BORDER), 1))
             p.drawLine(int(x), baseline - 4, int(x), baseline + 4)
             p.setPen(QColor(Palette.TEXT_FAINT))
-            label = f"{'-' if negative else '+'}{TICK_S * i}s"
+            label = f"{'-' if negative else '+'}{tick_s * i}s"
             p.drawText(int(x) - 18, baseline + 6, 36, 12,
                        int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop), label)
             i += 1
@@ -614,18 +642,19 @@ class _TimelineCanvas(QWidget):
             # only moves the offset, measured to scale from that fixed anchor — so
             # the seconds scale with the distance to the anchor and never jump.
             anchor_x = self._on if it.anchor == "start" else self._off
-            it.offset = tlm._snap((x - anchor_x) / tlm.SCALE)
+            it.offset = tlm._snap((x - anchor_x) / self._eff())
             self._live_relayout(it)
             return
         mid = tlm.midpoint(self._on, self._off)
+        eff = self._eff()
         if part == "bar_start":
-            it.start_offset = tlm.resolve_bar_start(x, self._on, self._off)
+            it.start_offset = tlm.resolve_bar_start(x, self._on, self._off, self._zoom)
         elif part == "bar_stop":
-            it.stop_offset = tlm.resolve_bar_stop(x, self._on, self._off)
+            it.stop_offset = tlm.resolve_bar_stop(x, self._on, self._off, self._zoom)
         elif part == "bar_body":
-            ds = tlm._snap((x - self._drag["press_x"]) / tlm.SCALE)
-            it.start_offset = min(self._drag["start0"] + ds, (mid - self._on) / tlm.SCALE)
-            it.stop_offset = max(self._drag["stop0"] + ds, (mid - self._off) / tlm.SCALE)
+            ds = tlm._snap((x - self._drag["press_x"]) / eff)
+            it.start_offset = min(self._drag["start0"] + ds, (mid - self._on) / eff)
+            it.stop_offset = max(self._drag["stop0"] + ds, (mid - self._off) / eff)
         self._live_relayout(it)
 
     def _live_relayout(self, it) -> None:
@@ -635,10 +664,10 @@ class _TimelineCanvas(QWidget):
         if not g:
             return
         if it.kind == "bar":
-            g["start_x"] = tlm.offset_to_x("start", it.start_offset, self._on, self._off)
-            g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off)
+            g["start_x"] = tlm.offset_to_x("start", it.start_offset, self._on, self._off, self._zoom)
+            g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off, self._zoom)
         else:
-            g["cx"] = tlm.offset_to_x(it.anchor, it.offset, self._on, self._off)
+            g["cx"] = tlm.offset_to_x(it.anchor, it.offset, self._on, self._off, self._zoom)
         if "panel" in g:
             g["panel"] = (self._item_left(it) + 2, g["panel"][1], g["panel"][2], g["panel"][3])
         self.update()
@@ -653,6 +682,64 @@ class _TimelineCanvas(QWidget):
             self.changed.emit()
         else:
             self.edit_item(drag["item"])
+
+    # ── Zoom (Ctrl+wheel on a mouse; pinch on a touchpad) ─────────────────────
+
+    def wheelEvent(self, e):  # noqa: N802
+        if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            delta = e.angleDelta().y()
+            if delta:
+                self._apply_zoom(1.0 + ZOOM_WHEEL * delta, e.position().x())
+            e.accept()
+        else:
+            super().wheelEvent(e)   # no Ctrl → let the scroll area pan
+
+    def event(self, e):  # noqa: N802
+        t = e.type()
+        # Touchpad pinch arrives as a native zoom gesture on macOS / Windows…
+        if t == QEvent.Type.NativeGesture:
+            if e.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                self._apply_zoom(1.0 + e.value(), e.position().x())
+                return True
+        # …and as a Qt PinchGesture where the platform routes it that way.
+        elif t == QEvent.Type.Gesture:
+            pinch = e.gesture(Qt.GestureType.PinchGesture)
+            if pinch is not None:
+                sf = pinch.scaleFactor()   # incremental scale since the last event
+                if sf and abs(sf - 1.0) > 1e-4:
+                    self._apply_zoom(sf, self._viewport_center_x())
+                e.accept()
+                return True
+        return super().event(e)
+
+    def _viewport_center_x(self) -> float:
+        if self._scroll is not None:
+            return self._scroll.horizontalScrollBar().value() + self._scroll.viewport().width() / 2
+        return self.width() / 2
+
+    def reset_zoom(self) -> None:
+        if self._zoom != 1.0:
+            self._zoom = 1.0
+            self.relayout()
+            self._editor._sync_zoom()
+
+    def _apply_zoom(self, factor: float, cursor_x: float) -> None:
+        old = self._zoom
+        new = max(ZOOM_MIN, min(ZOOM_MAX, old * factor))
+        if abs(new - old) < 1e-6:
+            return
+        ratio = new / old
+        hbar = self._scroll.horizontalScrollBar() if self._scroll is not None else None
+        old_scroll = hbar.value() if hbar is not None else 0
+        # The content point under the cursor scales about the fixed edge inset, so
+        # keep it stationary in the viewport by adjusting the horizontal scroll.
+        new_content_x = tlm.EDGE_PAD + (cursor_x - tlm.EDGE_PAD) * ratio
+        self._zoom = new
+        self.relayout()
+        if hbar is not None:
+            viewport_x = cursor_x - old_scroll
+            hbar.setValue(int(round(new_content_x - viewport_x)))
+        self._editor._sync_zoom()
 
     # ── Editing ───────────────────────────────────────────────────────────────
 
@@ -974,6 +1061,14 @@ class TimelineEditor(QWidget):
         self._hint = QLabel("Drag handles to set timing · click to edit")
         self._hint.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         bar.addWidget(self._hint)
+        # Zoom readout — Ctrl+wheel / pinch to zoom; click to reset to 100%.
+        self._zoom_btn = QPushButton("100%")
+        self._zoom_btn.setFixedWidth(52)
+        self._zoom_btn.setFlat(True)
+        self._zoom_btn.setToolTip("Horizontal zoom — Ctrl+scroll or pinch. Click to reset.")
+        self._zoom_btn.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
+        self._zoom_btn.clicked.connect(lambda: self._canvas.reset_zoom())
+        bar.addWidget(self._zoom_btn)
         outer.addLayout(bar)
 
         self._canvas = _TimelineCanvas(self)
@@ -987,7 +1082,11 @@ class TimelineEditor(QWidget):
         scroll.setStyleSheet(
             f"QScrollArea {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER}; "
             f"border-radius: 8px; }}")
+        self._canvas.set_scroll_area(scroll)
         outer.addWidget(scroll, stretch=1)
+
+    def _sync_zoom(self) -> None:
+        self._zoom_btn.setText(f"{round(self._canvas._zoom * 100)}%")
 
     # ── Context injected by the host dialog ──────────────────────────────────
 
