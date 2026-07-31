@@ -190,7 +190,7 @@ class _TasksPanel(QWidget):
         self.hostname = hostname
         self.hub = hub
         self._rows: Dict[str, _TaskRow] = {}
-        self._known: list[str] = []
+        self._known: list = []   # [(name, description), ...] of the built rows
         self._export_path: Optional[str] = None
         self.hub.task_done.connect(self._on_io_done)
         # Update a row the instant its start/stop/restart returns, instead of
@@ -231,7 +231,10 @@ class _TasksPanel(QWidget):
         self._list.addWidget(self._empty)
 
     def update_tasks(self, tasks: list[m.ProcessStatus]) -> None:
-        names = [t.name for t in tasks]
+        # Track (name, description) — not just names — so an edit that changes a
+        # task's description (or the task set) triggers a rebuild, while a mere
+        # state change just updates the existing rows in place.
+        names = [(t.name, t.description) for t in tasks]
         # Build rows on first sight / when the set changes
         if names != self._known:
             # Clear and rebuild (task sets rarely change, so this is cheap)
