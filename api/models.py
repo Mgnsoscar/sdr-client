@@ -266,12 +266,21 @@ class SequenceRun(BaseModel):
     open_ended: bool = False
     created_at: str = ""
     started_actual: Optional[str] = None
+    on_air_actual: Optional[str] = None    # when T0 was actually crossed (RF live)
     stopped_actual: Optional[str] = None
     resume_offset_s: float = 0.0
     note: str = ""
     steps: List[StepFire] = []
     plan_id: str = ""
     plan_name: str = ""
+
+
+class StepOverride(BaseModel):
+    """A per-step parameter override applied when arming a sequence, addressed by
+    the step's index in the sequence. Mirrors agent/models.py StepOverride."""
+    index: int
+    args: List[str] = []
+    replace_args: bool = True
 
 
 class ArmSequenceRequest(BaseModel):
@@ -283,6 +292,7 @@ class ArmSequenceRequest(BaseModel):
     note: str = ""
     plan_id: str = ""
     plan_name: str = ""
+    step_overrides: List[StepOverride] = []
 
 
 class PatchSequenceRunRequest(BaseModel):
@@ -299,3 +309,29 @@ class PanicResult(BaseModel):
     events_cancelled: List[str]
     runs_aborted: List[str]
     at: str
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Plans (client-only: a cross-unit choreography)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# A Plan groups sequences from several units so they can be armed together at one
+# shared on-air time. Unlike sequences/tasks, plans live only in the GUI (there is
+# no agent Plan store); arming a plan fans out one arm per item, stamped with the
+# plan's id/name so the resulting runs can be regrouped. Each item may carry
+# per-step parameter overrides (StepOverride) so a plan can run a unit's sequence
+# with different task parameters than its stored definition.
+
+class PlanItem(BaseModel):
+    hostname: str                      # the unit this item arms (Fleet key)
+    unit_label: str = ""               # unit_id for display (cached; may go stale)
+    sequence_id: str
+    sequence_name: str = ""            # cached for display
+    overrides: List[StepOverride] = []
+
+
+class Plan(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    items: List[PlanItem] = []

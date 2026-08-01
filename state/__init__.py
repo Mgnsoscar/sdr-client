@@ -9,5 +9,7 @@ Public surface:
 from .poller import Poller, FastSnapshot, SlowSnapshot
 from .log_tail import LogTailer
 from .netutil import local_ip
+from .plan_store import PlanStore, new_plan_id
 
-__all__ = ["Poller", "FastSnapshot", "SlowSnapshot", "LogTailer", "local_ip"]
+__all__ = ["Poller", "FastSnapshot", "SlowSnapshot", "LogTailer", "local_ip",
+           "PlanStore", "new_plan_id"]
