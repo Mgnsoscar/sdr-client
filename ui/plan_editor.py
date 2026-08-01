@@ -38,6 +38,7 @@ from typing import Dict, List, Optional
 import yaml
 
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
@@ -48,7 +49,7 @@ from . import timeline_model as tlm
 from .param_form import ParamForm
 from .qt_adapter import DataHub
 from .theme import Palette
-from .timeline_editor import _TimelineCanvas
+from .timeline_editor import _TimelineCanvas, DRAG_THRESHOLD, LANES_TOP
 
 
 def _parse_task_commands(yaml_text) -> Dict[str, List[str]]:
@@ -567,11 +568,15 @@ class PlanBar:
 
 
 def _bar_from_item(item: m.PlanItem, uid: int = 0) -> PlanBar:
+    # Sequences live inside the plan's on-air window: on-air at/after ON-AIR
+    # (offset ≥ 0), off-air at/before OFF-AIR (offset ≤ 0). Clamp on load in case
+    # an older plan placed a bar outside it.
     return PlanBar(
         hostname=item.hostname, unit_label=item.unit_label,
         sequence_id=item.sequence_id, sequence_name=item.sequence_name,
         overrides=list(item.overrides),
-        start_offset=item.on_air_offset_s, stop_offset=item.off_air_offset_s, uid=uid)
+        start_offset=max(0.0, item.on_air_offset_s),
+        stop_offset=min(0.0, item.off_air_offset_s), uid=uid)
 
 
 def _item_from_bar(bar: PlanBar) -> m.PlanItem:
@@ -583,15 +588,135 @@ def _item_from_bar(bar: PlanBar) -> m.PlanItem:
 
 
 class _PlanCanvas(_TimelineCanvas):
-    """The sequence timeline canvas, reused for plan bars. Only the add/edit hooks
-    differ — a bar is a whole sequence, edited via PlanItemDialog rather than the
-    task step editor."""
+    """The sequence timeline canvas, reused for plan bars — but showing ONLY the
+    on-air window. A bar is a whole sequence, edited via PlanItemDialog; sequences
+    are confined to the window (on-air ≥ plan ON-AIR, off-air ≤ plan OFF-AIR), and
+    the warm-up / cool-down zones are dropped."""
 
     def add_new(self, kind: str = "bar") -> None:
         self._editor.add_sequence()
 
     def edit_item(self, item) -> None:
         self._editor.edit_sequence(item)
+
+    # ── Window-only geometry (ON-AIR at the left, OFF-AIR at the right) ────────
+
+    def _compute_anchors(self):
+        eff = self._eff()
+        max_on = max((it.start_offset for it in self._items if it.start_offset > 0),
+                     default=0.0)
+        max_off = max((-it.stop_offset for it in self._items if it.stop_offset < 0),
+                      default=0.0)
+        band = max(tlm.MIDDLE_GAP * self._zoom,
+                   (max_on + max_off) * eff + tlm.BAND_PAD * self._zoom)
+        on_air_x = float(tlm.EDGE_PAD)
+        off_air_x = on_air_x + band
+        width = int(off_air_x + tlm.EDGE_PAD)
+        return on_air_x, off_air_x, width
+
+    # ── Drag, confined to the window ───────────────────────────────────────────
+
+    def mouseMoveEvent(self, e):  # noqa: N802
+        pos = e.position()
+        if self._drag is None:
+            hit = self._hit(pos.x(), pos.y())
+            if hit and hit[1] in ("bar_start", "bar_stop"):
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            elif hit:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+            return
+        if not (e.buttons() & Qt.MouseButton.LeftButton):
+            return
+        if self._drag["part"] not in ("bar_start", "bar_stop", "bar_body"):
+            return
+        if not self._drag["moved"] and abs(pos.x() - self._drag["press_x"]) < DRAG_THRESHOLD:
+            return
+        self._drag["moved"] = True
+        it, part = self._drag["item"], self._drag["part"]
+        x = pos.x()
+        eff = self._eff()
+        mid = tlm.midpoint(self._on, self._off)
+        max_start = (mid - self._on) / eff      # on-air handle can't cross the middle
+        min_stop = (mid - self._off) / eff      # off-air handle can't cross the middle
+        if part == "bar_start":
+            v = tlm.resolve_bar_start(x, self._on, self._off, self._zoom)
+            it.start_offset = min(max(0.0, v), max_start)   # in [ON-AIR, middle]
+        elif part == "bar_stop":
+            v = tlm.resolve_bar_stop(x, self._on, self._off, self._zoom)
+            it.stop_offset = max(min(0.0, v), min_stop)     # in [middle, OFF-AIR]
+        elif part == "bar_body":
+            ds = tlm._snap((x - self._drag["press_x"]) / eff)
+            s0, p0 = self._drag["start0"], self._drag["stop0"]
+            # Rigid shift: keep on-air in [0, middle] and off-air in [middle, 0].
+            lo = max(-s0, min_stop - p0)
+            hi = min(max_start - s0, -p0)
+            ds = max(lo, min(hi, ds)) if lo <= hi else 0.0
+            it.start_offset = s0 + ds
+            it.stop_offset = p0 + ds
+        self._live_relayout(it)
+
+    # ── Window-only painting (no warm-up / cool-down) ─────────────────────────
+
+    def paintEvent(self, _e):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        baseline = int(self._baseline)
+        on_x, off_x = int(self._on), int(self._off)
+
+        # The on-air window is the whole stage.
+        p.fillRect(on_x, LANES_TOP - 10, off_x - on_x, baseline - (LANES_TOP - 10),
+                   QColor(Palette.ONLINE_SOFT))
+        p.setPen(QPen(QColor(Palette.BORDER_STRONG), 2))
+        p.drawLine(on_x, baseline, off_x, baseline)
+
+        tick_font = QFont(); tick_font.setPointSize(8)
+        p.setFont(tick_font)
+        self._paint_window_ticks(p, baseline, on_x, off_x)
+
+        self._paint_anchor(p, on_x, baseline, "ON-AIR", Palette.ONLINE)
+        self._paint_anchor(p, off_x, baseline, "OFF-AIR", Palette.CRASH)
+
+        cap_font = QFont(); cap_font.setPointSize(9); cap_font.setItalic(True)
+        p.setFont(cap_font)
+        p.setPen(QColor(Palette.TEXT_FAINT))
+        p.drawText(on_x, baseline + 26, off_x - on_x, 14,
+                   int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter),
+                   "· on-air window ·")
+
+        for it in self._items:
+            self._paint_bar(p, it)
+        p.end()
+
+    def _paint_window_ticks(self, p, baseline, on_x, off_x):
+        """Ticks inside the window: seconds from ON-AIR on the left half, seconds
+        before OFF-AIR on the right half (they meet, without overlapping, at the
+        middle)."""
+        eff = self._eff()
+        tick_s = self._tick_interval()
+        step = tick_s * eff
+        mid = (on_x + off_x) / 2.0
+        i = 1
+        while on_x + i * step < mid:
+            x = on_x + i * step
+            p.setPen(QPen(QColor(Palette.BORDER), 1))
+            p.drawLine(int(x), baseline - 4, int(x), baseline + 4)
+            p.setPen(QColor(Palette.TEXT_FAINT))
+            p.drawText(int(x) - 18, baseline + 6, 36, 12,
+                       int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
+                       f"+{tick_s * i}s")
+            i += 1
+        i = 1
+        while off_x - i * step > mid:
+            x = off_x - i * step
+            p.setPen(QPen(QColor(Palette.BORDER), 1))
+            p.drawLine(int(x), baseline - 4, int(x), baseline + 4)
+            p.setPen(QColor(Palette.TEXT_FAINT))
+            p.drawText(int(x) - 18, baseline + 6, 36, 12,
+                       int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
+                       f"-{tick_s * i}s")
+            i += 1
 
 
 class PlanTimelineEditor(QWidget):

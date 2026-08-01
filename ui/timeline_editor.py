@@ -158,6 +158,12 @@ class _TimelineCanvas(QWidget):
         """Effective pixels-per-second at the current zoom."""
         return tlm.SCALE * self._zoom
 
+    def _compute_anchors(self):
+        """(on_air_x, off_air_x, content_width) for the current items. A subclass
+        may override to change the timeline's extent (e.g. the plan editor shows
+        only the on-air window)."""
+        return tlm.compute_anchors(self._items, self._zoom)
+
     def set_scroll_area(self, scroll) -> None:
         self._scroll = scroll
 
@@ -297,8 +303,9 @@ class _TimelineCanvas(QWidget):
         Each lane's height is the tallest footprint of the items in it (an expanded
         task is taller), and lanes stack with cumulative y so an expanded panel or
         an offset caption never overlaps the task below it."""
-        # Un-centered content anchors + intrinsic content width.
-        self._c_on, self._c_off, self._content_w = tlm.compute_anchors(self._items, self._zoom)
+        # Un-centered content anchors + intrinsic content width. Factored into a
+        # hook so a subclass (the plan timeline) can supply a window-only geometry.
+        self._c_on, self._c_off, self._content_w = self._compute_anchors()
         self._on, self._off = self._c_on, self._c_off   # for shift-invariant lane packing
         self._lane_of = self._assign_lanes()
         n_lanes = (max(self._lane_of.values()) + 1) if self._lane_of else 1
