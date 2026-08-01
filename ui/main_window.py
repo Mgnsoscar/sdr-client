@@ -30,6 +30,7 @@ from .alert_feed import AlertFeed
 from .plans_tab import PlansTab
 from .qt_adapter import DataHub
 from .theme import Palette
+from .timeline_tab import TimelineTab
 from .units_tab import UnitsTab
 
 logger = logging.getLogger(__name__)
@@ -124,8 +125,9 @@ class MainWindow(QMainWindow):
         # Real tabs where built; placeholders elsewhere for now.
         self.units_tab = UnitsTab(self.hub.fleet, self.hub)
         self.plans_tab = PlansTab(self.hub.fleet, self.hub)
+        self.timeline_tab = TimelineTab(self.hub)
         self._tabs = {
-            "Timeline": _Placeholder("Timeline"),
+            "Timeline": self.timeline_tab,
             "Units": self.units_tab,
             "Sequences": _Placeholder("Sequences"),
             "Plans": self.plans_tab,
