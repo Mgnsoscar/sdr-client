@@ -328,6 +328,12 @@ class PlanItem(BaseModel):
     sequence_id: str
     sequence_name: str = ""            # cached for display
     overrides: List[StepOverride] = []
+    # Placement on the plan timeline, relative to the plan's anchors (not absolute
+    # times — those are set when a plan is scheduled). on_air_offset_s shifts this
+    # sequence's on-air away from the plan's on-air (T0); off_air_offset_s shifts
+    # its off-air away from the plan's off-air (T_end).
+    on_air_offset_s: float = 0.0
+    off_air_offset_s: float = 0.0
 
 
 class Plan(BaseModel):

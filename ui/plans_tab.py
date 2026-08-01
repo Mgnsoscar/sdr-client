@@ -94,13 +94,15 @@ def plans_to_yaml(plans: List[m.Plan]) -> str:
     return yaml.safe_dump({"plans": docs}, sort_keys=False, allow_unicode=True)
 
 
-def _shared_on_air(fleet: Fleet, plan: m.Plan, item_leads: Dict[int, float],
-                   margin: float) -> str:
-    """Compute the shared on-air (T0) for a plan, at arm time, so it can't drift
-    into the past while a confirm dialog is open. Read each unit's OWN clock (the
-    agent schedules against it) and pick the time that clears every unit's warm-up
-    lead-in: max over items of (that unit's now + its lead) + margin. Falls back to
-    the laptop clock for any unit whose /system is unavailable. Returns UTC ISO."""
+def _plan_t0(fleet: Fleet, plan: m.Plan, item_leads: Dict[int, float],
+             margin: float) -> datetime:
+    """Compute the plan's on-air anchor (T0) at arm time, so it can't drift into
+    the past while a confirm dialog is open. Each sequence goes on air at
+    T0 + its on_air_offset, and its earliest step fires that much earlier still by
+    its warm-up lead. Reading each unit's OWN clock (the agent schedules against
+    it), T0 must satisfy, for every item: T0 + offset - lead > that unit's now —
+    i.e. T0 = max over items of (unit now + lead - offset) + margin. Falls back to
+    the laptop clock for any unit whose /system is unavailable."""
     laptop_now = datetime.now(timezone.utc)
     now_by_host: Dict[str, datetime] = {}
     for host in {it.hostname for it in plan.items}:
@@ -112,20 +114,23 @@ def _shared_on_air(fleet: Fleet, plan: m.Plan, item_leads: Dict[int, float],
     required = laptop_now
     for i, item in enumerate(plan.items):
         base = now_by_host.get(item.hostname, laptop_now)
-        cand = base + timedelta(seconds=item_leads.get(i, 0.0))
+        eff_lead = item_leads.get(i, 0.0) - item.on_air_offset_s
+        cand = base + timedelta(seconds=eff_lead)
         if cand > required:
             required = cand
-    return (required + timedelta(seconds=margin)).isoformat()
+    return required + timedelta(seconds=margin)
 
 
 def _arm_plan(fleet: Fleet, plan: m.Plan, item_leads: Dict[int, float],
               margin: float) -> List[tuple]:
-    """Arm every item of a plan at one shared on-air time, computed here (not
-    before a confirm dialog) so it stays in the future. Worker thread.
-    Returns [(item, SequenceRun|None, error|None), ...]."""
-    on_air_at_iso = _shared_on_air(fleet, plan, item_leads, margin)
+    """Arm every item of a plan around one shared on-air anchor (T0), computed here
+    (not before a confirm dialog) so it stays in the future. Each sequence is armed
+    at T0 + its on_air_offset, so a plan can stagger units relative to the anchor.
+    Worker thread. Returns [(item, SequenceRun|None, error|None), ...]."""
+    t0 = _plan_t0(fleet, plan, item_leads, margin)
     out = []
     for item in plan.items:
+        on_air_at_iso = (t0 + timedelta(seconds=item.on_air_offset_s)).isoformat()
         req = m.ArmSequenceRequest(
             on_air_at=on_air_at_iso,
             open_ended=True,
@@ -498,7 +503,7 @@ class PlansTab(QWidget):
             if isinstance(val, list):
                 seq_by[host] = {s.id: s for s in val}
         item_leads: Dict[int, float] = {}
-        max_lead = 0.0
+        max_eff_lead = 0.0   # how far before T0 the earliest step fires, across items
         missing_seq = []
         for i, item in enumerate(plan.items):
             seq = seq_by.get(item.hostname, {}).get(item.sequence_id)
@@ -507,7 +512,9 @@ class PlansTab(QWidget):
                 continue
             lead = _lead_in(seq)
             item_leads[i] = lead
-            max_lead = max(max_lead, lead)
+            # A sequence placed later (on_air_offset > 0) needs less head-room before
+            # the plan anchor; one placed earlier needs more.
+            max_eff_lead = max(max_eff_lead, lead - item.on_air_offset_s)
         if missing_seq:
             QMessageBox.warning(
                 self, "Cannot arm plan",
@@ -522,8 +529,8 @@ class PlansTab(QWidget):
                          f"{max_skew:.1f}s apart.")
 
         n_units = len({i.hostname for i in plan.items})
-        dlg = _ArmConfirmDialog(len(plan.items), n_units, max_lead, ARM_MARGIN_S,
-                                skew_note, parent=self)
+        dlg = _ArmConfirmDialog(len(plan.items), n_units, max(0.0, max_eff_lead),
+                                ARM_MARGIN_S, skew_note, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             self._set_status("arm cancelled")
             return

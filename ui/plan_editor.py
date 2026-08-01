@@ -12,9 +12,16 @@ Three dialogs, leaf-first:
       One plan item: pick a unit, pick one of its sequences, then optionally
       override individual start/run steps' parameters. Returns a PlanItem.
 
+  PlanTimelineEditor (+ _PlanCanvas, reusing the sequence timeline canvas)
+      A visual timeline of the plan: each sequence is a duration bar with an
+      on-air handle (offset from the plan's ON-AIR / T0) and an off-air handle
+      (offset from the plan's OFF-AIR / T_end). Placement is relative — absolute
+      times come later, when a plan is scheduled. Drag to place; click to edit
+      which sequence + its overrides (via PlanItemDialog).
+
   PlanEditorDialog
-      The whole plan: name, description, and a list of items. Persists via the
-      caller's PlanStore.
+      The whole plan: name, description, and the sequence timeline. Persists via
+      the caller's PlanStore.
 
 Everything runs off the DataHub's run_async / task_done pattern; the modal exec
 loops still pump those queued signals, so async results arrive while a dialog is
@@ -23,12 +30,14 @@ down, so the item dialog opens instantly.
 """
 from __future__ import annotations
 
+import itertools
 import shlex
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import yaml
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
@@ -39,6 +48,7 @@ from . import timeline_model as tlm
 from .param_form import ParamForm
 from .qt_adapter import DataHub
 from .theme import Palette
+from .timeline_editor import _TimelineCanvas
 
 
 def _parse_task_commands(yaml_text) -> Dict[str, List[str]]:
@@ -264,7 +274,11 @@ class _StepRow(QFrame):
 
 class PlanItemDialog(QDialog):
     """Pick a unit + one of its sequences, and optionally override start/run steps'
-    parameters. Returns a PlanItem via .result_item on accept."""
+    parameters. Returns a PlanItem via .result_item on accept. When editing an
+    existing item a Remove button is offered (result code REMOVE). The item's
+    timeline placement (on/off-air offsets) is carried through unchanged."""
+
+    REMOVE = 2   # custom result code (distinct from Accepted=1 / Rejected=0)
 
     def __init__(self, hub: DataHub, sequences_by_host: Dict[str, List[m.Sequence]],
                  item: Optional[m.PlanItem] = None, parent=None):
@@ -331,8 +345,14 @@ class PlanItemDialog(QDialog):
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         outer.addWidget(self._status)
 
-        self._buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self._buttons = QDialogButtonBox()
+        if self._item is not None:
+            remove = QPushButton("Remove")
+            remove.setStyleSheet(f"color: {Palette.CRASH};")
+            self._buttons.addButton(remove, QDialogButtonBox.ButtonRole.DestructiveRole)
+            remove.clicked.connect(lambda: self.done(self.REMOVE))
+        self._buttons.addButton(QDialogButtonBox.StandardButton.Ok)
+        self._buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
         self._buttons.accepted.connect(self._accept)
         self._buttons.rejected.connect(self.reject)
         outer.addWidget(self._buttons)
@@ -494,10 +514,15 @@ class PlanItemDialog(QDialog):
         # Keep only overrides that still address a step in the chosen sequence.
         overrides = [self._overrides[i] for i in sorted(self._overrides)
                      if i < len(seq.steps)]
+        # Carry the timeline placement through unchanged — it's set by dragging the
+        # bar, not in this dialog.
+        on_off = (self._item.on_air_offset_s, self._item.off_air_offset_s) \
+            if self._item is not None else (0.0, 0.0)
         self.result_item = m.PlanItem(
             hostname=hostname, unit_label=label,
             sequence_id=seq.id, sequence_name=seq.name or seq.id,
-            overrides=overrides)
+            overrides=overrides,
+            on_air_offset_s=on_off[0], off_air_offset_s=on_off[1])
         self.accept()
 
     def _disconnect(self) -> None:
@@ -507,36 +532,159 @@ class PlanItemDialog(QDialog):
             pass
 
 
+# ── The plan timeline (sequences placed on the on-air / off-air anchors) ──────
+
+_bar_ids = itertools.count(1)
+
+
+@dataclass
+class PlanBar:
+    """One sequence placed on the plan timeline. Its on-air (start_offset, from the
+    plan's ON-AIR anchor) and off-air (stop_offset, from the plan's OFF-AIR anchor)
+    are RELATIVE placements — the absolute times are set when a plan is scheduled.
+
+    The geometry attributes (kind/start_offset/stop_offset/uid/args/task_name) match
+    a timeline_model bar so the shared canvas paints and drags it unchanged; args is
+    always empty (parameter overrides live inside the sequence, edited in the
+    dialog), which keeps the canvas's caret / arg-panel machinery inert."""
+    hostname: str
+    unit_label: str
+    sequence_id: str
+    sequence_name: str
+    overrides: List[m.StepOverride] = field(default_factory=list)
+    start_offset: float = 0.0     # on-air offset, from plan T0     (anchor="start")
+    stop_offset: float = 0.0      # off-air offset, from plan T_end (anchor="stop")
+    uid: int = 0
+    kind: str = "bar"
+    args: list = field(default_factory=list)   # unused; keeps the canvas caret inert
+    task_name: str = ""                         # the canvas paints this as the label
+
+    def __post_init__(self):
+        if not self.uid:
+            self.uid = next(_bar_ids)
+        self.task_name = f"{self.unit_label or self.hostname} · " \
+                         f"{self.sequence_name or self.sequence_id}"
+
+
+def _bar_from_item(item: m.PlanItem, uid: int = 0) -> PlanBar:
+    return PlanBar(
+        hostname=item.hostname, unit_label=item.unit_label,
+        sequence_id=item.sequence_id, sequence_name=item.sequence_name,
+        overrides=list(item.overrides),
+        start_offset=item.on_air_offset_s, stop_offset=item.off_air_offset_s, uid=uid)
+
+
+def _item_from_bar(bar: PlanBar) -> m.PlanItem:
+    return m.PlanItem(
+        hostname=bar.hostname, unit_label=bar.unit_label,
+        sequence_id=bar.sequence_id, sequence_name=bar.sequence_name,
+        overrides=list(bar.overrides),
+        on_air_offset_s=bar.start_offset, off_air_offset_s=bar.stop_offset)
+
+
+class _PlanCanvas(_TimelineCanvas):
+    """The sequence timeline canvas, reused for plan bars. Only the add/edit hooks
+    differ — a bar is a whole sequence, edited via PlanItemDialog rather than the
+    task step editor."""
+
+    def add_new(self, kind: str = "bar") -> None:
+        self._editor.add_sequence()
+
+    def edit_item(self, item) -> None:
+        self._editor.edit_sequence(item)
+
+
+class PlanTimelineEditor(QWidget):
+    """Toolbar (+ Sequence, zoom) above the shared timeline canvas, showing whole
+    sequences as duration bars anchored to the plan's on-air / off-air. Placement
+    is by dragging; clicking a bar edits which sequence + its overrides."""
+
+    changed = pyqtSignal()
+
+    def __init__(self, hub: DataHub, sequences_by_host: Dict[str, List[m.Sequence]],
+                 parent=None):
+        super().__init__(parent)
+        self._hub = hub
+        self._seqs = sequences_by_host
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(8)
+
+        bar = QHBoxLayout()
+        self._add = QPushButton("+ Sequence")
+        self._add.setToolTip("Add a sequence from any unit to this plan")
+        self._add.clicked.connect(lambda: self._canvas.add_new())
+        bar.addWidget(self._add)
+        bar.addStretch(1)
+        self._hint = QLabel("Drag handles to place each sequence · click to edit")
+        self._hint.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+        bar.addWidget(self._hint)
+        self._zoom_btn = QPushButton("100%")
+        self._zoom_btn.setFixedWidth(52)
+        self._zoom_btn.setFlat(True)
+        self._zoom_btn.setToolTip("Horizontal zoom — Ctrl+scroll or pinch. Click to reset.")
+        self._zoom_btn.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
+        self._zoom_btn.clicked.connect(lambda: self._canvas.reset_zoom())
+        bar.addWidget(self._zoom_btn)
+        outer.addLayout(bar)
+
+        self._canvas = _PlanCanvas(self)
+        self._canvas.changed.connect(self.changed.emit)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._canvas)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setMinimumHeight(240)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setStyleSheet(
+            f"QScrollArea {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER}; "
+            f"border-radius: 8px; }}")
+        self._canvas.set_scroll_area(scroll)
+        outer.addWidget(scroll, stretch=1)
+
+    # Hooks the shared canvas expects from its "editor".
+    def available_tasks(self) -> List[str]:
+        return []   # bars are sequences, always drawn as known
+
+    def _sync_zoom(self) -> None:
+        self._zoom_btn.setText(f"{round(self._canvas._zoom * 100)}%")
+
+    # ── Bars ⇄ plan items ──────────────────────────────────────────────────────
+
+    def set_sequences(self, sequences_by_host: Dict[str, List[m.Sequence]]) -> None:
+        self._seqs = sequences_by_host
+
+    def set_items(self, items: List[m.PlanItem]) -> None:
+        self._canvas.set_items([_bar_from_item(it) for it in items])
+
+    def items(self) -> List[m.PlanItem]:
+        return [_item_from_bar(b) for b in self._canvas.items()]
+
+    def is_empty(self) -> bool:
+        return not self._canvas.items()
+
+    # ── Add / edit a sequence bar ──────────────────────────────────────────────
+
+    def add_sequence(self) -> None:
+        if not self._seqs:
+            self._hint.setText("still loading units — try again in a moment")
+            return
+        dlg = PlanItemDialog(self._hub, self._seqs, parent=self.window())
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_item is not None:
+            self._canvas.add_item(_bar_from_item(dlg.result_item))
+
+    def edit_sequence(self, bar: PlanBar) -> None:
+        dlg = PlanItemDialog(self._hub, self._seqs, item=_item_from_bar(bar),
+                             parent=self.window())
+        r = dlg.exec()
+        if r == PlanItemDialog.REMOVE:
+            self._canvas.remove_item(bar.uid)
+        elif r == QDialog.DialogCode.Accepted and dlg.result_item is not None:
+            self._canvas.replace_item(bar.uid, _bar_from_item(dlg.result_item, uid=bar.uid))
+
+
 # ── The whole plan ───────────────────────────────────────────────────────────
-
-class _ItemRow(QFrame):
-    """A row summarising one plan item in the plan editor."""
-
-    def __init__(self, item: m.PlanItem, on_edit, on_remove):
-        super().__init__()
-        self.item = item
-        self.setObjectName("card")
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 8, 12, 8)
-        lay.setSpacing(10)
-
-        box = QVBoxLayout(); box.setSpacing(2)
-        title = QLabel(f"<b>{item.unit_label or item.hostname}</b>  ·  {item.sequence_name}")
-        title.setStyleSheet(f"font-size: 13px; color: {Palette.TEXT};")
-        box.addWidget(title)
-        n = len(item.overrides)
-        sub = QLabel(f"{n} parameter override(s)" if n else "runs as defined")
-        sub.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
-        box.addWidget(sub)
-        lay.addLayout(box, stretch=1)
-
-        edit = QPushButton("Edit"); edit.setFixedWidth(60)
-        edit.clicked.connect(lambda: on_edit(item))
-        lay.addWidget(edit)
-        rm = QPushButton("Remove"); rm.setFixedWidth(72)
-        rm.clicked.connect(lambda: on_remove(item))
-        lay.addWidget(rm)
-
 
 class PlanEditorDialog(QDialog):
     """Create or edit a plan: name, description, and a list of unit+sequence items.
@@ -547,23 +695,24 @@ class PlanEditorDialog(QDialog):
         super().__init__(parent)
         self._hub = hub
         self._editing = plan is not None
-        self._items: List[m.PlanItem] = list(plan.items) if plan else []
         self._plan_id = plan.id if plan else None
         self._seqs_by_host: Dict[str, List[m.Sequence]] = {}
         self._seqs_loaded = False
         self.result_plan: Optional[m.Plan] = None
 
         self.setWindowTitle("Edit plan" if self._editing else "New plan")
-        self.setMinimumSize(620, 500)
+        self.setMinimumSize(820, 560)
         self._build()
         if plan is not None:
             self._name.setText(plan.name)
             self._desc.setText(plan.description)
+            # Bars render straight from the stored items (they carry cached unit /
+            # sequence labels), so the timeline is populated before sequences load.
+            self._timeline.set_items(plan.items)
 
         self._hub.task_done.connect(self._on_task_done)
         self.finished.connect(lambda _=0: self._disconnect())
         self._load_sequences()
-        self._rebuild_items()
 
     # ── Construction ─────────────────────────────────────────────────────────
 
@@ -583,27 +732,8 @@ class PlanEditorDialog(QDialog):
         form.addRow("Description", self._desc)
         outer.addLayout(form)
 
-        head = QHBoxLayout()
-        lbl = QLabel("Sequences in this plan")
-        lbl.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {Palette.TEXT};")
-        head.addWidget(lbl)
-        head.addStretch(1)
-        self._add_btn = QPushButton("Add item…")
-        self._add_btn.setObjectName("primary")
-        self._add_btn.clicked.connect(self._on_add)
-        head.addWidget(self._add_btn)
-        outer.addLayout(head)
-
-        self._items_host = QWidget()
-        self._items_lay = QVBoxLayout(self._items_host)
-        self._items_lay.setContentsMargins(0, 0, 0, 0)
-        self._items_lay.setSpacing(8)
-        self._items_lay.setAlignment(Qt.AlignmentFlag.AlignTop)
-        iscroll = QScrollArea()
-        iscroll.setWidgetResizable(True)
-        iscroll.setWidget(self._items_host)
-        iscroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        outer.addWidget(iscroll, stretch=1)
+        self._timeline = PlanTimelineEditor(self._hub, self._seqs_by_host)
+        outer.addWidget(self._timeline, stretch=1)
 
         self._status = QLabel("loading units…")
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
@@ -629,45 +759,11 @@ class PlanEditorDialog(QDialog):
             for host, val in result.items():
                 by_host[host] = val if isinstance(val, list) else []
         self._seqs_by_host = by_host
+        self._timeline.set_sequences(by_host)
         total = sum(len(v) for v in by_host.values())
         self._status.setText(
             f"{len(by_host)} unit(s), {total} sequence(s) available"
             if by_host else "no units reachable")
-
-    # ── Items ──────────────────────────────────────────────────────────────────
-
-    def _rebuild_items(self) -> None:
-        while self._items_lay.count():
-            w = self._items_lay.takeAt(0).widget()
-            if w is not None:
-                w.deleteLater()
-        if not self._items:
-            empty = QLabel("No sequences yet. Click “Add item…” to add one from a unit.")
-            empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
-            self._items_lay.addWidget(empty)
-            return
-        for item in self._items:
-            self._items_lay.addWidget(_ItemRow(item, self._on_edit_item, self._on_remove_item))
-
-    def _on_add(self) -> None:
-        if not self._seqs_loaded:
-            self._status.setText("still loading units — try again in a moment")
-            return
-        dlg = PlanItemDialog(self._hub, self._seqs_by_host, parent=self)
-        if dlg.exec() and dlg.result_item is not None:
-            self._items.append(dlg.result_item)
-            self._rebuild_items()
-
-    def _on_edit_item(self, item: m.PlanItem) -> None:
-        dlg = PlanItemDialog(self._hub, self._seqs_by_host, item=item, parent=self)
-        if dlg.exec() and dlg.result_item is not None:
-            idx = self._items.index(item)
-            self._items[idx] = dlg.result_item
-            self._rebuild_items()
-
-    def _on_remove_item(self, item: m.PlanItem) -> None:
-        self._items = [i for i in self._items if i is not item]
-        self._rebuild_items()
 
     # ── Save ─────────────────────────────────────────────────────────────────
 
@@ -676,7 +772,7 @@ class PlanEditorDialog(QDialog):
         if not name:
             self._status.setText("plan name is required")
             return
-        if not self._items:
+        if self._timeline.is_empty():
             self._status.setText("add at least one sequence")
             return
         from state import new_plan_id
@@ -684,7 +780,7 @@ class PlanEditorDialog(QDialog):
             id=self._plan_id or new_plan_id(),
             name=name,
             description=self._desc.text().strip(),
-            items=self._items,
+            items=self._timeline.items(),
         )
         self.accept()
 
