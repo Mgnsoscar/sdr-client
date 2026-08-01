@@ -49,10 +49,10 @@ CLOCK_WARN_SKEW_S = 1.0
 _ACTIVE = (m.SequenceState.ARMED, m.SequenceState.RUNNING)
 
 
-def _lead_in(seq: m.Sequence) -> float:
-    """Warm-up lead-in for a sequence: the magnitude of its most-negative
+def _lead_in(steps) -> float:
+    """Warm-up lead-in for a step list: the magnitude of its most-negative
     start-anchored offset (0 if none)."""
-    starts = [s.offset_s for s in seq.steps if s.anchor == "start"]
+    starts = [s.offset_s for s in steps if s.anchor == "start"]
     return max(0.0, -min(starts)) if starts else 0.0
 
 
@@ -136,7 +136,10 @@ def _arm_plan(fleet: Fleet, plan: m.Plan, item_leads: Dict[int, float],
             open_ended=True,
             plan_id=plan.id,
             plan_name=plan.name,
-            step_overrides=item.overrides,
+            # A plan-local step copy runs as-is; older items fall back to the stored
+            # sequence with legacy per-arg overrides.
+            steps=(item.steps or None),
+            step_overrides=([] if item.steps else item.overrides),
         )
         try:
             run = fleet.get(item.hostname).arm_sequence(item.sequence_id, req)
@@ -506,11 +509,17 @@ class PlansTab(QWidget):
         max_eff_lead = 0.0   # how far before T0 the earliest step fires, across items
         missing_seq = []
         for i, item in enumerate(plan.items):
-            seq = seq_by.get(item.hostname, {}).get(item.sequence_id)
-            if seq is None:
-                missing_seq.append(item.unit_label or item.hostname)
-                continue
-            lead = _lead_in(seq)
+            # A plan-local copy carries its own steps; otherwise the source
+            # sequence must still exist on the unit.
+            if item.steps:
+                steps = item.steps
+            else:
+                seq = seq_by.get(item.hostname, {}).get(item.sequence_id)
+                if seq is None:
+                    missing_seq.append(item.unit_label or item.hostname)
+                    continue
+                steps = seq.steps
+            lead = _lead_in(steps)
             item_leads[i] = lead
             # A sequence placed later (on_air_offset > 0) needs less head-room before
             # the plan anchor; one placed earlier needs more.
