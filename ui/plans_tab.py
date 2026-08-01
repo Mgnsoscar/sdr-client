@@ -30,10 +30,10 @@ from typing import Dict, List, Optional
 
 import yaml
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QScrollArea, QVBoxLayout, QWidget,
+    QDialog, QDialogButtonBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import Fleet
@@ -141,6 +141,63 @@ def _stop_plan(fleet: Fleet, runs: List[tuple]) -> List[tuple]:
         except Exception as exc:  # noqa: BLE001 — reported per run
             out.append((run_id, str(exc)))
     return out
+
+
+class _ArmConfirmDialog(QDialog):
+    """Confirm arming a plan, with a live-updating estimate of the shared on-air
+    time. T0 is computed at arm time as now + the longest warm-up + margin, so the
+    displayed clock time slides forward with real time — it tracks (roughly) what
+    the operator will actually get when they press Arm, however long they wait."""
+
+    def __init__(self, n_seqs: int, n_units: int, max_lead: float, margin: float,
+                 skew_note: str, parent=None):
+        super().__init__(parent)
+        self._max_lead = max_lead
+        self._margin = margin
+        self.setWindowTitle("Arm plan")
+        self.setMinimumWidth(420)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(18, 16, 18, 14)
+        outer.setSpacing(10)
+
+        head = QLabel(f"Arm {n_seqs} sequence(s) across {n_units} unit(s)?")
+        head.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {Palette.TEXT};")
+        head.setWordWrap(True)
+        outer.addWidget(head)
+
+        self._on_air = QLabel()
+        self._on_air.setStyleSheet(f"font-size: 22px; font-weight: 600; color: {Palette.TEXT};")
+        outer.addWidget(self._on_air)
+
+        detail = QLabel(f"Shared on-air (T0) = now + {max_lead:.0f}s warm-up + "
+                        f"{margin:.0f}s margin, computed the moment you press Arm.")
+        detail.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
+        detail.setWordWrap(True)
+        outer.addWidget(detail)
+
+        if skew_note:
+            warn = QLabel(skew_note.strip())
+            warn.setStyleSheet(f"font-size: 11px; color: {Palette.ARMED};")
+            warn.setWordWrap(True)
+            outer.addWidget(warn)
+
+        buttons = QDialogButtonBox()
+        arm = buttons.addButton("Arm", QDialogButtonBox.ButtonRole.AcceptRole)
+        arm.setObjectName("primary")
+        buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(buttons)
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(250)
+        self._tick()
+
+    def _tick(self) -> None:
+        est = datetime.now(timezone.utc) + timedelta(seconds=self._max_lead + self._margin)
+        self._on_air.setText(f"~ {est.astimezone().strftime('%H:%M:%S')} local")
 
 
 class _PlanRow(QFrame):
@@ -436,27 +493,16 @@ class PlansTab(QWidget):
             self._set_status("arm cancelled", error=True)
             return
 
-        # Approximate on-air for the prompt; the exact T0 is computed at arm time
-        # (below) so it can't drift into the past while this dialog is open.
-        est = datetime.now(timezone.utc) + timedelta(seconds=max_lead + ARM_MARGIN_S)
-        local = est.astimezone().strftime("%H:%M:%S")
-
         skew_note = ""
         if max_skew is not None and max_skew > CLOCK_WARN_SKEW_S:
-            skew_note = (f"\n\n⚠ Unit clocks differ by {max_skew:.1f}s. A shared on-air "
+            skew_note = (f"⚠ Unit clocks differ by {max_skew:.1f}s. A shared on-air "
                          f"time depends on synced clocks — units may go on air up to "
                          f"{max_skew:.1f}s apart.")
 
-        if QMessageBox.question(
-            self, "Arm plan",
-            f"Arm {len(plan.items)} sequence(s) across "
-            f"{len({i.hostname for i in plan.items})} unit(s)?\n\n"
-            f"Shared on-air (T0): about {local} local  "
-            f"(now + {max_lead:.0f}s warm-up + {ARM_MARGIN_S:.0f}s margin)."
-            f"{skew_note}",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        ) != QMessageBox.StandardButton.Yes:
+        n_units = len({i.hostname for i in plan.items})
+        dlg = _ArmConfirmDialog(len(plan.items), n_units, max_lead, ARM_MARGIN_S,
+                                skew_note, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             self._set_status("arm cancelled")
             return
 
