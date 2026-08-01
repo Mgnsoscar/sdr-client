@@ -67,13 +67,14 @@ def _parse_iso(ts) -> Optional[datetime]:
 
 
 def _is_on_air(run: m.SequenceRun) -> bool:
-    """True once the run has started firing (state RUNNING) — the agent's own,
-    event-pushed truth. An ARMED run is still waiting for its first step.
+    """True once the run has actually crossed its on-air time (T0) — i.e. RF is
+    live, not merely warming up.
 
-    We deliberately use the run STATE rather than comparing the client clock to
-    on_air_at: on_air_at is in the unit's clock, so on a skewed fleet the laptop
-    could still think T0 is in the future after the unit is already transmitting."""
-    return run.state == m.SequenceState.RUNNING
+    The agent stamps on_air_actual the moment it crosses T0 on its own clock, so
+    this is exact and skew-proof: a RUNNING run still in its warm-up (before T0)
+    has on_air_actual unset and reads as armed, and we never compare the laptop's
+    clock to a unit-clock on_air_at."""
+    return run.state == m.SequenceState.RUNNING and bool(run.on_air_actual)
 
 
 def plans_to_yaml(plans: List[m.Plan]) -> str:

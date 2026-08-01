@@ -266,6 +266,7 @@ class SequenceRun(BaseModel):
     open_ended: bool = False
     created_at: str = ""
     started_actual: Optional[str] = None
+    on_air_actual: Optional[str] = None    # when T0 was actually crossed (RF live)
     stopped_actual: Optional[str] = None
     resume_offset_s: float = 0.0
     note: str = ""
