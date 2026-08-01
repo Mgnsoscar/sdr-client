@@ -40,8 +40,8 @@ import yaml
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QFrame,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import models as m
@@ -325,6 +325,21 @@ class PlanItemDialog(QDialog):
         self._seq = QComboBox()
         self._seq.currentIndexChanged.connect(lambda _=0: self._on_seq_changed())
         form.addRow("Sequence", self._seq)
+
+        # Placement within the plan's on-air window (same values as dragging the
+        # bar's handles). On-air is measured forward from ON-AIR (≥ 0); off-air is
+        # measured back from OFF-AIR (≤ 0).
+        self._on_air = QDoubleSpinBox()
+        self._on_air.setRange(0.0, 100000.0); self._on_air.setDecimals(1)
+        self._on_air.setSingleStep(1.0); self._on_air.setSuffix(" s")
+        form.addRow("On-air — after ON-AIR", self._on_air)
+        self._off_air = QDoubleSpinBox()
+        self._off_air.setRange(-100000.0, 0.0); self._off_air.setDecimals(1)
+        self._off_air.setSingleStep(1.0); self._off_air.setSuffix(" s")
+        form.addRow("Off-air — before OFF-AIR", self._off_air)
+        if self._item is not None:
+            self._on_air.setValue(self._item.on_air_offset_s)
+            self._off_air.setValue(self._item.off_air_offset_s)
         outer.addLayout(form)
 
         lbl = QLabel("Steps")
@@ -515,15 +530,12 @@ class PlanItemDialog(QDialog):
         # Keep only overrides that still address a step in the chosen sequence.
         overrides = [self._overrides[i] for i in sorted(self._overrides)
                      if i < len(seq.steps)]
-        # Carry the timeline placement through unchanged — it's set by dragging the
-        # bar, not in this dialog.
-        on_off = (self._item.on_air_offset_s, self._item.off_air_offset_s) \
-            if self._item is not None else (0.0, 0.0)
         self.result_item = m.PlanItem(
             hostname=hostname, unit_label=label,
             sequence_id=seq.id, sequence_name=seq.name or seq.id,
             overrides=overrides,
-            on_air_offset_s=on_off[0], off_air_offset_s=on_off[1])
+            on_air_offset_s=round(self._on_air.value(), 1),
+            off_air_offset_s=round(self._off_air.value(), 1))
         self.accept()
 
     def _disconnect(self) -> None:
