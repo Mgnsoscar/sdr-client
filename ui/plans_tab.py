@@ -8,6 +8,7 @@ fans out a single arm per item, stamped with the plan's id/name so the resulting
 runs can be regrouped for monitoring and stopped together.
 
   - New / Edit / Delete → manage plan definitions (PlanEditorDialog + PlanStore)
+  - Export / Import      → move plan definitions between machines as YAML
   - Arm    → put every item on air at one shared T0 (now + the longest warm-up
              lead-in + margin), after a clock-skew pre-flight
   - Stop   → cancel/abort every active run belonging to the plan
@@ -27,15 +28,17 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
+import yaml
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import Fleet
 from api import models as m
-from state import PlanStore
+from state import PlanStore, new_plan_id
 from .plan_editor import PlanEditorDialog
 from .qt_adapter import DataHub
 from .theme import Palette
@@ -51,6 +54,23 @@ def _lead_in(seq: m.Sequence) -> float:
     start-anchored offset (0 if none)."""
     starts = [s.offset_s for s in seq.steps if s.anchor == "start"]
     return max(0.0, -min(starts)) if starts else 0.0
+
+
+def plans_to_yaml(plans: List[m.Plan]) -> str:
+    """Serialize plans to a portable YAML document ({plans: [...]}).
+
+    The local plan id is dropped (a fresh one is minted on import); each item
+    keeps its unit + sequence references and overrides so the plan re-creates
+    wherever those units and sequences exist.
+    """
+    docs = []
+    for p in plans:
+        docs.append({
+            "name": p.name,
+            "description": p.description,
+            "items": [it.model_dump(mode="json") for it in p.items],
+        })
+    return yaml.safe_dump({"plans": docs}, sort_keys=False, allow_unicode=True)
 
 
 def _arm_plan(fleet: Fleet, plan: m.Plan, on_air_at_iso: str) -> List[tuple]:
@@ -166,6 +186,14 @@ class PlansTab(QWidget):
         self._refresh_btn = QPushButton("Refresh")
         self._refresh_btn.clicked.connect(self._refresh)
         row.addWidget(self._refresh_btn)
+        self._export_btn = QPushButton("Export…")
+        self._export_btn.setToolTip("Save all plans to a YAML file")
+        self._export_btn.clicked.connect(self._on_export)
+        row.addWidget(self._export_btn)
+        self._import_btn = QPushButton("Import…")
+        self._import_btn.setToolTip("Add plans from a YAML file (existing names are skipped)")
+        self._import_btn.clicked.connect(self._on_import)
+        row.addWidget(self._import_btn)
         self._status = QLabel("")
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         row.addWidget(self._status)
@@ -237,6 +265,91 @@ class PlansTab(QWidget):
             return
         self._store.delete(plan.id)
         self._refresh()
+
+    # ── Export / import (move plans between machines) ──────────────────────────
+
+    def _on_export(self) -> None:
+        plans = self._store.plans()
+        if not plans:
+            QMessageBox.information(self, "Export", "There are no plans to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export plans", "plans.yaml", "YAML (*.yaml *.yml)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(plans_to_yaml(plans))
+        except OSError as exc:
+            QMessageBox.warning(self, "Export failed", f"Could not write file:\n{exc}")
+            return
+        QMessageBox.information(self, "Export", f"{len(plans)} plan(s) written to\n{path}")
+
+    def _on_import(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import plans", "", "YAML (*.yaml *.yml)")
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                doc = yaml.safe_load(fh)
+        except (OSError, yaml.YAMLError) as exc:
+            QMessageBox.warning(self, "Import failed", f"Could not read file:\n{exc}")
+            return
+        if isinstance(doc, dict):
+            raw = doc.get("plans") or []
+        elif isinstance(doc, list):
+            raw = doc
+        else:
+            raw = []
+
+        existing = {p.name for p in self._store.plans()}
+        to_add: List[m.Plan] = []
+        skipped: List[str] = []
+        bad: List[str] = []
+        for entry in raw:
+            if not isinstance(entry, dict) or not entry.get("name"):
+                continue
+            name = entry["name"]
+            if name in existing:
+                skipped.append(name)
+                continue
+            try:
+                items = [m.PlanItem(**it) for it in (entry.get("items") or [])]
+                plan = m.Plan(id=new_plan_id(), name=name,
+                              description=entry.get("description", "") or "", items=items)
+            except Exception as exc:  # noqa: BLE001 — malformed item/override schema
+                bad.append(f"• {name}: {exc}")
+                continue
+            to_add.append(plan)
+            existing.add(name)
+
+        if not to_add:
+            msg = "No new plans found in that file."
+            if skipped:
+                msg += f"\n\n{len(skipped)} plan(s) skipped (name already exists)."
+            if bad:
+                msg += "\n\n" + "\n".join(bad)
+            QMessageBox.information(self, "Import", msg)
+            return
+
+        if QMessageBox.question(
+            self, "Import plans",
+            f"Add {len(to_add)} plan(s)?"
+            + (f"\n{len(skipped)} with an existing name will be skipped." if skipped else ""),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        for plan in to_add:
+            self._store.upsert(plan)
+        self._refresh()
+        summary = f"Imported {len(to_add)} plan(s)."
+        if skipped:
+            summary += f"\nSkipped {len(skipped)} (name already exists)."
+        if bad:
+            summary += "\n\nCould not read:\n" + "\n".join(bad)
+        QMessageBox.information(self, "Import complete", summary)
 
     # ── Arm (shared on-air, clock-skew pre-flight) ─────────────────────────────
 
