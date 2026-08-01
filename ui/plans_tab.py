@@ -56,6 +56,16 @@ def _lead_in(seq: m.Sequence) -> float:
     return max(0.0, -min(starts)) if starts else 0.0
 
 
+def _parse_iso(ts) -> Optional[datetime]:
+    try:
+        dt = datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def plans_to_yaml(plans: List[m.Plan]) -> str:
     """Serialize plans to a portable YAML document ({plans: [...]}).
 
@@ -73,9 +83,36 @@ def plans_to_yaml(plans: List[m.Plan]) -> str:
     return yaml.safe_dump({"plans": docs}, sort_keys=False, allow_unicode=True)
 
 
-def _arm_plan(fleet: Fleet, plan: m.Plan, on_air_at_iso: str) -> List[tuple]:
-    """Arm every item of a plan at the shared on-air time. Worker thread.
+def _shared_on_air(fleet: Fleet, plan: m.Plan, item_leads: Dict[int, float],
+                   margin: float) -> str:
+    """Compute the shared on-air (T0) for a plan, at arm time, so it can't drift
+    into the past while a confirm dialog is open. Read each unit's OWN clock (the
+    agent schedules against it) and pick the time that clears every unit's warm-up
+    lead-in: max over items of (that unit's now + its lead) + margin. Falls back to
+    the laptop clock for any unit whose /system is unavailable. Returns UTC ISO."""
+    laptop_now = datetime.now(timezone.utc)
+    now_by_host: Dict[str, datetime] = {}
+    for host in {it.hostname for it in plan.items}:
+        try:
+            health = fleet.get(host).system()
+            now_by_host[host] = _parse_iso(getattr(health, "utc_now", None)) or laptop_now
+        except Exception:  # noqa: BLE001 — best-effort; fall back to the laptop clock
+            now_by_host[host] = laptop_now
+    required = laptop_now
+    for i, item in enumerate(plan.items):
+        base = now_by_host.get(item.hostname, laptop_now)
+        cand = base + timedelta(seconds=item_leads.get(i, 0.0))
+        if cand > required:
+            required = cand
+    return (required + timedelta(seconds=margin)).isoformat()
+
+
+def _arm_plan(fleet: Fleet, plan: m.Plan, item_leads: Dict[int, float],
+              margin: float) -> List[tuple]:
+    """Arm every item of a plan at one shared on-air time, computed here (not
+    before a confirm dialog) so it stays in the future. Worker thread.
     Returns [(item, SequenceRun|None, error|None), ...]."""
+    on_air_at_iso = _shared_on_air(fleet, plan, item_leads, margin)
     out = []
     for item in plan.items:
         req = m.ArmSequenceRequest(
@@ -375,19 +412,23 @@ class PlansTab(QWidget):
             QMessageBox.warning(self, "Pre-flight failed", f"{result}")
             return
 
-        # Resolve each item's sequence to compute the longest warm-up lead-in.
+        # Resolve each item's sequence to its warm-up lead-in (keyed by item index,
+        # since the shared on-air is computed per-item at arm time).
         seq_by: Dict[str, Dict[str, m.Sequence]] = {}
         for host, val in (seqs or {}).items():
             if isinstance(val, list):
                 seq_by[host] = {s.id: s for s in val}
+        item_leads: Dict[int, float] = {}
         max_lead = 0.0
         missing_seq = []
-        for item in plan.items:
+        for i, item in enumerate(plan.items):
             seq = seq_by.get(item.hostname, {}).get(item.sequence_id)
             if seq is None:
                 missing_seq.append(item.unit_label or item.hostname)
                 continue
-            max_lead = max(max_lead, _lead_in(seq))
+            lead = _lead_in(seq)
+            item_leads[i] = lead
+            max_lead = max(max_lead, lead)
         if missing_seq:
             QMessageBox.warning(
                 self, "Cannot arm plan",
@@ -395,8 +436,10 @@ class PlansTab(QWidget):
             self._set_status("arm cancelled", error=True)
             return
 
-        on_air_at = datetime.now(timezone.utc) + timedelta(seconds=max_lead + ARM_MARGIN_S)
-        local = on_air_at.astimezone().strftime("%H:%M:%S")
+        # Approximate on-air for the prompt; the exact T0 is computed at arm time
+        # (below) so it can't drift into the past while this dialog is open.
+        est = datetime.now(timezone.utc) + timedelta(seconds=max_lead + ARM_MARGIN_S)
+        local = est.astimezone().strftime("%H:%M:%S")
 
         skew_note = ""
         if max_skew is not None and max_skew > CLOCK_WARN_SKEW_S:
@@ -408,7 +451,7 @@ class PlansTab(QWidget):
             self, "Arm plan",
             f"Arm {len(plan.items)} sequence(s) across "
             f"{len({i.hostname for i in plan.items})} unit(s)?\n\n"
-            f"Shared on-air (T0): {local} local  "
+            f"Shared on-air (T0): about {local} local  "
             f"(now + {max_lead:.0f}s warm-up + {ARM_MARGIN_S:.0f}s margin)."
             f"{skew_note}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
@@ -417,11 +460,10 @@ class PlansTab(QWidget):
             self._set_status("arm cancelled")
             return
 
-        on_air_iso = on_air_at.isoformat()
         self._set_status(f"arming {plan.name or plan.id}…")
         self.hub.run_async(
             f"plan_arm:{plan.id}",
-            lambda: _arm_plan(self.fleet, plan, on_air_iso),
+            lambda: _arm_plan(self.fleet, plan, item_leads, ARM_MARGIN_S),
         )
 
     def _on_stop(self, plan: m.Plan) -> None:
@@ -483,8 +525,15 @@ class PlansTab(QWidget):
             self._set_status("arm failed", error=True)
             QMessageBox.warning(self, "Arm failed", f"{result}")
             return
-        ok = [it for it, run, err in result if err is None]
+        ok = [(it, run) for it, run, err in result if err is None]
         bad = [(it, err) for it, run, err in result if err is not None]
+        # Show the actual shared on-air (T0) the units were armed to.
+        on_air = ""
+        for _it, run in ok:
+            dt = _parse_iso(getattr(run, "on_air_at", None))
+            if dt is not None:
+                on_air = f", on air {dt.astimezone().strftime('%H:%M:%S')}"
+                break
         if bad:
             lines = "\n".join(f"• {it.unit_label or it.hostname} / {it.sequence_name}: {err}"
                               for it, err in bad)
@@ -493,7 +542,7 @@ class PlansTab(QWidget):
                 f"Armed {len(ok)} of {len(result)} sequence(s).\n\nFailed:\n{lines}")
             self._set_status("arm: some units failed", error=True)
         else:
-            self._set_status(f"armed {len(ok)} sequence(s)")
+            self._set_status(f"armed {len(ok)} sequence(s){on_air}")
 
     # ── Rendering ──────────────────────────────────────────────────────────────
 
