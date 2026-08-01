@@ -66,6 +66,16 @@ def _parse_iso(ts) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
+def _is_on_air(run: m.SequenceRun) -> bool:
+    """True once RF is actually live: the run is RUNNING and its on-air time (T0)
+    has passed. An ARMED run — or a RUNNING one still in its warm-up before T0 —
+    is not yet on air."""
+    if run.state != m.SequenceState.RUNNING:
+        return False
+    dt = _parse_iso(getattr(run, "on_air_at", None))
+    return dt is None or datetime.now(timezone.utc) >= dt
+
+
 def plans_to_yaml(plans: List[m.Plan]) -> str:
     """Serialize plans to a portable YAML document ({plans: [...]}).
 
@@ -203,12 +213,12 @@ class _ArmConfirmDialog(QDialog):
 class _PlanRow(QFrame):
     """One plan: name, unit/sequence summary, active-run pill, action buttons."""
 
-    def __init__(self, plan: m.Plan, active_n: int,
+    def __init__(self, plan: m.Plan, on_air_n: int, pending_n: int,
                  on_arm, on_stop, on_edit, on_delete):
         super().__init__()
         self.plan = plan
         self.setObjectName("card")
-        active = active_n > 0
+        active = (on_air_n + pending_n) > 0
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
@@ -231,8 +241,14 @@ class _PlanRow(QFrame):
         box.addWidget(summary)
         lay.addLayout(box, stretch=1)
 
-        word = f"{active_n} on air" if active else "idle"
-        self._pill = StatusPill(word, "running" if active else "idle")
+        # On air (RF live) beats armed/warming: show whichever phase the plan is in.
+        if on_air_n:
+            word, status = f"{on_air_n} on air", "running"
+        elif pending_n:
+            word, status = f"{pending_n} armed", "armed"
+        else:
+            word, status = "idle", "idle"
+        self._pill = StatusPill(word, status)
         lay.addWidget(self._pill, alignment=Qt.AlignmentFlag.AlignTop)
 
         self._arm = QPushButton("Arm")
@@ -333,6 +349,11 @@ class PlansTab(QWidget):
                 if r.plan_id == plan.id and r.state in _ACTIVE:
                     out.append((host, r.id))
         return out
+
+    def _active_run_objs(self, plan: m.Plan) -> List[m.SequenceRun]:
+        """This plan's armed/running SequenceRun objects (for phase counting)."""
+        return [r for runs in self._runs_by_host.values() for r in runs
+                if r.plan_id == plan.id and r.state in _ACTIVE]
 
     # ── Plan CRUD ──────────────────────────────────────────────────────────────
 
@@ -609,11 +630,13 @@ class PlansTab(QWidget):
 
         active_total = 0
         for plan in self._plans:
-            active_n = len(self._active_runs_for(plan))
-            if active_n:
+            runs = self._active_run_objs(plan)
+            on_air_n = sum(1 for r in runs if _is_on_air(r))
+            pending_n = len(runs) - on_air_n
+            if runs:
                 active_total += 1
             self._list.addWidget(_PlanRow(
-                plan, active_n,
+                plan, on_air_n, pending_n,
                 on_arm=self._on_arm, on_stop=self._on_stop,
                 on_edit=self._on_edit, on_delete=self._on_delete))
         suffix = f" · {active_total} active" if active_total else ""
