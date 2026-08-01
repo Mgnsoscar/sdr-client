@@ -141,6 +141,11 @@ class Fleet:
         """Sequence runs per unit — used to rebuild the timeline / plan grouping."""
         return self._fan_out(lambda c: c.list_sequence_runs(), units)
 
+    def sequences_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Sequence definitions per unit — used by the plan editor to browse what's
+        available on each unit. Values are list[Sequence] or an Exception."""
+        return self._fan_out(lambda c: c.list_sequences(), units)
+
     def tasks_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
         """Task status list per unit. Values are list[ProcessStatus] or Exception."""
         return self._fan_out(lambda c: c.list_tasks(), units)

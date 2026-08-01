@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
 
 from api import models as m
 from .alert_feed import AlertFeed
+from .plans_tab import PlansTab
 from .qt_adapter import DataHub
 from .theme import Palette
 from .units_tab import UnitsTab
@@ -122,11 +123,12 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget()
         # Real tabs where built; placeholders elsewhere for now.
         self.units_tab = UnitsTab(self.hub.fleet, self.hub)
+        self.plans_tab = PlansTab(self.hub.fleet, self.hub)
         self._tabs = {
             "Timeline": _Placeholder("Timeline"),
             "Units": self.units_tab,
             "Sequences": _Placeholder("Sequences"),
-            "Plans": _Placeholder("Plans"),
+            "Plans": self.plans_tab,
         }
         for name in TABS:
             self._stack.addWidget(self._tabs[name])
@@ -156,6 +158,11 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(idx)
         for i, btn in enumerate(self._tab_buttons):
             btn.setChecked(i == idx)
+        # Let a tab refresh itself when it becomes visible (e.g. Plans reloads its
+        # list and live run state rather than being polled).
+        w = self._stack.currentWidget()
+        if hasattr(w, "on_shown"):
+            w.on_shown()
 
     # ── Event / data handlers (GUI thread) ──────────────────────────────────────
 
