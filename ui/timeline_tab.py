@@ -301,25 +301,42 @@ class _DayPlanner(QWidget):
         p.setBrush(QBrush(QColor(Palette.ACCENT)))
         p.drawRoundedRect(QRectF(rect.left(), rect.top() + 3, 3.5, rect.height() - 6), 1.5, 1.5)
 
-        inner = rect.adjusted(12, 5, -8, -4)
+        inner = rect.adjusted(12, 4, -8, -4)
+        pre = "…" if b["clip_top"] else ""
+        post = "…" if b["clip_bot"] else ""
+        trange = f"{pre}{b['start'].strftime('%H:%M')} – {b['stop'].strftime('%H:%M')}{post}"
+        fm_name = QFontMetrics(name_font)
+        fm_meta = QFontMetrics(meta_font)
+
+        # Every block shows its window. When there's no room to stack, put the name
+        # on the left and the time on the right of a single line.
+        if rect.height() < 34:
+            tw = fm_meta.horizontalAdvance(trange)
+            p.setFont(meta_font)
+            p.setPen(QColor(Palette.ACCENT))
+            p.drawText(QRectF(inner.right() - tw, inner.top(), tw, inner.height()),
+                       int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), trange)
+            p.setFont(name_font)
+            p.setPen(QColor(Palette.TEXT))
+            name = fm_name.elidedText(b["name"], Qt.TextElideMode.ElideRight,
+                                      max(10, int(inner.width() - tw - 8)))
+            p.drawText(QRectF(inner.left(), inner.top(), inner.width() - tw - 8, inner.height()),
+                       int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), name)
+            return
+
         y = inner.top()
         p.setFont(name_font)
         p.setPen(QColor(Palette.TEXT))
-        fm = QFontMetrics(name_font)
-        name = fm.elidedText(b["name"], Qt.TextElideMode.ElideRight, int(inner.width()))
+        name = fm_name.elidedText(b["name"], Qt.TextElideMode.ElideRight, int(inner.width()))
         p.drawText(QRectF(inner.left(), y, inner.width(), 16),
                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), name)
         y += 16
-        if rect.height() >= 40:
-            pre = "…" if b["clip_top"] else ""
-            post = "…" if b["clip_bot"] else ""
-            trange = f"{pre}{b['start'].strftime('%H:%M')} – {b['stop'].strftime('%H:%M')}{post}"
-            p.setFont(meta_font)
-            p.setPen(QColor(Palette.ACCENT))
-            p.drawText(QRectF(inner.left(), y, inner.width(), 13),
-                       int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), trange)
-            y += 14
-        if b["desc"] and rect.bottom() - y > 14:
+        p.setFont(meta_font)
+        p.setPen(QColor(Palette.ACCENT))
+        p.drawText(QRectF(inner.left(), y, inner.width(), 13),
+                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), trange)
+        y += 14
+        if b["desc"] and rect.bottom() - y > 12:
             p.setFont(desc_font)
             p.setPen(QColor(Palette.TEXT_MUTED))
             p.drawText(QRectF(inner.left(), y, inner.width(), rect.bottom() - y - 2),
