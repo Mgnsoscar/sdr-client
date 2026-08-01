@@ -347,3 +347,14 @@ class Plan(BaseModel):
     name: str
     description: str = ""
     items: List[PlanItem] = []
+
+
+class ScheduledPlan(BaseModel):
+    """A plan placed on the timeline at an absolute on-air window. start is the
+    plan's on-air (T0), stop its off-air (T_end) — both absolute local ISO-8601.
+    Client-only, like plans; execution (arming at the time) is a later step."""
+    id: str
+    plan_id: str
+    plan_name: str = ""                 # cached for display if the plan is gone
+    start: str                          # ISO-8601 local datetime — on-air (T0)
+    stop: str                           # ISO-8601 local datetime — off-air (T_end)
