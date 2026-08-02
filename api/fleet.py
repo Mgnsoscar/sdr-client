@@ -22,12 +22,29 @@ from . import models as m
 logger = logging.getLogger(__name__)
 
 
+LIBRARY_HOST = "__library__"   # reserved: the offline shared-library "unit"
+
+
 class Fleet:
     def __init__(self, max_workers: int = 16):
         self._units: Dict[str, AgentClient] = {}
+        self._library = None          # a LibraryClient-shaped object, or None
         self._max_workers = max_workers
 
     # ── Registry ────────────────────────────────────────────────────────────────
+
+    def set_library(self, client) -> None:
+        """Register the offline library client. It is resolvable via
+        get(LIBRARY_HOST) so the unit-card panels/editors can author the library,
+        but it is deliberately kept OUT of units()/hostnames()/fan-out — so it is
+        never polled or shown as a real unit."""
+        self._library = client
+
+    def library_store(self):
+        """The one LibraryStore backing the library client, or None if unset.
+        The Library tab uses this so it, the reused panels (via the LibraryClient),
+        and the fleet all read and write the same store instance."""
+        return self._library.store if self._library is not None else None
 
     def add(self, client: AgentClient) -> None:
         # Key by hostname, which is stable for the client's lifetime. unit_id is
@@ -51,6 +68,8 @@ class Fleet:
             logger.info("Fleet: removed unit '%s'", hostname)
 
     def get(self, hostname: str) -> AgentClient:
+        if hostname == LIBRARY_HOST and self._library is not None:
+            return self._library
         if hostname not in self._units:
             raise KeyError(f"Unknown unit: '{hostname}'")
         return self._units[hostname]
@@ -65,6 +84,8 @@ class Fleet:
         return len(self._units)
 
     def __contains__(self, hostname: str) -> bool:
+        if hostname == LIBRARY_HOST:
+            return self._library is not None
         return hostname in self._units
 
     def close(self) -> None:

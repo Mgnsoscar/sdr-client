@@ -37,6 +37,10 @@ class LibraryClient:
         self.unit_id = "Library"
         self.hostname = "__library__"
 
+    @property
+    def store(self) -> LibraryStore:
+        return self._store
+
     # ── Tasks ──────────────────────────────────────────────────────────────────
 
     def list_tasks(self) -> List[m.ProcessStatus]:

@@ -1,19 +1,21 @@
 """
 LibraryTab — the shared definition library.
 
-One fleet-wide set of scripts, tasks, and sequences (the authoring source the
-sequence/plan editors read from, and — later — the set deployed to every unit).
+One fleet-wide set of scripts, tasks, and sequences: the authoring source the
+sequence/plan editors read from, and — later — the set deployed to every unit.
 Per-unit differences are parameters and live in plans, not here.
 
-This view shows the library's contents and lets you populate it:
-  - Pull from unit… — snapshot a connected unit's scripts/tasks/sequences into the
-    library (any one unit is enough; the fleet holds one identical library).
-  - Import… / Export… — move the whole library as a JSON file (seed a fresh PC,
-    or share it).
+The tab has a library-wide header (populate/move the whole library) over the same
+editing panels the unit card uses, repointed at the offline library instead of a
+live unit (fleet.get("__library__") → LibraryClient):
 
-Within-library integrity is surfaced here (a sequence step referencing an unknown
-task, a task whose script is missing). Editing individual definitions from here
-comes with the editor rework; for now this is view + populate.
+    header:  Pull from unit… · Import… · Export…   +   integrity status
+    sub-tabs:  Tasks  |  Sequences  |  Scripts
+
+Because those panels talk to the LibraryClient, all authoring — including a
+script's auto-generated parameter form — works with no unit connected. The Tasks
+and Sequences panels run in "library mode": definition editing only, no
+Start/Stop/run-state (a library isn't a running unit).
 
 Operation labels routed in _on_task_done:
     lib_pull:<hostname>
@@ -21,53 +23,38 @@ Operation labels routed in _on_task_done:
 from __future__ import annotations
 
 import json
-from typing import List, Optional
+from typing import List
 
-from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QInputDialog, QLabel, QListWidget, QMessageBox,
-    QPushButton, QVBoxLayout, QWidget,
+    QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMessageBox, QPushButton,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from api import models as m
+from api.fleet import LIBRARY_HOST
 from state import LibraryStore, pull_library
+from .library_panels import LibraryTasksPanel
 from .qt_adapter import DataHub
+from .scripts_panel import ScriptsPanel
+from .sequences_panel import SequencesPanel
 from .theme import Palette
 
 
-class _Column(QWidget):
-    """A titled list column (Scripts / Tasks / Sequences)."""
-
-    def __init__(self, title: str):
-        super().__init__()
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(4)
-        self._title = QLabel(title)
-        self._title.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {Palette.TEXT};")
-        lay.addWidget(self._title)
-        self._list = QListWidget()
-        self._list.setStyleSheet(
-            f"QListWidget {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER}; "
-            f"border-radius: 8px; }}")
-        lay.addWidget(self._list, stretch=1)
-        self._base = title
-
-    def set_items(self, items: List[str]) -> None:
-        self._list.clear()
-        self._list.addItems(items)
-        self._title.setText(f"{self._base}  ({len(items)})")
-
-
 class LibraryTab(QWidget):
+    SUBTABS = ["Tasks", "Sequences", "Scripts"]
+
     def __init__(self, hub: DataHub, parent=None):
         super().__init__(parent)
         self.hub = hub
-        self._store = LibraryStore()
+        # Share the one store the fleet's LibraryClient wraps, so this header (its
+        # counts / integrity) and the editing panels (via the client) read and
+        # write the same library. Falls back to a private store only if the fleet
+        # has none registered (e.g. an isolated test harness).
+        self._store = self.hub.fleet.library_store() or LibraryStore()
         self._pull_pending = False
         self._build()
         self.hub.task_done.connect(self._on_task_done)
-        self._refresh()
+        self._set_status()
 
     def _build(self) -> None:
         outer = QVBoxLayout(self)
@@ -101,26 +88,59 @@ class LibraryTab(QWidget):
         self._status.setWordWrap(True)
         outer.addWidget(self._status)
 
-        cols = QHBoxLayout()
-        cols.setSpacing(12)
-        self._scripts = _Column("Scripts")
-        self._tasks = _Column("Tasks")
-        self._sequences = _Column("Sequences")
-        for c in (self._scripts, self._tasks, self._sequences):
-            cols.addWidget(c, stretch=1)
-        outer.addLayout(cols, stretch=1)
+        # Sub-tab bar
+        subbar = QHBoxLayout()
+        subbar.setSpacing(6)
+        self._subtab_buttons: List[QPushButton] = []
+        for i, name in enumerate(self.SUBTABS):
+            b = QPushButton(name)
+            b.setObjectName("tab")
+            b.setCheckable(True)
+            b.clicked.connect(lambda _c, idx=i: self._select_subtab(idx))
+            subbar.addWidget(b)
+            self._subtab_buttons.append(b)
+        subbar.addStretch(1)
+        outer.addLayout(subbar)
+
+        # Editing panels, repointed at the library (LIBRARY_HOST), definition-only.
+        self._stack = QStackedWidget()
+        self._tasks_panel = LibraryTasksPanel(self.hub)
+        self._sequences_panel = SequencesPanel(LIBRARY_HOST, self.hub, library_mode=True)
+        self._scripts_panel = ScriptsPanel(LIBRARY_HOST, self.hub)
+        self._stack.addWidget(self._tasks_panel)        # 0 Tasks
+        self._stack.addWidget(self._sequences_panel)    # 1 Sequences
+        self._stack.addWidget(self._scripts_panel)      # 2 Scripts
+        outer.addWidget(self._stack, stretch=1)
+        self._select_subtab(0)
+
+    def _select_subtab(self, idx: int) -> None:
+        self._stack.setCurrentIndex(idx)
+        for i, b in enumerate(self._subtab_buttons):
+            b.setChecked(i == idx)
+        w = self._stack.currentWidget()
+        if hasattr(w, "on_shown"):
+            w.on_shown()
+        # Header counts / integrity may have changed from edits in the panel we're
+        # leaving — reload the store and re-derive them.
+        self._store.load()
+        self._set_status()
 
     # ── Shown / refresh ────────────────────────────────────────────────────────
 
     def on_shown(self) -> None:
         self._store.load()
-        self._refresh()
-
-    def _refresh(self) -> None:
-        self._scripts.set_items([s.name for s in self._store.scripts()])
-        self._tasks.set_items([t.name for t in self._store.tasks()])
-        self._sequences.set_items([s.name or s.id for s in self._store.sequences()])
         self._set_status()
+        w = self._stack.currentWidget()
+        if hasattr(w, "on_shown"):
+            w.on_shown()
+
+    def _refresh_panels(self) -> None:
+        """Reload every editing panel — used after a whole-library replace (pull /
+        import) so all three sub-tabs reflect the new contents, not just the visible
+        one."""
+        for w in (self._tasks_panel, self._sequences_panel, self._scripts_panel):
+            if hasattr(w, "on_shown"):
+                w.on_shown()
 
     def _set_status(self, note: str = "", error: bool = False) -> None:
         n_sc = len(self._store.scripts())
@@ -132,7 +152,8 @@ class LibraryTab(QWidget):
         if note:
             parts.append(note)
         if empty:
-            parts.append("Library is empty — pull it from a unit or import a file.")
+            parts.append("Library is empty — pull it from a unit, import a file, "
+                         "or add definitions in the tabs below.")
         else:
             parts.append(f"{n_sc} script(s) · {n_t} task(s) · {n_seq} sequence(s)")
         if problems:
@@ -192,7 +213,7 @@ class LibraryTab(QWidget):
             self._set_status(f"pull failed: {result}", error=True)
             return
         self._store.replace(result)
-        self._refresh()
+        self._refresh_panels()
         self._set_status("pulled from unit")
 
     # ── Import / export the whole library ──────────────────────────────────────
@@ -230,5 +251,5 @@ class LibraryTab(QWidget):
         ) != QMessageBox.StandardButton.Yes:
             return
         self._store.replace(lib)
-        self._refresh()
+        self._refresh_panels()
         self._set_status("imported library")

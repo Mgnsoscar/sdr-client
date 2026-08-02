@@ -186,7 +186,8 @@ class _SequenceRow(QFrame):
     """One sequence: name, summary, run-state pill, and action buttons."""
 
     def __init__(self, seq: m.Sequence, active_run: Optional[m.SequenceRun],
-                 on_start, on_stop, on_edit, on_delete, on_log):
+                 on_start, on_stop, on_edit, on_delete, on_log,
+                 library_mode: bool = False):
         super().__init__()
         self.seq = seq
         self.setObjectName("card")
@@ -211,9 +212,12 @@ class _SequenceRow(QFrame):
         box.addWidget(summary)
         lay.addLayout(box, stretch=1)
 
-        state_word = active_run.state.value if active else "idle"
-        self._pill = StatusPill(state_word, state_word)
-        lay.addWidget(self._pill, alignment=Qt.AlignmentFlag.AlignTop)
+        # In library mode there's no live run — hide the run-state pill and the
+        # Start/Stop/Log controls, leaving only Edit and Delete (definition editing).
+        if not library_mode:
+            state_word = active_run.state.value if active else "idle"
+            self._pill = StatusPill(state_word, state_word)
+            lay.addWidget(self._pill, alignment=Qt.AlignmentFlag.AlignTop)
 
         self._start = QPushButton("Start")
         self._stop = QPushButton("Stop")
@@ -236,15 +240,22 @@ class _SequenceRow(QFrame):
         self._log.clicked.connect(lambda: on_log(seq))
         self._edit.clicked.connect(lambda: on_edit(seq))
         self._delete.clicked.connect(lambda: on_delete(seq))
-        for b in (self._start, self._stop, self._log, self._edit, self._delete):
+        shown = (self._edit, self._delete) if library_mode else \
+            (self._start, self._stop, self._log, self._edit, self._delete)
+        for b in shown:
             lay.addWidget(b, alignment=Qt.AlignmentFlag.AlignTop)
 
 
 class SequencesPanel(QWidget):
-    def __init__(self, hostname: str, hub: DataHub, parent=None):
+    def __init__(self, hostname: str, hub: DataHub, parent=None,
+                 library_mode: bool = False):
         super().__init__(parent)
         self.hostname = hostname
         self.hub = hub
+        # Library mode: authoring the shared library's sequences offline. There is
+        # no live unit, so Start/Stop/Log and run-state tracking are dropped — only
+        # New/Edit/Delete/Import/Export (definition editing) remain.
+        self.library_mode = library_mode
         self._sequences: List[m.Sequence] = []
         self._runs: List[m.SequenceRun] = []
         self._seq_loaded = False
@@ -254,7 +265,8 @@ class SequencesPanel(QWidget):
         self.hub.task_done.connect(self._on_task_done)
         self.hub.task_done.connect(self._on_io_done)
         # Live-refresh run state when a sequence lifecycle event arrives.
-        self.hub.event_received.connect(self._on_event)
+        if not self.library_mode:
+            self.hub.event_received.connect(self._on_event)
 
     def _build(self) -> None:
         outer = QVBoxLayout(self)
@@ -306,10 +318,11 @@ class SequencesPanel(QWidget):
             f"seq_list:{self.hostname}",
             lambda: self.hub.fleet.get(self.hostname).list_sequences(),
         )
-        self._refresh_runs()
+        if not self.library_mode:
+            self._refresh_runs()
 
     def _refresh_runs(self) -> None:
-        if self._runs_pending:
+        if self.library_mode or self._runs_pending:
             return
         self._runs_pending = True
         self.hub.run_async(
@@ -553,7 +566,8 @@ class SequencesPanel(QWidget):
 
         if not self._sequences:
             if self._seq_loaded:
-                empty = QLabel("No sequences on this unit yet. "
+                where = "in the library" if self.library_mode else "on this unit"
+                empty = QLabel(f"No sequences {where} yet. "
                                "Click “New sequence” to create one.")
                 empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
                 self._list.addWidget(empty)
@@ -568,7 +582,7 @@ class SequencesPanel(QWidget):
                 seq, active,
                 on_start=self._on_start, on_stop=self._on_stop,
                 on_edit=self._on_edit, on_delete=self._on_delete,
-                on_log=self._on_log,
+                on_log=self._on_log, library_mode=self.library_mode,
             ))
         suffix = f" · {active_n} active" if active_n else ""
         self._set_status(f"{len(self._sequences)} sequence(s){suffix}")
