@@ -38,6 +38,14 @@ def _seq_fingerprint(s: m.Sequence) -> tuple:
             tuple(tuple(st.model_dump(mode="json").items()) for st in s.steps))
 
 
+def _norm_script(content: str) -> str:
+    """Compare script bodies ignoring cosmetic line-ending differences: a unit
+    reads files back with universal newlines (CRLF→LF), so a Windows-edited script
+    would otherwise always look 'changed' against the unit's copy. Normalize line
+    endings to LF and drop a trailing blank line so equal code compares equal."""
+    return (content or "").replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+
+
 def _plan_cmp(p: "m.Plan") -> dict:
     d = p.model_dump(mode="json"); d.pop("id", None); return d
 
@@ -120,9 +128,9 @@ def diff_library(canonical: m.Library, unit: m.Library) -> StateDiff:
     only). Pure — no I/O."""
     d = StateDiff()
 
-    # Scripts — compare by filename on content.
-    can_s = {s.name: s.content for s in canonical.scripts}
-    unit_s = {s.name: s.content for s in unit.scripts}
+    # Scripts — compare by filename on content, ignoring line-ending noise.
+    can_s = {s.name: _norm_script(s.content) for s in canonical.scripts}
+    unit_s = {s.name: _norm_script(s.content) for s in unit.scripts}
     for name, content in can_s.items():
         if name not in unit_s:
             d.scripts_add.append(name)

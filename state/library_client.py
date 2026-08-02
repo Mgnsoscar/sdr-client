@@ -128,6 +128,10 @@ class LibraryClient:
 
     def upload_script(self, filename: str, content: bytes) -> dict:
         text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else str(content)
+        # Store LF-normalized so the PC's copy matches what a unit reports back
+        # (units read scripts with universal newlines) — otherwise a Windows-edited
+        # script would always show as drifted right after a deploy.
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
         # Derive the parameter schema right here (same static, no-execution
         # introspection the agent uses, vendored into the client), so parameter
         # forms auto-generate offline the moment a script is added or edited.

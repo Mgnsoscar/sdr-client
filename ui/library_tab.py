@@ -457,7 +457,8 @@ class LibraryTab(QWidget):
     # ── Pull results ───────────────────────────────────────────────────────────
 
     def _drift_report_lines(self) -> list:
-        """Human-readable per-host drift, for the Check-units dialog."""
+        """Human-readable per-host drift, for the Check-units dialog. One line per
+        resource that differs, in plain language (no +/~/- shorthand)."""
         lines = []
         for host in self.hub.fleet.hostnames():
             label = self._label(host)
@@ -467,36 +468,31 @@ class LibraryTab(QWidget):
             d = self._drift.get(host)
             if d is None:
                 lines.append(f"• {label}: not checked")
-            elif d.in_sync:
+                continue
+            if d.in_sync:
                 lines.append(f"• {label}: in sync")
-            else:
-                def by(nmap, ids):
-                    return ", ".join(nmap.get(i, i) for i in ids)
-                bits = []
-                if d.scripts_add or d.scripts_change or d.scripts_remove:
-                    bits.append(f"scripts +[{', '.join(d.scripts_add)}] "
-                                f"~[{', '.join(d.scripts_change)}] -[{', '.join(d.scripts_remove)}]")
-                if d.tasks_add or d.tasks_change or d.tasks_remove:
-                    bits.append(f"tasks +[{', '.join(d.tasks_add)}] "
-                                f"~[{', '.join(d.tasks_change)}] -[{', '.join(d.tasks_remove)}]")
-                if d.sequences_add or d.sequences_change or d.sequences_remove:
-                    bits.append(f"sequences +[{by(d.seq_names, d.sequences_add)}] "
-                                f"~[{by(d.seq_names, d.sequences_change)}] "
-                                f"-[{by(d.seq_names, d.sequences_remove)}]")
-                if d.plans_add or d.plans_change or d.plans_remove:
-                    bits.append(f"plans +[{by(d.plan_names, d.plans_add)}] "
-                                f"~[{by(d.plan_names, d.plans_change)}] "
-                                f"-[{by(d.plan_names, d.plans_remove)}]")
-                if d.schedule_add or d.schedule_change or d.schedule_remove:
-                    bits.append(f"schedule +[{by(d.sched_names, d.schedule_add)}] "
-                                f"~[{by(d.sched_names, d.schedule_change)}] "
-                                f"-[{by(d.sched_names, d.schedule_remove)}]")
-                extra = " ⚠ has plans/schedule not on this PC" if d.unit_has_extra else ""
-                lines.append(f"• {label}: DRIFTED — " + "; ".join(bits) + extra)
-        return lines
+                continue
 
-    _LEGEND = ("\nLegend:  +[…] this PC has, the unit is missing   "
-               "~[…] differ   -[…] on the UNIT, not on this PC")
+            lines.append(f"• {label}: drifted")
+
+            def add_bucket(kind, added, changed, removed, nmap=None):
+                def fmt(ids):
+                    return ", ".join(nmap.get(i, i) for i in ids) if nmap else ", ".join(ids)
+                if added:
+                    lines.append(f"      {kind} missing on the unit: {fmt(added)}")
+                if changed:
+                    lines.append(f"      {kind} that differ: {fmt(changed)}")
+                if removed:
+                    lines.append(f"      {kind} on the unit but not on this PC: {fmt(removed)}")
+
+            add_bucket("scripts", d.scripts_add, d.scripts_change, d.scripts_remove)
+            add_bucket("tasks", d.tasks_add, d.tasks_change, d.tasks_remove)
+            add_bucket("sequences", d.sequences_add, d.sequences_change,
+                       d.sequences_remove, d.seq_names)
+            add_bucket("plans", d.plans_add, d.plans_change, d.plans_remove, d.plan_names)
+            add_bucket("schedule", d.schedule_add, d.schedule_change,
+                       d.schedule_remove, d.sched_names)
+        return lines
 
     def _show_drift_details(self) -> None:
         lines = self._drift_report_lines()
@@ -510,13 +506,12 @@ class LibraryTab(QWidget):
                                     "All units are in sync with this PC.\n\n" + body)
         else:
             any_extra = any(d.unit_has_extra for d in self._drift.values())
-            body += self._LEGEND
-            body += ("\n\n“Deploy to units…” pushes THIS PC to the units (library "
-                     "in place; plans/schedule replaced).")
+            body += ("\n\n“Deploy to units…” makes the units match THIS PC "
+                     "(updates their definitions in place; replaces their plans/schedule).")
             if any_extra:
-                body += ("\n“Restore from unit…” pulls a unit's copy back to this PC "
-                         "— use it to recover plans/schedule a unit has that this PC "
-                         "doesn't, before deploying (a deploy would overwrite them).")
+                body += ("\n“Restore from unit…” brings a unit's copy back to this PC "
+                         "— use it first to recover plans/schedule a unit has that this "
+                         "PC doesn't (a deploy would overwrite them).")
             QMessageBox.warning(self, "Check units — drift found", body)
 
     def _on_task_done(self, label: str, result) -> None:
