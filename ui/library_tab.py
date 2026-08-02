@@ -305,6 +305,15 @@ class LibraryTab(QWidget):
             "Library definitions are updated in place — running tasks and active "
             "runs are never interrupted; plans and schedule are stored on each unit "
             "for recovery. Unreachable units are reported and can be redeployed later.")
+        blank_scripts = [s.name for s in lib.scripts if not (s.content or "").strip()]
+        if blank_scripts:
+            box.setInformativeText(
+                box.informativeText()
+                + f"\n\n⚠ {len(blank_scripts)} script(s) in this library have no "
+                  f"content ({', '.join(blank_scripts[:3])}"
+                  f"{'…' if len(blank_scripts) > 3 else ''}). Deploying will blank "
+                  f"those files on the units — Restore→Merge from a unit that still "
+                  f"has them, or re-upload, before deploying.")
         extra_hosts = [self._label(h) for h, d in self._drift.items() if d.unit_has_extra]
         if extra_hosts:
             box.setInformativeText(
@@ -553,10 +562,12 @@ class LibraryTab(QWidget):
             libc = self._store.merge(result.library)
             add_p = self._plan_store.merge(result.plans)
             add_s = self._sched_store.merge(result.schedule)
+            refreshed = (f" · recovered {libc['scripts_refreshed']} empty script "
+                         f"body(ies)" if libc.get("scripts_refreshed") else "")
             self._set_status(
                 f"merged from unit: +{libc['scripts']} script(s) · +{libc['tasks']} "
                 f"task(s) · +{libc['sequences']} sequence(s) · +{add_p} plan(s) · "
-                f"+{add_s} scheduled (nothing local removed)")
+                f"+{add_s} scheduled{refreshed} (nothing local removed)")
         else:
             self._store.replace(result.library)
             self._plan_store.replace_all(result.plans)

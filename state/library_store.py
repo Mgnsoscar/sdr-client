@@ -72,14 +72,21 @@ class LibraryStore:
     def merge(self, other: m.Library) -> dict:
         """Add definitions from `other` that this library doesn't already have
         (scripts by name, tasks by name, sequences by id) — keeping everything
-        local. Used by a non-destructive Restore. Returns {scripts, tasks,
-        sequences} added counts."""
-        added = {"scripts": 0, "tasks": 0, "sequences": 0}
-        have_s = {s.name for s in self._lib.scripts}
+        local. Used by a non-destructive Restore. As a special case, a local script
+        with an EMPTY body is a hole, not a real value: if `other` has content for
+        it, adopt that content (this recovers script bodies lost to an earlier bug
+        without overwriting anything real). Returns added + refreshed counts."""
+        added = {"scripts": 0, "tasks": 0, "sequences": 0, "scripts_refreshed": 0}
+        by_name = {s.name: s for s in self._lib.scripts}
         for s in other.scripts:
-            if s.name not in have_s:
+            local = by_name.get(s.name)
+            if local is None:
                 self._lib.scripts.append(s.model_copy(deep=True))
                 added["scripts"] += 1
+            elif not (local.content or "").strip() and (s.content or "").strip():
+                local.content = s.content
+                local.params = list(s.params)
+                added["scripts_refreshed"] += 1
         have_t = {t.name for t in self._lib.tasks}
         for t in other.tasks:
             if t.name not in have_t:
@@ -176,6 +183,12 @@ class LibraryStore:
         problems: List[str] = []
         task_names = set(self.task_names())
         script_names = {s.name for s in self._lib.scripts}
+        empty = [s.name for s in self._lib.scripts if not (s.content or "").strip()]
+        if empty:
+            problems.append(
+                f"{len(empty)} script(s) have no content ({', '.join(empty[:3])}"
+                f"{'…' if len(empty) > 3 else ''}) — re-upload them or Restore→Merge "
+                f"from a unit that has them")
         for t in self._lib.tasks:
             script = _script_of_command(t.command)
             if script and script not in script_names:
