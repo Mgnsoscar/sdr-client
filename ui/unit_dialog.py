@@ -26,11 +26,15 @@ class UnitDialog(QDialog):
                  taken_labels: Optional[set] = None,
                  discovered_provider: Optional[Callable[[], list]] = None,
                  taken_addresses: Optional[set] = None,
+                 taken_machine_ids: Optional[set] = None,
                  rescan: Optional[Callable[[], None]] = None, parent=None):
         super().__init__(parent)
         self._existing = existing
         self._taken = {l.lower() for l in (taken_labels or set())}
         self._taken_addrs = {a.lower() for a in (taken_addresses or set())}
+        self._taken_mids = {m for m in (taken_machine_ids or set()) if m}
+        # machine-id of a picked discovered unit (so we can fingerprint it on save)
+        self._picked_machine_id = existing.machine_id if existing else ""
         # When editing, the unit's own label is allowed to stay the same.
         if existing is not None:
             self._taken.discard(existing.label.lower())
@@ -144,7 +148,8 @@ class UnitDialog(QDialog):
         new_n = 0
         for u in units:
             addrs = ", ".join(u.suggested_addresses) or "no address"
-            already = (u.unit_id.lower() in self._taken
+            already = ((u.machine_id and u.machine_id in self._taken_mids)
+                       or u.unit_id.lower() in self._taken
                        or any(a.lower() in self._taken_addrs for a in u.suggested_addresses))
             if already:
                 # Still show it (greyed, unselectable) so you can tell discovery
@@ -174,6 +179,7 @@ class UnitDialog(QDialog):
             return
         self._label.setText(u.unit_id)
         self._addrs.setPlainText("\n".join(u.suggested_addresses))
+        self._picked_machine_id = u.machine_id   # fingerprint, so we recognise it later
 
     def _parse_addresses(self) -> List[str]:
         out = []
@@ -207,5 +213,6 @@ class UnitDialog(QDialog):
             label=self._label.text().strip(),
             addresses=self._parse_addresses(),
             api_key=self._key.text().strip(),
+            machine_id=self._picked_machine_id,
         )
         self.accept()

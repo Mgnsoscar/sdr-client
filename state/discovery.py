@@ -29,6 +29,7 @@ class DiscoveredUnit:
     hostname: str = ""              # the unit's .local name (no trailing dot), if any
     addresses: List[str] = field(default_factory=list)   # IPs seen
     port: int = 8765
+    machine_id: str = ""           # the Pi's /etc/machine-id (stable fingerprint)
 
     @property
     def suggested_addresses(self) -> List[str]:
@@ -57,18 +58,22 @@ def _unit_from_info(name: str, info) -> Optional[DiscoveredUnit]:
     # effectively has no usable address here.
     addresses = [a for a in addresses if a and not a.startswith("127.")]
     props = getattr(info, "properties", {}) or {}
-    unit_id = ""
-    raw = props.get(b"unit_id") or props.get("unit_id")
-    if isinstance(raw, bytes):
-        unit_id = raw.decode("utf-8", errors="replace")
-    elif isinstance(raw, str):
-        unit_id = raw
+
+    def _prop(key: str) -> str:
+        raw = props.get(key.encode()) or props.get(key)
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8", errors="replace")
+        return raw if isinstance(raw, str) else ""
+
+    unit_id = _prop("unit_id")
+    machine_id = _prop("machine_id")
     if not unit_id:
         # Fall back to the instance name: "<unit_id>._sdragent._tcp.local."
         unit_id = name.split("." + SERVICE_TYPE.split(".", 1)[0], 1)[0].rstrip(".")
     server = (getattr(info, "server", "") or "").rstrip(".")
     port = int(getattr(info, "port", 0) or 8765)
-    return DiscoveredUnit(unit_id=unit_id, hostname=server, addresses=addresses, port=port)
+    return DiscoveredUnit(unit_id=unit_id, hostname=server, addresses=addresses,
+                          port=port, machine_id=machine_id)
 
 
 class Discovery:

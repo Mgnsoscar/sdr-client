@@ -51,6 +51,8 @@ class DataHub(QObject):
     # Live log tail: a chunk of log text, and connection status.
     log_text = pyqtSignal(str)
     log_status = pyqtSignal(bool, str)   # (connected, detail)
+    # The set of discovered (mDNS) units changed — GUI-thread hook for auto-learn.
+    discovery_changed = pyqtSignal()
 
     def __init__(
         self,
@@ -99,6 +101,9 @@ class DataHub(QObject):
         """Start the event streams and poller. Call after the window is shown."""
         self.streams.start_all(self.fleet.units())
         self.poller.start()
+        # Re-emit discovery changes as a Qt signal so the GUI thread can react
+        # (the zeroconf callback fires on a background thread).
+        self.discovery.set_callback(self.discovery_changed.emit)
         self.discovery.start()
         logger.info("DataHub started")
 

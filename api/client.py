@@ -268,6 +268,14 @@ class AgentClient:
         """The address currently in use (the one that last answered)."""
         return self._active_addr
 
+    def add_address(self, addr: str) -> bool:
+        """Add a candidate connect address (e.g. learned from discovery on a new
+        network). Returns True if it was new. The next warmup can then use it."""
+        if addr and addr not in self._addresses:
+            self._addresses.append(addr)
+            return True
+        return False
+
     def _connect_to(self, addr: str) -> None:
         """Point the client at a specific candidate address and rebuild it."""
         self._active_addr = addr

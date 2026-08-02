@@ -11,6 +11,7 @@ For this first pass the detail view is a placeholder; it's built next.
 """
 from __future__ import annotations
 
+import logging
 from typing import Dict
 
 from PyQt6.QtCore import Qt
@@ -27,6 +28,8 @@ from .unit_card import UnitCard
 from .unit_detail import UnitDetail
 from .unit_dialog import UnitDialog
 from .qt_adapter import DataHub
+
+logger = logging.getLogger(__name__)
 
 
 class UnitsTab(QWidget):
@@ -51,6 +54,10 @@ class UnitsTab(QWidget):
                                   on_edit=self.edit_unit, on_remove=self.remove_unit)
         self._stack.addWidget(self._grid_page)   # index 0
         self._stack.addWidget(self._detail)      # index 1
+
+        # Auto-learn: when a unit is rediscovered at a new address (e.g. moved from
+        # wifi to ethernet), add that address to the matching unit by machine-id.
+        self.hub.discovery_changed.connect(self._on_discovery_changed)
 
     # ── Grid page ──────────────────────────────────────────────────────────────
 
@@ -133,9 +140,13 @@ class UnitsTab(QWidget):
         client.machine_id = entry.machine_id
         return client
 
+    def _machine_ids(self) -> set:
+        return {u.machine_id for u in self._cfg.units if u.machine_id}
+
     def _on_add(self) -> None:
         dlg = UnitDialog(taken_labels=self._labels(),
                          taken_addresses=self._known_addresses(),
+                         taken_machine_ids=self._machine_ids(),
                          discovered_provider=self.hub.discovery.discovered,
                          rescan=self.hub.discovery.rescan,
                          parent=self.window())
@@ -203,6 +214,58 @@ class UnitsTab(QWidget):
             QMessageBox.warning(self, "Could not save units",
                                 f"The unit list couldn't be written to disk:\n{exc}")
 
+    # ── Machine-id learning + address auto-learn ────────────────────────────────
+
+    def _sync_machine_ids(self) -> None:
+        """Persist a unit's machine-id once its live client has learned it from
+        /info, so we can recognise the same physical Pi later (even offline)."""
+        changed = False
+        for u in self._cfg.units:
+            try:
+                c = self.fleet.get(u.uid)
+            except KeyError:
+                continue
+            if c.machine_id and c.machine_id != u.machine_id:
+                u.machine_id = c.machine_id
+                changed = True
+        if changed:
+            self._persist()
+
+    def _on_discovery_changed(self) -> None:
+        """A discovered unit whose machine-id matches a known unit but at a NEW
+        address → add that address (never remove), and re-warm so it can connect
+        over the new link. This is what makes a Pi that moved from wifi to ethernet
+        reachable automatically."""
+        by_mid = {u.machine_id: u for u in self._cfg.units if u.machine_id}
+        if not by_mid:
+            return
+        learned_for: list = []
+        for d in self.hub.discovery.discovered():
+            unit = by_mid.get(d.machine_id) if d.machine_id else None
+            if unit is None:
+                continue
+            new_addrs = [a for a in d.suggested_addresses if a not in unit.addresses]
+            if not new_addrs:
+                continue
+            unit.addresses.extend(new_addrs)
+            try:
+                c = self.fleet.get(unit.uid)
+                for a in new_addrs:
+                    c.add_address(a)
+            except KeyError:
+                pass
+            learned_for.append(unit)
+            logger.info("Auto-learned address(es) %s for '%s'", new_addrs, unit.label)
+        if learned_for:
+            self._persist()
+            for unit in learned_for:      # a new address may bring an offline unit back
+                try:
+                    c = self.fleet.get(unit.uid)
+                    self.hub.run_async(f"warmup:{unit.uid}", c.warmup)
+                except KeyError:
+                    pass
+            self.hub.refresh_now()
+
     def _update_summary(self) -> None:
         total = len(self._cards)
         online = sum(1 for c in self._cards.values() if c.is_online())
@@ -234,6 +297,8 @@ class UnitsTab(QWidget):
             if isinstance(tasksv, list):
                 card.update_tasks(tasksv)
         self._update_summary()
+        # Persist any machine-ids the clients have learned from /info.
+        self._sync_machine_ids()
 
         # Forward to the open detail view so its task list / status stay live.
         if self._detail_is_open():
