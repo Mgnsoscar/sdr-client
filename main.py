@@ -39,6 +39,22 @@ def build_fleet(cfg: ClientConfig) -> Fleet:
     return fleet
 
 
+def migrate_plan_refs(cfg: ClientConfig) -> None:
+    """One-time: point existing plans (which referenced a unit by its old label or
+    address) at the unit's permanent uid, so they survive the identity change."""
+    from state import PlanStore
+    mapping = {}
+    for u in cfg.units:
+        mapping[u.label] = (u.uid, u.label)
+        for a in u.addresses:
+            mapping.setdefault(a, (u.uid, u.label))
+    try:
+        if PlanStore().remap_units(mapping):
+            logger.info("Migrated plan unit references to permanent ids")
+    except Exception as exc:  # noqa: BLE001 — migration is best-effort
+        logger.warning("Plan reference migration skipped: %s", exc)
+
+
 def main() -> int:
     cfg = ClientConfig.load()
 
@@ -47,6 +63,7 @@ def main() -> int:
     apply_theme(app)
 
     fleet = build_fleet(cfg)
+    migrate_plan_refs(cfg)
     # The offline shared library, resolvable as fleet.get(LIBRARY_HOST) so the
     # unit-card panels/editors can author it without a unit connected.
     fleet.set_library(LibraryClient(LibraryStore()))
