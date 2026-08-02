@@ -48,10 +48,16 @@ def pull_library(client) -> m.Library:
         names = []
     for name in names:
         try:
+            content = client.get_script(name)
+        except Exception as exc:  # noqa: BLE001 — keep the script even without its body
+            logger.warning("pull_library: get_script('%s') failed: %s", name, exc)
+            content = ""
+        try:
             params = (client.get_script_params(name) or {}).get("params", [])
         except Exception:  # noqa: BLE001 — a script without a schema still belongs
             params = []
-        scripts.append(m.LibraryScript(name=name, params=params))
+        scripts.append(m.LibraryScript(
+            name=name, content=content if isinstance(content, str) else "", params=params))
 
     try:
         tasks = parse_tasks_yaml(client.get_tasks_yaml())

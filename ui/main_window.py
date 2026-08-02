@@ -28,7 +28,6 @@ from PyQt6.QtWidgets import (
 from api import models as m
 from .alert_feed import AlertFeed
 from .library_tab import LibraryTab
-from .plans_tab import PlansTab
 from .qt_adapter import DataHub
 from .theme import Palette
 from .timeline_tab import TimelineTab
@@ -36,7 +35,8 @@ from .units_tab import UnitsTab
 
 logger = logging.getLogger(__name__)
 
-TABS = ["Timeline", "Units", "Library", "Plans"]
+# Plans now live as a sub-tab of Library (authoring), not a top-level tab.
+TABS = ["Timeline", "Units", "Library"]
 
 # Clock-skew threshold (seconds) beyond which we warn before coordinated arming.
 CLOCK_WARN_SKEW_S = 1.0
@@ -125,14 +125,15 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget()
         # Real tabs where built; placeholders elsewhere for now.
         self.units_tab = UnitsTab(self.hub.fleet, self.hub)
-        self.plans_tab = PlansTab(self.hub.fleet, self.hub)
         self.timeline_tab = TimelineTab(self.hub)
         self.library_tab = LibraryTab(self.hub)
+        # The Plans tab is owned by the Library tab (a sub-tab); expose it here too
+        # so existing references (e.g. cross-tab navigation) keep working.
+        self.plans_tab = self.library_tab._plans_panel
         self._tabs = {
             "Timeline": self.timeline_tab,
             "Units": self.units_tab,
             "Library": self.library_tab,
-            "Plans": self.plans_tab,
         }
         for name in TABS:
             self._stack.addWidget(self._tabs[name])

@@ -34,6 +34,7 @@ from api import models as m
 from api.fleet import LIBRARY_HOST
 from state import LibraryStore, pull_library
 from .library_panels import LibraryTasksPanel
+from .plans_tab import PlansTab
 from .qt_adapter import DataHub
 from .scripts_panel import ScriptsPanel
 from .sequences_panel import SequencesPanel
@@ -41,7 +42,7 @@ from .theme import Palette
 
 
 class LibraryTab(QWidget):
-    SUBTABS = ["Tasks", "Sequences", "Scripts"]
+    SUBTABS = ["Tasks", "Sequences", "Scripts", "Plans"]
 
     def __init__(self, hub: DataHub, parent=None):
         super().__init__(parent)
@@ -107,9 +108,11 @@ class LibraryTab(QWidget):
         self._tasks_panel = LibraryTasksPanel(self.hub)
         self._sequences_panel = SequencesPanel(LIBRARY_HOST, self.hub, library_mode=True)
         self._scripts_panel = ScriptsPanel(LIBRARY_HOST, self.hub)
+        self._plans_panel = PlansTab(self.hub.fleet, self.hub)
         self._stack.addWidget(self._tasks_panel)        # 0 Tasks
         self._stack.addWidget(self._sequences_panel)    # 1 Sequences
         self._stack.addWidget(self._scripts_panel)      # 2 Scripts
+        self._stack.addWidget(self._plans_panel)        # 3 Plans
         outer.addWidget(self._stack, stretch=1)
         self._select_subtab(0)
 
