@@ -107,6 +107,7 @@ class Discovery:
         if state_change is ServiceStateChange.Removed:
             with self._lock:
                 self._found.pop(name, None)
+            logger.info("Discovery: unit went away (%s)", name)
         else:
             try:
                 info = zeroconf.get_service_info(service_type, name, timeout=2000)
@@ -114,9 +115,12 @@ class Discovery:
                 info = None
             unit = _unit_from_info(name, info)
             if unit is None:
+                logger.info("Discovery: saw %s but couldn't resolve its address info", name)
                 return
             with self._lock:
                 self._found[name] = unit
+            logger.info("Discovery: found '%s' at %s", unit.unit_id,
+                        ", ".join(unit.suggested_addresses) or "?")
         if self._on_change is not None:
             try:
                 self._on_change()

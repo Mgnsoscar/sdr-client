@@ -123,22 +123,32 @@ class UnitDialog(QDialog):
         except Exception:  # noqa: BLE001
             units = []
         self._disc.clear()
-        shown = 0
+        new_n = 0
         for u in units:
-            # Hide units already added (by name, or any shared address).
-            if u.unit_id.lower() in self._taken:
-                continue
-            if any(a.lower() in self._taken_addrs for a in u.suggested_addresses):
-                continue
             addrs = ", ".join(u.suggested_addresses) or "no address"
-            item = QListWidgetItem(f"{u.unit_id}   ·   {addrs}")
-            item.setData(Qt.ItemDataRole.UserRole, u)
+            already = (u.unit_id.lower() in self._taken
+                       or any(a.lower() in self._taken_addrs for a in u.suggested_addresses))
+            if already:
+                # Still show it (greyed, unselectable) so you can tell discovery
+                # is working even when everything's already added.
+                item = QListWidgetItem(f"{u.unit_id}   ·   {addrs}   (already added)")
+                item.setFlags(Qt.ItemFlag.NoItemFlags)
+            else:
+                item = QListWidgetItem(f"{u.unit_id}   ·   {addrs}")
+                item.setData(Qt.ItemDataRole.UserRole, u)
+                new_n += 1
             self._disc.addItem(item)
-            shown += 1
-        if shown == 0:
-            placeholder = QListWidgetItem("No new units discovered yet…")
+        if not units:
+            placeholder = QListWidgetItem(
+                "No units seen yet — is the unit powered on, on this network, and "
+                "running the agent? Click Refresh to re-scan.")
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self._disc.addItem(placeholder)
+        elif new_n == 0:
+            # Everything discovered is already added — that's a good sign, not an error.
+            hint = QListWidgetItem("Every discovered unit is already added.")
+            hint.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._disc.insertItem(0, hint)
 
     def _on_pick_discovered(self, item: QListWidgetItem) -> None:
         u = item.data(Qt.ItemDataRole.UserRole)
