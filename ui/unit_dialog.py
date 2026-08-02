@@ -9,12 +9,12 @@ them in order and uses the first that answers.
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QPlainTextEdit,
-    QVBoxLayout,
+    QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QVBoxLayout,
 )
 
 from config import UnitEntry
@@ -23,27 +23,54 @@ from .theme import Palette
 
 class UnitDialog(QDialog):
     def __init__(self, existing: Optional[UnitEntry] = None,
-                 taken_labels: Optional[set] = None, parent=None):
+                 taken_labels: Optional[set] = None,
+                 discovered_provider: Optional[Callable[[], list]] = None,
+                 taken_addresses: Optional[set] = None, parent=None):
         super().__init__(parent)
         self._existing = existing
         self._taken = {l.lower() for l in (taken_labels or set())}
+        self._taken_addrs = {a.lower() for a in (taken_addresses or set())}
         # When editing, the unit's own label is allowed to stay the same.
         if existing is not None:
             self._taken.discard(existing.label.lower())
+        # Live discovery is only offered when adding (not editing).
+        self._discovered_provider = discovered_provider if existing is None else None
         self.result_entry: Optional[UnitEntry] = None
 
         self.setWindowTitle("Edit unit" if existing else "Add unit")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(480)
         self._build()
         if existing is not None:
             self._label.setText(existing.label)
             self._addrs.setPlainText("\n".join(existing.addresses))
             self._key.setText(existing.api_key)
+        if self._discovered_provider is not None:
+            self._refresh_discovered()
 
     def _build(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 12)
         outer.setSpacing(10)
+
+        # Discovered-units picker (add mode only).
+        if self._discovered_provider is not None:
+            row = QHBoxLayout()
+            lbl = QLabel("Discovered on the network")
+            lbl.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {Palette.TEXT};")
+            row.addWidget(lbl)
+            row.addStretch(1)
+            refresh = QPushButton("Refresh")
+            refresh.setFixedWidth(80)
+            refresh.clicked.connect(self._refresh_discovered)
+            row.addWidget(refresh)
+            outer.addLayout(row)
+
+            self._disc = QListWidget()
+            self._disc.setFixedHeight(96)
+            self._disc.setToolTip("Units announcing themselves via mDNS. Click one to "
+                                  "fill in its name and addresses.")
+            self._disc.itemClicked.connect(self._on_pick_discovered)
+            outer.addWidget(self._disc)
 
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -85,6 +112,40 @@ class UnitDialog(QDialog):
         self._buttons.rejected.connect(self.reject)
         outer.addWidget(self._buttons)
         self._revalidate()
+
+    # ── Discovery ────────────────────────────────────────────────────────────
+
+    def _refresh_discovered(self) -> None:
+        if self._discovered_provider is None:
+            return
+        try:
+            units = self._discovered_provider() or []
+        except Exception:  # noqa: BLE001
+            units = []
+        self._disc.clear()
+        shown = 0
+        for u in units:
+            # Hide units already added (by name, or any shared address).
+            if u.unit_id.lower() in self._taken:
+                continue
+            if any(a.lower() in self._taken_addrs for a in u.suggested_addresses):
+                continue
+            addrs = ", ".join(u.suggested_addresses) or "no address"
+            item = QListWidgetItem(f"{u.unit_id}   ·   {addrs}")
+            item.setData(Qt.ItemDataRole.UserRole, u)
+            self._disc.addItem(item)
+            shown += 1
+        if shown == 0:
+            placeholder = QListWidgetItem("No new units discovered yet…")
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._disc.addItem(placeholder)
+
+    def _on_pick_discovered(self, item: QListWidgetItem) -> None:
+        u = item.data(Qt.ItemDataRole.UserRole)
+        if u is None:
+            return
+        self._label.setText(u.unit_id)
+        self._addrs.setPlainText("\n".join(u.suggested_addresses))
 
     def _parse_addresses(self) -> List[str]:
         out = []

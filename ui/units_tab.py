@@ -120,8 +120,14 @@ class UnitsTab(QWidget):
 
     # ── Add / edit / remove units ───────────────────────────────────────────────
 
+    def _known_addresses(self) -> set:
+        return {a for u in self._cfg.units for a in u.addresses}
+
     def _on_add(self) -> None:
-        dlg = UnitDialog(taken_labels=set(self.fleet.hostnames()), parent=self.window())
+        dlg = UnitDialog(taken_labels=set(self.fleet.hostnames()),
+                         taken_addresses=self._known_addresses(),
+                         discovered_provider=self.hub.discovery.discovered,
+                         parent=self.window())
         if not dlg.exec() or dlg.result_entry is None:
             return
         entry = dlg.result_entry

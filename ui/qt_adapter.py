@@ -29,7 +29,7 @@ from typing import Callable, Optional
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from api import Fleet
-from state import Poller
+from state import Poller, Discovery
 from state.log_tail import LogTailer
 from webhook.stream_client import EventStreamManager
 
@@ -64,6 +64,7 @@ class DataHub(QObject):
         self.fleet = fleet
         self.streams = EventStreamManager(api_key=api_secret)
         self.poller = Poller(fleet, fast_interval_s, slow_interval_s)
+        self.discovery = Discovery()    # mDNS browser for units advertising themselves
         self.log_tailer = LogTailer()
         self._api_secret = api_secret
         self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="hub-action")
@@ -98,6 +99,7 @@ class DataHub(QObject):
         """Start the event streams and poller. Call after the window is shown."""
         self.streams.start_all(self.fleet.units())
         self.poller.start()
+        self.discovery.start()
         logger.info("DataHub started")
 
     def stop(self) -> None:
@@ -108,6 +110,7 @@ class DataHub(QObject):
         self._stopped = True
         self.poller.stop()
         self.streams.stop()
+        self.discovery.stop()
         self.log_tailer.stop()
         self._executor.shutdown(wait=False, cancel_futures=True)
         logger.info("DataHub stopped")
