@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
 
 from api import models as m
 from .alert_feed import AlertFeed
+from .library_tab import LibraryTab
 from .plans_tab import PlansTab
 from .qt_adapter import DataHub
 from .theme import Palette
@@ -35,7 +36,7 @@ from .units_tab import UnitsTab
 
 logger = logging.getLogger(__name__)
 
-TABS = ["Timeline", "Units", "Sequences", "Plans"]
+TABS = ["Timeline", "Units", "Library", "Plans"]
 
 # Clock-skew threshold (seconds) beyond which we warn before coordinated arming.
 CLOCK_WARN_SKEW_S = 1.0
@@ -126,10 +127,11 @@ class MainWindow(QMainWindow):
         self.units_tab = UnitsTab(self.hub.fleet, self.hub)
         self.plans_tab = PlansTab(self.hub.fleet, self.hub)
         self.timeline_tab = TimelineTab(self.hub)
+        self.library_tab = LibraryTab(self.hub)
         self._tabs = {
             "Timeline": self.timeline_tab,
             "Units": self.units_tab,
-            "Sequences": _Placeholder("Sequences"),
+            "Library": self.library_tab,
             "Plans": self.plans_tab,
         }
         for name in TABS:
