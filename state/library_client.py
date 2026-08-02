@@ -23,6 +23,7 @@ from typing import List
 import yaml
 
 from api import models as m
+from api.argspec import extract_params
 from .library_store import LibraryStore, _script_of_command
 
 
@@ -123,10 +124,13 @@ class LibraryClient:
 
     def upload_script(self, filename: str, content: bytes) -> dict:
         text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else str(content)
-        existing = self._store.get_script(filename)
-        # Keep any known parameter schema on re-upload; offline we can't re-derive
-        # it (that's the agent's static introspection). A pull/deploy refreshes it.
-        params = existing.params if existing is not None else []
+        # Derive the parameter schema right here (same static, no-execution
+        # introspection the agent uses, vendored into the client), so parameter
+        # forms auto-generate offline the moment a script is added or edited.
+        try:
+            params = (extract_params(text) or {}).get("params", [])
+        except Exception:  # noqa: BLE001 — a script we can't parse still uploads
+            params = []
         self._store.upsert_script(m.LibraryScript(name=filename, content=text, params=params))
         return {"uploaded": filename}
 
