@@ -19,11 +19,9 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-import yaml
-
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QFrame, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -31,9 +29,7 @@ from api import Fleet
 from api import models as m
 from .qt_adapter import DataHub
 from .logs_panel import LogsPanel
-from .scripts_panel import ScriptsPanel
 from .sequences_panel import SequencesPanel
-from .task_editor import TaskEditorDialog
 from .theme import Palette
 from .widgets import StatusPill
 
@@ -78,20 +74,15 @@ class _TaskRow(QFrame):
         self._pill = StatusPill(task.state.value, task.state.value)
         lay.addWidget(self._pill)
 
-        # Buttons
+        # Buttons — run controls only. Task definitions are edited in the Library
+        # and deployed; the unit card just runs what's deployed.
         self._start = QPushButton("Start")
         self._stop = QPushButton("Stop")
-        self._edit = QPushButton("Edit")
-        self._delete = QPushButton("Delete")
         for b in (self._start, self._stop):
             b.setFixedWidth(72)
-        for b in (self._edit, self._delete):
-            b.setFixedWidth(62)
         self._start.clicked.connect(self._on_start)
         self._stop.clicked.connect(self._on_stop)
-        self._edit.clicked.connect(self._on_edit)
-        self._delete.clicked.connect(self._on_delete)
-        for b in (self._start, self._stop, self._edit, self._delete):
+        for b in (self._start, self._stop):
             lay.addWidget(b)
 
         self.update_status(task)
@@ -115,14 +106,11 @@ class _TaskRow(QFrame):
         running = st in (m.ProcessState.RUNNING, m.ProcessState.STARTING)
         self._start.setEnabled(not running)
         self._stop.setEnabled(running or st == m.ProcessState.CRASHED)
-        # A running task can't be deleted (the agent refuses); edit is allowed anytime.
-        self._delete.setEnabled(not running)
-        self._edit.setEnabled(True)
 
     # ── Actions ────────────────────────────────────────────────────────────────
 
     def _busy(self, label: str) -> None:
-        for b in (self._start, self._stop, self._edit, self._delete):
+        for b in (self._start, self._stop):
             b.setEnabled(False)
         self._info.setText(label)
 
@@ -130,7 +118,7 @@ class _TaskRow(QFrame):
         """Show an action error and re-enable the buttons (the next poll will
         settle the exact enabled-state)."""
         self._info.setText(msg)
-        for b in (self._start, self._stop, self._edit, self._delete):
+        for b in (self._start, self._stop):
             b.setEnabled(True)
 
     def _on_start(self) -> None:
@@ -147,41 +135,8 @@ class _TaskRow(QFrame):
             lambda: self.hub.fleet.get(self.hostname).stop_task(self.task_name),
         )
 
-    def _on_edit(self) -> None:
-        TaskEditorDialog(self.hub, self.hostname,
-                         existing_name=self.task_name, parent=self.window()).exec()
-
-    def _on_delete(self) -> None:
-        resp = QMessageBox.question(
-            self, "Delete task",
-            f"Delete task '{self.task_name}' from {self.hostname}?\n"
-            f"This removes it from tasks.yaml on the unit.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if resp != QMessageBox.StandardButton.Yes:
-            return
-        self._busy("deleting…")
-        self.hub.run_async(
-            f"task_delete:{self.hostname}:{self.task_name}",
-            lambda: self.hub.fleet.get(self.hostname).delete_task(self.task_name),
-        )
-
 
 # ── Tasks panel ──────────────────────────────────────────────────────────────
-
-def _import_task_set(client, tasks):
-    """Create each task via the client (skipping name conflicts). Worker thread."""
-    out = []
-    for t in tasks:
-        name = t.get("name", "?")
-        try:
-            client.create_task(dict(t))
-            out.append((name, None))
-        except Exception as exc:  # noqa: BLE001 — AgentError etc., reported per task
-            out.append((name, str(exc)))
-    return out
-
 
 class _TasksPanel(QWidget):
     """Scrollable list of task rows for one unit."""
@@ -192,8 +147,6 @@ class _TasksPanel(QWidget):
         self.hub = hub
         self._rows: Dict[str, _TaskRow] = {}
         self._known: list = []   # [(name, description), ...] of the built rows
-        self._export_path: Optional[str] = None
-        self.hub.task_done.connect(self._on_io_done)
         # Update a row the instant its start/stop/restart returns, instead of
         # waiting for the next poll tick.
         self.hub.task_done.connect(self._on_task_action_done)
@@ -202,20 +155,8 @@ class _TasksPanel(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
 
-        header = QHBoxLayout()
-        header.addStretch(1)
-        self._export_btn = QPushButton("Export…")
-        self._export_btn.clicked.connect(self._on_export)
-        header.addWidget(self._export_btn)
-        self._import_btn = QPushButton("Import…")
-        self._import_btn.clicked.connect(self._on_import)
-        header.addWidget(self._import_btn)
-        self._new_btn = QPushButton("New task")
-        self._new_btn.setObjectName("primary")
-        self._new_btn.clicked.connect(self._on_new_task)
-        header.addWidget(self._new_btn)
-        lay.addLayout(header)
-
+        # No authoring controls: task definitions are managed in the Library and
+        # deployed to units. The unit card only runs what's deployed here.
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -246,8 +187,10 @@ class _TasksPanel(QWidget):
                     w.deleteLater()
             self._rows.clear()
             if not tasks:
-                self._empty = QLabel("No tasks on this unit.")
+                self._empty = QLabel("No tasks deployed to this unit. "
+                                     "Add them in the Library and deploy.")
                 self._empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
+                self._empty.setWordWrap(True)
                 self._list.addWidget(self._empty)
             for t in tasks:
                 row = _TaskRow(self.hostname, t, self.hub)
@@ -261,27 +204,17 @@ class _TasksPanel(QWidget):
                 if row is not None:
                     row.update_status(t)
 
-    def _on_new_task(self) -> None:
-        TaskEditorDialog(self.hub, self.hostname, parent=self.window()).exec()
-
     def _on_task_action_done(self, label: str, result) -> None:
-        """Reflect a start/stop/restart/delete result on its row immediately,
-        rather than waiting for the next poll tick."""
+        """Reflect a start/stop/restart result on its row immediately, rather than
+        waiting for the next poll tick."""
         parts = label.split(":", 2)   # "task_<verb>:<host>:<task>" (task may hold ':')
         if len(parts) != 3 or parts[1] != self.hostname:
             return
         op = parts[0]
-        if op not in ("task_start", "task_stop", "task_restart", "task_delete"):
+        if op not in ("task_start", "task_stop", "task_restart"):
             return
         name = parts[2]
         row = self._rows.get(name)
-        if op == "task_delete":
-            if isinstance(result, Exception):
-                if row is not None:
-                    row.set_error(f"delete failed: {result}")
-            else:
-                self.hub.refresh_now()   # task gone — drop it from the list at once
-            return
         if row is None:
             return
         if isinstance(result, m.ProcessStatus):
@@ -289,85 +222,13 @@ class _TasksPanel(QWidget):
         elif isinstance(result, Exception):
             row.set_error(str(result))
 
-    # ── Export / import (deploy a task set across units) ─────────────────────
-
-    def _on_export(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export tasks", "tasks.yaml", "YAML (*.yaml *.yml)")
-        if not path:
-            return
-        self._export_path = path
-        self.hub.run_async(
-            f"tasksio_export:{self.hostname}",
-            lambda: self.hub.fleet.get(self.hostname).get_tasks_yaml())
-
-    def _on_import(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import tasks", "", "YAML (*.yaml *.yml)")
-        if not path:
-            return
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                doc = yaml.safe_load(fh)
-        except (OSError, yaml.YAMLError) as exc:
-            QMessageBox.warning(self, "Import failed", f"Could not read file:\n{exc}")
-            return
-        if isinstance(doc, dict):
-            tasks = doc.get("tasks") or []
-        elif isinstance(doc, list):
-            tasks = doc
-        else:
-            tasks = []
-        tasks = [t for t in tasks if isinstance(t, dict) and t.get("name")]
-        if not tasks:
-            QMessageBox.information(self, "Import", "No tasks found in that file.")
-            return
-        if QMessageBox.question(
-            self, "Import tasks",
-            f"Create {len(tasks)} task(s) on {self.hostname}?\n"
-            f"Existing tasks with the same name are skipped.",
-        ) != QMessageBox.StandardButton.Yes:
-            return
-        client = self.hub.fleet.get(self.hostname)
-        self.hub.run_async(f"tasksio_import:{self.hostname}",
-                           lambda: _import_task_set(client, tasks))
-
-    def _on_io_done(self, label: str, result) -> None:
-        parts = label.split(":")
-        if not label.startswith("tasksio_") or len(parts) < 2 or parts[1] != self.hostname:
-            return
-        op = parts[0]
-        if op == "tasksio_export":
-            target = self._export_path
-            self._export_path = None
-            if isinstance(result, Exception) or not target:
-                QMessageBox.warning(self, "Export failed", f"{result}")
-                return
-            try:
-                with open(target, "w", encoding="utf-8", newline="") as fh:
-                    fh.write(result if isinstance(result, str) else str(result))
-            except OSError as exc:
-                QMessageBox.warning(self, "Export failed", f"Could not write file:\n{exc}")
-                return
-            QMessageBox.information(self, "Export", f"Tasks written to\n{target}")
-        elif op == "tasksio_import":
-            if isinstance(result, Exception) or not isinstance(result, list):
-                QMessageBox.warning(self, "Import failed", f"{result}")
-                return
-            ok = [n for n, e in result if e is None]
-            bad = [(n, e) for n, e in result if e is not None]
-            msg = f"Created {len(ok)} task(s)."
-            if bad:
-                msg += "\n\nSkipped / failed:\n" + "\n".join(f"• {n}: {e}" for n, e in bad)
-            QMessageBox.information(self, "Import complete", msg)
-
 
 # ── Detail view shell ────────────────────────────────────────────────────────
 
 class UnitDetail(QWidget):
     """Header + sub-tabs for one unit. Tasks panel built; others placeholder."""
 
-    SUBTABS = ["Tasks", "Logs", "Sequences", "Scripts"]
+    SUBTABS = ["Tasks", "Logs", "Sequences"]
 
     def __init__(self, fleet: Fleet, hub: DataHub, on_back, parent=None):
         super().__init__(parent)
@@ -414,7 +275,6 @@ class UnitDetail(QWidget):
         self._sub_stack = QStackedWidget()
         self._tasks_panel: Optional[_TasksPanel] = None  # built per-unit in set_unit
         self._logs_panel: Optional["LogsPanel"] = None   # built per-unit in set_unit
-        self._scripts_panel: Optional["ScriptsPanel"] = None  # built per-unit in set_unit
         self._sequences_panel: Optional["SequencesPanel"] = None  # built per-unit in set_unit
         self._placeholders: Dict[str, QWidget] = {}
         outer.addWidget(self._sub_stack, stretch=1)
@@ -447,12 +307,13 @@ class UnitDetail(QWidget):
 
         self._tasks_panel = _TasksPanel(hostname, self.hub)
         self._logs_panel = LogsPanel(hostname, self.hub)
-        self._sequences_panel = SequencesPanel(hostname, self.hub)
-        self._scripts_panel = ScriptsPanel(hostname, self.hub)
+        # Run-only: the unit card runs deployed tasks/sequences; it never edits
+        # definitions (that's the Library's job).
+        self._sequences_panel = SequencesPanel(hostname, self.hub,
+                                               can_edit=False, can_run=True)
         self._sub_stack.addWidget(self._tasks_panel)                       # 0 Tasks
         self._sub_stack.addWidget(self._logs_panel)                        # 1 Logs
         self._sub_stack.addWidget(self._sequences_panel)                   # 2 Sequences
-        self._sub_stack.addWidget(self._scripts_panel)                     # 3 Scripts
         self._select_subtab(0)
 
         # Pull fresh data now so the task list / status appear immediately, rather

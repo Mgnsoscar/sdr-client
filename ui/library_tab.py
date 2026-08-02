@@ -146,7 +146,8 @@ class LibraryTab(QWidget):
         # Editing panels, repointed at the library (LIBRARY_HOST), definition-only.
         self._stack = QStackedWidget()
         self._tasks_panel = LibraryTasksPanel(self.hub)
-        self._sequences_panel = SequencesPanel(LIBRARY_HOST, self.hub, library_mode=True)
+        self._sequences_panel = SequencesPanel(LIBRARY_HOST, self.hub,
+                                               can_edit=True, can_run=False)
         self._scripts_panel = ScriptsPanel(LIBRARY_HOST, self.hub)
         self._plans_panel = PlansTab(self.hub.fleet, self.hub)
         self._stack.addWidget(self._tasks_panel)        # 0 Tasks
