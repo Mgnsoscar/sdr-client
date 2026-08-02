@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import QApplication
 
 from api import AgentClient, Fleet
 from config import ClientConfig
+from state import LibraryStore, LibraryClient
 from ui.main_window import MainWindow
 from ui.qt_adapter import DataHub
 from ui.theme import apply_theme
@@ -44,6 +45,9 @@ def main() -> int:
     apply_theme(app)
 
     fleet = build_fleet(cfg)
+    # The offline shared library, resolvable as fleet.get(LIBRARY_HOST) so the
+    # unit-card panels/editors can author it without a unit connected.
+    fleet.set_library(LibraryClient(LibraryStore()))
     hub = DataHub(fleet, api_secret=cfg.api_key)
 
     window = MainWindow(hub)

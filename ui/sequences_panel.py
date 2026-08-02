@@ -186,7 +186,8 @@ class _SequenceRow(QFrame):
     """One sequence: name, summary, run-state pill, and action buttons."""
 
     def __init__(self, seq: m.Sequence, active_run: Optional[m.SequenceRun],
-                 on_start, on_stop, on_edit, on_delete, on_log):
+                 on_start, on_stop, on_edit, on_delete, on_log,
+                 can_edit: bool = True, can_run: bool = True):
         super().__init__()
         self.seq = seq
         self.setObjectName("card")
@@ -211,9 +212,12 @@ class _SequenceRow(QFrame):
         box.addWidget(summary)
         lay.addLayout(box, stretch=1)
 
-        state_word = active_run.state.value if active else "idle"
-        self._pill = StatusPill(state_word, state_word)
-        lay.addWidget(self._pill, alignment=Qt.AlignmentFlag.AlignTop)
+        # The run-state pill and Start/Stop/Log belong to a live unit (can_run);
+        # Edit/Delete are definition editing (can_edit, i.e. the Library).
+        if can_run:
+            state_word = active_run.state.value if active else "idle"
+            self._pill = StatusPill(state_word, state_word)
+            lay.addWidget(self._pill, alignment=Qt.AlignmentFlag.AlignTop)
 
         self._start = QPushButton("Start")
         self._stop = QPushButton("Stop")
@@ -236,15 +240,26 @@ class _SequenceRow(QFrame):
         self._log.clicked.connect(lambda: on_log(seq))
         self._edit.clicked.connect(lambda: on_edit(seq))
         self._delete.clicked.connect(lambda: on_delete(seq))
-        for b in (self._start, self._stop, self._log, self._edit, self._delete):
+        shown = []
+        if can_run:
+            shown += [self._start, self._stop, self._log]
+        if can_edit:
+            shown += [self._edit, self._delete]
+        for b in shown:
             lay.addWidget(b, alignment=Qt.AlignmentFlag.AlignTop)
 
 
 class SequencesPanel(QWidget):
-    def __init__(self, hostname: str, hub: DataHub, parent=None):
+    def __init__(self, hostname: str, hub: DataHub, parent=None,
+                 can_edit: bool = True, can_run: bool = True):
         super().__init__(parent)
         self.hostname = hostname
         self.hub = hub
+        # Two capabilities, set by the surface:
+        #   Library  → can_edit=True,  can_run=False  (author definitions offline)
+        #   Unit card→ can_edit=False, can_run=True   (run what's deployed, no editing)
+        self.can_edit = can_edit
+        self.can_run = can_run
         self._sequences: List[m.Sequence] = []
         self._runs: List[m.SequenceRun] = []
         self._seq_loaded = False
@@ -254,7 +269,8 @@ class SequencesPanel(QWidget):
         self.hub.task_done.connect(self._on_task_done)
         self.hub.task_done.connect(self._on_io_done)
         # Live-refresh run state when a sequence lifecycle event arrives.
-        self.hub.event_received.connect(self._on_event)
+        if self.can_run:
+            self.hub.event_received.connect(self._on_event)
 
     def _build(self) -> None:
         outer = QVBoxLayout(self)
@@ -262,22 +278,26 @@ class SequencesPanel(QWidget):
         outer.setSpacing(8)
 
         row = QHBoxLayout()
-        self._new_btn = QPushButton("New sequence")
-        self._new_btn.setObjectName("primary")
-        self._new_btn.clicked.connect(self._on_new)
-        row.addWidget(self._new_btn)
+        # Authoring controls (New / Export / Import) only when this surface can edit
+        # definitions. A unit card is run-only: definitions come from the Library.
+        if self.can_edit:
+            self._new_btn = QPushButton("New sequence")
+            self._new_btn.setObjectName("primary")
+            self._new_btn.clicked.connect(self._on_new)
+            row.addWidget(self._new_btn)
         self._refresh_btn = QPushButton("Refresh")
         self._refresh_btn.clicked.connect(self._refresh)
         row.addWidget(self._refresh_btn)
-        self._export_btn = QPushButton("Export…")
-        self._export_btn.setToolTip("Save every sequence on this unit to a YAML file")
-        self._export_btn.clicked.connect(self._on_export)
-        row.addWidget(self._export_btn)
-        self._import_btn = QPushButton("Import…")
-        self._import_btn.setToolTip("Create sequences from a YAML file "
-                                    "(existing names are skipped)")
-        self._import_btn.clicked.connect(self._on_import)
-        row.addWidget(self._import_btn)
+        if self.can_edit:
+            self._export_btn = QPushButton("Export…")
+            self._export_btn.setToolTip("Save every sequence to a YAML file")
+            self._export_btn.clicked.connect(self._on_export)
+            row.addWidget(self._export_btn)
+            self._import_btn = QPushButton("Import…")
+            self._import_btn.setToolTip("Create sequences from a YAML file "
+                                        "(existing names are skipped)")
+            self._import_btn.clicked.connect(self._on_import)
+            row.addWidget(self._import_btn)
         self._status = QLabel("")
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         row.addWidget(self._status)
@@ -306,10 +326,11 @@ class SequencesPanel(QWidget):
             f"seq_list:{self.hostname}",
             lambda: self.hub.fleet.get(self.hostname).list_sequences(),
         )
-        self._refresh_runs()
+        if self.can_run:
+            self._refresh_runs()
 
     def _refresh_runs(self) -> None:
-        if self._runs_pending:
+        if not self.can_run or self._runs_pending:
             return
         self._runs_pending = True
         self.hub.run_async(
@@ -553,9 +574,14 @@ class SequencesPanel(QWidget):
 
         if not self._sequences:
             if self._seq_loaded:
-                empty = QLabel("No sequences on this unit yet. "
-                               "Click “New sequence” to create one.")
+                if self.can_edit:
+                    msg = "No sequences in the library yet. Click “New sequence” to create one."
+                else:
+                    msg = ("No sequences deployed to this unit. Add them in the Library "
+                           "and deploy.")
+                empty = QLabel(msg)
                 empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
+                empty.setWordWrap(True)
                 self._list.addWidget(empty)
             return
 
@@ -568,7 +594,7 @@ class SequencesPanel(QWidget):
                 seq, active,
                 on_start=self._on_start, on_stop=self._on_stop,
                 on_edit=self._on_edit, on_delete=self._on_delete,
-                on_log=self._on_log,
+                on_log=self._on_log, can_edit=self.can_edit, can_run=self.can_run,
             ))
         suffix = f" · {active_n} active" if active_n else ""
         self._set_status(f"{len(self._sequences)} sequence(s){suffix}")

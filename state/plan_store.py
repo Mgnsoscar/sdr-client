@@ -80,3 +80,18 @@ class PlanStore:
             self._save()
             return True
         return False
+
+    def replace_all(self, plans: List[m.Plan]) -> None:
+        """Replace the whole plan set (e.g. restoring from a unit)."""
+        self._plans = list(plans)
+        self._save()
+
+    def merge(self, plans: List[m.Plan]) -> int:
+        """Add plans whose id isn't present yet (de-dupe by id when restoring from
+        several units). Returns how many were added."""
+        have = {p.id for p in self._plans}
+        added = [p for p in plans if p.id not in have]
+        if added:
+            self._plans.extend(added)
+            self._save()
+        return len(added)

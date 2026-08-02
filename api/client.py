@@ -514,6 +514,42 @@ class AgentClient:
         return m.SequenceRun(**self._request("DELETE", f"/sequence-runs/{run_id}"))
 
     # ══════════════════════════════════════════════════════════════════════════
+    # Library (deploy / snapshot the whole definition set)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def get_library(self) -> m.Library:
+        """This unit's current definitions (scripts + tasks + sequences), for drift
+        comparison against the canonical library."""
+        return m.Library(**self._request("GET", "/library"))
+
+    def deploy_library(self, library: m.Library, prune: bool = True) -> m.DeployLibraryResult:
+        """Converge this unit to `library`. Definition-only and safe on air: the
+        agent keeps running tasks alive and never deletes a sequence with an active
+        run. prune=True makes the unit match exactly; prune=False only adds/updates."""
+        body = {"library": library.model_dump(), "prune": prune}
+        return m.DeployLibraryResult(**self._request("PUT", "/library", json=body))
+
+    # ── Client-state replica (plans + schedule stored on the unit) ─────────────
+
+    def get_plans(self) -> List[m.Plan]:
+        """This unit's replica of the PC's plans (opaque storage — not executed here)."""
+        return [m.Plan(**p) for p in self._request("GET", "/plans")]
+
+    def put_plans(self, plans: List[m.Plan]) -> List[m.Plan]:
+        """Replace this unit's plan replica with `plans` (wholesale)."""
+        body = {"plans": [p.model_dump() for p in plans]}
+        return [m.Plan(**p) for p in self._request("PUT", "/plans", json=body)]
+
+    def get_schedule(self) -> List[m.ScheduledPlan]:
+        """This unit's replica of the PC's schedule."""
+        return [m.ScheduledPlan(**s) for s in self._request("GET", "/schedule")]
+
+    def put_schedule(self, schedule: List[m.ScheduledPlan]) -> List[m.ScheduledPlan]:
+        """Replace this unit's schedule replica with `schedule` (wholesale)."""
+        body = {"schedule": [s.model_dump() for s in schedule]}
+        return [m.ScheduledPlan(**s) for s in self._request("PUT", "/schedule", json=body)]
+
+    # ══════════════════════════════════════════════════════════════════════════
     # Panic
     # ══════════════════════════════════════════════════════════════════════════
 

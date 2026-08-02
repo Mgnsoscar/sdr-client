@@ -22,12 +22,29 @@ from . import models as m
 logger = logging.getLogger(__name__)
 
 
+LIBRARY_HOST = "__library__"   # reserved: the offline shared-library "unit"
+
+
 class Fleet:
     def __init__(self, max_workers: int = 16):
         self._units: Dict[str, AgentClient] = {}
+        self._library = None          # a LibraryClient-shaped object, or None
         self._max_workers = max_workers
 
     # ── Registry ────────────────────────────────────────────────────────────────
+
+    def set_library(self, client) -> None:
+        """Register the offline library client. It is resolvable via
+        get(LIBRARY_HOST) so the unit-card panels/editors can author the library,
+        but it is deliberately kept OUT of units()/hostnames()/fan-out — so it is
+        never polled or shown as a real unit."""
+        self._library = client
+
+    def library_store(self):
+        """The one LibraryStore backing the library client, or None if unset.
+        The Library tab uses this so it, the reused panels (via the LibraryClient),
+        and the fleet all read and write the same store instance."""
+        return self._library.store if self._library is not None else None
 
     def add(self, client: AgentClient) -> None:
         # Key by hostname, which is stable for the client's lifetime. unit_id is
@@ -51,6 +68,8 @@ class Fleet:
             logger.info("Fleet: removed unit '%s'", hostname)
 
     def get(self, hostname: str) -> AgentClient:
+        if hostname == LIBRARY_HOST and self._library is not None:
+            return self._library
         if hostname not in self._units:
             raise KeyError(f"Unknown unit: '{hostname}'")
         return self._units[hostname]
@@ -65,6 +84,8 @@ class Fleet:
         return len(self._units)
 
     def __contains__(self, hostname: str) -> bool:
+        if hostname == LIBRARY_HOST:
+            return self._library is not None
         return hostname in self._units
 
     def close(self) -> None:
@@ -149,6 +170,59 @@ class Fleet:
     def tasks_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
         """Task status list per unit. Values are list[ProcessStatus] or Exception."""
         return self._fan_out(lambda c: c.list_tasks(), units)
+
+    def libraries_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Each unit's current library snapshot (for drift detection). Values are
+        m.Library or an Exception."""
+        return self._fan_out(lambda c: c.get_library(), units)
+
+    def deploy_all(self, library: "m.Library", prune: bool = True,
+                   units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Deploy the canonical library to each unit (default: all). Values are
+        m.DeployLibraryResult or an Exception. Definition-only on every unit — a
+        live broadcast is never interrupted."""
+        return self._fan_out(lambda c: c.deploy_library(library, prune), units)
+
+    # ── Client-state replica (plans + schedule) ───────────────────────────────
+
+    def snapshots_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Each unit's full snapshot (library + plans + schedule) for drift checks.
+        Values are state.UnitSnapshot or an Exception."""
+        from state import snapshot_unit
+        return self._fan_out(lambda c: snapshot_unit(c), units)
+
+    def plans_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Each unit's plan replica. Values are list[Plan] or an Exception."""
+        return self._fan_out(lambda c: c.get_plans(), units)
+
+    def schedule_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Each unit's schedule replica. Values are list[ScheduledPlan] or Exception."""
+        return self._fan_out(lambda c: c.get_schedule(), units)
+
+    def deploy_plans_all(self, plans: List["m.Plan"],
+                         units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Replicate the PC's plans to each unit (wholesale replace)."""
+        return self._fan_out(lambda c: c.put_plans(plans), units)
+
+    def deploy_schedule_all(self, schedule: List["m.ScheduledPlan"],
+                            units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Replicate the PC's schedule to each unit (wholesale replace)."""
+        return self._fan_out(lambda c: c.put_schedule(schedule), units)
+
+    def deploy_state_all(self, library: "m.Library", plans: List["m.Plan"],
+                         schedule: List["m.ScheduledPlan"], prune: bool = True,
+                         units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Replicate EVERYTHING to each unit in one pass: the library (definition-
+        only, safe on air), then the plan + schedule replicas (wholesale). Values
+        are the unit's DeployLibraryResult on success, or the Exception that stopped
+        it. Plans/schedule are pushed only after the library succeeds, so a unit
+        never ends up with plans referencing sequences it doesn't yet have."""
+        def do(c):
+            res = c.deploy_library(library, prune)
+            c.put_plans(plans)
+            c.put_schedule(schedule)
+            return res
+        return self._fan_out(do, units)
 
     def panic_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
         """

@@ -333,6 +333,9 @@ class PlansTab(QWidget):
     # ── Shown / refresh ────────────────────────────────────────────────────────
 
     def on_shown(self) -> None:
+        # Reload from disk: a Restore/Deploy from the Library tab writes the same
+        # plans file, so re-read it rather than trusting our cached copy.
+        self._store.load()
         self._plans = self._store.plans()
         self._rebuild()
         self._refresh_runs()

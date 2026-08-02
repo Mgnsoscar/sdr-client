@@ -358,3 +358,38 @@ class ScheduledPlan(BaseModel):
     plan_name: str = ""                 # cached for display if the plan is gone
     start: str                          # ISO-8601 local datetime — on-air (T0)
     stop: str                           # ISO-8601 local datetime — off-air (T_end)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Library (the shared definition set, replicated identically to every unit)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# The client keeps one canonical library of scripts, tasks, and sequences. It is
+# the authoring source — the sequence/plan editors read from it, so a plan can be
+# built with no unit connected — and (in a later phase) it is deployed to every
+# unit so they all hold the same definitions. Per-unit differences are parameters,
+# and those live in plans, not here.
+
+class LibraryScript(BaseModel):
+    name: str                          # script filename, e.g. "freq.py"
+    content: str = ""                  # the script's source (for upload/edit/deploy)
+    params: List[dict] = []            # argparse param schema (/scripts/{name}/params)
+
+
+class Library(BaseModel):
+    scripts: List[LibraryScript] = []
+    tasks: List[TaskConfig] = []
+    sequences: List[Sequence] = []
+
+
+class DeployLibraryResult(BaseModel):
+    """What a unit's PUT /library changed. *_skipped fields hold definitions the
+    deploy left in place because they were in use (a running task, a sequence with
+    an active run) — nothing on air is ever stopped."""
+    scripts_written: List[str] = []
+    scripts_deleted: List[str] = []
+    tasks_reload: dict = {}
+    tasks_skipped: List[str] = []
+    sequences_upserted: List[str] = []
+    sequences_deleted: List[str] = []
+    sequences_skipped: List[str] = []

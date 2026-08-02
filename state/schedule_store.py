@@ -80,3 +80,17 @@ class ScheduleStore:
             self._save()
             return True
         return False
+
+    def replace_all(self, entries: List[m.ScheduledPlan]) -> None:
+        """Replace the whole schedule (e.g. restoring from a unit)."""
+        self._entries = list(entries)
+        self._save()
+
+    def merge(self, entries: List[m.ScheduledPlan]) -> int:
+        """Add entries whose id isn't present yet (de-dupe by id). Returns count added."""
+        have = {e.id for e in self._entries}
+        added = [e for e in entries if e.id not in have]
+        if added:
+            self._entries.extend(added)
+            self._save()
+        return len(added)

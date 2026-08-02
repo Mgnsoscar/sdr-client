@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
 )
 
 from api import models as m
+from api.fleet import LIBRARY_HOST
 from . import timeline_model as tlm
 from .qt_adapter import DataHub
 from .theme import Palette
@@ -222,16 +223,29 @@ class PlanItemDialog(QDialog):
         return None
 
     def _load_unit_meta(self, hostname: str) -> None:
-        """Point the timeline at this unit and fetch its task list + commands so the
-        step editor can offer tasks and resolve their parameter schemas."""
-        self._timeline.set_context(self._hub, hostname)
-        if not hostname:
+        """Feed the step editor from the shared LIBRARY, not the selected unit:
+        every unit runs the same library tasks/scripts (they differ only in the
+        parameters this plan sets), so the task list, their commands, and each
+        script's parameter schema all come from the library — which means a plan
+        can be authored with no unit connected. The selected unit only decides
+        which unit this parameterized copy will be armed on later."""
+        self._timeline.set_context(self._hub, LIBRARY_HOST)
+        try:
+            lib = self._hub.fleet.get(LIBRARY_HOST)
+        except KeyError:
+            self._timeline.set_tasks([])
+            self._timeline.set_task_commands({})
             return
-        self._status.setText("loading tasks…")
-        self._hub.run_async(f"plantasks:{hostname}",
-                            lambda: self._hub.fleet.get(hostname).list_tasks())
-        self._hub.run_async(f"planyaml:{hostname}",
-                            lambda: self._hub.fleet.get(hostname).get_tasks_yaml())
+        try:
+            names = [t.name for t in lib.list_tasks()]
+        except Exception:  # noqa: BLE001 — an empty library still authors
+            names = []
+        self._timeline.set_tasks(names)
+        try:
+            cmds = _parse_task_commands(lib.get_tasks_yaml())
+        except Exception:  # noqa: BLE001
+            cmds = {}
+        self._timeline.set_task_commands(cmds)
 
     def _seed_from_source(self, legacy_overrides: Optional[List[m.StepOverride]] = None) -> None:
         """Load the timeline with a fresh COPY of the selected source sequence's
@@ -568,7 +582,7 @@ class PlanTimelineEditor(QWidget):
 
     def add_sequence(self) -> None:
         if not self._seqs:
-            self._hint.setText("still loading units — try again in a moment")
+            self._hint.setText("no units configured — add units in units.yaml first")
             return
         dlg = PlanItemDialog(self._hub, self._seqs, parent=self.window())
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_item is not None:
@@ -645,25 +659,38 @@ class PlanEditorDialog(QDialog):
         self._buttons.rejected.connect(self.reject)
         outer.addWidget(self._buttons)
 
-    # ── Load sequences across the fleet ────────────────────────────────────────
+    # ── Load sequences from the shared library ─────────────────────────────────
 
     def _load_sequences(self) -> None:
-        self._hub.run_async("planseqs", lambda: self._hub.fleet.sequences_all())
-
-    def _on_task_done(self, label: str, result) -> None:
-        if label != "planseqs":
-            return
+        """Seed the item picker from the LIBRARY, not from live units. Every unit
+        runs the same shared sequences (they differ only in the parameters a plan
+        sets), so the source-sequence list is unit-independent and the same library
+        set is offered for every configured unit. This is a local read, so a plan
+        can be built with no unit connected. The unit list is the fleet's configured
+        units (from units.yaml) — present whether or not they're reachable."""
+        try:
+            lib_seqs = self._hub.fleet.get(LIBRARY_HOST).list_sequences()
+        except Exception:  # noqa: BLE001 — no library ⇒ author with none
+            lib_seqs = []
+        hosts = self._hub.fleet.hostnames()
+        by_host: Dict[str, List[m.Sequence]] = {h: list(lib_seqs) for h in hosts}
         self._seqs_loaded = True
-        by_host: Dict[str, List[m.Sequence]] = {}
-        if isinstance(result, dict):
-            for host, val in result.items():
-                by_host[host] = val if isinstance(val, list) else []
         self._seqs_by_host = by_host
         self._timeline.set_sequences(by_host)
-        total = sum(len(v) for v in by_host.values())
-        self._status.setText(
-            f"{len(by_host)} unit(s), {total} sequence(s) available"
-            if by_host else "no units reachable")
+        n_seq = len(lib_seqs)
+        if not hosts:
+            self._status.setText(f"{n_seq} library sequence(s) · no units configured")
+        elif n_seq == 0:
+            self._status.setText(f"{len(hosts)} unit(s) · no sequences in the library — "
+                                 f"create one in the Library first")
+        else:
+            self._status.setText(
+                f"{len(hosts)} unit(s) · {n_seq} library sequence(s) available")
+
+    def _on_task_done(self, label: str, result) -> None:
+        # The library seed is synchronous now; nothing async to route here. Kept
+        # for the connect()/disconnect() symmetry the dialog relies on.
+        return
 
     # ── Save ─────────────────────────────────────────────────────────────────
 
