@@ -63,6 +63,7 @@ class LibraryTab(QWidget):
         self._sched_store = ScheduleStore()
         self._pull_pending = False
         self._deploy_pending = False
+        self._restore_mode = "replace"   # "merge" | "replace", chosen per Restore
         self._drift = {}          # hostname -> LibraryDiff (last check)
         self._drift_err = {}      # hostname -> error string (unreachable / failed)
         self._build()
@@ -232,19 +233,36 @@ class LibraryTab(QWidget):
                 return
             hostname = by_label[label]
 
+        self._plan_store.load()
+        self._sched_store.load()
         empty = (not self._store.library().scripts and not self._store.tasks()
                  and not self._plan_store.plans() and not self._sched_store.entries())
         if empty:
-            pass  # nothing local to overwrite — no need to warn
-        elif QMessageBox.question(
-            self, "Restore from unit",
-            "This replaces the local library, plans, and schedule with this unit's "
-            "copy — use it to rebuild a fresh PC from a unit.\nContinue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        ) != QMessageBox.StandardButton.Yes:
-            return
+            mode = "replace"   # nothing local to lose — merge and replace are the same
+        else:
+            box = QMessageBox(self)
+            box.setWindowTitle("Restore from unit")
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(f"Restore from {self._label(hostname)}?")
+            box.setInformativeText(
+                "Merge — keep everything on this PC and add what the unit has that "
+                "you don't (nothing local is lost).\n\n"
+                "Replace — discard this PC's library, plans and schedule and take the "
+                "unit's copy exactly (use this to rebuild a blank PC).")
+            merge_btn = box.addButton("Merge", QMessageBox.ButtonRole.AcceptRole)
+            replace_btn = box.addButton("Replace", QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(merge_btn)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is merge_btn:
+                mode = "merge"
+            elif clicked is replace_btn:
+                mode = "replace"
+            else:
+                return
 
+        self._restore_mode = mode
         self._pull_pending = True
         self._set_status(f"restoring from {hostname}…")
         client = self.hub.fleet.get(hostname)
@@ -527,19 +545,32 @@ class LibraryTab(QWidget):
         if isinstance(result, Exception) or not isinstance(result, UnitSnapshot):
             self._set_status(f"restore failed: {result}", error=True)
             return
-        # Restore the library and the plan + schedule replicas together.
-        self._store.replace(result.library)
-        self._plan_store.replace_all(result.plans)
-        self._sched_store.replace_all(result.schedule)
+        # Reload the current on-disk plans/schedule so a merge builds on the latest.
+        self._plan_store.load()
+        self._sched_store.load()
+        if self._restore_mode == "merge":
+            # Non-destructive: keep everything local, add only what the unit has extra.
+            libc = self._store.merge(result.library)
+            add_p = self._plan_store.merge(result.plans)
+            add_s = self._sched_store.merge(result.schedule)
+            self._set_status(
+                f"merged from unit: +{libc['scripts']} script(s) · +{libc['tasks']} "
+                f"task(s) · +{libc['sequences']} sequence(s) · +{add_p} plan(s) · "
+                f"+{add_s} scheduled (nothing local removed)")
+        else:
+            self._store.replace(result.library)
+            self._plan_store.replace_all(result.plans)
+            self._sched_store.replace_all(result.schedule)
+            self._set_status(
+                f"restored (replaced): {len(result.library.scripts)} script(s) · "
+                f"{len(result.library.tasks)} task(s) · {len(result.library.sequences)} "
+                f"sequence(s) · {len(result.plans)} plan(s) · "
+                f"{len(result.schedule)} scheduled")
         self._refresh_panels()
         # The Plans sub-tab shares the plan file — reload it so it shows the restore.
         if hasattr(self._plans_panel, "on_shown"):
             self._plans_panel._store.load()
             self._plans_panel.on_shown()
-        self._set_status(
-            f"restored: {len(result.library.scripts)} script(s) · "
-            f"{len(result.library.tasks)} task(s) · {len(result.library.sequences)} "
-            f"sequence(s) · {len(result.plans)} plan(s) · {len(result.schedule)} scheduled")
 
     # ── Import / export the whole library ──────────────────────────────────────
 

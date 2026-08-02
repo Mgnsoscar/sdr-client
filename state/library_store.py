@@ -69,6 +69,30 @@ class LibraryStore:
         self._lib = lib.model_copy(deep=True)
         self._save()
 
+    def merge(self, other: m.Library) -> dict:
+        """Add definitions from `other` that this library doesn't already have
+        (scripts by name, tasks by name, sequences by id) — keeping everything
+        local. Used by a non-destructive Restore. Returns {scripts, tasks,
+        sequences} added counts."""
+        added = {"scripts": 0, "tasks": 0, "sequences": 0}
+        have_s = {s.name for s in self._lib.scripts}
+        for s in other.scripts:
+            if s.name not in have_s:
+                self._lib.scripts.append(s.model_copy(deep=True))
+                added["scripts"] += 1
+        have_t = {t.name for t in self._lib.tasks}
+        for t in other.tasks:
+            if t.name not in have_t:
+                self._lib.tasks.append(t.model_copy(deep=True))
+                added["tasks"] += 1
+        have_q = {q.id for q in self._lib.sequences}
+        for q in other.sequences:
+            if q.id not in have_q:
+                self._lib.sequences.append(q.model_copy(deep=True))
+                added["sequences"] += 1
+        self._save()
+        return added
+
     # ── Accessors ──────────────────────────────────────────────────────────────
 
     def scripts(self) -> List[m.LibraryScript]:
