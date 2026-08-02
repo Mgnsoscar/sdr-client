@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 from typing import List
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMessageBox,
     QPushButton, QStackedWidget, QVBoxLayout, QWidget,
@@ -32,7 +33,7 @@ from PyQt6.QtWidgets import (
 
 from api import models as m
 from api.fleet import LIBRARY_HOST
-from state import LibraryStore, pull_library
+from state import LibraryStore, pull_library, diff_library
 from .library_panels import LibraryTasksPanel
 from .plans_tab import PlansTab
 from .qt_adapter import DataHub
@@ -54,8 +55,14 @@ class LibraryTab(QWidget):
         self._store = self.hub.fleet.library_store() or LibraryStore()
         self._pull_pending = False
         self._deploy_pending = False
+        self._drift = {}          # hostname -> LibraryDiff (last check)
+        self._drift_err = {}      # hostname -> error string (unreachable / failed)
         self._build()
         self.hub.task_done.connect(self._on_task_done)
+        # Re-check a unit's definitions against the canonical library whenever it
+        # (re)connects, and — if enabled — reconcile it. Definition-only, so this
+        # never disturbs a live broadcast.
+        self.hub.stream_status.connect(self._on_stream_status)
         self._set_status()
 
     def _build(self) -> None:
@@ -88,13 +95,30 @@ class LibraryTab(QWidget):
         self._export_btn.setToolTip("Save the whole library to a JSON file")
         self._export_btn.clicked.connect(self._on_export)
         row.addWidget(self._export_btn)
+        self._check_btn = QPushButton("Check units")
+        self._check_btn.setToolTip("Compare every unit's definitions to this library "
+                                   "and report which have drifted")
+        self._check_btn.clicked.connect(self._on_check_units)
+        row.addWidget(self._check_btn)
         row.addStretch(1)
+        self._auto_reconcile = QCheckBox("Auto-reconcile on reconnect")
+        self._auto_reconcile.setToolTip(
+            "When a unit reconnects, automatically push additions and updates from "
+            "this library to it (never removes anything, never interrupts a run). "
+            "Leave off to only be notified of drift.")
+        row.addWidget(self._auto_reconcile)
         outer.addLayout(row)
 
         self._status = QLabel("")
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         self._status.setWordWrap(True)
         outer.addWidget(self._status)
+
+        self._units_status = QLabel("")
+        self._units_status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+        self._units_status.setWordWrap(True)
+        self._units_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        outer.addWidget(self._units_status)
 
         # Sub-tab bar
         subbar = QHBoxLayout()
@@ -291,12 +315,150 @@ class LibraryTab(QWidget):
         else:
             QMessageBox.information(self, "Deploy complete", f"Deployed to {len(ok)} unit(s).")
 
+    # ── Drift detection / reconcile-on-reconnect ───────────────────────────────
+
+    def _on_check_units(self) -> None:
+        hosts = self.hub.fleet.hostnames()
+        if not hosts:
+            QMessageBox.information(self, "Check units", "No units are configured.")
+            return
+        self._units_status.setText(f"checking {len(hosts)} unit(s)…")
+        self.hub.run_async("lib_check", lambda: self.hub.fleet.libraries_all())
+
+    def _on_stream_status(self, hostname: str, connected: bool) -> None:
+        # Only react to a (re)connect, and only for a real unit.
+        if not connected or hostname == LIBRARY_HOST or hostname not in self.hub.fleet:
+            return
+        self.hub.run_async(f"lib_check1:{hostname}",
+                           lambda h=hostname: self.hub.fleet.libraries_all([h]))
+
+    def _ingest_libraries(self, result) -> list:
+        """Fold a {host: Library|Exception} result into the drift maps. Returns the
+        hostnames that are reachable AND drifted (candidates to reconcile)."""
+        if not isinstance(result, dict):
+            return []
+        canon = self._store.library()
+        drifted = []
+        for host, val in result.items():
+            if isinstance(val, Exception) or not isinstance(val, m.Library):
+                self._drift_err[host] = str(val) if isinstance(val, Exception) else "no library"
+                self._drift.pop(host, None)
+                continue
+            self._drift_err.pop(host, None)
+            d = diff_library(canon, val)
+            self._drift[host] = d
+            if not d.in_sync:
+                drifted.append(host)
+        self._update_units_status()
+        return drifted
+
+    def _update_units_status(self) -> None:
+        checked = set(self._drift) | set(self._drift_err)
+        if not checked:
+            self._units_status.setText("")
+            return
+        in_sync = [h for h, d in self._drift.items() if d.in_sync]
+        drifted = [h for h, d in self._drift.items() if not d.in_sync]
+        unreachable = list(self._drift_err)
+        parts = [f"Units: {len(in_sync)} in sync"]
+        if drifted:
+            parts.append(f"{len(drifted)} drifted")
+        if unreachable:
+            parts.append(f"{len(unreachable)} unreachable")
+        line = "  ·  ".join(parts)
+        if drifted:
+            detail = "; ".join(f"{self._label(h)} ({self._drift[h].summary()})"
+                               for h in drifted[:4])
+            line += f"  —  {detail}" + (" …" if len(drifted) > 4 else "")
+        self._units_status.setText(line)
+        self._units_status.setStyleSheet(
+            f"font-size: 11px; color: {Palette.CRASH if drifted else Palette.TEXT_FAINT};")
+
+    def _maybe_auto_reconcile(self, drifted: list) -> None:
+        """If auto-reconcile is on, push additions/updates (never prune) to drifted
+        units so they converge without removing anything or touching a live run."""
+        if not drifted or not self._auto_reconcile.isChecked() or self._deploy_pending:
+            return
+        lib = self._store.library()
+        self.hub.run_async(
+            f"lib_reconcile:{','.join(drifted)}",
+            lambda hs=list(drifted): self.hub.fleet.deploy_all(lib, prune=False, units=hs))
+
     # ── Pull results ───────────────────────────────────────────────────────────
 
+    def _drift_report_lines(self) -> list:
+        """Human-readable per-host drift, for the Check-units dialog."""
+        lines = []
+        for host in self.hub.fleet.hostnames():
+            label = self._label(host)
+            if host in self._drift_err:
+                lines.append(f"• {label}: unreachable ({self._drift_err[host]})")
+                continue
+            d = self._drift.get(host)
+            if d is None:
+                lines.append(f"• {label}: not checked")
+            elif d.in_sync:
+                lines.append(f"• {label}: in sync")
+            else:
+                def names(ids):
+                    return ", ".join(d.seq_names.get(i, i) for i in ids)
+                bits = []
+                if d.scripts_add or d.scripts_change or d.scripts_remove:
+                    bits.append(f"scripts +[{', '.join(d.scripts_add)}] "
+                                f"~[{', '.join(d.scripts_change)}] -[{', '.join(d.scripts_remove)}]")
+                if d.tasks_add or d.tasks_change or d.tasks_remove:
+                    bits.append(f"tasks +[{', '.join(d.tasks_add)}] "
+                                f"~[{', '.join(d.tasks_change)}] -[{', '.join(d.tasks_remove)}]")
+                if d.sequences_add or d.sequences_change or d.sequences_remove:
+                    bits.append(f"sequences +[{names(d.sequences_add)}] "
+                                f"~[{names(d.sequences_change)}] -[{names(d.sequences_remove)}]")
+                lines.append(f"• {label}: DRIFTED — " + "; ".join(bits))
+        return lines
+
+    def _show_drift_details(self) -> None:
+        lines = self._drift_report_lines()
+        if not lines:
+            return
+        all_synced = all(h in self._drift and self._drift[h].in_sync
+                         for h in self.hub.fleet.hostnames())
+        body = "\n".join(lines)
+        if all_synced:
+            QMessageBox.information(self, "Check units",
+                                    "All units are in sync with the library.\n\n" + body)
+        else:
+            body += ("\n\nUse “Deploy to units…” to reconcile. Deploying updates "
+                     "definitions only — running tasks and active runs are untouched.")
+            QMessageBox.warning(self, "Check units — drift found", body)
+
     def _on_task_done(self, label: str, result) -> None:
+        if label == "lib_check":
+            self._ingest_libraries(result)
+            self._show_drift_details()
+            return
+        if label.startswith("lib_check1:"):
+            drifted = self._ingest_libraries(result)
+            self._maybe_auto_reconcile(drifted)
+            return
+        if label.startswith("lib_reconcile:"):
+            # A quiet write-through; refresh drift for those hosts so the line settles.
+            hosts = label.split(":", 1)[1].split(",")
+            if isinstance(result, dict):
+                oks = [h for h, r in result.items() if not isinstance(r, Exception)]
+                if oks:
+                    self.hub.run_async("lib_check_after",
+                                       lambda hs=oks: self.hub.fleet.libraries_all(hs))
+            return
+        if label == "lib_check_after":
+            self._ingest_libraries(result)
+            return
         if label == "lib_deploy":
             self._deploy_pending = False
             self._report_deploy(result)
+            # Refresh drift after a manual deploy so the units line reflects it.
+            hosts = self.hub.fleet.hostnames()
+            if hosts:
+                self.hub.run_async("lib_check_after",
+                                   lambda hs=list(hosts): self.hub.fleet.libraries_all(hs))
             return
         if not label.startswith("lib_pull:"):
             return
