@@ -12,7 +12,8 @@ from .netutil import local_ip
 from .plan_store import PlanStore, new_plan_id
 from .schedule_store import ScheduleStore, new_scheduled_id
 from .library_store import LibraryStore
+from .library_sync import pull_library
 
 __all__ = ["Poller", "FastSnapshot", "SlowSnapshot", "LogTailer", "local_ip",
            "PlanStore", "new_plan_id", "ScheduleStore", "new_scheduled_id",
-           "LibraryStore"]
+           "LibraryStore", "pull_library"]
