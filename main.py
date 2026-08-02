@@ -32,7 +32,9 @@ logger = logging.getLogger("sdr-client")
 def build_fleet(cfg: ClientConfig) -> Fleet:
     fleet = Fleet()
     for entry in cfg.units:
-        client = AgentClient(entry.label, addresses=entry.addresses, api_key=entry.api_key)
+        client = AgentClient(entry.uid, label=entry.label, addresses=entry.addresses,
+                             api_key=entry.api_key)
+        client.machine_id = entry.machine_id     # seed the known fingerprint
         fleet.add(client)
     return fleet
 

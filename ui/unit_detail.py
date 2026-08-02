@@ -312,7 +312,7 @@ class UnitDetail(QWidget):
 
         self.hostname = hostname
         client = self.fleet.get(hostname)
-        self._title.setText(client.unit_id)
+        self._title.setText(client.label)
 
         # Rebuild the sub-stack for this unit
         while self._sub_stack.count():

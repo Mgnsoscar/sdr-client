@@ -76,11 +76,13 @@ class AgentClient:
         use_https: bool = False,
         keepalive_expiry: float = 120.0,
         addresses: Optional[List[str]] = None,
+        label: str = "",
     ):
         """
         hostname : the unit's STABLE identity — the fleet key, and the value used in
-                   plans/drift/UI. It may be a real host (single-address units) or a
-                   label you chose. It is NOT necessarily what we connect to.
+                   plans/drift/UI. Normally a permanent uid ("unit_ab12…"); it never
+                   changes and is NOT what we connect to.
+        label    : the human-facing display name (renamable, unlike hostname).
         addresses: the hosts/IPs to actually connect to, tried in order until one
                    answers (home wifi, work ethernet, an mDNS .local name…).
                    Defaults to [hostname] so a single-address unit behaves as before.
@@ -90,7 +92,9 @@ class AgentClient:
                            above the poll interval so connections aren't churned.
         """
         self.hostname = hostname                    # identity / fleet key (not a target)
-        self.unit_id = unit_id or hostname
+        self.label = label or hostname              # display name
+        self.unit_id = unit_id or self.label        # agent's reported id (from /info)
+        self.machine_id = ""                        # physical Pi fingerprint (from /info)
         self.api_key = api_key
         self.port = port
         self.timeout = timeout
@@ -333,6 +337,8 @@ class AgentClient:
                 data = self._request("GET", "/info")
                 info = m.AgentInfo(**data)
                 self.unit_id = info.unit_id
+                if info.machine_id:
+                    self.machine_id = info.machine_id
                 self.state = ConnectionState.ONLINE
                 self.last_error = ""
                 self.last_latency_s = time.perf_counter() - t0
@@ -384,8 +390,10 @@ class AgentClient:
     def info(self) -> m.AgentInfo:
         data = self._request("GET", "/info")
         info = m.AgentInfo(**data)
-        # Adopt the real unit_id once we know it
+        # Adopt the real unit_id + machine-id fingerprint once we know them
         self.unit_id = info.unit_id
+        if info.machine_id:
+            self.machine_id = info.machine_id
         return info
 
     def system(self) -> m.SystemHealth:

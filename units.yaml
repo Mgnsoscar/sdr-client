@@ -1,24 +1,26 @@
 # SDR Broadcaster Control — known units
 #
 # You can add/edit/remove units from within the app (Units tab → "Add unit…",
-# and Edit/Remove on a unit's page); it saves back here.
+# and Edit/Remove on a unit's page); it saves back here. Units also show up
+# automatically via mDNS discovery in the "Add unit" dialog.
 #
-# Each unit has a stable name (label) and one or more addresses. The app tries
-# the addresses in order and uses whichever answers — so a unit that moves
-# between networks (home wifi, work ethernet) just needs all its addresses
-# listed once. An mDNS ".local" name resolves on any network, so it's a good
-# first address.
+# Each unit has:
+#   uid        — a permanent internal id (assigned automatically; the stable
+#                identity that plans and schedule reference — don't hand-edit)
+#   label      — a display name you choose, freely renamable
+#   addresses  — every address to try, in order; the first that answers wins
+#   machine_id — the Pi's /etc/machine-id, learned on connect (recognizes the
+#                same physical Pi across hostname/IP changes)
 
 webhook_port: 8766       # port the GUI listens on for unit events
 api_key: ""              # shared secret, if your agents require one (else leave blank)
 
-units:
-  # - label: Broadcaster 1
+units: []
+  # - uid: unit_a1b2c3d4
+  #   label: Broadcaster 1
   #   addresses:
   #     - broadcaster-1.local      # mDNS name — resolves on any network
   #     - 192.168.1.42             # home wifi IP
   #     - 169.254.61.247           # work ethernet IP
-  #   api_key: ""                  # optional per-unit override
-  - label: Broadcaster 1
-    addresses:
-      - 192.168.100.100            # an IP works too
+  #   api_key: ""
+  #   machine_id: ""

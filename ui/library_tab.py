@@ -220,7 +220,7 @@ class LibraryTab(QWidget):
         by_label = {}
         for h in hosts:
             try:
-                label = self.hub.fleet.get(h).unit_id
+                label = self.hub.fleet.get(h).label
             except KeyError:
                 label = h
             labels.append(label)
@@ -273,7 +273,7 @@ class LibraryTab(QWidget):
 
     def _label(self, hostname: str) -> str:
         try:
-            return self.hub.fleet.get(hostname).unit_id
+            return self.hub.fleet.get(hostname).label
         except KeyError:
             return hostname
 

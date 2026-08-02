@@ -113,7 +113,7 @@ class UnitsTab(QWidget):
             self._grid.addWidget(empty, 0, 0)
         # Card per unit, keyed by stable hostname/label (matches snapshot keys).
         for i, client in enumerate(units):
-            card = UnitCard(client.hostname, display_name=client.unit_id)
+            card = UnitCard(client.hostname, display_name=client.label)
             card.clicked.connect(self._on_card_clicked)
             self._cards[client.hostname] = card
             self._grid.addWidget(card, i // self.COLUMNS, i % self.COLUMNS)
@@ -124,63 +124,75 @@ class UnitsTab(QWidget):
     def _known_addresses(self) -> set:
         return {a for u in self._cfg.units for a in u.addresses}
 
+    def _labels(self) -> set:
+        return {u.label for u in self._cfg.units}
+
+    def _make_client(self, entry: UnitEntry) -> AgentClient:
+        client = AgentClient(entry.uid, label=entry.label,
+                             addresses=entry.addresses, api_key=entry.api_key)
+        client.machine_id = entry.machine_id
+        return client
+
     def _on_add(self) -> None:
-        dlg = UnitDialog(taken_labels=set(self.fleet.hostnames()),
+        dlg = UnitDialog(taken_labels=self._labels(),
                          taken_addresses=self._known_addresses(),
                          discovered_provider=self.hub.discovery.discovered,
                          rescan=self.hub.discovery.rescan,
                          parent=self.window())
         if not dlg.exec() or dlg.result_entry is None:
             return
-        entry = dlg.result_entry
+        entry = dlg.result_entry            # carries a fresh permanent uid
         self._cfg.units.append(entry)
         self._persist()
-        client = AgentClient(entry.label, addresses=entry.addresses, api_key=entry.api_key)
+        client = self._make_client(entry)
         self.hub.add_unit(client)
         self._rebuild_grid()
-        self.hub.run_async(f"warmup:{entry.label}", client.warmup)
+        self.hub.run_async(f"warmup:{entry.uid}", client.warmup)
         self.hub.refresh_now()
 
-    def edit_unit(self, label: str) -> None:
-        entry = next((u for u in self._cfg.units if u.label == label), None)
+    def edit_unit(self, uid: str) -> None:
+        entry = next((u for u in self._cfg.units if u.uid == uid), None)
         if entry is None:
-            # Fall back to a live-fleet view if it isn't in the config for some reason.
             try:
-                c = self.fleet.get(label)
-                entry = UnitEntry(label=label, addresses=c.addresses(), api_key=c.api_key)
+                c = self.fleet.get(uid)
+                entry = UnitEntry(label=c.label, addresses=c.addresses(),
+                                  api_key=c.api_key, uid=uid, machine_id=c.machine_id)
             except KeyError:
                 return
-        dlg = UnitDialog(existing=entry, taken_labels=set(self.fleet.hostnames()),
+        dlg = UnitDialog(existing=entry,
+                         taken_labels={u.label for u in self._cfg.units if u.uid != uid},
                          parent=self.window())
         if not dlg.exec() or dlg.result_entry is None:
             return
         new = dlg.result_entry
-        # Swap the config entry.
-        self._cfg.units = [new if u.label == label else u for u in self._cfg.units]
-        if not any(u.label == label for u in self._cfg.units):
-            self._cfg.units.append(new)
+        new.uid = entry.uid                 # permanent id survives a rename
+        new.machine_id = entry.machine_id
+        self._cfg.units = [new if u.uid == uid else u for u in self._cfg.units]
         self._persist()
-        # Replace the live client (a rename changes the fleet key).
-        self.hub.remove_unit(label)
-        client = AgentClient(new.label, addresses=new.addresses, api_key=new.api_key)
+        # Replace the live client under the SAME uid key (so plans stay intact),
+        # applying the new label / addresses / api key.
+        self.hub.remove_unit(uid)
+        client = self._make_client(new)
         self.hub.add_unit(client)
         self._show_grid()
         self._rebuild_grid()
-        self.hub.run_async(f"warmup:{new.label}", client.warmup)
+        self.hub.run_async(f"warmup:{new.uid}", client.warmup)
         self.hub.refresh_now()
 
-    def remove_unit(self, label: str) -> None:
+    def remove_unit(self, uid: str) -> None:
+        entry = next((u for u in self._cfg.units if u.uid == uid), None)
+        name = entry.label if entry else uid
         if QMessageBox.question(
             self, "Remove unit",
-            f"Remove '{label}' from this PC?\nThis only forgets the unit here; the "
+            f"Remove '{name}' from this PC?\nThis only forgets the unit here; the "
             f"unit and its broadcasts are untouched.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         ) != QMessageBox.StandardButton.Yes:
             return
-        self._cfg.units = [u for u in self._cfg.units if u.label != label]
+        self._cfg.units = [u for u in self._cfg.units if u.uid != uid]
         self._persist()
-        self.hub.remove_unit(label)
+        self.hub.remove_unit(uid)
         self._show_grid()
         self._rebuild_grid()
 
