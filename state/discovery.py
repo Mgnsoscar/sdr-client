@@ -131,6 +131,27 @@ class Discovery:
             except Exception:  # noqa: BLE001 — never let a UI callback kill the browser
                 logger.debug("Discovery on_change callback raised", exc_info=True)
 
+    def rescan(self) -> None:
+        """Force a fresh round of mDNS queries (e.g. the user clicked Refresh).
+        The background browser already keeps results live, but this restarts it so
+        it re-queries immediately and picks up anything slow to respond. The cache
+        is kept so the list doesn't flicker."""
+        if not self._started:
+            self.start()
+            return
+        try:
+            from zeroconf import ServiceBrowser
+        except ImportError:
+            return
+        try:
+            if self._browser is not None:
+                self._browser.cancel()
+            self._browser = ServiceBrowser(self._zc, SERVICE_TYPE,
+                                           handlers=[self._on_service])
+            logger.info("Discovery: re-scanning for %s", SERVICE_TYPE)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Discovery re-scan failed: %s", exc)
+
     def discovered(self) -> List[DiscoveredUnit]:
         """A snapshot of currently-advertised units, sorted by name."""
         with self._lock:

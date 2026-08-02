@@ -128,6 +128,7 @@ class UnitsTab(QWidget):
         dlg = UnitDialog(taken_labels=set(self.fleet.hostnames()),
                          taken_addresses=self._known_addresses(),
                          discovered_provider=self.hub.discovery.discovered,
+                         rescan=self.hub.discovery.rescan,
                          parent=self.window())
         if not dlg.exec() or dlg.result_entry is None:
             return

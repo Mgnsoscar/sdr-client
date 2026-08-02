@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Callable, List, Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QVBoxLayout,
@@ -25,7 +25,8 @@ class UnitDialog(QDialog):
     def __init__(self, existing: Optional[UnitEntry] = None,
                  taken_labels: Optional[set] = None,
                  discovered_provider: Optional[Callable[[], list]] = None,
-                 taken_addresses: Optional[set] = None, parent=None):
+                 taken_addresses: Optional[set] = None,
+                 rescan: Optional[Callable[[], None]] = None, parent=None):
         super().__init__(parent)
         self._existing = existing
         self._taken = {l.lower() for l in (taken_labels or set())}
@@ -35,6 +36,7 @@ class UnitDialog(QDialog):
             self._taken.discard(existing.label.lower())
         # Live discovery is only offered when adding (not editing).
         self._discovered_provider = discovered_provider if existing is None else None
+        self._rescan = rescan
         self.result_entry: Optional[UnitEntry] = None
 
         self.setWindowTitle("Edit unit" if existing else "Add unit")
@@ -61,7 +63,7 @@ class UnitDialog(QDialog):
             row.addStretch(1)
             refresh = QPushButton("Refresh")
             refresh.setFixedWidth(80)
-            refresh.clicked.connect(self._refresh_discovered)
+            refresh.clicked.connect(self._on_refresh)
             row.addWidget(refresh)
             outer.addLayout(row)
 
@@ -115,8 +117,24 @@ class UnitDialog(QDialog):
 
     # ── Discovery ────────────────────────────────────────────────────────────
 
+    def _on_refresh(self) -> None:
+        # Kick off a fresh mDNS query, then re-read now and again shortly after so
+        # units that answer within the next second or two show up.
+        if self._rescan is not None:
+            try:
+                self._rescan()
+            except Exception:  # noqa: BLE001
+                pass
+        self._refresh_discovered()
+        for delay in (700, 1600):
+            QTimer.singleShot(delay, self._refresh_discovered)
+
     def _refresh_discovered(self) -> None:
         if self._discovered_provider is None:
+            return
+        try:
+            self._disc.count()   # touch the widget; a delayed timer may fire after
+        except RuntimeError:     # the dialog was closed & its C++ object deleted
             return
         try:
             units = self._discovered_provider() or []
