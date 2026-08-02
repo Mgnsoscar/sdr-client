@@ -26,8 +26,8 @@ import json
 from typing import List
 
 from PyQt6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMessageBox, QPushButton,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QCheckBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMessageBox,
+    QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from api import models as m
@@ -53,6 +53,7 @@ class LibraryTab(QWidget):
         # has none registered (e.g. an isolated test harness).
         self._store = self.hub.fleet.library_store() or LibraryStore()
         self._pull_pending = False
+        self._deploy_pending = False
         self._build()
         self.hub.task_done.connect(self._on_task_done)
         self._set_status()
@@ -73,6 +74,12 @@ class LibraryTab(QWidget):
                                   "sequences into the shared library")
         self._pull_btn.clicked.connect(self._on_pull)
         row.addWidget(self._pull_btn)
+        self._deploy_btn = QPushButton("Deploy to units…")
+        self._deploy_btn.setToolTip("Push this library to the units so they all hold "
+                                    "the same definitions (updates definitions only — "
+                                    "never interrupts a live broadcast)")
+        self._deploy_btn.clicked.connect(self._on_deploy)
+        row.addWidget(self._deploy_btn)
         self._import_btn = QPushButton("Import…")
         self._import_btn.setToolTip("Load a library from a JSON file (replaces the current one)")
         self._import_btn.clicked.connect(self._on_import)
@@ -208,7 +215,89 @@ class LibraryTab(QWidget):
         client = self.hub.fleet.get(hostname)
         self.hub.run_async(f"lib_pull:{hostname}", lambda: pull_library(client))
 
+    # ── Deploy to units ────────────────────────────────────────────────────────
+
+    def _label(self, hostname: str) -> str:
+        try:
+            return self.hub.fleet.get(hostname).unit_id
+        except KeyError:
+            return hostname
+
+    def _on_deploy(self) -> None:
+        if self._deploy_pending:
+            return
+        lib = self._store.library()
+        if not (lib.scripts or lib.tasks or lib.sequences):
+            QMessageBox.information(self, "Deploy", "The library is empty — nothing to deploy.")
+            return
+        hosts = self.hub.fleet.hostnames()
+        if not hosts:
+            QMessageBox.information(self, "Deploy", "No units are configured to deploy to.")
+            return
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Deploy library")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(f"Deploy the library to {len(hosts)} unit(s)?")
+        box.setInformativeText(
+            f"{len(lib.scripts)} script(s) · {len(lib.tasks)} task(s) · "
+            f"{len(lib.sequences)} sequence(s).\n\n"
+            "Definitions only — running tasks and active runs are never interrupted. "
+            "Unreachable units are reported and can be redeployed later.")
+        prune = QCheckBox("Prune — remove definitions the library omits (make each unit identical)")
+        prune.setChecked(True)
+        box.setCheckBox(prune)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        do_prune = prune.isChecked()
+        self._deploy_pending = True
+        self._set_status(f"deploying to {len(hosts)} unit(s)…")
+        self.hub.run_async("lib_deploy",
+                           lambda: self.hub.fleet.deploy_all(lib, do_prune))
+
+    def _report_deploy(self, result) -> None:
+        if not isinstance(result, dict):
+            self._set_status(f"deploy failed: {result}", error=True)
+            QMessageBox.warning(self, "Deploy failed", f"{result}")
+            return
+        ok = {h: r for h, r in result.items() if not isinstance(r, Exception)}
+        bad = {h: r for h, r in result.items() if isinstance(r, Exception)}
+        notes = []
+        for h, r in ok.items():
+            parts = []
+            if getattr(r, "tasks_skipped", None):
+                parts.append(f"tasks kept running: {', '.join(r.tasks_skipped)}")
+            if getattr(r, "sequences_skipped", None):
+                parts.append(f"sequences with active runs kept: {', '.join(r.sequences_skipped)}")
+            if parts:
+                notes.append(f"{self._label(h)}: " + "; ".join(parts))
+        self._set_status(
+            f"deployed to {len(ok)} unit(s)" + (f" · {len(bad)} failed" if bad else ""),
+            error=bool(bad))
+        if bad or notes:
+            lines = []
+            if bad:
+                lines.append("Failed (redeploy when reachable):")
+                lines += [f"• {self._label(h)}: {e}" for h, e in bad.items()]
+            if notes:
+                if lines:
+                    lines.append("")
+                lines.append("Left in place because in use (nothing on air was touched):")
+                lines += [f"• {n}" for n in notes]
+            QMessageBox.warning(self, "Deploy — details", "\n".join(lines))
+        else:
+            QMessageBox.information(self, "Deploy complete", f"Deployed to {len(ok)} unit(s).")
+
+    # ── Pull results ───────────────────────────────────────────────────────────
+
     def _on_task_done(self, label: str, result) -> None:
+        if label == "lib_deploy":
+            self._deploy_pending = False
+            self._report_deploy(result)
+            return
         if not label.startswith("lib_pull:"):
             return
         self._pull_pending = False

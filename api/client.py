@@ -514,6 +514,22 @@ class AgentClient:
         return m.SequenceRun(**self._request("DELETE", f"/sequence-runs/{run_id}"))
 
     # ══════════════════════════════════════════════════════════════════════════
+    # Library (deploy / snapshot the whole definition set)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def get_library(self) -> m.Library:
+        """This unit's current definitions (scripts + tasks + sequences), for drift
+        comparison against the canonical library."""
+        return m.Library(**self._request("GET", "/library"))
+
+    def deploy_library(self, library: m.Library, prune: bool = True) -> m.DeployLibraryResult:
+        """Converge this unit to `library`. Definition-only and safe on air: the
+        agent keeps running tasks alive and never deletes a sequence with an active
+        run. prune=True makes the unit match exactly; prune=False only adds/updates."""
+        body = {"library": library.model_dump(), "prune": prune}
+        return m.DeployLibraryResult(**self._request("PUT", "/library", json=body))
+
+    # ══════════════════════════════════════════════════════════════════════════
     # Panic
     # ══════════════════════════════════════════════════════════════════════════
 

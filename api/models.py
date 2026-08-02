@@ -380,3 +380,16 @@ class Library(BaseModel):
     scripts: List[LibraryScript] = []
     tasks: List[TaskConfig] = []
     sequences: List[Sequence] = []
+
+
+class DeployLibraryResult(BaseModel):
+    """What a unit's PUT /library changed. *_skipped fields hold definitions the
+    deploy left in place because they were in use (a running task, a sequence with
+    an active run) — nothing on air is ever stopped."""
+    scripts_written: List[str] = []
+    scripts_deleted: List[str] = []
+    tasks_reload: dict = {}
+    tasks_skipped: List[str] = []
+    sequences_upserted: List[str] = []
+    sequences_deleted: List[str] = []
+    sequences_skipped: List[str] = []

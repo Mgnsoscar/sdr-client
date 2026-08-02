@@ -171,6 +171,18 @@ class Fleet:
         """Task status list per unit. Values are list[ProcessStatus] or Exception."""
         return self._fan_out(lambda c: c.list_tasks(), units)
 
+    def libraries_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Each unit's current library snapshot (for drift detection). Values are
+        m.Library or an Exception."""
+        return self._fan_out(lambda c: c.get_library(), units)
+
+    def deploy_all(self, library: "m.Library", prune: bool = True,
+                   units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Deploy the canonical library to each unit (default: all). Values are
+        m.DeployLibraryResult or an Exception. Definition-only on every unit — a
+        live broadcast is never interrupted."""
+        return self._fan_out(lambda c: c.deploy_library(library, prune), units)
+
     def panic_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
         """
         EMERGENCY STOP across the fleet. Returns {unit_id: PanicResult|Exception}.
