@@ -529,6 +529,26 @@ class AgentClient:
         body = {"library": library.model_dump(), "prune": prune}
         return m.DeployLibraryResult(**self._request("PUT", "/library", json=body))
 
+    # ── Client-state replica (plans + schedule stored on the unit) ─────────────
+
+    def get_plans(self) -> List[m.Plan]:
+        """This unit's replica of the PC's plans (opaque storage — not executed here)."""
+        return [m.Plan(**p) for p in self._request("GET", "/plans")]
+
+    def put_plans(self, plans: List[m.Plan]) -> List[m.Plan]:
+        """Replace this unit's plan replica with `plans` (wholesale)."""
+        body = {"plans": [p.model_dump() for p in plans]}
+        return [m.Plan(**p) for p in self._request("PUT", "/plans", json=body)]
+
+    def get_schedule(self) -> List[m.ScheduledPlan]:
+        """This unit's replica of the PC's schedule."""
+        return [m.ScheduledPlan(**s) for s in self._request("GET", "/schedule")]
+
+    def put_schedule(self, schedule: List[m.ScheduledPlan]) -> List[m.ScheduledPlan]:
+        """Replace this unit's schedule replica with `schedule` (wholesale)."""
+        body = {"schedule": [s.model_dump() for s in schedule]}
+        return [m.ScheduledPlan(**s) for s in self._request("PUT", "/schedule", json=body)]
+
     # ══════════════════════════════════════════════════════════════════════════
     # Panic
     # ══════════════════════════════════════════════════════════════════════════

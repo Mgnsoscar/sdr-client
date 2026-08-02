@@ -183,6 +183,41 @@ class Fleet:
         live broadcast is never interrupted."""
         return self._fan_out(lambda c: c.deploy_library(library, prune), units)
 
+    # ── Client-state replica (plans + schedule) ───────────────────────────────
+
+    def plans_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Each unit's plan replica. Values are list[Plan] or an Exception."""
+        return self._fan_out(lambda c: c.get_plans(), units)
+
+    def schedule_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Each unit's schedule replica. Values are list[ScheduledPlan] or Exception."""
+        return self._fan_out(lambda c: c.get_schedule(), units)
+
+    def deploy_plans_all(self, plans: List["m.Plan"],
+                         units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Replicate the PC's plans to each unit (wholesale replace)."""
+        return self._fan_out(lambda c: c.put_plans(plans), units)
+
+    def deploy_schedule_all(self, schedule: List["m.ScheduledPlan"],
+                            units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Replicate the PC's schedule to each unit (wholesale replace)."""
+        return self._fan_out(lambda c: c.put_schedule(schedule), units)
+
+    def deploy_state_all(self, library: "m.Library", plans: List["m.Plan"],
+                         schedule: List["m.ScheduledPlan"], prune: bool = True,
+                         units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Replicate EVERYTHING to each unit in one pass: the library (definition-
+        only, safe on air), then the plan + schedule replicas (wholesale). Values
+        are the unit's DeployLibraryResult on success, or the Exception that stopped
+        it. Plans/schedule are pushed only after the library succeeds, so a unit
+        never ends up with plans referencing sequences it doesn't yet have."""
+        def do(c):
+            res = c.deploy_library(library, prune)
+            c.put_plans(plans)
+            c.put_schedule(schedule)
+            return res
+        return self._fan_out(do, units)
+
     def panic_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
         """
         EMERGENCY STOP across the fleet. Returns {unit_id: PanicResult|Exception}.

@@ -172,3 +172,30 @@ def pull_library(client) -> m.Library:
         sequences = []
 
     return m.Library(scripts=scripts, tasks=tasks, sequences=list(sequences))
+
+
+@dataclass
+class UnitSnapshot:
+    """Everything a fresh PC needs from one unit to rebuild: the shared library
+    plus the plan + schedule replicas the unit was holding."""
+    library: m.Library
+    plans: List[m.Plan] = field(default_factory=list)
+    schedule: List[m.ScheduledPlan] = field(default_factory=list)
+
+
+def pull_everything(client) -> UnitSnapshot:
+    """Snapshot a unit's library AND its plan/schedule replicas. Worker thread —
+    used to restore a fresh PC from any one reachable unit (all units hold the
+    same replicas, so one is enough). Each part degrades to empty on failure."""
+    library = pull_library(client)
+    try:
+        plans = list(client.get_plans())
+    except Exception as exc:  # noqa: BLE001
+        logger.error("pull_everything: get_plans failed: %s", exc)
+        plans = []
+    try:
+        schedule = list(client.get_schedule())
+    except Exception as exc:  # noqa: BLE001
+        logger.error("pull_everything: get_schedule failed: %s", exc)
+        schedule = []
+    return UnitSnapshot(library=library, plans=plans, schedule=schedule)

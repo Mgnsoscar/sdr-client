@@ -33,7 +33,10 @@ from PyQt6.QtWidgets import (
 
 from api import models as m
 from api.fleet import LIBRARY_HOST
-from state import LibraryStore, pull_library, diff_library
+from state import (
+    LibraryStore, PlanStore, ScheduleStore, pull_library, pull_everything,
+    diff_library, UnitSnapshot,
+)
 from .library_panels import LibraryTasksPanel
 from .plans_tab import PlansTab
 from .qt_adapter import DataHub
@@ -53,6 +56,11 @@ class LibraryTab(QWidget):
         # write the same library. Falls back to a private store only if the fleet
         # has none registered (e.g. an isolated test harness).
         self._store = self.hub.fleet.library_store() or LibraryStore()
+        # Canonical plans + schedule live in these stores (same files the Plans and
+        # Timeline tabs use). They are replicated to the units alongside the library
+        # so a fresh PC can restore everything from unit IPs alone.
+        self._plan_store = PlanStore()
+        self._sched_store = ScheduleStore()
         self._pull_pending = False
         self._deploy_pending = False
         self._drift = {}          # hostname -> LibraryDiff (last check)
@@ -75,10 +83,10 @@ class LibraryTab(QWidget):
         title.setStyleSheet(f"font-size: 16px; font-weight: 600; color: {Palette.TEXT};")
         row.addWidget(title)
         row.addSpacing(12)
-        self._pull_btn = QPushButton("Pull from unit…")
+        self._pull_btn = QPushButton("Restore from unit…")
         self._pull_btn.setObjectName("primary")
-        self._pull_btn.setToolTip("Snapshot a connected unit's scripts, tasks and "
-                                  "sequences into the shared library")
+        self._pull_btn.setToolTip("Rebuild this PC from a unit: replace the local "
+                                  "library, plans and schedule with the unit's copy")
         self._pull_btn.clicked.connect(self._on_pull)
         row.addWidget(self._pull_btn)
         self._deploy_btn = QPushButton("Deploy to units…")
@@ -224,20 +232,23 @@ class LibraryTab(QWidget):
                 return
             hostname = by_label[label]
 
-        if not self._store.library().scripts and not self._store.tasks():
-            pass  # empty library — no need to warn about replacing
+        empty = (not self._store.library().scripts and not self._store.tasks()
+                 and not self._plan_store.plans() and not self._sched_store.entries())
+        if empty:
+            pass  # nothing local to overwrite — no need to warn
         elif QMessageBox.question(
-            self, "Replace library",
-            "Pulling replaces the current library with this unit's definitions.\nContinue?",
+            self, "Restore from unit",
+            "This replaces the local library, plans, and schedule with this unit's "
+            "copy — use it to rebuild a fresh PC from a unit.\nContinue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         ) != QMessageBox.StandardButton.Yes:
             return
 
         self._pull_pending = True
-        self._set_status(f"pulling from {hostname}…")
+        self._set_status(f"restoring from {hostname}…")
         client = self.hub.fleet.get(hostname)
-        self.hub.run_async(f"lib_pull:{hostname}", lambda: pull_library(client))
+        self.hub.run_async(f"lib_pull:{hostname}", lambda: pull_everything(client))
 
     # ── Deploy to units ────────────────────────────────────────────────────────
 
@@ -251,8 +262,14 @@ class LibraryTab(QWidget):
         if self._deploy_pending:
             return
         lib = self._store.library()
-        if not (lib.scripts or lib.tasks or lib.sequences):
-            QMessageBox.information(self, "Deploy", "The library is empty — nothing to deploy.")
+        # Reload plans/schedule from disk so we replicate what the Plans and
+        # Timeline tabs have most recently saved (they use these same files).
+        self._plan_store.load()
+        self._sched_store.load()
+        plans = self._plan_store.plans()
+        schedule = self._sched_store.entries()
+        if not (lib.scripts or lib.tasks or lib.sequences or plans or schedule):
+            QMessageBox.information(self, "Deploy", "Nothing to deploy yet.")
             return
         hosts = self.hub.fleet.hostnames()
         if not hosts:
@@ -260,15 +277,18 @@ class LibraryTab(QWidget):
             return
 
         box = QMessageBox(self)
-        box.setWindowTitle("Deploy library")
+        box.setWindowTitle("Deploy to units")
         box.setIcon(QMessageBox.Icon.Question)
-        box.setText(f"Deploy the library to {len(hosts)} unit(s)?")
+        box.setText(f"Replicate everything to {len(hosts)} unit(s)?")
         box.setInformativeText(
             f"{len(lib.scripts)} script(s) · {len(lib.tasks)} task(s) · "
-            f"{len(lib.sequences)} sequence(s).\n\n"
-            "Definitions only — running tasks and active runs are never interrupted. "
-            "Unreachable units are reported and can be redeployed later.")
-        prune = QCheckBox("Prune — remove definitions the library omits (make each unit identical)")
+            f"{len(lib.sequences)} sequence(s) · {len(plans)} plan(s) · "
+            f"{len(schedule)} scheduled.\n\n"
+            "Library definitions are updated in place — running tasks and active "
+            "runs are never interrupted; plans and schedule are stored on each unit "
+            "for recovery. Unreachable units are reported and can be redeployed later.")
+        prune = QCheckBox("Prune — remove library definitions the library omits "
+                          "(make each unit identical)")
         prune.setChecked(True)
         box.setCheckBox(prune)
         box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
@@ -279,8 +299,9 @@ class LibraryTab(QWidget):
         do_prune = prune.isChecked()
         self._deploy_pending = True
         self._set_status(f"deploying to {len(hosts)} unit(s)…")
-        self.hub.run_async("lib_deploy",
-                           lambda: self.hub.fleet.deploy_all(lib, do_prune))
+        self.hub.run_async(
+            "lib_deploy",
+            lambda: self.hub.fleet.deploy_state_all(lib, plans, schedule, do_prune))
 
     def _report_deploy(self, result) -> None:
         if not isinstance(result, dict):
@@ -376,13 +397,19 @@ class LibraryTab(QWidget):
 
     def _maybe_auto_reconcile(self, drifted: list) -> None:
         """If auto-reconcile is on, push additions/updates (never prune) to drifted
-        units so they converge without removing anything or touching a live run."""
+        units so they converge without removing anything or touching a live run —
+        and refresh their plan + schedule replicas so a recovered PC stays whole."""
         if not drifted or not self._auto_reconcile.isChecked() or self._deploy_pending:
             return
         lib = self._store.library()
+        self._plan_store.load()
+        self._sched_store.load()
+        plans = self._plan_store.plans()
+        schedule = self._sched_store.entries()
         self.hub.run_async(
             f"lib_reconcile:{','.join(drifted)}",
-            lambda hs=list(drifted): self.hub.fleet.deploy_all(lib, prune=False, units=hs))
+            lambda hs=list(drifted): self.hub.fleet.deploy_state_all(
+                lib, plans, schedule, prune=False, units=hs))
 
     # ── Pull results ───────────────────────────────────────────────────────────
 
@@ -463,12 +490,22 @@ class LibraryTab(QWidget):
         if not label.startswith("lib_pull:"):
             return
         self._pull_pending = False
-        if isinstance(result, Exception) or not isinstance(result, m.Library):
-            self._set_status(f"pull failed: {result}", error=True)
+        if isinstance(result, Exception) or not isinstance(result, UnitSnapshot):
+            self._set_status(f"restore failed: {result}", error=True)
             return
-        self._store.replace(result)
+        # Restore the library and the plan + schedule replicas together.
+        self._store.replace(result.library)
+        self._plan_store.replace_all(result.plans)
+        self._sched_store.replace_all(result.schedule)
         self._refresh_panels()
-        self._set_status("pulled from unit")
+        # The Plans sub-tab shares the plan file — reload it so it shows the restore.
+        if hasattr(self._plans_panel, "on_shown"):
+            self._plans_panel._store.load()
+            self._plans_panel.on_shown()
+        self._set_status(
+            f"restored: {len(result.library.scripts)} script(s) · "
+            f"{len(result.library.tasks)} task(s) · {len(result.library.sequences)} "
+            f"sequence(s) · {len(result.plans)} plan(s) · {len(result.schedule)} scheduled")
 
     # ── Import / export the whole library ──────────────────────────────────────
 
