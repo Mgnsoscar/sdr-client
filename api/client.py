@@ -75,15 +75,21 @@ class AgentClient:
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
         use_https: bool = False,
         keepalive_expiry: float = 120.0,
+        addresses: Optional[List[str]] = None,
     ):
         """
-        hostname : e.g. "hostname-1.local" or an IP. No scheme, no port.
+        hostname : the unit's STABLE identity — the fleet key, and the value used in
+                   plans/drift/UI. It may be a real host (single-address units) or a
+                   label you chose. It is NOT necessarily what we connect to.
+        addresses: the hosts/IPs to actually connect to, tried in order until one
+                   answers (home wifi, work ethernet, an mDNS .local name…).
+                   Defaults to [hostname] so a single-address unit behaves as before.
         unit_id  : label for errors/logs; defaults to hostname until /info is read.
         api_key  : sent as X-API-Key if the agent has auth enabled.
         keepalive_expiry : seconds httpx keeps an idle pooled connection. Set well
                            above the poll interval so connections aren't churned.
         """
-        self.hostname = hostname
+        self.hostname = hostname                    # identity / fleet key (not a target)
         self.unit_id = unit_id or hostname
         self.api_key = api_key
         self.port = port
@@ -93,11 +99,14 @@ class AgentClient:
         self.keepalive_expiry = keepalive_expiry
         self.scheme = "https" if use_https else "http"
 
-        # The address httpx actually connects to. Starts as the hostname; after a
-        # successful resolve (in warmup) we pin it to the IP so reconnects skip the
-        # slow mDNS lookup. The Host header still carries the hostname.
+        # Candidate connect targets. The active one is what httpx talks to; on
+        # warmup we probe them in order and stick to the first that answers.
+        self._addresses: List[str] = [a for a in (addresses or [hostname]) if a] or [hostname]
+        self._active_addr: str = self._addresses[0]
+        # After a successful resolve (in warmup) we pin the active address to its IP
+        # so reconnects skip the slow mDNS lookup. The Host header carries the addr.
         self._resolved_ip: Optional[str] = None
-        self.base_url = f"{self.scheme}://{hostname}:{port}"
+        self.base_url = f"{self.scheme}://{self._active_addr}:{port}"
 
         # Connection status — updated by warmup()/health() and every request.
         # Construction does NO network I/O; state starts UNKNOWN.
@@ -152,10 +161,10 @@ class AgentClient:
         )
 
         if self._resolved_ip:
-            # Connect to the cached IP; keep the Host header as the hostname so the
-            # agent still sees the expected host.
+            # Connect to the cached IP; keep the Host header as the active address so
+            # the agent still sees the expected host.
             base = f"{self.scheme}://{self._resolved_ip}:{self.port}"
-            headers = {**self._headers, "Host": f"{self.hostname}:{self.port}"}
+            headers = {**self._headers, "Host": f"{self._active_addr}:{self.port}"}
         else:
             base = self.base_url
             headers = self._headers
@@ -247,27 +256,43 @@ class AgentClient:
     # Meta / health
     # ══════════════════════════════════════════════════════════════════════════
 
+    def addresses(self) -> List[str]:
+        """The candidate connect targets, in order."""
+        return list(self._addresses)
+
+    def active_address(self) -> str:
+        """The address currently in use (the one that last answered)."""
+        return self._active_addr
+
+    def _connect_to(self, addr: str) -> None:
+        """Point the client at a specific candidate address and rebuild it."""
+        self._active_addr = addr
+        self._resolved_ip = None
+        self.base_url = f"{self.scheme}://{addr}:{self.port}"
+        with self._lock:
+            self._client = self._new_client()
+
     def _resolve_and_pin_ip(self) -> None:
         """
-        Resolve the hostname to an IP once and rebuild the client to connect to that
-        IP directly. Makes future reconnects fast (no repeat mDNS lookup). If the
-        hostname is already an IP, or resolution fails, this is a no-op and we keep
-        using the hostname. The slow mDNS cost is paid here, in warmup, off the UI
-        thread — not on every reconnect.
+        Resolve the active address to an IP once and rebuild the client to connect to
+        that IP directly. Makes future reconnects fast (no repeat mDNS lookup). If the
+        address is already an IP, or resolution fails, this is a no-op and we keep
+        using it. The slow mDNS cost is paid here, in warmup, off the UI thread — not
+        on every reconnect.
         """
         if self._resolved_ip is not None:
             return
-        # If hostname is already a bare IP, nothing to resolve.
+        # If the active address is already a bare IP, nothing to resolve.
         try:
-            socket.inet_aton(self.hostname)
+            socket.inet_aton(self._active_addr)
             return  # it's an IPv4 address already
         except OSError:
             pass
         try:
-            ip = socket.gethostbyname(self.hostname)   # resolves .local via the OS resolver
+            ip = socket.gethostbyname(self._active_addr)   # resolves .local via the OS resolver
         except OSError:
-            return  # leave hostname-based; resolution may work later
-        if ip and ip != self.hostname:
+            return  # leave address-based; resolution may work later
+        if ip and ip != self._active_addr:
             self._resolved_ip = ip
             with self._lock:
                 # Swap in a client that targets the pinned IP. We deliberately do
@@ -291,27 +316,43 @@ class AgentClient:
 
         Resolves and pins the IP so later reconnects skip the slow mDNS lookup.
         Uses /info so it doubles as adopting the real unit_id.
+
+        With several candidate addresses it probes them in order (the currently
+        active one first, so a working unit isn't disturbed) and sticks to the first
+        that answers — so a unit that moved between networks reconnects without any
+        manual address change.
         """
-        t0 = time.perf_counter()
-        try:
-            data = self._request("GET", "/info")
-            info = m.AgentInfo(**data)
-            self.unit_id = info.unit_id
-            self.state = ConnectionState.ONLINE
-            self.last_error = ""
-            self.last_latency_s = time.perf_counter() - t0
-            self.last_contact_ok = time.perf_counter()
-            # Pin the resolved IP now that we know the host is reachable.
-            self._resolve_and_pin_ip()
-        except AgentConnectionError as exc:
-            self.state = ConnectionState.OFFLINE
-            self.last_error = str(exc)
-            self.last_latency_s = None
-        except AgentHTTPError as exc:
-            # Reachable but unhappy (e.g. auth) — that's ERROR, not OFFLINE.
-            self.state = ConnectionState.ERROR
-            self.last_error = str(exc)
-            self.last_latency_s = time.perf_counter() - t0
+        # Try the active address first (sticky), then the rest.
+        ordered = [self._active_addr] + [a for a in self._addresses if a != self._active_addr]
+        last_conn_err: Optional[str] = None
+        for addr in ordered:
+            if addr != self._active_addr or self._resolved_ip is not None:
+                self._connect_to(addr)
+            t0 = time.perf_counter()
+            try:
+                data = self._request("GET", "/info")
+                info = m.AgentInfo(**data)
+                self.unit_id = info.unit_id
+                self.state = ConnectionState.ONLINE
+                self.last_error = ""
+                self.last_latency_s = time.perf_counter() - t0
+                self.last_contact_ok = time.perf_counter()
+                self._resolve_and_pin_ip()   # pin the IP of the address that worked
+                return self.state
+            except AgentConnectionError as exc:
+                last_conn_err = str(exc)
+                continue   # this address is unreachable — try the next
+            except AgentHTTPError as exc:
+                # Reachable but unhappy (e.g. auth). The address works at the TCP
+                # level, so stop here rather than probing further.
+                self.state = ConnectionState.ERROR
+                self.last_error = str(exc)
+                self.last_latency_s = time.perf_counter() - t0
+                return self.state
+        # No address answered.
+        self.state = ConnectionState.OFFLINE
+        self.last_error = last_conn_err or "no address reachable"
+        self.last_latency_s = None
         return self.state
 
     def health(self) -> bool:
@@ -327,6 +368,11 @@ class AgentClient:
                 self.last_error = ""
             return ok
         except AgentConnectionError as exc:
+            # The active address stopped answering. If the unit has other known
+            # addresses (e.g. it moved from wifi to ethernet), re-probe them so it
+            # recovers on its own without a manual address change.
+            if len(self._addresses) > 1:
+                return self.warmup() == ConnectionState.ONLINE
             self.state = ConnectionState.OFFLINE
             self.last_error = str(exc)
             return False

@@ -112,6 +112,20 @@ class DataHub(QObject):
         self._executor.shutdown(wait=False, cancel_futures=True)
         logger.info("DataHub stopped")
 
+    # ── Runtime fleet membership ─────────────────────────────────────────────────
+
+    def add_unit(self, client) -> None:
+        """Register a newly-added unit and begin streaming from it. The poller picks
+        it up automatically on its next tick (it iterates the fleet)."""
+        self.fleet.add(client)
+        if not self._stopped:
+            self.streams.start_for(client)
+
+    def remove_unit(self, hostname: str) -> None:
+        """Stop streaming from a unit and drop it from the fleet."""
+        self.streams.stop_for(hostname)
+        self.fleet.remove(hostname)
+
     # ── Async action runner ─────────────────────────────────────────────────────
 
     def run_async(self, label: str, fn: Callable[[], object]) -> None:

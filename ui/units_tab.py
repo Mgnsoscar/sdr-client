@@ -15,15 +15,17 @@ from typing import Dict
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+    QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from api import Fleet
+from api import AgentClient, Fleet
 from api import models as m
+from config import ClientConfig, UnitEntry
 from .theme import Palette
 from .unit_card import UnitCard
 from .unit_detail import UnitDetail
+from .unit_dialog import UnitDialog
 from .qt_adapter import DataHub
 
 
@@ -36,6 +38,8 @@ class UnitsTab(QWidget):
         self.fleet = fleet
         self.hub = hub
         self._cards: Dict[str, UnitCard] = {}
+        # The known-units config (units.yaml). This tab owns edits to it.
+        self._cfg = ClientConfig.load()
 
         self._stack = QStackedWidget()
         outer = QVBoxLayout(self)
@@ -43,7 +47,8 @@ class UnitsTab(QWidget):
         outer.addWidget(self._stack)
 
         self._grid_page = self._build_grid_page()
-        self._detail = UnitDetail(fleet, hub, on_back=self._show_grid)
+        self._detail = UnitDetail(fleet, hub, on_back=self._show_grid,
+                                  on_edit=self.edit_unit, on_remove=self.remove_unit)
         self._stack.addWidget(self._grid_page)   # index 0
         self._stack.addWidget(self._detail)      # index 1
 
@@ -60,6 +65,12 @@ class UnitsTab(QWidget):
         title = QLabel("Units")
         title.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {Palette.TEXT};")
         header.addWidget(title)
+        header.addSpacing(12)
+        self._add_btn = QPushButton("Add unit…")
+        self._add_btn.setObjectName("primary")
+        self._add_btn.setToolTip("Add a unit by name and one or more addresses")
+        self._add_btn.clicked.connect(self._on_add)
+        header.addWidget(self._add_btn)
         header.addStretch(1)
         self._summary = QLabel("")
         self._summary.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
@@ -78,18 +89,99 @@ class UnitsTab(QWidget):
         self._grid.setVerticalSpacing(12)
         self._grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 
-        # Create a card per unit, keyed by stable hostname (matches snapshot keys).
-        for i, client in enumerate(self.fleet.units()):
-            card = UnitCard(client.hostname, display_name=client.unit_id)
-            card.clicked.connect(self._on_card_clicked)
-            self._cards[client.hostname] = card
-            self._grid.addWidget(card, i // self.COLUMNS, i % self.COLUMNS)
+        self._empty = QLabel("No units yet. Click “Add unit…” to add one.")
+        self._empty.setStyleSheet(f"font-size: 13px; color: {Palette.TEXT_FAINT};")
 
         scroll.setWidget(grid_host)
         lay.addWidget(scroll, stretch=1)
 
-        self._update_summary()
+        self._rebuild_grid()
         return page
+
+    def _rebuild_grid(self) -> None:
+        """(Re)create a card per unit from the current fleet."""
+        while self._grid.count():
+            w = self._grid.takeAt(0).widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self._cards.clear()
+
+        units = self.fleet.units()
+        if not units:
+            self._grid.addWidget(self._empty, 0, 0)
+        # Card per unit, keyed by stable hostname/label (matches snapshot keys).
+        for i, client in enumerate(units):
+            card = UnitCard(client.hostname, display_name=client.unit_id)
+            card.clicked.connect(self._on_card_clicked)
+            self._cards[client.hostname] = card
+            self._grid.addWidget(card, i // self.COLUMNS, i % self.COLUMNS)
+        self._update_summary()
+
+    # ── Add / edit / remove units ───────────────────────────────────────────────
+
+    def _on_add(self) -> None:
+        dlg = UnitDialog(taken_labels=set(self.fleet.hostnames()), parent=self.window())
+        if not dlg.exec() or dlg.result_entry is None:
+            return
+        entry = dlg.result_entry
+        self._cfg.units.append(entry)
+        self._persist()
+        client = AgentClient(entry.label, addresses=entry.addresses, api_key=entry.api_key)
+        self.hub.add_unit(client)
+        self._rebuild_grid()
+        self.hub.run_async(f"warmup:{entry.label}", client.warmup)
+        self.hub.refresh_now()
+
+    def edit_unit(self, label: str) -> None:
+        entry = next((u for u in self._cfg.units if u.label == label), None)
+        if entry is None:
+            # Fall back to a live-fleet view if it isn't in the config for some reason.
+            try:
+                c = self.fleet.get(label)
+                entry = UnitEntry(label=label, addresses=c.addresses(), api_key=c.api_key)
+            except KeyError:
+                return
+        dlg = UnitDialog(existing=entry, taken_labels=set(self.fleet.hostnames()),
+                         parent=self.window())
+        if not dlg.exec() or dlg.result_entry is None:
+            return
+        new = dlg.result_entry
+        # Swap the config entry.
+        self._cfg.units = [new if u.label == label else u for u in self._cfg.units]
+        if not any(u.label == label for u in self._cfg.units):
+            self._cfg.units.append(new)
+        self._persist()
+        # Replace the live client (a rename changes the fleet key).
+        self.hub.remove_unit(label)
+        client = AgentClient(new.label, addresses=new.addresses, api_key=new.api_key)
+        self.hub.add_unit(client)
+        self._show_grid()
+        self._rebuild_grid()
+        self.hub.run_async(f"warmup:{new.label}", client.warmup)
+        self.hub.refresh_now()
+
+    def remove_unit(self, label: str) -> None:
+        if QMessageBox.question(
+            self, "Remove unit",
+            f"Remove '{label}' from this PC?\nThis only forgets the unit here; the "
+            f"unit and its broadcasts are untouched.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self._cfg.units = [u for u in self._cfg.units if u.label != label]
+        self._persist()
+        self.hub.remove_unit(label)
+        self._show_grid()
+        self._rebuild_grid()
+
+    def _persist(self) -> None:
+        try:
+            self._cfg.save()
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not save units",
+                                f"The unit list couldn't be written to disk:\n{exc}")
 
     def _update_summary(self) -> None:
         total = len(self._cards)

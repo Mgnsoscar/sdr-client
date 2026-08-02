@@ -32,7 +32,7 @@ logger = logging.getLogger("sdr-client")
 def build_fleet(cfg: ClientConfig) -> Fleet:
     fleet = Fleet()
     for entry in cfg.units:
-        client = AgentClient(entry.hostname, api_key=entry.api_key)
+        client = AgentClient(entry.label, addresses=entry.addresses, api_key=entry.api_key)
         fleet.add(client)
     return fleet
 

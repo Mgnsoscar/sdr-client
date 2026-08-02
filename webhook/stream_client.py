@@ -152,6 +152,13 @@ class EventStreamManager:
         for c in clients:
             self.start_for(c)
 
+    def stop_for(self, hostname: str) -> None:
+        """Stop and drop the stream for one unit (e.g. it was removed)."""
+        t = self._threads.pop(hostname, None)
+        if t is not None:
+            t.stop()
+            t.join(timeout=2.0)
+
     def stop(self) -> None:
         for t in self._threads.values():
             t.stop()
