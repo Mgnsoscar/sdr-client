@@ -372,6 +372,7 @@ class ScheduledPlan(BaseModel):
 
 class LibraryScript(BaseModel):
     name: str                          # script filename, e.g. "freq.py"
+    content: str = ""                  # the script's source (for upload/edit/deploy)
     params: List[dict] = []            # argparse param schema (/scripts/{name}/params)
 
 
