@@ -89,9 +89,6 @@ class UnitsTab(QWidget):
         self._grid.setVerticalSpacing(12)
         self._grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 
-        self._empty = QLabel("No units yet. Click “Add unit…” to add one.")
-        self._empty.setStyleSheet(f"font-size: 13px; color: {Palette.TEXT_FAINT};")
-
         scroll.setWidget(grid_host)
         lay.addWidget(scroll, stretch=1)
 
@@ -109,7 +106,11 @@ class UnitsTab(QWidget):
 
         units = self.fleet.units()
         if not units:
-            self._grid.addWidget(self._empty, 0, 0)
+            # A fresh label each rebuild — the loop above deletes whatever was here,
+            # so a reused instance would be a use-after-delete (a hard Qt crash).
+            empty = QLabel("No units yet. Click “Add unit…” to add one.")
+            empty.setStyleSheet(f"font-size: 13px; color: {Palette.TEXT_FAINT};")
+            self._grid.addWidget(empty, 0, 0)
         # Card per unit, keyed by stable hostname/label (matches snapshot keys).
         for i, client in enumerate(units):
             card = UnitCard(client.hostname, display_name=client.unit_id)
