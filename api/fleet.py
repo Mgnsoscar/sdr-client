@@ -185,6 +185,12 @@ class Fleet:
 
     # ── Client-state replica (plans + schedule) ───────────────────────────────
 
+    def snapshots_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Each unit's full snapshot (library + plans + schedule) for drift checks.
+        Values are state.UnitSnapshot or an Exception."""
+        from state import snapshot_unit
+        return self._fan_out(lambda c: snapshot_unit(c), units)
+
     def plans_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
         """Each unit's plan replica. Values are list[Plan] or an Exception."""
         return self._fan_out(lambda c: c.get_plans(), units)

@@ -35,7 +35,7 @@ from api import models as m
 from api.fleet import LIBRARY_HOST
 from state import (
     LibraryStore, PlanStore, ScheduleStore, pull_library, pull_everything,
-    diff_library, UnitSnapshot,
+    diff_state, UnitSnapshot,
 )
 from .library_panels import LibraryTasksPanel
 from .plans_tab import PlansTab
@@ -287,6 +287,13 @@ class LibraryTab(QWidget):
             "Library definitions are updated in place — running tasks and active "
             "runs are never interrupted; plans and schedule are stored on each unit "
             "for recovery. Unreachable units are reported and can be redeployed later.")
+        extra_hosts = [self._label(h) for h, d in self._drift.items() if d.unit_has_extra]
+        if extra_hosts:
+            box.setInformativeText(
+                box.informativeText()
+                + f"\n\n⚠ These units hold plans/schedule not on this PC and a deploy "
+                  f"will overwrite them: {', '.join(extra_hosts)}. Restore from one "
+                  f"first if you want to keep them.")
         prune = QCheckBox("Prune — remove library definitions the library omits "
                           "(make each unit identical)")
         prune.setChecked(True)
@@ -344,29 +351,34 @@ class LibraryTab(QWidget):
             QMessageBox.information(self, "Check units", "No units are configured.")
             return
         self._units_status.setText(f"checking {len(hosts)} unit(s)…")
-        self.hub.run_async("lib_check", lambda: self.hub.fleet.libraries_all())
+        self.hub.run_async("lib_check", lambda: self.hub.fleet.snapshots_all())
 
     def _on_stream_status(self, hostname: str, connected: bool) -> None:
         # Only react to a (re)connect, and only for a real unit.
         if not connected or hostname == LIBRARY_HOST or hostname not in self.hub.fleet:
             return
         self.hub.run_async(f"lib_check1:{hostname}",
-                           lambda h=hostname: self.hub.fleet.libraries_all([h]))
+                           lambda h=hostname: self.hub.fleet.snapshots_all([h]))
 
     def _ingest_libraries(self, result) -> list:
-        """Fold a {host: Library|Exception} result into the drift maps. Returns the
-        hostnames that are reachable AND drifted (candidates to reconcile)."""
+        """Fold a {host: UnitSnapshot|Exception} result into the drift maps,
+        comparing each unit's library + plan + schedule replicas to this PC's
+        canonical state. Returns the hostnames that are reachable AND drifted."""
         if not isinstance(result, dict):
             return []
-        canon = self._store.library()
+        canon_lib = self._store.library()
+        self._plan_store.load()
+        self._sched_store.load()
+        canon_plans = self._plan_store.plans()
+        canon_sched = self._sched_store.entries()
         drifted = []
         for host, val in result.items():
-            if isinstance(val, Exception) or not isinstance(val, m.Library):
-                self._drift_err[host] = str(val) if isinstance(val, Exception) else "no library"
+            if isinstance(val, Exception) or not isinstance(val, UnitSnapshot):
+                self._drift_err[host] = str(val) if isinstance(val, Exception) else "no snapshot"
                 self._drift.pop(host, None)
                 continue
             self._drift_err.pop(host, None)
-            d = diff_library(canon, val)
+            d = diff_state(canon_lib, canon_plans, canon_sched, val)
             self._drift[host] = d
             if not d.in_sync:
                 drifted.append(host)
@@ -386,30 +398,33 @@ class LibraryTab(QWidget):
             parts.append(f"{len(drifted)} drifted")
         if unreachable:
             parts.append(f"{len(unreachable)} unreachable")
+        extra = [h for h in drifted if self._drift[h].unit_has_extra]
         line = "  ·  ".join(parts)
         if drifted:
             detail = "; ".join(f"{self._label(h)} ({self._drift[h].summary()})"
                                for h in drifted[:4])
             line += f"  —  {detail}" + (" …" if len(drifted) > 4 else "")
+        if extra:
+            line += (f"    ⚠ {len(extra)} unit(s) hold plans/schedule not on this PC "
+                     f"— Restore from unit to recover them.")
         self._units_status.setText(line)
         self._units_status.setStyleSheet(
             f"font-size: 11px; color: {Palette.CRASH if drifted else Palette.TEXT_FAINT};")
 
     def _maybe_auto_reconcile(self, drifted: list) -> None:
-        """If auto-reconcile is on, push additions/updates (never prune) to drifted
-        units so they converge without removing anything or touching a live run —
-        and refresh their plan + schedule replicas so a recovered PC stays whole."""
-        if not drifted or not self._auto_reconcile.isChecked() or self._deploy_pending:
+        """If auto-reconcile is on, push LIBRARY additions/updates (never prune) to
+        units whose library drifted, so they converge without removing anything or
+        touching a live run. Plans and schedule are deliberately NOT auto-pushed: a
+        wholesale replace could delete a unit's plans/schedule this PC no longer has
+        — that's a Restore situation, surfaced as drift, never overwritten silently."""
+        targets = [h for h in drifted
+                   if h in self._drift and not self._drift[h].library_in_sync]
+        if not targets or not self._auto_reconcile.isChecked() or self._deploy_pending:
             return
         lib = self._store.library()
-        self._plan_store.load()
-        self._sched_store.load()
-        plans = self._plan_store.plans()
-        schedule = self._sched_store.entries()
         self.hub.run_async(
-            f"lib_reconcile:{','.join(drifted)}",
-            lambda hs=list(drifted): self.hub.fleet.deploy_state_all(
-                lib, plans, schedule, prune=False, units=hs))
+            f"lib_reconcile:{','.join(targets)}",
+            lambda hs=list(targets): self.hub.fleet.deploy_all(lib, prune=False, units=hs))
 
     # ── Pull results ───────────────────────────────────────────────────────────
 
@@ -427,8 +442,8 @@ class LibraryTab(QWidget):
             elif d.in_sync:
                 lines.append(f"• {label}: in sync")
             else:
-                def names(ids):
-                    return ", ".join(d.seq_names.get(i, i) for i in ids)
+                def by(nmap, ids):
+                    return ", ".join(nmap.get(i, i) for i in ids)
                 bits = []
                 if d.scripts_add or d.scripts_change or d.scripts_remove:
                     bits.append(f"scripts +[{', '.join(d.scripts_add)}] "
@@ -437,10 +452,23 @@ class LibraryTab(QWidget):
                     bits.append(f"tasks +[{', '.join(d.tasks_add)}] "
                                 f"~[{', '.join(d.tasks_change)}] -[{', '.join(d.tasks_remove)}]")
                 if d.sequences_add or d.sequences_change or d.sequences_remove:
-                    bits.append(f"sequences +[{names(d.sequences_add)}] "
-                                f"~[{names(d.sequences_change)}] -[{names(d.sequences_remove)}]")
-                lines.append(f"• {label}: DRIFTED — " + "; ".join(bits))
+                    bits.append(f"sequences +[{by(d.seq_names, d.sequences_add)}] "
+                                f"~[{by(d.seq_names, d.sequences_change)}] "
+                                f"-[{by(d.seq_names, d.sequences_remove)}]")
+                if d.plans_add or d.plans_change or d.plans_remove:
+                    bits.append(f"plans +[{by(d.plan_names, d.plans_add)}] "
+                                f"~[{by(d.plan_names, d.plans_change)}] "
+                                f"-[{by(d.plan_names, d.plans_remove)}]")
+                if d.schedule_add or d.schedule_change or d.schedule_remove:
+                    bits.append(f"schedule +[{by(d.sched_names, d.schedule_add)}] "
+                                f"~[{by(d.sched_names, d.schedule_change)}] "
+                                f"-[{by(d.sched_names, d.schedule_remove)}]")
+                extra = " ⚠ has plans/schedule not on this PC" if d.unit_has_extra else ""
+                lines.append(f"• {label}: DRIFTED — " + "; ".join(bits) + extra)
         return lines
+
+    _LEGEND = ("\nLegend:  +[…] this PC has, the unit is missing   "
+               "~[…] differ   -[…] on the UNIT, not on this PC")
 
     def _show_drift_details(self) -> None:
         lines = self._drift_report_lines()
@@ -451,10 +479,16 @@ class LibraryTab(QWidget):
         body = "\n".join(lines)
         if all_synced:
             QMessageBox.information(self, "Check units",
-                                    "All units are in sync with the library.\n\n" + body)
+                                    "All units are in sync with this PC.\n\n" + body)
         else:
-            body += ("\n\nUse “Deploy to units…” to reconcile. Deploying updates "
-                     "definitions only — running tasks and active runs are untouched.")
+            any_extra = any(d.unit_has_extra for d in self._drift.values())
+            body += self._LEGEND
+            body += ("\n\n“Deploy to units…” pushes THIS PC to the units (library "
+                     "in place; plans/schedule replaced).")
+            if any_extra:
+                body += ("\n“Restore from unit…” pulls a unit's copy back to this PC "
+                         "— use it to recover plans/schedule a unit has that this PC "
+                         "doesn't, before deploying (a deploy would overwrite them).")
             QMessageBox.warning(self, "Check units — drift found", body)
 
     def _on_task_done(self, label: str, result) -> None:
@@ -473,7 +507,7 @@ class LibraryTab(QWidget):
                 oks = [h for h, r in result.items() if not isinstance(r, Exception)]
                 if oks:
                     self.hub.run_async("lib_check_after",
-                                       lambda hs=oks: self.hub.fleet.libraries_all(hs))
+                                       lambda hs=oks: self.hub.fleet.snapshots_all(hs))
             return
         if label == "lib_check_after":
             self._ingest_libraries(result)
@@ -485,7 +519,7 @@ class LibraryTab(QWidget):
             hosts = self.hub.fleet.hostnames()
             if hosts:
                 self.hub.run_async("lib_check_after",
-                                   lambda hs=list(hosts): self.hub.fleet.libraries_all(hs))
+                                   lambda hs=list(hosts): self.hub.fleet.snapshots_all(hs))
             return
         if not label.startswith("lib_pull:"):
             return
