@@ -53,10 +53,13 @@ def _unit_from_info(name: str, info) -> Optional[DiscoveredUnit]:
         addresses = list(info.parsed_addresses())
     except Exception:  # noqa: BLE001
         addresses = []
-    # Drop loopback (e.g. 127.0.1.1, which Debian maps a unit's hostname to): it
-    # would make the client "connect" to itself. A unit advertising only loopback
-    # effectively has no usable address here.
-    addresses = [a for a in addresses if a and not a.startswith("127.")]
+    # Keep only usable IPv4:
+    #   - drop loopback (e.g. 127.0.1.1, which Debian maps a hostname to) — the
+    #     client would "connect" to itself;
+    #   - drop IPv6 (anything with a ':') — including link-local fe80:: addresses,
+    #     which need a zone index and which this IPv4-only stack can't use.
+    addresses = [a for a in addresses
+                 if a and ":" not in a and not a.startswith("127.")]
     props = getattr(info, "properties", {}) or {}
 
     def _prop(key: str) -> str:
