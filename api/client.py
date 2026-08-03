@@ -456,10 +456,22 @@ class AgentClient:
     def task_history(self, name: str) -> List[m.ExitRecord]:
         return [m.ExitRecord(**r) for r in self._request("GET", f"/tasks/{name}/history")]
 
+    def _stream_base(self) -> str:
+        """Base 'scheme://host:port' for streaming connections (WebSocket logs, SSE
+        events). Prefers the IP the active address already resolved to during
+        warmup, so OPENING a stream doesn't re-run a slow .local/mDNS lookup every
+        time — that lookup is noticeably slow on Windows and is exactly what made
+        opening a unit's logs lag. Falls back to the active address (e.g. a .local
+        name) until an IP has been pinned."""
+        if self._resolved_ip:
+            return f"{self.scheme}://{self._resolved_ip}:{self.port}"
+        return self.base_url
+
     def log_stream_url(self, name: str, lines: int = 50) -> str:
         """WebSocket URL for live log streaming (used by a separate stream thread)."""
-        ws_scheme = "wss" if self.base_url.startswith("https") else "ws"
-        host_port = self.base_url.split("://", 1)[1]
+        base = self._stream_base()
+        ws_scheme = "wss" if base.startswith("https") else "ws"
+        host_port = base.split("://", 1)[1]
         # URL-encode the task name (it may contain spaces or other characters) and
         # the query string. A raw space here yields a malformed request line that
         # uvicorn rejects with 400 "Invalid HTTP request received".
@@ -471,8 +483,9 @@ class AgentClient:
 
     def sequence_log_stream_url(self, seq_id: str, lines: int = 200) -> str:
         """WebSocket URL for a sequence run's log (whole-run timeline + output)."""
-        ws_scheme = "wss" if self.base_url.startswith("https") else "ws"
-        host_port = self.base_url.split("://", 1)[1]
+        base = self._stream_base()
+        ws_scheme = "wss" if base.startswith("https") else "ws"
+        host_port = base.split("://", 1)[1]
         params = {"lines": lines}
         if self.api_key:
             params["api_key"] = self.api_key
@@ -526,7 +539,7 @@ class AgentClient:
 
     def event_stream_url(self) -> str:
         """URL of this unit's SSE event stream (used by the stream client thread)."""
-        url = f"{self.base_url}/events/stream"
+        url = f"{self._stream_base()}/events/stream"
         if self.api_key:
             url += f"?api_key={self.api_key}"
         return url
