@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional
 
@@ -39,6 +40,7 @@ class FastSnapshot:
     system: Dict[str, object] = field(default_factory=dict)        # unit_id -> SystemHealth | Exc
     tasks: Dict[str, object] = field(default_factory=dict)         # unit_id -> list[ProcessStatus] | Exc
     runs: Dict[str, object] = field(default_factory=dict)          # unit_id -> list[SequenceRun] | Exc
+    captured_at: float = 0.0    # this PC's UTC epoch when /system was polled (for clock-skew)
 
 
 @dataclass
@@ -91,6 +93,7 @@ class Poller:
         snap.health = self.fleet.health_all()
         if self._stop.is_set():
             return snap
+        snap.captured_at = time.time()   # anchor for Pi-vs-PC clock-skew, set at poll time
         snap.system = self.fleet.system_all()
         if self._stop.is_set():
             return snap
