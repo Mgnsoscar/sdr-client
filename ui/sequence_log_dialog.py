@@ -54,6 +54,13 @@ class SequenceLogDialog(QDialog):
 
     # ── Construction ─────────────────────────────────────────────────────────
 
+    def _unit_name(self) -> str:
+        """The unit's display label (falls back to its id if not resolvable)."""
+        try:
+            return self.hub.fleet.get(self.hostname).label or self.hostname
+        except Exception:  # noqa: BLE001 — unknown host, etc.
+            return self.hostname
+
     def _build(self) -> None:
         outer = QVBoxLayout(self)
         outer.setContentsMargins(14, 12, 14, 12)
@@ -61,7 +68,7 @@ class SequenceLogDialog(QDialog):
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        title = QLabel(f"{self.sequence.name or self.sequence.id}  ·  {self.hostname}")
+        title = QLabel(f"{self.sequence.name or self.sequence.id}  ·  {self._unit_name()}")
         title.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {Palette.TEXT};")
         row.addWidget(title)
         self._status_lbl = QLabel("connecting…")
