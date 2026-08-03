@@ -4,10 +4,10 @@ UnitDetail — the drill-in view for a single unit.
 Opened when a UnitCard is clicked. Layout: a header (back button + unit name +
 live status) above a row of sub-tabs:
 
-    Tasks  |  Logs  |  Sequences  |  Scripts
+    Tasks  |  Sequences
 
-This module builds the shell + the Tasks, Logs, and Scripts panels. The
-Sequences panel is still a placeholder, filled in a subsequent step.
+Each task row carries a Logs button that opens the task's log in its own window
+(like a sequence's log), so logs aren't confined to a single shared tab.
 
 Data:
   - Task state is fed from the poller's fast snapshot (on_fast_update), so the
@@ -28,8 +28,8 @@ from PyQt6.QtWidgets import (
 from api import Fleet
 from api import models as m
 from .qt_adapter import DataHub
-from .logs_panel import LogsPanel
 from .sequences_panel import SequencesPanel
+from .task_log_dialog import TaskLogDialog
 from .theme import Palette
 from .widgets import StatusPill
 
@@ -76,19 +76,23 @@ class _TaskRow(QFrame):
 
         # Buttons — run controls only. Task definitions are edited in the Library
         # and deployed; the unit card just runs what's deployed.
+        self._logs = QPushButton("Logs")
+        self._logs.setToolTip("Open this task's log in a window")
+        self._logs.clicked.connect(self._on_logs)
         self._start = QPushButton("Start")
         self._stop = QPushButton("Stop")
-        for b in (self._start, self._stop):
+        for b in (self._logs, self._start, self._stop):
             b.setFixedWidth(72)
         self._start.clicked.connect(self._on_start)
         self._stop.clicked.connect(self._on_stop)
-        for b in (self._start, self._stop):
+        for b in (self._logs, self._start, self._stop):
             lay.addWidget(b)
 
         self.update_status(task)
 
     def update_status(self, task: m.ProcessStatus) -> None:
         st = task.state
+        self._state = st
         self._pill.set_status(st.value, st.value)
 
         # Info line
@@ -120,6 +124,12 @@ class _TaskRow(QFrame):
         self._info.setText(msg)
         for b in (self._start, self._stop):
             b.setEnabled(True)
+
+    def _on_logs(self) -> None:
+        running = getattr(self, "_state", None) == m.ProcessState.RUNNING
+        dlg = TaskLogDialog(self.hub, self.hostname, self.task_name,
+                            running=running, parent=self.window())
+        dlg.show()
 
     def _on_start(self) -> None:
         self._busy("starting…")
@@ -228,7 +238,7 @@ class _TasksPanel(QWidget):
 class UnitDetail(QWidget):
     """Header + sub-tabs for one unit. Tasks panel built; others placeholder."""
 
-    SUBTABS = ["Tasks", "Logs", "Sequences"]
+    SUBTABS = ["Tasks", "Sequences"]
 
     def __init__(self, fleet: Fleet, hub: DataHub, on_back,
                  on_edit=None, on_remove=None, parent=None):
@@ -289,7 +299,6 @@ class UnitDetail(QWidget):
         # Sub-tab content
         self._sub_stack = QStackedWidget()
         self._tasks_panel: Optional[_TasksPanel] = None  # built per-unit in set_unit
-        self._logs_panel: Optional["LogsPanel"] = None   # built per-unit in set_unit
         self._sequences_panel: Optional["SequencesPanel"] = None  # built per-unit in set_unit
         self._placeholders: Dict[str, QWidget] = {}
         outer.addWidget(self._sub_stack, stretch=1)
@@ -306,10 +315,6 @@ class UnitDetail(QWidget):
     # ── Populate for a specific unit ────────────────────────────────────────────
 
     def set_unit(self, hostname: str) -> None:
-        # Close any live tail from a previously-viewed unit.
-        if self._logs_panel is not None:
-            self._logs_panel.on_leave()
-
         self.hostname = hostname
         client = self.fleet.get(hostname)
         self._title.setText(client.label)
@@ -321,14 +326,13 @@ class UnitDetail(QWidget):
             w.deleteLater()
 
         self._tasks_panel = _TasksPanel(hostname, self.hub)
-        self._logs_panel = LogsPanel(hostname, self.hub)
         # Run-only: the unit card runs deployed tasks/sequences; it never edits
-        # definitions (that's the Library's job).
+        # definitions (that's the Library's job). Task logs open in their own
+        # window from each task row (see _TaskRow.Logs).
         self._sequences_panel = SequencesPanel(hostname, self.hub,
                                                can_edit=False, can_run=True)
         self._sub_stack.addWidget(self._tasks_panel)                       # 0 Tasks
-        self._sub_stack.addWidget(self._logs_panel)                        # 1 Logs
-        self._sub_stack.addWidget(self._sequences_panel)                   # 2 Sequences
+        self._sub_stack.addWidget(self._sequences_panel)                   # 1 Sequences
         self._select_subtab(0)
 
         # Pull fresh data now so the task list / status appear immediately, rather
@@ -346,9 +350,6 @@ class UnitDetail(QWidget):
             w.on_shown()
 
     def _handle_back(self) -> None:
-        # Close any live log tail before leaving the unit.
-        if self._logs_panel is not None:
-            self._logs_panel.on_leave()
         self._on_back()
 
     # ── Live updates routed from the Units tab ───────────────────────────────────
@@ -360,9 +361,6 @@ class UnitDetail(QWidget):
         tasksv = snap.tasks.get(self.hostname)
         if isinstance(tasksv, list) and self._tasks_panel is not None:
             self._tasks_panel.update_tasks(tasksv)
-            # Keep the Logs panel's task selector in sync with available tasks.
-            if self._logs_panel is not None:
-                self._logs_panel.set_tasks(tasksv)
         # Header status from system reachability
         sysv = snap.system.get(self.hostname)
         if isinstance(sysv, m.SystemHealth):
