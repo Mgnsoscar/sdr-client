@@ -30,7 +30,6 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from api import Fleet
 from state import Poller, Discovery
-from state.log_tail import LogTailer
 from webhook.stream_client import EventStreamManager
 
 logger = logging.getLogger(__name__)
@@ -48,9 +47,6 @@ class DataHub(QObject):
     stream_status = pyqtSignal(str, bool)
     # Emitted when a run_async task finishes: (label, result_or_exception).
     task_done = pyqtSignal(str, object)
-    # Live log tail: a chunk of log text, and connection status.
-    log_text = pyqtSignal(str)
-    log_status = pyqtSignal(bool, str)   # (connected, detail)
     # The set of discovered (mDNS) units changed — GUI-thread hook for auto-learn.
     discovery_changed = pyqtSignal()
 
@@ -67,7 +63,6 @@ class DataHub(QObject):
         self.streams = EventStreamManager(api_key=api_secret)
         self.poller = Poller(fleet, fast_interval_s, slow_interval_s)
         self.discovery = Discovery()    # mDNS browser for units advertising themselves
-        self.log_tailer = LogTailer()
         self._api_secret = api_secret
         self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="hub-action")
         self._stopped = False
@@ -79,21 +74,6 @@ class DataHub(QObject):
         self.streams.set_status_callback(lambda uid, ok: self.stream_status.emit(uid, ok))
         self.poller.set_fast_callback(lambda snap: self.fast_update.emit(snap))
         self.poller.set_slow_callback(lambda snap: self.slow_update.emit(snap))
-        self.log_tailer.set_callbacks(
-            on_text=lambda chunk: self.log_text.emit(chunk),
-            on_status=lambda ok, detail: self.log_status.emit(ok, detail),
-        )
-
-    # ── Log tail control ───────────────────────────────────────────────────────
-
-    def start_log_tail(self, hostname: str, task_name: str, lines: int = 200) -> None:
-        """Open a live log tail for a task. Replaces any current tail."""
-        client = self.fleet.get(hostname)
-        url = client.log_stream_url(task_name, lines=lines)
-        self.log_tailer.start(url)
-
-    def stop_log_tail(self) -> None:
-        self.log_tailer.stop()
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
