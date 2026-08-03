@@ -17,9 +17,11 @@ from .library_sync import (
     pull_everything, snapshot_unit, UnitSnapshot,
 )
 from .library_client import LibraryClient, LibraryError
+from .discovery import Discovery, DiscoveredUnit
 
 __all__ = ["Poller", "FastSnapshot", "SlowSnapshot", "LogTailer", "local_ip",
            "PlanStore", "new_plan_id", "ScheduleStore", "new_scheduled_id",
            "LibraryStore", "pull_library", "diff_library", "diff_state",
            "LibraryDiff", "StateDiff", "pull_everything", "snapshot_unit",
-           "UnitSnapshot", "LibraryClient", "LibraryError"]
+           "UnitSnapshot", "LibraryClient", "LibraryError",
+           "Discovery", "DiscoveredUnit"]

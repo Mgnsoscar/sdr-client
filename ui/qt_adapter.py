@@ -29,7 +29,7 @@ from typing import Callable, Optional
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from api import Fleet
-from state import Poller
+from state import Poller, Discovery
 from state.log_tail import LogTailer
 from webhook.stream_client import EventStreamManager
 
@@ -51,6 +51,8 @@ class DataHub(QObject):
     # Live log tail: a chunk of log text, and connection status.
     log_text = pyqtSignal(str)
     log_status = pyqtSignal(bool, str)   # (connected, detail)
+    # The set of discovered (mDNS) units changed — GUI-thread hook for auto-learn.
+    discovery_changed = pyqtSignal()
 
     def __init__(
         self,
@@ -64,6 +66,7 @@ class DataHub(QObject):
         self.fleet = fleet
         self.streams = EventStreamManager(api_key=api_secret)
         self.poller = Poller(fleet, fast_interval_s, slow_interval_s)
+        self.discovery = Discovery()    # mDNS browser for units advertising themselves
         self.log_tailer = LogTailer()
         self._api_secret = api_secret
         self._executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="hub-action")
@@ -98,6 +101,10 @@ class DataHub(QObject):
         """Start the event streams and poller. Call after the window is shown."""
         self.streams.start_all(self.fleet.units())
         self.poller.start()
+        # Re-emit discovery changes as a Qt signal so the GUI thread can react
+        # (the zeroconf callback fires on a background thread).
+        self.discovery.set_callback(self.discovery_changed.emit)
+        self.discovery.start()
         logger.info("DataHub started")
 
     def stop(self) -> None:
@@ -108,9 +115,24 @@ class DataHub(QObject):
         self._stopped = True
         self.poller.stop()
         self.streams.stop()
+        self.discovery.stop()
         self.log_tailer.stop()
         self._executor.shutdown(wait=False, cancel_futures=True)
         logger.info("DataHub stopped")
+
+    # ── Runtime fleet membership ─────────────────────────────────────────────────
+
+    def add_unit(self, client) -> None:
+        """Register a newly-added unit and begin streaming from it. The poller picks
+        it up automatically on its next tick (it iterates the fleet)."""
+        self.fleet.add(client)
+        if not self._stopped:
+            self.streams.start_for(client)
+
+    def remove_unit(self, hostname: str) -> None:
+        """Stop streaming from a unit and drop it from the fleet."""
+        self.streams.stop_for(hostname)
+        self.fleet.remove(hostname)
 
     # ── Async action runner ─────────────────────────────────────────────────────
 

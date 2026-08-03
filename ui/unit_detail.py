@@ -230,11 +230,14 @@ class UnitDetail(QWidget):
 
     SUBTABS = ["Tasks", "Logs", "Sequences"]
 
-    def __init__(self, fleet: Fleet, hub: DataHub, on_back, parent=None):
+    def __init__(self, fleet: Fleet, hub: DataHub, on_back,
+                 on_edit=None, on_remove=None, parent=None):
         super().__init__(parent)
         self.fleet = fleet
         self.hub = hub
         self._on_back = on_back
+        self._on_edit = on_edit
+        self._on_remove = on_remove
         self.hostname: Optional[str] = None
 
         outer = QVBoxLayout(self)
@@ -255,6 +258,18 @@ class UnitDetail(QWidget):
         self._status = StatusPill("unknown", "unknown")
         header.addWidget(self._status)
         header.addStretch(1)
+
+        # Manage this unit's identity/addresses (delegated to the Units tab).
+        self._edit_btn = QPushButton("Edit unit…")
+        self._edit_btn.setToolTip("Change this unit's name, addresses, or API key")
+        self._edit_btn.clicked.connect(
+            lambda: self._on_edit(self.hostname) if (self._on_edit and self.hostname) else None)
+        header.addWidget(self._edit_btn)
+        self._remove_btn = QPushButton("Remove")
+        self._remove_btn.setToolTip("Forget this unit on this PC")
+        self._remove_btn.clicked.connect(
+            lambda: self._on_remove(self.hostname) if (self._on_remove and self.hostname) else None)
+        header.addWidget(self._remove_btn)
         outer.addLayout(header)
 
         # Sub-tab buttons
@@ -297,7 +312,7 @@ class UnitDetail(QWidget):
 
         self.hostname = hostname
         client = self.fleet.get(hostname)
-        self._title.setText(client.unit_id)
+        self._title.setText(client.label)
 
         # Rebuild the sub-stack for this unit
         while self._sub_stack.count():

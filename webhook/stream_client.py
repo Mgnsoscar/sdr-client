@@ -48,10 +48,13 @@ class _StreamThread(threading.Thread):
         self._client = client
         self._on_event = on_event
         self._on_status = on_status
-        self._stop = threading.Event()
+        # NB: NOT named `_stop` — that shadows threading.Thread._stop(), which
+        # Thread.join() calls internally, so join() would blow up with
+        # "'Event' object is not callable" once the thread has finished.
+        self._stop_event = threading.Event()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def _url(self) -> str:
         return self._client.event_stream_url()
@@ -59,7 +62,7 @@ class _StreamThread(threading.Thread):
     def run(self) -> None:
         backoff = 1.0
         max_backoff = 20.0
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 self._consume_stream()
                 backoff = 1.0  # reset after a clean run
@@ -68,8 +71,8 @@ class _StreamThread(threading.Thread):
                 if self._on_status:
                     self._on_status(self._client.hostname, False)
             # Wait before reconnecting (unless stopping)
-            if not self._stop.is_set():
-                self._stop.wait(backoff)
+            if not self._stop_event.is_set():
+                self._stop_event.wait(backoff)
                 backoff = min(backoff * 2, max_backoff)
 
     def _consume_stream(self) -> None:
@@ -89,7 +92,7 @@ class _StreamThread(threading.Thread):
                 data_buf: list[str] = []
 
                 for line in resp.iter_lines():
-                    if self._stop.is_set():
+                    if self._stop_event.is_set():
                         break
                     # httpx yields str lines already decoded, without the newline.
                     if line == "":
@@ -151,6 +154,13 @@ class EventStreamManager:
     def start_all(self, clients) -> None:
         for c in clients:
             self.start_for(c)
+
+    def stop_for(self, hostname: str) -> None:
+        """Stop and drop the stream for one unit (e.g. it was removed)."""
+        t = self._threads.pop(hostname, None)
+        if t is not None:
+            t.stop()
+            t.join(timeout=2.0)
 
     def stop(self) -> None:
         for t in self._threads.values():

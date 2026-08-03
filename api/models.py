@@ -100,6 +100,7 @@ class ExitRecord(BaseModel):
 class AgentInfo(BaseModel):
     hostname: str
     unit_id: str
+    machine_id: str = ""
     agent_version: str
     python_version: str
     tasks: List[str]

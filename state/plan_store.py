@@ -86,6 +86,23 @@ class PlanStore:
         self._plans = list(plans)
         self._save()
 
+    def remap_units(self, mapping: dict) -> bool:
+        """One-time migration: rewrite plan items that reference a unit by an old
+        key (its label or an address) to the unit's permanent uid. `mapping` is
+        {old_key: (uid, label)}. Items already keyed by the uid are untouched.
+        Returns True if anything changed (and persists)."""
+        changed = False
+        for plan in self._plans:
+            for item in plan.items:
+                hit = mapping.get(item.hostname)
+                if hit and item.hostname != hit[0]:
+                    item.hostname = hit[0]
+                    item.unit_label = hit[1]
+                    changed = True
+        if changed:
+            self._save()
+        return changed
+
     def merge(self, plans: List[m.Plan]) -> int:
         """Add plans whose id isn't present yet (de-dupe by id when restoring from
         several units). Returns how many were added."""

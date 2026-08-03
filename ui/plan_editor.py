@@ -165,7 +165,7 @@ class PlanItemDialog(QDialog):
         self._unit.blockSignals(True)
         for hostname in self._seqs:
             try:
-                label = self._hub.fleet.get(hostname).unit_id
+                label = self._hub.fleet.get(hostname).label
             except KeyError:
                 label = hostname
             self._unit.addItem(f"{label}", hostname)
@@ -300,7 +300,7 @@ class PlanItemDialog(QDialog):
             return
         hostname = self._current_hostname()
         try:
-            label = self._hub.fleet.get(hostname).unit_id
+            label = self._hub.fleet.get(hostname).label
         except KeyError:
             label = self._item.unit_label if self._item else hostname
         src = self._current_source()

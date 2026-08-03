@@ -11,20 +11,25 @@ For this first pass the detail view is a placeholder; it's built next.
 """
 from __future__ import annotations
 
+import logging
 from typing import Dict
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+    QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from api import Fleet
+from api import AgentClient, Fleet
 from api import models as m
+from config import ClientConfig, UnitEntry
 from .theme import Palette
 from .unit_card import UnitCard
 from .unit_detail import UnitDetail
+from .unit_dialog import UnitDialog
 from .qt_adapter import DataHub
+
+logger = logging.getLogger(__name__)
 
 
 class UnitsTab(QWidget):
@@ -36,6 +41,8 @@ class UnitsTab(QWidget):
         self.fleet = fleet
         self.hub = hub
         self._cards: Dict[str, UnitCard] = {}
+        # The known-units config (units.yaml). This tab owns edits to it.
+        self._cfg = ClientConfig.load()
 
         self._stack = QStackedWidget()
         outer = QVBoxLayout(self)
@@ -43,9 +50,14 @@ class UnitsTab(QWidget):
         outer.addWidget(self._stack)
 
         self._grid_page = self._build_grid_page()
-        self._detail = UnitDetail(fleet, hub, on_back=self._show_grid)
+        self._detail = UnitDetail(fleet, hub, on_back=self._show_grid,
+                                  on_edit=self.edit_unit, on_remove=self.remove_unit)
         self._stack.addWidget(self._grid_page)   # index 0
         self._stack.addWidget(self._detail)      # index 1
+
+        # Auto-learn: when a unit is rediscovered at a new address (e.g. moved from
+        # wifi to ethernet), add that address to the matching unit by machine-id.
+        self.hub.discovery_changed.connect(self._on_discovery_changed)
 
     # ── Grid page ──────────────────────────────────────────────────────────────
 
@@ -60,6 +72,12 @@ class UnitsTab(QWidget):
         title = QLabel("Units")
         title.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {Palette.TEXT};")
         header.addWidget(title)
+        header.addSpacing(12)
+        self._add_btn = QPushButton("Add unit…")
+        self._add_btn.setObjectName("primary")
+        self._add_btn.setToolTip("Add a unit by name and one or more addresses")
+        self._add_btn.clicked.connect(self._on_add)
+        header.addWidget(self._add_btn)
         header.addStretch(1)
         self._summary = QLabel("")
         self._summary.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
@@ -78,18 +96,175 @@ class UnitsTab(QWidget):
         self._grid.setVerticalSpacing(12)
         self._grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
 
-        # Create a card per unit, keyed by stable hostname (matches snapshot keys).
-        for i, client in enumerate(self.fleet.units()):
-            card = UnitCard(client.hostname, display_name=client.unit_id)
-            card.clicked.connect(self._on_card_clicked)
-            self._cards[client.hostname] = card
-            self._grid.addWidget(card, i // self.COLUMNS, i % self.COLUMNS)
-
         scroll.setWidget(grid_host)
         lay.addWidget(scroll, stretch=1)
 
-        self._update_summary()
+        self._rebuild_grid()
         return page
+
+    def _rebuild_grid(self) -> None:
+        """(Re)create a card per unit from the current fleet."""
+        while self._grid.count():
+            w = self._grid.takeAt(0).widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self._cards.clear()
+
+        units = self.fleet.units()
+        if not units:
+            # A fresh label each rebuild — the loop above deletes whatever was here,
+            # so a reused instance would be a use-after-delete (a hard Qt crash).
+            empty = QLabel("No units yet. Click “Add unit…” to add one.")
+            empty.setStyleSheet(f"font-size: 13px; color: {Palette.TEXT_FAINT};")
+            self._grid.addWidget(empty, 0, 0)
+        # Card per unit, keyed by stable hostname/label (matches snapshot keys).
+        for i, client in enumerate(units):
+            card = UnitCard(client.hostname, display_name=client.label)
+            card.clicked.connect(self._on_card_clicked)
+            self._cards[client.hostname] = card
+            self._grid.addWidget(card, i // self.COLUMNS, i % self.COLUMNS)
+        self._update_summary()
+
+    # ── Add / edit / remove units ───────────────────────────────────────────────
+
+    def _known_addresses(self) -> set:
+        return {a for u in self._cfg.units for a in u.addresses}
+
+    def _labels(self) -> set:
+        return {u.label for u in self._cfg.units}
+
+    def _make_client(self, entry: UnitEntry) -> AgentClient:
+        client = AgentClient(entry.uid, label=entry.label,
+                             addresses=entry.addresses, api_key=entry.api_key)
+        client.machine_id = entry.machine_id
+        return client
+
+    def _machine_ids(self) -> set:
+        return {u.machine_id for u in self._cfg.units if u.machine_id}
+
+    def _on_add(self) -> None:
+        dlg = UnitDialog(taken_labels=self._labels(),
+                         taken_addresses=self._known_addresses(),
+                         taken_machine_ids=self._machine_ids(),
+                         discovered_provider=self.hub.discovery.discovered,
+                         rescan=self.hub.discovery.rescan,
+                         parent=self.window())
+        if not dlg.exec() or dlg.result_entry is None:
+            return
+        entry = dlg.result_entry            # carries a fresh permanent uid
+        self._cfg.units.append(entry)
+        self._persist()
+        client = self._make_client(entry)
+        self.hub.add_unit(client)
+        self._rebuild_grid()
+        self.hub.run_async(f"warmup:{entry.uid}", client.warmup)
+        self.hub.refresh_now()
+
+    def edit_unit(self, uid: str) -> None:
+        entry = next((u for u in self._cfg.units if u.uid == uid), None)
+        if entry is None:
+            try:
+                c = self.fleet.get(uid)
+                entry = UnitEntry(label=c.label, addresses=c.addresses(),
+                                  api_key=c.api_key, uid=uid, machine_id=c.machine_id)
+            except KeyError:
+                return
+        dlg = UnitDialog(existing=entry,
+                         taken_labels={u.label for u in self._cfg.units if u.uid != uid},
+                         parent=self.window())
+        if not dlg.exec() or dlg.result_entry is None:
+            return
+        new = dlg.result_entry
+        new.uid = entry.uid                 # permanent id survives a rename
+        new.machine_id = entry.machine_id
+        self._cfg.units = [new if u.uid == uid else u for u in self._cfg.units]
+        self._persist()
+        # Replace the live client under the SAME uid key (so plans stay intact),
+        # applying the new label / addresses / api key.
+        self.hub.remove_unit(uid)
+        client = self._make_client(new)
+        self.hub.add_unit(client)
+        self._show_grid()
+        self._rebuild_grid()
+        self.hub.run_async(f"warmup:{new.uid}", client.warmup)
+        self.hub.refresh_now()
+
+    def remove_unit(self, uid: str) -> None:
+        entry = next((u for u in self._cfg.units if u.uid == uid), None)
+        name = entry.label if entry else uid
+        if QMessageBox.question(
+            self, "Remove unit",
+            f"Remove '{name}' from this PC?\nThis only forgets the unit here; the "
+            f"unit and its broadcasts are untouched.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self._cfg.units = [u for u in self._cfg.units if u.uid != uid]
+        self._persist()
+        self.hub.remove_unit(uid)
+        self._show_grid()
+        self._rebuild_grid()
+
+    def _persist(self) -> None:
+        try:
+            self._cfg.save()
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not save units",
+                                f"The unit list couldn't be written to disk:\n{exc}")
+
+    # ── Machine-id learning + address auto-learn ────────────────────────────────
+
+    def _sync_machine_ids(self) -> None:
+        """Persist a unit's machine-id once its live client has learned it from
+        /info, so we can recognise the same physical Pi later (even offline)."""
+        changed = False
+        for u in self._cfg.units:
+            try:
+                c = self.fleet.get(u.uid)
+            except KeyError:
+                continue
+            if c.machine_id and c.machine_id != u.machine_id:
+                u.machine_id = c.machine_id
+                changed = True
+        if changed:
+            self._persist()
+
+    def _on_discovery_changed(self) -> None:
+        """A discovered unit whose machine-id matches a known unit but at a NEW
+        address → add that address (never remove), and re-warm so it can connect
+        over the new link. This is what makes a Pi that moved from wifi to ethernet
+        reachable automatically."""
+        by_mid = {u.machine_id: u for u in self._cfg.units if u.machine_id}
+        if not by_mid:
+            return
+        learned_for: list = []
+        for d in self.hub.discovery.discovered():
+            unit = by_mid.get(d.machine_id) if d.machine_id else None
+            if unit is None:
+                continue
+            new_addrs = [a for a in d.suggested_addresses if a not in unit.addresses]
+            if not new_addrs:
+                continue
+            unit.addresses.extend(new_addrs)
+            try:
+                c = self.fleet.get(unit.uid)
+                for a in new_addrs:
+                    c.add_address(a)
+            except KeyError:
+                pass
+            learned_for.append(unit)
+            logger.info("Auto-learned address(es) %s for '%s'", new_addrs, unit.label)
+        if learned_for:
+            self._persist()
+            for unit in learned_for:      # a new address may bring an offline unit back
+                try:
+                    c = self.fleet.get(unit.uid)
+                    self.hub.run_async(f"warmup:{unit.uid}", c.warmup)
+                except KeyError:
+                    pass
+            self.hub.refresh_now()
 
     def _update_summary(self) -> None:
         total = len(self._cards)
@@ -122,6 +297,8 @@ class UnitsTab(QWidget):
             if isinstance(tasksv, list):
                 card.update_tasks(tasksv)
         self._update_summary()
+        # Persist any machine-ids the clients have learned from /info.
+        self._sync_machine_ids()
 
         # Forward to the open detail view so its task list / status stay live.
         if self._detail_is_open():
