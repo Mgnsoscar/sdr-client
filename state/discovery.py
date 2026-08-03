@@ -93,13 +93,16 @@ class Discovery:
         if self._started:
             return
         try:
-            from zeroconf import Zeroconf, ServiceBrowser
+            from zeroconf import Zeroconf, ServiceBrowser, InterfaceChoice
         except ImportError:
             logger.warning("zeroconf not installed — unit auto-discovery disabled "
                            "(you can still add units by address)")
             return
         try:
-            self._zc = Zeroconf()
+            # InterfaceChoice.All makes zeroconf bind every interface, including a
+            # direct-ethernet link with only a link-local (169.254.x) address —
+            # otherwise such an interface can be skipped and the unit on it missed.
+            self._zc = Zeroconf(interfaces=InterfaceChoice.All)
             self._browser = ServiceBrowser(self._zc, SERVICE_TYPE,
                                            handlers=[self._on_service])
             self._started = True
@@ -137,25 +140,17 @@ class Discovery:
                 logger.debug("Discovery on_change callback raised", exc_info=True)
 
     def rescan(self) -> None:
-        """Force a fresh round of mDNS queries (e.g. the user clicked Refresh).
-        The background browser already keeps results live, but this restarts it so
-        it re-queries immediately and picks up anything slow to respond. The cache
-        is kept so the list doesn't flicker."""
-        if not self._started:
-            self.start()
-            return
-        try:
-            from zeroconf import ServiceBrowser
-        except ImportError:
-            return
-        try:
-            if self._browser is not None:
-                self._browser.cancel()
-            self._browser = ServiceBrowser(self._zc, SERVICE_TYPE,
-                                           handlers=[self._on_service])
-            logger.info("Discovery: re-scanning for %s", SERVICE_TYPE)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Discovery re-scan failed: %s", exc)
+        """Force a fresh scan AND re-enumerate network interfaces (e.g. the user
+        clicked Refresh). This fully restarts zeroconf so an interface that came up
+        AFTER launch — like a just-plugged direct-ethernet link with a link-local
+        169.254.x address — is included; a browser-only restart would keep using the
+        interfaces present at startup and never see it. Clears the cache so the list
+        reflects the new scan."""
+        self.stop()
+        with self._lock:
+            self._found.clear()
+        self.start()
+        logger.info("Discovery: re-scanning (re-enumerated interfaces)")
 
     def discovered(self) -> List[DiscoveredUnit]:
         """A snapshot of currently-advertised units, sorted by name."""
