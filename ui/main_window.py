@@ -38,8 +38,10 @@ logger = logging.getLogger(__name__)
 # Plans now live as a sub-tab of Library (authoring), not a top-level tab.
 TABS = ["Timeline", "Units", "Library"]
 
-# Clock-skew threshold (seconds) beyond which we warn before coordinated arming.
-CLOCK_WARN_SKEW_S = 1.0
+# A unit's clock vs THIS PC's: past this many seconds we flag it, because it's the
+# skew that makes scheduled plans (which fire on the unit's own clock) miss. Set
+# generously so normal poll timing isn't mistaken for skew.
+PC_SKEW_WARN_S = 3.0
 
 
 class _Placeholder(QWidget):
@@ -100,10 +102,14 @@ class MainWindow(QMainWindow):
 
         lay.addStretch(1)
 
-        # Clock-sync indicator
+        # Clock-sync indicator. Clickable when a unit's clock differs from this PC
+        # (so schedules would miss): a click sets the reachable units' clocks here.
         self._clock_lbl = QLabel("clocks: —")
         self._clock_lbl.setObjectName("clockUnknown")
-        self._clock_lbl.setToolTip("Clock synchronization across units")
+        self._clock_lbl.setToolTip("Clock offset between units and this PC")
+        self._clock_actionable = False
+        self._skew_reachable: list = []
+        self._clock_lbl.mousePressEvent = self._on_clock_clicked
         lay.addWidget(self._clock_lbl)
 
         # Spacer before panic
@@ -197,6 +203,9 @@ class MainWindow(QMainWindow):
         if label == "panic_all":
             self._report_panic_result(result)
             return
+        if label == "sync_clocks":
+            self._report_clock_sync(result)
+            return
         if isinstance(result, Exception):
             logger.error("Action '%s' failed: %s", label, result)
             self.statusBar().showMessage(self._format_action_error(label, result), 6000)
@@ -212,38 +221,96 @@ class MainWindow(QMainWindow):
     # ── Clock indicator ─────────────────────────────────────────────────────────
 
     def _update_clock_indicator(self, snap) -> None:
-        """Derive a fleet clock-sync status from the fast snapshot's system data."""
+        """Flag when any unit's clock differs from THIS PC's — the skew that
+        actually breaks scheduled plans (they fire on the unit's own clock).
+        Measured against the poll's capture time, so poll/render lag isn't counted
+        as skew. When flagged, the indicator is a one-click "sync to this PC"."""
         from datetime import datetime, timezone
 
-        times = []
-        any_unsynced = False
-        for r in snap.system.values():
-            if isinstance(r, m.SystemHealth):
-                if r.clock_synced is False:
-                    any_unsynced = True
-                if r.utc_now:
-                    try:
-                        dt = datetime.fromisoformat(r.utc_now)
-                        if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
-                        times.append(dt)
-                    except ValueError:
-                        pass
+        anchor = snap.captured_at or None
+        worst = 0.0          # signed: + means the unit is ahead of this PC
+        reachable = []
+        for host, r in snap.system.items():
+            if not isinstance(r, m.SystemHealth) or not r.utc_now:
+                continue
+            try:
+                dt = datetime.fromisoformat(r.utc_now)
+            except ValueError:
+                continue
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            reachable.append(host)
+            if anchor is not None:
+                off = dt.timestamp() - anchor
+                if abs(off) > abs(worst):
+                    worst = off
+        self._skew_reachable = reachable
 
-        if not times:
+        if not reachable or anchor is None:
             self._clock_lbl.setText("clocks: —")
             self._clock_lbl.setObjectName("clockUnknown")
+            self._set_clock_actionable(False)
+        elif abs(worst) > PC_SKEW_WARN_S:
+            self._clock_lbl.setText(f"clocks: ⚠ {self._fmt_skew(worst)} — sync")
+            self._clock_lbl.setObjectName("clockWarn")
+            self._set_clock_actionable(True)
         else:
-            skew = (max(times) - min(times)).total_seconds() if len(times) >= 2 else 0.0
-            if any_unsynced or skew > CLOCK_WARN_SKEW_S:
-                self._clock_lbl.setText(f"clocks: ⚠ {skew:.1f}s skew")
-                self._clock_lbl.setObjectName("clockWarn")
-            else:
-                self._clock_lbl.setText("clocks: synced ✓")
-                self._clock_lbl.setObjectName("clockOk")
+            self._clock_lbl.setText("clocks: synced ✓")
+            self._clock_lbl.setObjectName("clockOk")
+            self._set_clock_actionable(False)
         # Re-polish so the objectName-based stylesheet repaints
         self._clock_lbl.style().unpolish(self._clock_lbl)
         self._clock_lbl.style().polish(self._clock_lbl)
+
+    @staticmethod
+    def _fmt_skew(off: float) -> str:
+        """'2m behind' / '40s ahead' — magnitude + direction relative to this PC."""
+        mag = abs(off)
+        unit = f"{mag / 60:.0f}m" if mag >= 90 else f"{mag:.0f}s"
+        return f"{unit} {'ahead' if off > 0 else 'behind'}"
+
+    def _set_clock_actionable(self, on: bool) -> None:
+        self._clock_actionable = on
+        self._clock_lbl.setCursor(
+            Qt.CursorShape.PointingHandCursor if on else Qt.CursorShape.ArrowCursor)
+        self._clock_lbl.setToolTip(
+            "Set each reachable unit's clock to this PC's time (for testing "
+            "schedules on a unit with no internet)" if on
+            else "Clock offset between units and this PC")
+
+    def _unit_name(self, host: str) -> str:
+        try:
+            return self.hub.fleet.get(host).label or host
+        except KeyError:
+            return host
+
+    def _on_clock_clicked(self, event) -> None:
+        if not self._clock_actionable or not self._skew_reachable:
+            return
+        hosts = list(self._skew_reachable)
+        names = ", ".join(self._unit_name(h) for h in hosts)
+        if QMessageBox.question(
+            self, "Sync unit clocks",
+            f"Set the system clock on {len(hosts)} reachable unit(s) to this PC's "
+            f"current time?\n\n{names}\n\nUse this to test schedules on a unit with "
+            f"no internet (no NTP). It changes the unit's clock; once the unit is "
+            f"back online it re-syncs to real time on its own.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.hub.run_async("sync_clocks", lambda: self._sync_clocks(hosts))
+
+    def _sync_clocks(self, hosts: list) -> list:
+        """Worker thread: push this PC's time to each unit. Returns per-unit ok."""
+        out = []
+        for h in hosts:
+            try:
+                res = self.hub.fleet.get(h).set_time()
+                out.append((h, bool(res.get("ok")), res.get("detail", "")))
+            except Exception as exc:  # noqa: BLE001 — reported per unit
+                out.append((h, False, str(exc)))
+        return out
 
     # ── Panic ────────────────────────────────────────────────────────────────────
 
@@ -285,6 +352,25 @@ class MainWindow(QMainWindow):
             )
         else:
             logger.info("Panic confirmed on all %d unit(s)", len(ok))
+
+    def _report_clock_sync(self, result) -> None:
+        if isinstance(result, Exception):
+            QMessageBox.warning(self, "Clock sync failed", str(result))
+            return
+        ok = [h for h, good, _ in result if good]
+        bad = [(h, detail) for h, good, detail in result if not good]
+        if not bad:
+            self.statusBar().showMessage(
+                f"Synced clock on {len(ok)} unit(s) to this PC.", 5000)
+            self.hub.refresh_now()      # reflect the corrected skew immediately
+            return
+        lines = "\n".join(f"  • {self._unit_name(h)}: {d}" for h, d in bad)
+        QMessageBox.warning(
+            self, "Clock sync — partial",
+            f"Set the clock on {len(ok)} unit(s).\n\nFailed on:\n{lines}\n\n"
+            f"If a unit reports a permission error, its agent isn't running as "
+            f"root (the installed service is, by default).")
+        self.hub.refresh_now()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 

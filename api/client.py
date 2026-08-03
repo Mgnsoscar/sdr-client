@@ -415,6 +415,14 @@ class AgentClient:
     def system(self) -> m.SystemHealth:
         return m.SystemHealth(**self._request("GET", "/system"))
 
+    def set_time(self, epoch: Optional[float] = None) -> dict:
+        """Set the unit's system clock to `epoch` (UTC seconds; defaults to this
+        PC's current time). Corrects a Pi with no NTP so scheduled plans — which
+        fire on the unit's own clock — land at the intended moment."""
+        if epoch is None:
+            epoch = time.time()
+        return self._request("POST", "/time", json={"epoch": epoch})
+
     def sdr(self) -> m.SdrStatus:
         return m.SdrStatus(**self._request("GET", "/sdr"))
 
