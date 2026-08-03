@@ -14,7 +14,7 @@ Qt signals before touching the view.
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QTextCursor
 from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout,
 )
@@ -71,6 +71,7 @@ class SequenceLogDialog(QDialog):
         self._autoscroll = QPushButton("Autoscroll: on")
         self._autoscroll.setCheckable(True)
         self._autoscroll.setChecked(True)
+        self._autoscroll.toggled.connect(self._on_autoscroll_toggled)
         row.addWidget(self._autoscroll)
         clear = QPushButton("Clear")
         clear.clicked.connect(lambda: self._view.clear())
@@ -100,12 +101,23 @@ class SequenceLogDialog(QDialog):
         self._tailer.start(url)
 
     def _append(self, chunk: str) -> None:
-        at_bottom = self._autoscroll.isChecked()
-        self._view.moveCursor(self._view.textCursor().MoveOperation.End)
-        self._view.insertPlainText(chunk)
-        if at_bottom:
-            sb = self._view.verticalScrollBar()
-            sb.setValue(sb.maximum())
+        # Remember whether the user was at the bottom BEFORE appending. Insert via a
+        # detached cursor (not self._view.moveCursor, which forces the viewport to
+        # follow the cursor and so scrolls even with autoscroll off). Only scroll
+        # when autoscroll is on and the user hadn't scrolled up to read history.
+        bar = self._view.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 4
+        cursor = self._view.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(chunk)
+        if self._autoscroll.isChecked() and at_bottom:
+            bar.setValue(bar.maximum())
+
+    def _on_autoscroll_toggled(self, on: bool) -> None:
+        self._autoscroll.setText(f"Autoscroll: {'on' if on else 'off'}")
+        if on:
+            bar = self._view.verticalScrollBar()
+            bar.setValue(bar.maximum())
 
     def _on_status(self, connected: bool, detail: str) -> None:
         if connected:
