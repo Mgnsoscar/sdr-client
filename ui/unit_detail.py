@@ -76,16 +76,16 @@ class _TaskRow(QFrame):
 
         # Buttons — run controls only. Task definitions are edited in the Library
         # and deployed; the unit card just runs what's deployed.
-        self._logs = QPushButton("Logs")
+        self._logs = QPushButton("Log")
         self._logs.setToolTip("Open this task's log in a window")
         self._logs.clicked.connect(self._on_logs)
         self._start = QPushButton("Start")
         self._stop = QPushButton("Stop")
-        for b in (self._logs, self._start, self._stop):
+        for b in (self._start, self._stop, self._logs):
             b.setFixedWidth(72)
         self._start.clicked.connect(self._on_start)
         self._stop.clicked.connect(self._on_stop)
-        for b in (self._logs, self._start, self._stop):
+        for b in (self._start, self._stop, self._logs):
             lay.addWidget(b)
 
         self.update_status(task)
