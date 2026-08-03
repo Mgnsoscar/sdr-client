@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# SDR client runtime state (per-PC; never committed)
+unit_ledger.json
+unit_ledger.json.tmp

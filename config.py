@@ -80,6 +80,12 @@ class ClientConfig:
             # so every load agrees on the same permanent id.
             if not (isinstance(entry, dict) and entry.get("uid")):
                 migrated = True
+            # Drop unusable addresses (IPv6 / loopback that may have been auto-learned
+            # before we filtered them) and persist the cleanup.
+            usable = [a for a in u.addresses if ":" not in a and not a.startswith("127.")]
+            if usable != u.addresses:
+                u.addresses = usable
+                migrated = True
             units.append(u)
 
         cfg = cls(

@@ -105,7 +105,10 @@ class AgentClient:
 
         # Candidate connect targets. The active one is what httpx talks to; on
         # warmup we probe them in order and stick to the first that answers.
-        self._addresses: List[str] = [a for a in (addresses or [hostname]) if a] or [hostname]
+        # Drop anything with a ':' — IPv6 (incl. link-local fe80::) which this
+        # IPv4/hostname stack can't form a valid URL for (httpx raises InvalidURL).
+        self._addresses: List[str] = [a for a in (addresses or [hostname])
+                                      if a and ":" not in a] or [hostname]
         self._active_addr: str = self._addresses[0]
         # After a successful resolve (in warmup) we pin the active address to its IP
         # so reconnects skip the slow mDNS lookup. The Host header carries the addr.
@@ -339,7 +342,12 @@ class AgentClient:
         last_conn_err: Optional[str] = None
         for addr in ordered:
             if addr != self._active_addr or self._resolved_ip is not None:
-                self._connect_to(addr)
+                try:
+                    self._connect_to(addr)
+                except Exception as exc:  # noqa: BLE001 — a malformed address (e.g.
+                    # a bare IPv6 literal) shouldn't abort probing the others
+                    last_conn_err = f"bad address '{addr}': {exc}"
+                    continue
             t0 = time.perf_counter()
             try:
                 data = self._request("GET", "/info")

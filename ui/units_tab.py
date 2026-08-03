@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
 from api import AgentClient, Fleet
 from api import models as m
 from config import ClientConfig, UnitEntry
+from state import UnitLedger
 from .theme import Palette
 from .unit_card import UnitCard
 from .unit_detail import UnitDetail
@@ -43,6 +44,9 @@ class UnitsTab(QWidget):
         self._cards: Dict[str, UnitCard] = {}
         # The known-units config (units.yaml). This tab owns edits to it.
         self._cfg = ClientConfig.load()
+        # Permanent machine-id → uid ledger (survives unit deletion), so re-adding
+        # the same physical Pi reuses its original id and keeps its plans linked.
+        self._ledger = UnitLedger()
 
         self._stack = QStackedWidget()
         outer = QVBoxLayout(self)
@@ -153,6 +157,19 @@ class UnitsTab(QWidget):
         if not dlg.exec() or dlg.result_entry is None:
             return
         entry = dlg.result_entry            # carries a fresh permanent uid
+        # If we've hosted this physical Pi before (same machine-id, e.g. it was
+        # deleted and is now re-added from discovery), give it back its original
+        # permanent id so its existing plans/schedule reconnect — instead of the
+        # fresh id, which nothing references. A never-seen Pi is recorded now.
+        if entry.machine_id:
+            known = self._ledger.uid_for(entry.machine_id)
+            if known and known != entry.uid and not any(u.uid == known
+                                                        for u in self._cfg.units):
+                logger.info("Re-adding a previously-known Pi — reusing its "
+                            "permanent id %s (plans preserved)", known)
+                entry.uid = known
+            else:
+                self._ledger.record(entry.machine_id, entry.uid)
         self._cfg.units.append(entry)
         self._persist()
         client = self._make_client(entry)
@@ -218,7 +235,9 @@ class UnitsTab(QWidget):
 
     def _sync_machine_ids(self) -> None:
         """Persist a unit's machine-id once its live client has learned it from
-        /info, so we can recognise the same physical Pi later (even offline)."""
+        /info, so we can recognise the same physical Pi later (even offline), and
+        reconcile it with the permanent machine-id → uid ledger."""
+        # 1. Learn machine-ids the live clients discovered from /info.
         changed = False
         for u in self._cfg.units:
             try:
@@ -230,6 +249,45 @@ class UnitsTab(QWidget):
                 changed = True
         if changed:
             self._persist()
+
+        # 2. Reconcile every known machine-id with the ledger: record ones we've
+        #    not seen before, and re-key a unit the ledger already ties to an
+        #    EARLIER uid. The latter is a manual re-add — the Pi was typed in by
+        #    address (so it got a fresh temp uid), and only on connect do we learn
+        #    its machine-id and discover it's a Pi whose plans reference the old
+        #    uid. Re-keying restores that link.
+        rekeys = []
+        for u in self._cfg.units:
+            if not u.machine_id:
+                continue
+            known = self._ledger.uid_for(u.machine_id)
+            if known is None:
+                self._ledger.record(u.machine_id, u.uid)
+            elif known != u.uid and not any(o.uid == known for o in self._cfg.units):
+                rekeys.append((u.uid, known))
+        for old_uid, new_uid in rekeys:
+            self._rekey_unit(old_uid, new_uid)
+        if rekeys:
+            self._show_grid()
+            self._rebuild_grid()
+            self.hub.refresh_now()
+
+    def _rekey_unit(self, old_uid: str, new_uid: str) -> None:
+        """Move a unit from a freshly-minted uid onto its original one (from the
+        ledger) so its existing plans and schedule reconnect. Swaps the live fleet
+        client under the new key and re-warms it."""
+        entry = next((u for u in self._cfg.units if u.uid == old_uid), None)
+        if entry is None:
+            return
+        entry.uid = new_uid
+        self._persist()
+        self.hub.remove_unit(old_uid)
+        client = self._make_client(entry)
+        self.hub.add_unit(client)
+        self.hub.run_async(f"warmup:{new_uid}", client.warmup)
+        logger.info("Recognised '%s' as a previously-known unit — restored its "
+                    "permanent id %s so its plans/schedule reconnect", entry.label,
+                    new_uid)
 
     def _on_discovery_changed(self) -> None:
         """A discovered unit whose machine-id matches a known unit but at a NEW
