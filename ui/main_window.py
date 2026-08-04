@@ -206,6 +206,9 @@ class MainWindow(QMainWindow):
         if label == "sync_clocks":
             self._report_clock_sync(result)
             return
+        if label == "state_sync":
+            self._report_state_sync(result)
+            return
         if isinstance(result, Exception):
             logger.error("Action '%s' failed: %s", label, result)
             self.statusBar().showMessage(self._format_action_error(label, result), 6000)
@@ -371,6 +374,23 @@ class MainWindow(QMainWindow):
             f"If a unit reports a permission error, its agent isn't running as "
             f"root (the installed service is, by default).")
         self.hub.refresh_now()
+
+    def _report_state_sync(self, result) -> None:
+        """After a plans/schedule edit was mirrored out to the fleet. Stay quiet
+        on full success (the whole point is that units track the PC seamlessly);
+        only surface the units we couldn't reach, so drift is never silent."""
+        if isinstance(result, Exception):        # whole fan-out failed to start
+            self.statusBar().showMessage(f"Couldn't sync units: {result}", 6000)
+            return
+        if not isinstance(result, dict) or not result:
+            return
+        bad = [h for h, r in result.items() if isinstance(r, Exception)]
+        if not bad:
+            return
+        names = ", ".join(self._unit_name(h) for h in bad)
+        self.statusBar().showMessage(
+            f"Change saved. {len(bad)} unit(s) unreachable ({names}) — they'll "
+            f"catch up on the next deploy.", 6000)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
