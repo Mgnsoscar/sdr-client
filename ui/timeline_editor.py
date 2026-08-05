@@ -1213,16 +1213,21 @@ class TimelineEditor(QWidget):
             "action": s.action.value if hasattr(s.action, "value") else str(s.action),
             "task_name": s.task_name, "args": list(getattr(s, "args", []) or []),
             "replace_args": bool(getattr(s, "replace_args", False)),
+            "params": dict(getattr(s, "params", {}) or {}),
         } for s in steps]
         self._canvas.set_items(tlm.steps_to_items(dicts))
 
     def steps(self) -> List[m.SequenceStep]:
         out: List[m.SequenceStep] = []
         for d in tlm.items_to_steps(self._canvas.items()):
+            # A tune step carries params; start/run/stop carry args. Use .get so a
+            # missing key never crashes the save.
             out.append(m.SequenceStep(
                 anchor=d["anchor"], offset_s=d["offset_s"],
                 action=m.StepAction(d["action"]), task_name=d["task_name"],
-                args=list(d["args"]), replace_args=d["replace_args"]))
+                args=list(d.get("args") or []),
+                replace_args=bool(d.get("replace_args", False)),
+                params=dict(d.get("params") or {})))
         return out
 
     # ── Validation (mirrors the agent's _validate_steps) ─────────────────────
