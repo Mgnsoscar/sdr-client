@@ -450,6 +450,16 @@ class AgentClient:
         body = request.model_dump() if request else None
         return m.ProcessStatus(**self._request("POST", f"/tasks/{name}/restart", json=body))
 
+    def set_task_params(self, name: str, values: dict, wait: float = 1.0) -> dict:
+        """Retune a running task's live parameters. Returns the agent's
+        {ok, accepted, rejected, applied, pending}."""
+        return self._request("POST", f"/tasks/{name}/params",
+                             json={"values": values, "wait": wait})
+
+    def get_task_params(self, name: str) -> dict:
+        """Current + applied live-parameter values of a running task."""
+        return self._request("GET", f"/tasks/{name}/params/live")
+
     def task_logs(self, name: str, lines: int = 100) -> List[str]:
         return self._request("GET", f"/tasks/{name}/logs", params={"lines": lines})
 

@@ -24,7 +24,7 @@ Public API:
 from __future__ import annotations
 
 import shlex
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
@@ -51,6 +51,20 @@ def num_or_none(s):
         return float(s)
     except (TypeError, ValueError):
         return None
+
+
+def _typed(val_str: str, spec: dict):
+    """Coerce a widget's string value to the type its schema declares (int/float),
+    leaving anything else — and unparseable numbers — as the original string."""
+    t = spec.get("type")
+    try:
+        if t == "int":
+            return int(val_str, 0)
+        if t == "float":
+            return float(val_str)
+    except (TypeError, ValueError):
+        pass
+    return val_str
 
 
 def resolve_preset_value(spec: dict, text: str) -> str:
@@ -232,6 +246,29 @@ class ParamForm(QWidget):
                     out += [flag, val]
                 else:
                     out.append(val)
+        return out
+
+    def values(self) -> Dict[str, Any]:
+        """Current widget values as a {param-name: typed-value} dict — numbers as
+        numbers, choices/presets as their resolved value, flags as bool. Empty
+        text fields are omitted. Used for live tuning (paramkit set-params), where
+        values travel as JSON rather than CLI args."""
+        out: Dict[str, Any] = {}
+        for dest, (w, spec) in self._widgets.items():
+            if spec.get("is_flag"):
+                out[dest] = bool(w.isChecked()) if isinstance(w, QCheckBox) else False
+            elif spec.get("presets") and isinstance(w, QComboBox):
+                raw = resolve_preset_value(spec, w.currentText())
+                if raw != "":
+                    out[dest] = _typed(raw, spec)
+            elif isinstance(w, (QSpinBox, QDoubleSpinBox)):
+                out[dest] = w.value()
+            elif isinstance(w, QComboBox):
+                out[dest] = w.currentText().strip()
+            else:
+                txt = w.text().strip()
+                if txt != "":
+                    out[dest] = _typed(txt, spec)
         return out
 
     def validate(self) -> Optional[str]:
