@@ -231,7 +231,7 @@ class TaskEditorDialog(QDialog):
                 self.created_name = self._name.text().strip()
                 # Pull fresh data now so the new/edited task shows immediately,
                 # instead of waiting for the next poll tick.
-                self.hub.refresh_now()
+                self.hub.refresh_now(self.hostname)
                 self.accept()
             return
 

@@ -134,20 +134,29 @@ class DataHub(QObject):
 
     # ── Immediate refresh ────────────────────────────────────────────────────────
 
-    def refresh_now(self) -> None:
+    def refresh_now(self, host: Optional[str] = None) -> None:
         """
         Run one fast-tier poll immediately (off the GUI thread) and emit
         fast_update, instead of waiting up to fast_interval_s for the next tick.
 
         Called when a unit view opens and after a task action, so the UI reflects
         the new state right away rather than lagging a whole poll cycle behind.
+
+        Pass `host` to poll only that unit. Prefer this from an action/view that
+        concerns a single unit: a whole-fleet refresh fans out to every unit and
+        blocks on connect-timeouts to any that are unreachable, so with several
+        disconnected units even a one-unit action would take seconds to settle.
+        A scoped refresh touches only the unit in question and stays snappy. The
+        fast_update consumers merge per-unit, so a single-unit snapshot leaves the
+        other cards untouched.
         """
         if self._stopped:
             return
+        units = [host] if host else None
 
         def _run():
             try:
-                snap = self.poller.poll_fast_once()
+                snap = self.poller.poll_fast_once(units)
             except Exception:   # noqa: BLE001 — a failed ad-hoc poll is non-fatal
                 return
             if not self._stopped:

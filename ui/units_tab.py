@@ -176,7 +176,7 @@ class UnitsTab(QWidget):
         self.hub.add_unit(client)
         self._rebuild_grid()
         self.hub.run_async(f"warmup:{entry.uid}", client.warmup)
-        self.hub.refresh_now()
+        self.hub.refresh_now(entry.uid)   # just the new unit — don't wait on dead ones
 
     def edit_unit(self, uid: str) -> None:
         entry = next((u for u in self._cfg.units if u.uid == uid), None)
@@ -205,7 +205,7 @@ class UnitsTab(QWidget):
         self._show_grid()
         self._rebuild_grid()
         self.hub.run_async(f"warmup:{new.uid}", client.warmup)
-        self.hub.refresh_now()
+        self.hub.refresh_now(new.uid)     # just the edited unit
 
     def remove_unit(self, uid: str) -> None:
         entry = next((u for u in self._cfg.units if u.uid == uid), None)
