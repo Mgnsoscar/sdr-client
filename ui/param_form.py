@@ -285,6 +285,17 @@ class ParamForm(QWidget):
         if spec.get("unit"):
             text = f"{text}  [{spec['unit']}]"
         lbl = QLabel(text)
+        if spec.get("live"):
+            # Mark params the script can retune while running. Rich text so the
+            # badge sits inline after the name; the plain name stays the label.
+            from html import escape
+            lbl.setText(
+                f"{escape(text)} "
+                f"<span style='color:{Palette.ACCENT}; font-size:9px; "
+                f"font-weight:600; letter-spacing:0.4px;'>● LIVE</span>")
+            lbl.setToolTip((spec.get("help") + "\n\n" if spec.get("help") else "")
+                           + "Tunable while the task is running.")
+            return lbl
         if spec.get("help"):
             lbl.setToolTip(spec["help"])
         return lbl
