@@ -157,6 +157,16 @@ class LibraryClient:
         return {"deleted": name}
 
     def get_script_params(self, name: str) -> dict:
+        # Re-extract from the stored source so the schema always reflects the
+        # current extractor — a script added before a new field was understood
+        # (e.g. `live`) still reports it, without needing a re-import. Fall back to
+        # the params captured at upload time if the source can't be parsed.
+        s = self._store.get_script(name)
+        if s is not None and s.content:
+            try:
+                return {"params": (extract_params(s.content) or {}).get("params", [])}
+            except Exception:  # noqa: BLE001 — a script we can't parse: use stored
+                pass
         return {"params": self._store.script_params(name)}
 
     # ── Not applicable to a library ────────────────────────────────────────────
