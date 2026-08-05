@@ -52,7 +52,7 @@ from PyQt6.QtWidgets import (
 
 from api import models as m
 from . import timeline_model as tlm
-from .param_form import ParamForm
+from .param_form import ParamForm, fmt_value
 from .theme import Palette
 
 # ── View geometry (paint sizes; timing geometry lives in timeline_model) ──────
@@ -222,6 +222,11 @@ class _TimelineCanvas(QWidget):
         return int(max(RUN_MIN_W, min(RUN_MAX_W, w)))
 
     def _run_label(self, item) -> str:
+        if getattr(item, "action", "run") == "tune":
+            # A tune point shows its parameter changes inline (no caret panel).
+            summary = ", ".join(f"{k}={v}" for k, v in (item.params or {}).items())
+            base = f"◈ {item.task_name or '(no task)'}"
+            return f"{base}  {summary}".strip() if summary else base
         # Name only — the arguments live behind the ▾ caret / editor.
         return f"⚡ {item.task_name or '(no task)'}".strip()
 
@@ -540,13 +545,20 @@ class _TimelineCanvas(QWidget):
         g = self._geom[it.uid]
         y, cx, w = g["y"], g["cx"], g["w"]
         known = self.task_known(it.task_name)
-        border = QColor(Palette.ARMED if known else Palette.CRASH)
+        is_tune = getattr(it, "action", "run") == "tune"
+        if not known:
+            border, fill, text = Palette.CRASH, Palette.CRASH_SOFT, Palette.CRASH
+        elif is_tune:                       # tune points read as a distinct accent
+            border, fill, text = Palette.ACCENT, Palette.ACCENT_SOFT, Palette.ACCENT
+        else:
+            border, fill, text = Palette.ARMED, Palette.ARMED_SOFT, Palette.TEXT
+        border = QColor(border)
         rect = QRectF(cx - w / 2, y, w, LANE_H)
         p.setPen(QPen(border, 2))
-        p.setBrush(QBrush(QColor(Palette.ARMED_SOFT if known else Palette.CRASH_SOFT)))
+        p.setBrush(QBrush(QColor(fill)))
         p.drawRoundedRect(rect, LANE_H / 2, LANE_H / 2)
         p.setFont(self._label_font)
-        p.setPen(QColor(Palette.TEXT if known else Palette.CRASH))
+        p.setPen(QColor(text))
         fm = QFontMetrics(self._label_font)
         pad = 20 + (CARET_W if it.args else 0)
         label = fm.elidedText(self._run_label(it), Qt.TextElideMode.ElideRight, max(10, int(w) - pad))
@@ -762,6 +774,8 @@ class _TimelineCanvas(QWidget):
         default_task = self._editor.available_tasks()[0] if self._editor.available_tasks() else ""
         if kind == "bar":
             item = tlm.BarItem(task_name=default_task, start_offset=0.0, stop_offset=0.0)
+        elif kind == "tune":
+            item = tlm.RunItem(task_name=default_task, action="tune", anchor="start", offset=0.0)
         else:
             item = tlm.RunItem(task_name=default_task, anchor="start", offset=0.0)
         dlg = StepEditorDialog(item, self._editor, new=True, parent=self)
@@ -788,6 +802,7 @@ class StepEditorDialog(QDialog):
 
         self._current_script = ""
         self._pending_prefill: Optional[List[str]] = None
+        self._prefill_params: Dict[str, object] = dict(getattr(item, "params", {}) or {})
         self._task_touched = False
 
         self.setWindowTitle("New step" if new else "Edit step")
@@ -827,7 +842,13 @@ class StepEditorDialog(QDialog):
         self._type = QComboBox()
         self._type.addItem("Duration  (on-air → off-air)", "bar")
         self._type.addItem("One-shot  (fires once)", "run")
-        self._type.setCurrentIndex(0 if item.kind == "bar" else 1)
+        self._type.addItem("Tune  (set live params)", "tune")
+        if item.kind == "bar":
+            self._type.setCurrentIndex(0)
+        elif getattr(item, "action", "run") == "tune":
+            self._type.setCurrentIndex(2)
+        else:
+            self._type.setCurrentIndex(1)
         self._type.currentIndexChanged.connect(self._sync_type)
         form.addRow("Type", self._type)
 
@@ -881,13 +902,15 @@ class StepEditorDialog(QDialog):
         self._extra.setPlaceholderText("extra args not covered by the form (optional)")
         eform = QFormLayout(); eform.setContentsMargins(0, 0, 0, 0)
         eform.addRow("Extra args", self._extra)
-        outer.addLayout(eform)
+        self._extra_row = QWidget()
+        self._extra_row.setLayout(eform)
+        outer.addWidget(self._extra_row)
 
-        hint = QLabel("Parameters are pre-filled from the task; changing them here only "
-                      "affects this step (the task is left unchanged).")
-        hint.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-        hint.setWordWrap(True)
-        outer.addWidget(hint)
+        self._hint = QLabel("Parameters are pre-filled from the task; changing them here only "
+                            "affects this step (the task is left unchanged).")
+        self._hint.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+        self._hint.setWordWrap(True)
+        outer.addWidget(self._hint)
 
         buttons = QDialogButtonBox()
         if not self._new:
@@ -915,12 +938,28 @@ class StepEditorDialog(QDialog):
         if hasattr(widget, "_row_label"):
             widget._row_label.setVisible(visible)
 
+    def _is_tune(self) -> bool:
+        return self._type.currentData() == "tune"
+
     def _sync_type(self) -> None:
-        is_bar = self._type.currentData() == "bar"
+        mode = self._type.currentData()
+        is_bar = mode == "bar"
+        is_tune = mode == "tune"
         self._set_row_visible(self._start_off, is_bar)
         self._set_row_visible(self._stop_off, is_bar)
-        self._set_row_visible(self._anchor, not is_bar)
+        self._set_row_visible(self._anchor, not is_bar)   # a point (run/tune) has one anchor
         self._set_row_visible(self._run_off, not is_bar)
+        # Tune sends live-parameter values, not CLI args.
+        self._extra_row.setVisible(not is_tune)
+        self._hint.setText(
+            "Sets the running task's live parameters at this offset. The task must "
+            "be started by a duration step in this sequence."
+            if is_tune else
+            "Parameters are pre-filled from the task; changing them here only "
+            "affects this step (the task is left unchanged).")
+        # The form's contents differ (tune shows only live params), so rebuild it.
+        if self._current_script:
+            self._build_form(self._current_script)
 
     # ── Task → script → parameter form ────────────────────────────────────────
 
@@ -979,15 +1018,41 @@ class StepEditorDialog(QDialog):
 
     def _build_form(self, script: str) -> None:
         specs = self._editor.param_cache().get(script, [])
-        self._form.set_params(specs)
-        self._params_status.setText("" if specs else "this script declares no parameters — use extra args")
-        self._apply_prefill()
+        if self._is_tune():
+            # Only live-tunable params can be changed mid-run; the checkboxes let
+            # you pick exactly which ones this step sets.
+            specs = [s for s in specs if s.get("live")]
+            self._form.set_params(specs, selectable=True)
+            self._params_status.setText(
+                "tick the parameters to set at this offset" if specs
+                else "this task's script declares no live parameters")
+            self._seed_from_params()
+        else:
+            self._form.set_params(specs)
+            self._params_status.setText(
+                "" if specs else "this script declares no parameters — use extra args")
+            self._apply_prefill()
 
     def _apply_prefill(self) -> None:
         if self._pending_prefill is None:
             return
         extra = self._form.set_values(self._pending_prefill)
         self._extra.setText(" ".join(shlex.quote(e) for e in extra) if extra else "")
+
+    def _seed_from_params(self) -> None:
+        """Prefill the (live-only) form from a tune step's stored {name: value}."""
+        if not self._prefill_params:
+            return
+        args: List[str] = []
+        specs = self._editor.param_cache().get(self._current_script, [])
+        by_name = {s.get("name") or s.get("dest"): s for s in specs}
+        for name, value in self._prefill_params.items():
+            spec = by_name.get(name)
+            flag = (spec.get("flags") or [None])[0] if spec else None
+            if flag is not None:
+                args += [flag, fmt_value(value)]
+        if args:
+            self._form.set_values(args)
 
     # ── Save ──────────────────────────────────────────────────────────────────
 
@@ -1010,16 +1075,25 @@ class StepEditorDialog(QDialog):
         if err:
             self._params_status.setText(err)
             return
-        args = self._build_args()
         uid = self._src.uid
-        if self._type.currentData() == "bar":
+        mode = self._type.currentData()
+        if mode == "tune":
+            params = self._form.values()
+            if not params:
+                self._params_status.setText("set at least one live parameter to tune")
+                return
+            self.result_item = tlm.RunItem(
+                task_name=task, action="tune", params=params,
+                anchor=self._anchor.currentData(),
+                offset=round(self._run_off.value(), 1), uid=uid)
+        elif mode == "bar":
             self.result_item = tlm.BarItem(
-                task_name=task, args=args, replace_args=True,
+                task_name=task, args=self._build_args(), replace_args=True,
                 start_offset=round(self._start_off.value(), 1),
                 stop_offset=round(self._stop_off.value(), 1), uid=uid)
         else:
             self.result_item = tlm.RunItem(
-                task_name=task, args=args, replace_args=True,
+                task_name=task, args=self._build_args(), replace_args=True,
                 anchor=self._anchor.currentData(),
                 offset=round(self._run_off.value(), 1), uid=uid)
         self.accept()
@@ -1060,10 +1134,14 @@ class TimelineEditor(QWidget):
         self._add_bar.setToolTip("A task that runs across the on-air window (start + stop)")
         self._add_run = QPushButton("+ One-shot")
         self._add_run.setToolTip("A task that fires once and exits (many allowed)")
+        self._add_tune = QPushButton("+ Tune")
+        self._add_tune.setToolTip("Change a running duration task's live parameters at a set time")
         self._add_bar.clicked.connect(lambda: self._canvas.add_new("bar"))
         self._add_run.clicked.connect(lambda: self._canvas.add_new("run"))
+        self._add_tune.clicked.connect(lambda: self._canvas.add_new("tune"))
         bar.addWidget(self._add_bar)
         bar.addWidget(self._add_run)
+        bar.addWidget(self._add_tune)
         bar.addStretch(1)
         self._hint = QLabel("Drag handles to set timing · click to edit")
         self._hint.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")

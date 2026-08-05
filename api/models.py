@@ -12,7 +12,7 @@ Models are split into:
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional, Dict, List
+from typing import Any, Optional, Dict, List
 from pydantic import BaseModel
 
 
@@ -48,6 +48,7 @@ class StepAction(str, Enum):
     START = "start"   # launch a long-running task (paired with a STOP)
     STOP  = "stop"    # stop a long-running task
     RUN   = "run"     # fire-and-exit one-shot: launch, self-terminates, no stop
+    TUNE  = "tune"    # retune a running task's live parameters (see SequenceStep.params)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -236,6 +237,8 @@ class SequenceStep(BaseModel):
     args: List[str] = []               # CLI args for this step's start/run
     replace_args: bool = False         # True: args are the complete set (replace task defaults)
     inject_resume_offset: bool = False
+    # TUNE step: live-parameter values to apply to the running task, {name: value}.
+    params: Dict[str, Any] = {}
 
 
 class Sequence(BaseModel):
@@ -261,6 +264,7 @@ class StepFire(BaseModel):
     resume_offset_s: Optional[float] = None
     args: List[str] = []
     replace_args: bool = False
+    params: Dict[str, Any] = {}
 
 
 class SequenceRun(BaseModel):

@@ -59,12 +59,19 @@ class BarItem:
 
 @dataclass
 class RunItem:
-    """A one-shot fire-and-exit step: a single point, no end."""
+    """A single-point step. Geometrically one point on the timeline (no end);
+    what it does depends on `action`:
+      - "run"  — fire-and-exit one-shot: launch the task, it self-terminates.
+      - "tune" — retune a *running* duration task's live parameters (params below)
+                 at this offset; carries `params`, not `args`.
+    Sharing one item type keeps the canvas geometry (drag/lanes/hit) identical."""
     task_name: str
     args: List[str] = field(default_factory=list)
     replace_args: bool = True
     anchor: str = "start"       # "start" (on-air) | "stop" (off-air)
     offset: float = 0.0
+    action: str = "run"         # "run" | "tune"
+    params: Dict[str, object] = field(default_factory=dict)   # tune: {name: value}
     uid: int = 0
     kind: str = "run"
 
@@ -209,6 +216,11 @@ def item_to_steps(it) -> List[dict]:
             {"anchor": "stop", "offset_s": it.stop_offset, "action": "stop",
              "task_name": it.task_name, "args": [], "replace_args": False},
         ]
+    if getattr(it, "action", "run") == "tune":
+        return [
+            {"anchor": it.anchor, "offset_s": it.offset, "action": "tune",
+             "task_name": it.task_name, "params": dict(it.params or {})},
+        ]
     return [
         {"anchor": it.anchor, "offset_s": it.offset, "action": "run",
          "task_name": it.task_name, "args": list(it.args), "replace_args": it.replace_args},
@@ -235,6 +247,11 @@ def steps_to_items(steps: List[dict]) -> List:
             items.append(RunItem(
                 task_name=s["task_name"], args=list(s.get("args") or []),
                 replace_args=bool(s.get("replace_args", True)),
+                anchor=s.get("anchor", "start"), offset=float(s["offset_s"])))
+        elif action == "tune":
+            items.append(RunItem(
+                task_name=s["task_name"], action="tune",
+                params=dict(s.get("params") or {}),
                 anchor=s.get("anchor", "start"), offset=float(s["offset_s"])))
         elif action == "start":
             starts.append(s)
@@ -276,4 +293,11 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
         return "needs at least one on-air step"
     if not any(s["anchor"] == "stop" for s in steps):
         return "needs at least one off-air step (a duration task provides both)"
+    # A tune step retunes a running duration task, so the task it targets must be
+    # started by a duration (bar) step in this same sequence.
+    duration_tasks = {it.task_name for it in items if getattr(it, "kind", None) == "bar"}
+    for it in items:
+        if getattr(it, "action", "run") == "tune" and it.task_name not in duration_tasks:
+            return (f"tune step targets '{it.task_name or '(no task)'}', which no "
+                    f"duration task in this sequence starts")
     return None

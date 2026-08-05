@@ -69,10 +69,15 @@ def summarize(seq: m.Sequence) -> str:
         return s.action.value if hasattr(s.action, "value") else str(s.action)
 
     def desc(s) -> str:
-        glyph = "▶" if action_of(s) == "start" else "⏹"
-        args = getattr(s, "args", None) or []
-        argstr = f" {' '.join(args)}" if (action_of(s) == "start" and args) else ""
-        return f"{glyph} {s.task_name}{argstr} {_fmt_offset(s.offset_s)}"
+        act = action_of(s)
+        glyph = {"start": "▶", "run": "⚡", "tune": "◈"}.get(act, "⏹")
+        if act == "tune":
+            params = getattr(s, "params", None) or {}
+            detail = " " + ", ".join(f"{k}={v}" for k, v in params.items()) if params else ""
+        else:
+            args = getattr(s, "args", None) or []
+            detail = f" {' '.join(args)}" if (act in ("start", "run") and args) else ""
+        return f"{glyph} {s.task_name}{detail} {_fmt_offset(s.offset_s)}"
 
     on = sorted((s for s in seq.steps if s.anchor == "start"), key=lambda s: s.offset_s)
     off = sorted((s for s in seq.steps if s.anchor == "stop"), key=lambda s: s.offset_s)
