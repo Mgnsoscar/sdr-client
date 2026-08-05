@@ -21,7 +21,6 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QLabel, QScrollArea, QVBoxLayout,
 )
@@ -29,8 +28,6 @@ from PyQt6.QtWidgets import (
 from .param_form import ParamForm, fmt_value
 from .qt_adapter import DataHub
 from .theme import Palette
-
-APPLY_DEBOUNCE_MS = 350
 
 
 class LiveTuneDialog(QDialog):
@@ -41,17 +38,13 @@ class LiveTuneDialog(QDialog):
         self.task_name = task_name
         self._script_name = ""
         self._live_specs: List[dict] = []
-        self._loading = True          # suppress auto-apply while we seed the form
+        self._loading = True          # suppress the dirty marker while we seed
         self._applying = False
+        self._dirty = False
 
         self.setWindowTitle(f"Tune '{task_name}' (live)")
         self.setMinimumWidth(520)
         self._build()
-
-        self._debounce = QTimer(self)
-        self._debounce.setSingleShot(True)
-        self._debounce.setInterval(APPLY_DEBOUNCE_MS)
-        self._debounce.timeout.connect(self._apply)
 
         self.hub.task_done.connect(self._on_task_done)
         self.finished.connect(lambda _=0: self._disconnect())
@@ -65,14 +58,14 @@ class LiveTuneDialog(QDialog):
         root.setSpacing(10)
 
         blurb = QLabel(
-            "Changes below are applied to the running task immediately. The "
-            "deployed task definition is not modified.")
+            "Adjust the values, then press Update (or Enter) to apply them to the "
+            "running task. The deployed task definition is not modified.")
         blurb.setWordWrap(True)
         blurb.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         root.addWidget(blurb)
 
         self._form = ParamForm()
-        self._form.changed.connect(self._on_changed)
+        self._form.changed.connect(self._mark_dirty)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -87,7 +80,17 @@ class LiveTuneDialog(QDialog):
 
         self._buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         self._buttons.rejected.connect(self.reject)
-        self._buttons.accepted.connect(self.accept)
+        self._update_btn = self._buttons.addButton(
+            "Update", QDialogButtonBox.ButtonRole.ApplyRole)
+        self._update_btn.clicked.connect(self._apply)
+        # Make Update the dialog's default button so Enter applies (rather than
+        # Close closing the dialog); Close must not steal the default.
+        self._update_btn.setDefault(True)
+        self._update_btn.setAutoDefault(True)
+        close = self._buttons.button(QDialogButtonBox.StandardButton.Close)
+        if close is not None:
+            close.setDefault(False)
+            close.setAutoDefault(False)
         root.addWidget(self._buttons)
 
     # ── Loading ────────────────────────────────────────────────────────────────
@@ -171,19 +174,22 @@ class LiveTuneDialog(QDialog):
         self._loading = True
         self._form.set_values(args)
         self._loading = False
-        self._set_result("Ready — adjust a value to apply it live.")
+        self._dirty = False
+        self._set_result("Ready — adjust a value and press Update to apply it.")
 
-    # ── Apply on change ──────────────────────────────────────────────────────────
+    # ── Apply on Update / Enter ──────────────────────────────────────────────────
 
-    def _on_changed(self) -> None:
+    def _mark_dirty(self) -> None:
+        """A value changed but hasn't been sent yet. Just a hint — nothing is
+        applied until Update (or Enter)."""
         if self._loading:
             return
-        self._debounce.start()
+        self._dirty = True
+        self._set_result("Unsaved changes — press Update to apply.")
 
     def _apply(self) -> None:
         if self._applying:
-            self._debounce.start()      # a set is in flight; retry shortly
-            return
+            return                      # a set is already in flight; ignore
         err = self._form.validate()
         if err:
             self._set_result(err, error=True)
@@ -192,6 +198,7 @@ class LiveTuneDialog(QDialog):
         if not values:
             return
         self._applying = True
+        self._dirty = False
         self._set_result("applying…")
         self.hub.run_async(
             f"livetune_set:{self.hostname}",
