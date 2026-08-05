@@ -84,6 +84,12 @@ class ProcessStatus(BaseModel):
 class StartRequest(BaseModel):
     env_overrides: Dict[str, str] = {}
     args: List[str] = []
+    # When False, args are APPENDED to the task's configured command. When True,
+    # args REPLACE the task's trailing args — the launch becomes
+    # [interpreter, script, *args] — so a form can fully specify the parameters
+    # for one run without touching the deployed task definition. Mirrors the
+    # agent's StartRequest.replace_args.
+    replace_args: bool = False
 
 
 class ExitRecord(BaseModel):

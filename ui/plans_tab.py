@@ -373,25 +373,33 @@ class PlansTab(QWidget):
         dlg = PlanEditorDialog(self.hub, parent=self.window())
         if dlg.exec() and dlg.result_plan is not None:
             self._store.upsert(dlg.result_plan)
+            self._sync_units()
             self._refresh()
 
     def _on_edit(self, plan: m.Plan) -> None:
         dlg = PlanEditorDialog(self.hub, plan=plan, parent=self.window())
         if dlg.exec() and dlg.result_plan is not None:
             self._store.upsert(dlg.result_plan)
+            self._sync_units()
             self._refresh()
 
     def _on_delete(self, plan: m.Plan) -> None:
         if QMessageBox.question(
             self, "Delete plan",
-            f"Delete plan '{plan.name or plan.id}'?\nThis only removes the local "
-            f"definition; it does not touch the units.",
+            f"Delete plan '{plan.name or plan.id}'?\nThis removes the plan here and "
+            f"on every reachable unit (all units mirror the PC).",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         ) != QMessageBox.StandardButton.Yes:
             return
         self._store.delete(plan.id)
+        self._sync_units()
         self._refresh()
+
+    def _sync_units(self) -> None:
+        """Replicate the just-edited plans (and schedule) out to every unit so
+        their copies stay identical to the PC — the PC is the source of truth."""
+        self.hub.sync_state_to_units()
 
     # ── Export / import (move plans between machines) ──────────────────────────
 
@@ -470,6 +478,7 @@ class PlansTab(QWidget):
             return
         for plan in to_add:
             self._store.upsert(plan)
+        self._sync_units()
         self._refresh()
         summary = f"Imported {len(to_add)} plan(s)."
         if skipped:

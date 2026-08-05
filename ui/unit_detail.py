@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 from api import Fleet
 from api import models as m
 from .qt_adapter import DataHub
+from .run_task_dialog import RunTaskDialog
 from .sequences_panel import SequencesPanel
 from .task_log_dialog import TaskLogDialog
 from .theme import Palette
@@ -79,13 +80,17 @@ class _TaskRow(QFrame):
         self._logs = QPushButton("Log")
         self._logs.setToolTip("Open this task's log in a window")
         self._logs.clicked.connect(self._on_logs)
+        self._run = QPushButton("Run…")
+        self._run.setToolTip("Start this task once with different parameters "
+                             "(doesn't change the deployed definition)")
+        self._run.clicked.connect(self._on_run)
         self._start = QPushButton("Start")
         self._stop = QPushButton("Stop")
-        for b in (self._start, self._stop, self._logs):
+        for b in (self._run, self._start, self._stop, self._logs):
             b.setFixedWidth(72)
         self._start.clicked.connect(self._on_start)
         self._stop.clicked.connect(self._on_stop)
-        for b in (self._start, self._stop, self._logs):
+        for b in (self._run, self._start, self._stop, self._logs):
             lay.addWidget(b)
 
         self.update_status(task)
@@ -130,6 +135,13 @@ class _TaskRow(QFrame):
         dlg = TaskLogDialog(self.hub, self.hostname, self.task_name,
                             running=running, parent=self.window())
         dlg.show()
+
+    def _on_run(self) -> None:
+        running = getattr(self, "_state", None) in (
+            m.ProcessState.RUNNING, m.ProcessState.STARTING)
+        dlg = RunTaskDialog(self.hub, self.hostname, self.task_name,
+                            running=running, parent=self.window())
+        dlg.exec()
 
     def _on_start(self) -> None:
         self._busy("starting…")

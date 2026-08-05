@@ -683,6 +683,7 @@ class TimelineTab(QWidget):
         dlg = _ScheduleDialog(plans, default_day=self._selected_date(), parent=self.window())
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_entry is not None:
             self._store.upsert(dlg.result_entry)
+            self._sync_units()
             self._jump_to(dlg.result_entry)
             self._reload()
 
@@ -694,11 +695,19 @@ class TimelineTab(QWidget):
         r = dlg.exec()
         if r == _ScheduleDialog.REMOVE:
             self._store.delete(entry_id)
+            self._sync_units()
             self._reload()
         elif r == QDialog.DialogCode.Accepted and dlg.result_entry is not None:
             self._store.upsert(dlg.result_entry)
+            self._sync_units()
             self._jump_to(dlg.result_entry)
             self._reload()
+
+    def _sync_units(self) -> None:
+        """Replicate the just-edited schedule (and plans) out to every unit so
+        their copies stay identical to the PC. No-op when running head-less."""
+        if self.hub is not None:
+            self.hub.sync_state_to_units()
 
     def _jump_to(self, entry: m.ScheduledPlan) -> None:
         s = _parse(entry.start)
