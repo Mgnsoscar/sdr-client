@@ -44,6 +44,7 @@ from PyQt6.QtWidgets import (
 from api import models as m
 from api.fleet import LIBRARY_HOST
 from . import timeline_model as tlm
+from .param_form import fmt_duration
 from .qt_adapter import DataHub
 from .theme import Palette
 from .timeline_editor import _TimelineCanvas, TimelineEditor, DRAG_THRESHOLD, LANES_TOP
@@ -492,9 +493,9 @@ class _PlanCanvas(_TimelineCanvas):
             p.setPen(QPen(QColor(Palette.BORDER), 1))
             p.drawLine(int(x), baseline - 4, int(x), baseline + 4)
             p.setPen(QColor(Palette.TEXT_FAINT))
-            p.drawText(int(x) - 18, baseline + 6, 36, 12,
+            p.drawText(int(x) - 27, baseline + 6, 54, 12,
                        int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
-                       f"+{tick_s * i}s")
+                       fmt_duration(tick_s * i, signed=True, compact=True))
             i += 1
         i = 1
         while off_x - i * step > mid:
@@ -502,9 +503,9 @@ class _PlanCanvas(_TimelineCanvas):
             p.setPen(QPen(QColor(Palette.BORDER), 1))
             p.drawLine(int(x), baseline - 4, int(x), baseline + 4)
             p.setPen(QColor(Palette.TEXT_FAINT))
-            p.drawText(int(x) - 18, baseline + 6, 36, 12,
+            p.drawText(int(x) - 27, baseline + 6, 54, 12,
                        int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
-                       f"-{tick_s * i}s")
+                       fmt_duration(-(tick_s * i), signed=True, compact=True))
             i += 1
 
 

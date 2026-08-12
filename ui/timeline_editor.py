@@ -54,7 +54,7 @@ from api import models as m
 from . import timeline_model as tlm
 from api import ramp as _ramp
 
-from .param_form import ParamForm, fmt_value
+from .param_form import ParamForm, fmt_duration, fmt_value
 from .ramp_editor import RampEditorDialog
 from .theme import Palette
 
@@ -92,13 +92,8 @@ DRAG_PARTS = ("bar_start", "bar_stop", "bar_body", "run_body")
 
 
 def _fmt_offset(offset_s: float) -> str:
-    """'-120s', '+5s', '0s' — integer when whole, else one decimal."""
-    n = int(offset_s) if offset_s == int(offset_s) else round(offset_s, 1)
-    if n > 0:
-        return f"+{n}s"
-    if n < 0:
-        return f"{n}s"
-    return "0s"
+    """'-2 min', '+5 s', '0 s' — signed, split into min/h past each threshold."""
+    return fmt_duration(offset_s, signed=True)
 
 
 def _ramp_summary(spec, anchor: str) -> str:
@@ -112,7 +107,7 @@ def _ramp_summary(spec, anchor: str) -> str:
     try:
         res = _ramp.resolve_ramp(a, b, steps=spec.get("steps"), step=spec.get("step"), hold_s=spec.get("hold_s"),
                                  duration_s=spec.get("duration_s"))
-        return f"{param} {span} · {fmt_value(res.duration_s)}s"
+        return f"{param} {span} · {fmt_duration(res.duration_s)}"
     except (ValueError, TypeError):
         return f"{param} {span}"
 
@@ -469,8 +464,9 @@ class _TimelineCanvas(QWidget):
             p.setPen(QPen(QColor(Palette.BORDER), 1))
             p.drawLine(int(x), baseline - 4, int(x), baseline + 4)
             p.setPen(QColor(Palette.TEXT_FAINT))
-            label = f"{'-' if negative else '+'}{tick_s * i}s"
-            p.drawText(int(x) - 18, baseline + 6, 36, 12,
+            label = fmt_duration(-(tick_s * i) if negative else tick_s * i,
+                                 signed=True, compact=True)
+            p.drawText(int(x) - 27, baseline + 6, 54, 12,
                        int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop), label)
             i += 1
 
@@ -1308,7 +1304,7 @@ class TimelineEditor(QWidget):
 
     def _update_mindur(self) -> None:
         d = self.min_on_air_duration()
-        self._mindur.setText(f"min on-air {fmt_value(d)}s" if d > 0 else "")
+        self._mindur.setText(f"min on-air {fmt_duration(d)}" if d > 0 else "")
 
     # ── Add / load / read steps ──────────────────────────────────────────────
 

@@ -46,6 +46,45 @@ def fmt_value(v) -> str:
     return str(v)
 
 
+def fmt_duration(seconds, *, signed: bool = False, compact: bool = False) -> str:
+    """Human-readable duration from a seconds value, splitting into h/min/s once it
+    passes each threshold:
+
+        default:  42 → '42 s',  90 → '1 min, 30 s',  3725 → '1 h, 2 min, 5 s'
+        compact:  42 → '42s',   90 → '1m 30s',       3725 → '1h 2m 5s'  (tight axes)
+
+    signed=True prefixes '+'/'-' (zero → '0 s'); sub-minute values keep one decimal
+    when not whole ('1.5 s')."""
+    try:
+        s = float(seconds)
+    except (TypeError, ValueError):
+        return ""
+    sign = "-" if s < 0 else ("+" if signed and s > 0 else "")
+    s = abs(s)
+    whole = int(s)
+    frac = s - whole
+    h, rem = divmod(whole, 3600)
+    m, sec = divmod(rem, 60)
+    sec_val = sec + frac
+    sv = int(sec_val) if float(sec_val).is_integer() else round(sec_val, 1)
+    parts = []
+    if compact:
+        if h:
+            parts.append(f"{h}h")
+        if m:
+            parts.append(f"{m}m")
+        if sec_val or not parts:
+            parts.append(f"{sv}s")
+        return sign + " ".join(parts)
+    if h:
+        parts.append(f"{h} h")
+    if m:
+        parts.append(f"{m} min")
+    if sec_val or not parts:
+        parts.append(f"{sv} s")
+    return sign + ", ".join(parts)
+
+
 def num_or_none(s):
     try:
         return float(s)

@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
 from api import ramp as _ramp
 
 from . import timeline_model as tlm
-from .param_form import fmt_value
+from .param_form import fmt_duration, fmt_value
 from .theme import Palette
 
 _MODES_SINGLE = [
@@ -317,8 +317,8 @@ class RampEditorDialog(QDialog):
             return
         step = abs(res.values[1] - res.values[0]) if len(res.values) > 1 else 0
         lines.append(f"{len(res.values)} points · {res.n_intervals} steps · "
-                     f"step size {fmt_value(step)}{u} · hold {fmt_value(res.hold_s)}s · "
-                     f"duration {fmt_value(res.duration_s)}s")
+                     f"step size {fmt_value(step)}{u} · hold {fmt_duration(res.hold_s)} · "
+                     f"duration {fmt_duration(res.duration_s)}")
         self._set_preview("\n".join(lines))
         self._refresh_steps_view(spec, both=False)
 
@@ -412,8 +412,7 @@ def _fmt(v) -> str:
 
 
 def _off(v: float) -> str:
-    n = int(v) if float(v).is_integer() else round(v, 1)
-    return f"+{n}s" if n > 0 else (f"{n}s" if n < 0 else "0s")
+    return fmt_duration(v, signed=True)
 
 
 def _spin(value: float) -> QDoubleSpinBox:

@@ -43,6 +43,7 @@ from PyQt6.QtWidgets import (
 )
 
 from api import models as m
+from .param_form import fmt_duration
 from .qt_adapter import DataHub
 from .sequence_editor import SequenceEditorDialog
 from .sequence_log_dialog import SequenceLogDialog
@@ -59,8 +60,7 @@ Result = Tuple[str, Optional[str]]   # (run_id, error-or-None)
 
 
 def _fmt_offset(offset_s: float) -> str:
-    n = int(offset_s) if float(offset_s).is_integer() else round(offset_s, 1)
-    return f"+{n}s" if n > 0 else (f"{n}s" if n < 0 else "0s")
+    return fmt_duration(offset_s, signed=True)
 
 
 def summarize(seq: m.Sequence) -> str:
