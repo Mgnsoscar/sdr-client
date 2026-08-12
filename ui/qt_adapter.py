@@ -160,3 +160,20 @@ class DataHub(QObject):
     def panic_all(self) -> None:
         """Fire the all-units emergency stop off the GUI thread."""
         self.run_async("panic_all", lambda: self.fleet.panic_all())
+
+    # ── Convenience: keep unit replicas in sync ──────────────────────────────────
+
+    def sync_state_to_units(self) -> None:
+        """Push the PC's current plans + schedule to every unit so all replicas
+        stay identical to the PC (the source of truth). Call this after any local
+        edit to a plan or schedule entry. Runs off the GUI thread; reachable units
+        update immediately, unreachable ones are left behind and reconcile on the
+        next explicit deploy / drift check. Result is reported as a 'state_sync'
+        task_done so the UI can note any units it couldn't reach."""
+        from state import PlanStore, ScheduleStore
+        plans = PlanStore().plans()
+        schedule = ScheduleStore().entries()
+        self.run_async(
+            "state_sync",
+            lambda: self.fleet.sync_plans_schedule_all(plans, schedule),
+        )

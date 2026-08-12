@@ -24,7 +24,7 @@ Public API:
 from __future__ import annotations
 
 import shlex
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
@@ -51,6 +51,20 @@ def num_or_none(s):
         return float(s)
     except (TypeError, ValueError):
         return None
+
+
+def _typed(val_str: str, spec: dict):
+    """Coerce a widget's string value to the type its schema declares (int/float),
+    leaving anything else — and unparseable numbers — as the original string."""
+    t = spec.get("type")
+    try:
+        if t == "int":
+            return int(val_str, 0)
+        if t == "float":
+            return float(val_str)
+    except (TypeError, ValueError):
+        pass
+    return val_str
 
 
 def resolve_preset_value(spec: dict, text: str) -> str:
@@ -140,20 +154,28 @@ class ParamForm(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._widgets: Dict[str, tuple] = {}   # dest -> (widget, spec)
+        self._checks: Dict[str, QCheckBox] = {}  # dest -> include-checkbox (selectable mode)
+        self._selectable = False
         self._form = QFormLayout(self)
         self._form.setContentsMargins(0, 0, 0, 0)
         self._form.setSpacing(6)
 
     # ── Build ────────────────────────────────────────────────────────────────
 
-    def set_params(self, specs: List[dict]) -> None:
-        """Rebuild the form for a parameter schema (clears existing widgets)."""
+    def set_params(self, specs: List[dict], selectable: bool = False) -> None:
+        """Rebuild the form for a parameter schema (clears existing widgets).
+
+        selectable=True prefixes each row with an include checkbox: values() then
+        returns only the ticked params. Used by tune steps, where you pick exactly
+        which live parameters to set and leave the rest untouched."""
         while self._form.count():
             item = self._form.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
         self._widgets.clear()
+        self._checks.clear()
+        self._selectable = selectable
 
         if not specs:
             note = QLabel("This script declares no parameters.")
@@ -162,7 +184,12 @@ class ParamForm(QWidget):
         for spec in specs:
             widget = self._widget_for(spec)
             self._widgets[spec["dest"]] = (widget, spec)
-            self._form.addRow(self._label_for(spec), widget)
+            if selectable:
+                chk = self._check_for(spec)
+                self._checks[spec["dest"]] = chk
+                self._form.addRow(chk, widget)
+            else:
+                self._form.addRow(self._label_for(spec), widget)
         self.changed.emit()
 
     def has_params(self) -> bool:
@@ -187,6 +214,9 @@ class ParamForm(QWidget):
                 i += 1
                 continue
             w, spec = self._widgets[dest]
+            # In selectable mode, prefilling a param means the caller wants it set.
+            if self._selectable and dest in self._checks:
+                self._checks[dest].setChecked(True)
             if spec.get("is_flag"):
                 if isinstance(w, QCheckBox):
                     w.setChecked(True)
@@ -234,10 +264,41 @@ class ParamForm(QWidget):
                     out.append(val)
         return out
 
+    def values(self) -> Dict[str, Any]:
+        """Current widget values as a {param-name: typed-value} dict — numbers as
+        numbers, choices/presets as their resolved value, flags as bool. Empty
+        text fields are omitted. Used for live tuning (paramkit set-params), where
+        values travel as JSON rather than CLI args."""
+        out: Dict[str, Any] = {}
+        for dest, (w, spec) in self._widgets.items():
+            if self._selectable:
+                chk = self._checks.get(dest)
+                if chk is None or not chk.isChecked():
+                    continue          # only ticked params are included
+            if spec.get("is_flag"):
+                out[dest] = bool(w.isChecked()) if isinstance(w, QCheckBox) else False
+            elif spec.get("presets") and isinstance(w, QComboBox):
+                raw = resolve_preset_value(spec, w.currentText())
+                if raw != "":
+                    out[dest] = _typed(raw, spec)
+            elif isinstance(w, (QSpinBox, QDoubleSpinBox)):
+                out[dest] = w.value()
+            elif isinstance(w, QComboBox):
+                out[dest] = w.currentText().strip()
+            else:
+                txt = w.text().strip()
+                if txt != "":
+                    out[dest] = _typed(txt, spec)
+        return out
+
     def validate(self) -> Optional[str]:
         """Return an error message if any value is missing/bad/out-of-range."""
         missing, bad_type, bad_range = [], [], []
         for dest, (w, spec) in self._widgets.items():
+            if self._selectable:
+                chk = self._checks.get(dest)
+                if chk is None or not chk.isChecked():
+                    continue          # unticked params aren't being set
             if spec.get("is_flag"):
                 continue
             if spec.get("presets") and isinstance(w, QComboBox):
@@ -274,6 +335,19 @@ class ParamForm(QWidget):
 
     # ── Widgets ──────────────────────────────────────────────────────────────
 
+    def _check_for(self, spec: dict) -> QCheckBox:
+        """An include checkbox used as a row's label in selectable mode. Its text
+        is the parameter name + unit; ticking it means 'set this parameter'."""
+        flag = spec["flags"][0] if spec["flags"] else spec["dest"]
+        text = flag.lstrip("-").replace("-", " ")
+        if spec.get("unit"):
+            text = f"{text}  [{spec['unit']}]"
+        chk = QCheckBox(text)
+        if spec.get("help"):
+            chk.setToolTip(spec["help"])
+        chk.toggled.connect(lambda _=False: self.changed.emit())
+        return chk
+
     def _label_for(self, spec: dict) -> QLabel:
         flag = spec["flags"][0] if spec["flags"] else spec["dest"]
         text: str = flag + (" *" if spec.get("required") else "")
@@ -285,6 +359,17 @@ class ParamForm(QWidget):
         if spec.get("unit"):
             text = f"{text}  [{spec['unit']}]"
         lbl = QLabel(text)
+        if spec.get("live"):
+            # Mark params the script can retune while running. Rich text so the
+            # badge sits inline after the name; the plain name stays the label.
+            from html import escape
+            lbl.setText(
+                f"{escape(text)} "
+                f"<span style='color:{Palette.ACCENT}; font-size:9px; "
+                f"font-weight:600; letter-spacing:0.4px;'>● LIVE</span>")
+            lbl.setToolTip((spec.get("help") + "\n\n" if spec.get("help") else "")
+                           + "Tunable while the task is running.")
+            return lbl
         if spec.get("help"):
             lbl.setToolTip(spec["help"])
         return lbl

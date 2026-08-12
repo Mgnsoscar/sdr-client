@@ -12,7 +12,7 @@ Models are split into:
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional, Dict, List
+from typing import Any, Optional, Dict, List
 from pydantic import BaseModel
 
 
@@ -48,6 +48,22 @@ class StepAction(str, Enum):
     START = "start"   # launch a long-running task (paired with a STOP)
     STOP  = "stop"    # stop a long-running task
     RUN   = "run"     # fire-and-exit one-shot: launch, self-terminates, no stop
+    TUNE  = "tune"    # retune a running task's live parameters (see SequenceStep.params)
+    RAMP  = "ramp"    # sweep one live parameter over time (expands to tunes on the unit)
+
+
+class RampSpec(BaseModel):
+    """A parameter ramp for a RAMP step: sweep `param` from start to stop. Give any
+    two of {step, hold_s, duration_s}; the third derives. A both-anchored ramp fills
+    the plan's on-air window, so only one of {step, hold_s} is given. Mirrors the
+    agent's RampSpec; expansion lives in api.ramp."""
+    param: str
+    start: float
+    stop: float
+    steps: Optional[int] = None          # number of equal increments (divides evenly)
+    step: Optional[float] = None         # OR a fixed value increment
+    hold_s: Optional[float] = None
+    duration_s: Optional[float] = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -84,6 +100,12 @@ class ProcessStatus(BaseModel):
 class StartRequest(BaseModel):
     env_overrides: Dict[str, str] = {}
     args: List[str] = []
+    # When False, args are APPENDED to the task's configured command. When True,
+    # args REPLACE the task's trailing args — the launch becomes
+    # [interpreter, script, *args] — so a form can fully specify the parameters
+    # for one run without touching the deployed task definition. Mirrors the
+    # agent's StartRequest.replace_args.
+    replace_args: bool = False
 
 
 class ExitRecord(BaseModel):
@@ -223,13 +245,19 @@ class PatchEventRequest(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class SequenceStep(BaseModel):
-    anchor: str = "start"              # "start" | "stop"
+    anchor: str = "start"              # "start" | "stop" | "both" (ramp)
     offset_s: float
+    # "both"-anchored ramp: off-air-side inset (≤ 0). Fills [on-air+offset_s, off-air+offset_end_s].
+    offset_end_s: Optional[float] = None
     action: StepAction
     task_name: str
     args: List[str] = []               # CLI args for this step's start/run
     replace_args: bool = False         # True: args are the complete set (replace task defaults)
     inject_resume_offset: bool = False
+    # TUNE step: live-parameter values to apply to the running task, {name: value}.
+    params: Dict[str, Any] = {}
+    # RAMP step: the parametric sweep (expanded into tunes on the unit at arm time).
+    ramp: Optional[RampSpec] = None
 
 
 class Sequence(BaseModel):
@@ -255,6 +283,7 @@ class StepFire(BaseModel):
     resume_offset_s: Optional[float] = None
     args: List[str] = []
     replace_args: bool = False
+    params: Dict[str, Any] = {}
 
 
 class SequenceRun(BaseModel):

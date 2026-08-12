@@ -59,18 +59,57 @@ class BarItem:
 
 @dataclass
 class RunItem:
-    """A one-shot fire-and-exit step: a single point, no end."""
+    """A single-point step. Geometrically one point on the timeline (no end);
+    what it does depends on `action`:
+      - "run"  — fire-and-exit one-shot: launch the task, it self-terminates.
+      - "tune" — retune a *running* duration task's live parameters (params below)
+                 at this offset; carries `params`, not `args`.
+      - "ramp" — sweep one live parameter over time; carries `ramp` (the spec).
+                 anchor may also be "both" (fills the on-air window).
+    Sharing one item type keeps the canvas geometry (drag/lanes/hit) identical."""
     task_name: str
     args: List[str] = field(default_factory=list)
     replace_args: bool = True
-    anchor: str = "start"       # "start" (on-air) | "stop" (off-air)
-    offset: float = 0.0
+    anchor: str = "start"       # "start" (on-air) | "stop" (off-air) | "both" (ramp)
+    offset: float = 0.0         # on-air-side offset for a "both" ramp
+    offset_end: float = 0.0     # off-air-side inset for a "both" ramp (≤ 0)
+    action: str = "run"         # "run" | "tune" | "ramp"
+    params: Dict[str, object] = field(default_factory=dict)   # tune: {name: value}
+    ramp: Optional[Dict[str, object]] = None                  # ramp: the RampSpec dict
     uid: int = 0
     kind: str = "run"
 
     def __post_init__(self):
         if not self.uid:
             self.uid = next(_ids)
+
+
+# ── Ramp geometry (a ramp draws as a bar between two anchored endpoints) ──────
+
+def _ramp_duration(r: dict) -> float:
+    from api import ramp as _ramp
+    try:
+        return _ramp.resolve_ramp(r.get("start"), r.get("stop"), steps=r.get("steps"), step=r.get("step"),
+                                  hold_s=r.get("hold_s"), duration_s=r.get("duration_s")).duration_s
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def ramp_span(it):
+    """A ramp's two timeline endpoints as ((left_anchor, left_off), (right_anchor,
+    right_off)) — so it can be drawn as a duration bar. A 'both' ramp spans on-air
+    to off-air; a single-anchor ramp runs `duration` seconds from its anchor."""
+    r = dict(getattr(it, "ramp", None) or {})
+    if it.anchor == "both":
+        return (("start", float(it.offset)), ("stop", float(getattr(it, "offset_end", 0.0))))
+    dur = _ramp_duration(r)
+    if it.anchor == "stop":
+        return (("stop", float(it.offset) - dur), ("stop", float(it.offset)))
+    return (("start", float(it.offset)), ("start", float(it.offset) + dur))
+
+
+def _is_ramp(it) -> bool:
+    return getattr(it, "action", "run") == "ramp"
 
 
 # ── Coordinate mapping ───────────────────────────────────────────────────────
@@ -96,26 +135,32 @@ def compute_anchors(items, zoom: float = 1.0) -> Tuple[float, float, int]:
     right_s = MIN_SIDE_S
     max_on = 0.0    # largest positive on-air offset that lands in the band
     max_off = 0.0   # largest |negative off-air offset| that lands in the band
+
+    def take(anchor: str, off: float):
+        nonlocal left_s, right_s, max_on, max_off
+        if anchor == "start":
+            if off < 0:
+                left_s = max(left_s, -off)
+            elif off > 0:
+                max_on = max(max_on, off)
+        else:  # off-air anchored
+            if off > 0:
+                right_s = max(right_s, off)
+            elif off < 0:
+                max_off = max(max_off, -off)
+
     for it in items:
         if it.kind == "bar":
-            if it.start_offset < 0:
-                left_s = max(left_s, -it.start_offset)
-            elif it.start_offset > 0:
-                max_on = max(max_on, it.start_offset)
-            if it.stop_offset > 0:
-                right_s = max(right_s, it.stop_offset)
-            elif it.stop_offset < 0:
-                max_off = max(max_off, -it.stop_offset)
+            take("start", it.start_offset)
+            take("stop", it.stop_offset)
+        elif _is_ramp(it):
+            (la, lo), (ra, ro) = ramp_span(it)
+            take(la, lo)
+            take(ra, ro)
         elif it.anchor == "start":
-            if it.offset < 0:
-                left_s = max(left_s, -it.offset)
-            elif it.offset > 0:
-                max_on = max(max_on, it.offset)
-        else:  # run, off-air anchored
-            if it.offset > 0:
-                right_s = max(right_s, it.offset)
-            elif it.offset < 0:
-                max_off = max(max_off, -it.offset)
+            take("start", it.offset)
+        else:  # run/tune, off-air anchored
+            take("stop", it.offset)
     left_s += HEADROOM_S
     right_s += HEADROOM_S
     band_gap = max(MIDDLE_GAP * zoom, (max_on + max_off) * eff + BAND_PAD * zoom)
@@ -209,6 +254,17 @@ def item_to_steps(it) -> List[dict]:
             {"anchor": "stop", "offset_s": it.stop_offset, "action": "stop",
              "task_name": it.task_name, "args": [], "replace_args": False},
         ]
+    if getattr(it, "action", "run") == "tune":
+        return [
+            {"anchor": it.anchor, "offset_s": it.offset, "action": "tune",
+             "task_name": it.task_name, "params": dict(it.params or {})},
+        ]
+    if getattr(it, "action", "run") == "ramp":
+        return [
+            {"anchor": it.anchor, "offset_s": it.offset, "action": "ramp",
+             "offset_end_s": getattr(it, "offset_end", 0.0),
+             "task_name": it.task_name, "ramp": dict(it.ramp or {})},
+        ]
     return [
         {"anchor": it.anchor, "offset_s": it.offset, "action": "run",
          "task_name": it.task_name, "args": list(it.args), "replace_args": it.replace_args},
@@ -236,6 +292,17 @@ def steps_to_items(steps: List[dict]) -> List:
                 task_name=s["task_name"], args=list(s.get("args") or []),
                 replace_args=bool(s.get("replace_args", True)),
                 anchor=s.get("anchor", "start"), offset=float(s["offset_s"])))
+        elif action == "tune":
+            items.append(RunItem(
+                task_name=s["task_name"], action="tune",
+                params=dict(s.get("params") or {}),
+                anchor=s.get("anchor", "start"), offset=float(s["offset_s"])))
+        elif action == "ramp":
+            items.append(RunItem(
+                task_name=s["task_name"], action="ramp",
+                ramp=dict(s.get("ramp") or {}),
+                anchor=s.get("anchor", "start"), offset=float(s["offset_s"]),
+                offset_end=float(s.get("offset_end_s") or 0.0)))
         elif action == "start":
             starts.append(s)
         elif action == "stop":
@@ -276,4 +343,56 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
         return "needs at least one on-air step"
     if not any(s["anchor"] == "stop" for s in steps):
         return "needs at least one off-air step (a duration task provides both)"
+    # A tune step retunes a running duration task, so the task it targets must be
+    # started by a duration (bar) step in this same sequence.
+    duration_tasks = {it.task_name for it in items if getattr(it, "kind", None) == "bar"}
+    for it in items:
+        act = getattr(it, "action", "run")
+        if act in ("tune", "ramp") and it.task_name not in duration_tasks:
+            return (f"{act} step targets '{it.task_name or '(no task)'}', which no "
+                    f"duration task in this sequence starts")
+        if act == "ramp":
+            err = _ramp_spec_error(getattr(it, "ramp", None), it.anchor)
+            if err:
+                return f"ramp on '{it.task_name}': {err}"
     return None
+
+
+def _ramp_spec_error(spec: Optional[dict], anchor: str) -> Optional[str]:
+    """Validate a ramp spec the same way the agent does (so a bad ramp is caught
+    before deploy). Returns an error string or None."""
+    if not spec:
+        return "no ramp defined"
+    from api import ramp as _ramp
+    try:
+        if anchor == "both":
+            if spec.get("steps") is None and spec.get("step") is None and spec.get("hold_s") is None:
+                return "a window-filling ramp needs a step count or hold time"
+        else:
+            _ramp.resolve_ramp(spec.get("start"), spec.get("stop"),
+                               steps=spec.get("steps"), step=spec.get("step"), hold_s=spec.get("hold_s"),
+                               duration_s=spec.get("duration_s"))
+    except (ValueError, TypeError) as exc:
+        return str(exc)
+    return None
+
+
+def min_on_air_duration(items) -> float:
+    """The shortest on-air window this item set fits in (seconds). Delegates to the
+    shared api.ramp math after normalising items to step-shaped objects."""
+    from types import SimpleNamespace
+    from api import ramp as _ramp
+    objs = []
+    for s in items_to_steps(items):
+        r = s.get("ramp")
+        robj = None
+        if r:
+            robj = SimpleNamespace(
+                start=r.get("start"), stop=r.get("stop"),
+                steps=r.get("steps"), step=r.get("step"),
+                hold_s=r.get("hold_s"), duration_s=r.get("duration_s"))
+        objs.append(SimpleNamespace(
+            anchor=s.get("anchor", "start"), offset_s=s.get("offset_s", 0.0),
+            offset_end_s=s.get("offset_end_s", 0.0),
+            action=s.get("action", ""), ramp=robj))
+    return _ramp.min_on_air_duration(objs)

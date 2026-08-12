@@ -209,6 +209,21 @@ class Fleet:
         """Replicate the PC's schedule to each unit (wholesale replace)."""
         return self._fan_out(lambda c: c.put_schedule(schedule), units)
 
+    def sync_plans_schedule_all(self, plans: List["m.Plan"],
+                                schedule: List["m.ScheduledPlan"],
+                                units: Optional[List[str]] = None) -> Dict[str, object]:
+        """Replicate the PC's plans + schedule to each unit in one pass (wholesale
+        replace on both). Used to keep every unit's replica identical to the PC
+        after a local edit — the PC is the source of truth. Plans go first so a
+        unit never holds a schedule referencing a plan it doesn't yet have.
+        Unreachable units surface as an Exception in their slot and are simply
+        left behind (they reconcile on the next explicit deploy / drift check)."""
+        def do(c):
+            c.put_plans(plans)
+            c.put_schedule(schedule)
+            return True
+        return self._fan_out(do, units)
+
     def deploy_state_all(self, library: "m.Library", plans: List["m.Plan"],
                          schedule: List["m.ScheduledPlan"], prune: bool = True,
                          units: Optional[List[str]] = None) -> Dict[str, object]:
