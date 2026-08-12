@@ -46,7 +46,7 @@ from typing import Dict, List, Optional, Tuple
 from PyQt6.QtCore import QEvent, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout,
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -54,6 +54,7 @@ from api import models as m
 from . import timeline_model as tlm
 from api import ramp as _ramp
 
+from .duration_spin import DurationSpinBox
 from .param_form import ParamForm, fmt_duration, fmt_value
 from .ramp_editor import RampEditorDialog
 from .theme import Palette
@@ -938,12 +939,8 @@ class StepEditorDialog(QDialog):
         form.addRow("Type", self._type)
 
         # Duration offsets (two ends).
-        self._start_off = QDoubleSpinBox()
-        self._start_off.setRange(-100000.0, 100000.0); self._start_off.setDecimals(1)
-        self._start_off.setSingleStep(1.0); self._start_off.setSuffix(" s")
-        self._stop_off = QDoubleSpinBox()
-        self._stop_off.setRange(-100000.0, 100000.0); self._stop_off.setDecimals(1)
-        self._stop_off.setSingleStep(1.0); self._stop_off.setSuffix(" s")
+        self._start_off = DurationSpinBox()
+        self._stop_off = DurationSpinBox()
         self._row_start = self._add_row(form, "Start — from ON-AIR", self._start_off)
         self._row_stop = self._add_row(form, "Stop — from OFF-AIR", self._stop_off)
 
@@ -951,9 +948,7 @@ class StepEditorDialog(QDialog):
         self._anchor = QComboBox()
         self._anchor.addItem("on-air (T0)", "start")
         self._anchor.addItem("off-air", "stop")
-        self._run_off = QDoubleSpinBox()
-        self._run_off.setRange(-100000.0, 100000.0); self._run_off.setDecimals(1)
-        self._run_off.setSingleStep(1.0); self._run_off.setSuffix(" s")
+        self._run_off = DurationSpinBox()
         self._row_anchor = self._add_row(form, "Anchor", self._anchor)
         self._row_run = self._add_row(form, "Offset — from anchor", self._run_off)
 

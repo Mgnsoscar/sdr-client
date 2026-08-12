@@ -18,13 +18,14 @@ from typing import List, Optional
 
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QLabel,
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel,
     QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from api import ramp as _ramp
 
 from . import timeline_model as tlm
+from .duration_spin import DurationSpinBox
 from .param_form import fmt_duration, fmt_value
 from .theme import Palette
 
@@ -415,10 +416,8 @@ def _off(v: float) -> str:
     return fmt_duration(v, signed=True)
 
 
-def _spin(value: float) -> QDoubleSpinBox:
-    w = QDoubleSpinBox()
-    w.setRange(-100000.0, 100000.0)
-    w.setDecimals(1); w.setSingleStep(1.0); w.setSuffix(" s")
+def _spin(value: float) -> DurationSpinBox:
+    w = DurationSpinBox()
     w.setValue(value)
     return w
 

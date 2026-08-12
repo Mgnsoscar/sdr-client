@@ -37,13 +37,14 @@ import yaml
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QFrame,
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import models as m
 from api.fleet import LIBRARY_HOST
 from . import timeline_model as tlm
+from .duration_spin import DurationSpinBox
 from .param_form import fmt_duration
 from .qt_adapter import DataHub
 from .theme import Palette
@@ -129,13 +130,11 @@ class PlanItemDialog(QDialog):
         # Placement within the plan's on-air window (same values as dragging the
         # bar's handles). On-air is measured forward from ON-AIR (≥ 0); off-air is
         # measured back from OFF-AIR (≤ 0).
-        self._on_air = QDoubleSpinBox()
-        self._on_air.setRange(0.0, 100000.0); self._on_air.setDecimals(1)
-        self._on_air.setSingleStep(1.0); self._on_air.setSuffix(" s")
+        self._on_air = DurationSpinBox()
+        self._on_air.setRange(0.0, 100000.0)      # on-air offset is measured forward (≥ 0)
         form.addRow("On-air — after ON-AIR", self._on_air)
-        self._off_air = QDoubleSpinBox()
-        self._off_air.setRange(-100000.0, 0.0); self._off_air.setDecimals(1)
-        self._off_air.setSingleStep(1.0); self._off_air.setSuffix(" s")
+        self._off_air = DurationSpinBox()
+        self._off_air.setRange(-100000.0, 0.0)    # off-air offset is measured back (≤ 0)
         form.addRow("Off-air — before OFF-AIR", self._off_air)
         outer.addLayout(form)
 
