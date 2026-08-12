@@ -70,10 +70,14 @@ def summarize(seq: m.Sequence) -> str:
 
     def desc(s) -> str:
         act = action_of(s)
-        glyph = {"start": "▶", "run": "⚡", "tune": "◈"}.get(act, "⏹")
+        glyph = {"start": "▶", "run": "⚡", "tune": "◈", "ramp": "⟋"}.get(act, "⏹")
         if act == "tune":
             params = getattr(s, "params", None) or {}
             detail = " " + ", ".join(f"{k}={v}" for k, v in params.items()) if params else ""
+        elif act == "ramp":
+            r = getattr(s, "ramp", None)
+            r = r.model_dump() if hasattr(r, "model_dump") else (r or {})
+            detail = f" {r.get('param','')} {r.get('start')}→{r.get('stop')}" if r else ""
         else:
             args = getattr(s, "args", None) or []
             detail = f" {' '.join(args)}" if (act in ("start", "run") and args) else ""

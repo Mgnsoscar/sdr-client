@@ -52,7 +52,10 @@ from PyQt6.QtWidgets import (
 
 from api import models as m
 from . import timeline_model as tlm
+from api import ramp as _ramp
+
 from .param_form import ParamForm, fmt_value
+from .ramp_editor import RampEditorDialog
 from .theme import Palette
 
 # ── View geometry (paint sizes; timing geometry lives in timeline_model) ──────
@@ -95,6 +98,22 @@ def _fmt_offset(offset_s: float) -> str:
     if n < 0:
         return f"{n}s"
     return "0s"
+
+
+def _ramp_summary(spec, anchor: str) -> str:
+    """A compact 'param start→stop · 60s' (or '· fills window') label for a ramp."""
+    spec = spec or {}
+    param = spec.get("param") or "(param)"
+    a, b = spec.get("start"), spec.get("stop")
+    span = f"{fmt_value(a)}→{fmt_value(b)}" if a is not None and b is not None else "…"
+    if anchor == "both":
+        return f"{param} {span} · fills window"
+    try:
+        res = _ramp.resolve_ramp(a, b, step=spec.get("step"), hold_s=spec.get("hold_s"),
+                                 duration_s=spec.get("duration_s"))
+        return f"{param} {span} · {fmt_value(res.duration_s)}s"
+    except (ValueError, TypeError):
+        return f"{param} {span}"
 
 
 def _timing_text(offset_s: float, side: str, with_side: bool) -> str:
@@ -222,11 +241,14 @@ class _TimelineCanvas(QWidget):
         return int(max(RUN_MIN_W, min(RUN_MAX_W, w)))
 
     def _run_label(self, item) -> str:
-        if getattr(item, "action", "run") == "tune":
+        act = getattr(item, "action", "run")
+        if act == "tune":
             # A tune point shows its parameter changes inline (no caret panel).
             summary = ", ".join(f"{k}={v}" for k, v in (item.params or {}).items())
             base = f"◈ {item.task_name or '(no task)'}"
             return f"{base}  {summary}".strip() if summary else base
+        if act == "ramp":
+            return f"⟋ {_ramp_summary(getattr(item, 'ramp', None), item.anchor)}"
         # Name only — the arguments live behind the ▾ caret / editor.
         return f"⚡ {item.task_name or '(no task)'}".strip()
 
@@ -545,10 +567,10 @@ class _TimelineCanvas(QWidget):
         g = self._geom[it.uid]
         y, cx, w = g["y"], g["cx"], g["w"]
         known = self.task_known(it.task_name)
-        is_tune = getattr(it, "action", "run") == "tune"
+        is_live = getattr(it, "action", "run") in ("tune", "ramp")
         if not known:
             border, fill, text = Palette.CRASH, Palette.CRASH_SOFT, Palette.CRASH
-        elif is_tune:                       # tune points read as a distinct accent
+        elif is_live:                       # tune/ramp points read as a distinct accent
             border, fill, text = Palette.ACCENT, Palette.ACCENT_SOFT, Palette.ACCENT
         else:
             border, fill, text = Palette.ARMED, Palette.ARMED_SOFT, Palette.TEXT
@@ -762,10 +784,16 @@ class _TimelineCanvas(QWidget):
 
     # ── Editing ───────────────────────────────────────────────────────────────
 
+    def _dialog_for(self, item, new: bool):
+        # Ramps have their own editor; everything else uses the step editor.
+        if getattr(item, "action", "run") == "ramp":
+            return RampEditorDialog(item, self._editor, new=new, parent=self)
+        return StepEditorDialog(item, self._editor, new=new, parent=self)
+
     def edit_item(self, item) -> None:
-        dlg = StepEditorDialog(item, self._editor, new=False, parent=self)
+        dlg = self._dialog_for(item, new=False)
         r = dlg.exec()
-        if r == StepEditorDialog.REMOVE:
+        if r == dlg.REMOVE:
             self.remove_item(item.uid)
         elif r == QDialog.DialogCode.Accepted and dlg.result_item is not None:
             self.replace_item(item.uid, dlg.result_item)
@@ -776,9 +804,12 @@ class _TimelineCanvas(QWidget):
             item = tlm.BarItem(task_name=default_task, start_offset=0.0, stop_offset=0.0)
         elif kind == "tune":
             item = tlm.RunItem(task_name=default_task, action="tune", anchor="start", offset=0.0)
+        elif kind == "ramp":
+            item = tlm.RunItem(task_name=default_task, action="ramp", anchor="start",
+                               offset=0.0, ramp={})
         else:
             item = tlm.RunItem(task_name=default_task, anchor="start", offset=0.0)
-        dlg = StepEditorDialog(item, self._editor, new=True, parent=self)
+        dlg = self._dialog_for(item, new=True)
         r = dlg.exec()
         if r == QDialog.DialogCode.Accepted and dlg.result_item is not None:
             self.add_item(dlg.result_item)
@@ -1136,13 +1167,21 @@ class TimelineEditor(QWidget):
         self._add_run.setToolTip("A task that fires once and exits (many allowed)")
         self._add_tune = QPushButton("+ Tune")
         self._add_tune.setToolTip("Change a running duration task's live parameters at a set time")
+        self._add_ramp = QPushButton("+ Ramp")
+        self._add_ramp.setToolTip("Sweep a running duration task's live parameter over time")
         self._add_bar.clicked.connect(lambda: self._canvas.add_new("bar"))
         self._add_run.clicked.connect(lambda: self._canvas.add_new("run"))
         self._add_tune.clicked.connect(lambda: self._canvas.add_new("tune"))
+        self._add_ramp.clicked.connect(lambda: self._canvas.add_new("ramp"))
         bar.addWidget(self._add_bar)
         bar.addWidget(self._add_run)
         bar.addWidget(self._add_tune)
+        bar.addWidget(self._add_ramp)
         bar.addStretch(1)
+        # Minimum on-air duration the current steps require (ramps at both ends etc).
+        self._mindur = QLabel("")
+        self._mindur.setStyleSheet(f"font-size: 11px; color: {Palette.ACCENT};")
+        bar.addWidget(self._mindur)
         self._hint = QLabel("Drag handles to set timing · click to edit")
         self._hint.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         bar.addWidget(self._hint)
@@ -1158,6 +1197,7 @@ class TimelineEditor(QWidget):
 
         self._canvas = _TimelineCanvas(self)
         self._canvas.changed.connect(self.changed.emit)
+        self._canvas.changed.connect(self._update_mindur)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)   # canvas stretches to fill a wider window
         scroll.setWidget(self._canvas)
@@ -1204,6 +1244,13 @@ class TimelineEditor(QWidget):
 
     def available_tasks(self) -> List[str]:
         return self._tasks
+
+    def min_on_air_duration(self) -> float:
+        return tlm.min_on_air_duration(self._canvas.items())
+
+    def _update_mindur(self) -> None:
+        d = self.min_on_air_duration()
+        self._mindur.setText(f"min on-air {fmt_value(d)}s" if d > 0 else "")
 
     # ── Add / load / read steps ──────────────────────────────────────────────
 
