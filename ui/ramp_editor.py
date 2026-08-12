@@ -255,6 +255,13 @@ class RampEditorDialog(QDialog):
             spec["duration_s"] = _num(self._duration.text())
         return spec
 
+    def _param_unit(self) -> str:
+        name = self._param.currentText().strip()
+        for s in self._live_params:
+            if (s.get("name") or s.get("dest")) == name:
+                return s.get("unit") or ""
+        return ""
+
     def _update_preview(self, *_) -> None:
         if not self._ready:
             return
@@ -265,19 +272,32 @@ class RampEditorDialog(QDialog):
         if spec["start"] is None or spec["stop"] is None:
             self._set_preview("Enter numeric From/To values.")
             return
+
+        unit = self._param_unit()
+        u = f" {unit}" if unit else ""
+        lines = [f"Ramp {spec['param'] or '(param)'}:  "
+                 f"{fmt_value(spec['start'])}{u} → {fmt_value(spec['stop'])}{u}"]
+
         if self._is_both():
-            self._set_preview("Sweeps across the on-air window between the insets "
-                              "(duration set when scheduled in a plan).")
-            return
+            lines.append(f"Anchor: fill on-air window  (start {_off(self._offset.value())}, "
+                         f"end {_off(self._offset_end.value())} from off-air)")
+            given = "step" if _FIELDS.get(self._mode.currentData()) == ("step",) else "hold"
+            val = self._step.text().strip() if given == "step" else self._hold.text().strip()
+            lines.append(f"{given} = {val or '—'} · duration set by the schedule")
+            return self._set_preview("\n".join(lines))
+
+        anchor = "on-air" if self._anchor.currentData() == "start" else "off-air"
+        lines.append(f"Anchor: {anchor}, offset {_off(self._offset.value())}")
         try:
             res = _ramp.resolve_ramp(spec["start"], spec["stop"], step=spec.get("step"),
                                      hold_s=spec.get("hold_s"), duration_s=spec.get("duration_s"))
         except (ValueError, TypeError) as exc:
-            self._set_preview(str(exc), error=True)
-            return
-        self._set_preview(
-            f"→ {len(res.values)} points, {fmt_value(res.hold_s)}s hold, "
-            f"{fmt_value(res.duration_s)}s duration")
+            lines.append("⚠ " + str(exc))
+            return self._set_preview("\n".join(lines), error=True)
+        step = abs(res.values[1] - res.values[0]) if len(res.values) > 1 else 0
+        lines.append(f"{len(res.values)} points · step {fmt_value(step)}{u} · "
+                     f"hold {fmt_value(res.hold_s)}s · duration {fmt_value(res.duration_s)}s")
+        self._set_preview("\n".join(lines))
 
     def _set_preview(self, text: str, error: bool = False) -> None:
         self._preview.setStyleSheet(
@@ -319,6 +339,11 @@ class RampEditorDialog(QDialog):
 
 def _fmt(v) -> str:
     return "" if v is None else fmt_value(v) if isinstance(v, (int, float)) else str(v)
+
+
+def _off(v: float) -> str:
+    n = int(v) if float(v).is_integer() else round(v, 1)
+    return f"+{n}s" if n > 0 else (f"{n}s" if n < 0 else "0s")
 
 
 def _spin(value: float) -> QDoubleSpinBox:

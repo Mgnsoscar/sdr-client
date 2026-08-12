@@ -69,6 +69,7 @@ HANDLE_W = 12               # drawn width of a bar's grip
 HANDLE_HIT = 11             # px each side of a handle centre that grabs it
 RUN_MIN_W = 120             # minimum run-pill width
 RUN_MAX_W = 260
+RAMP_MIN_W = 44             # minimum ramp-bar width (so a short/zero-span ramp is clickable)
 CARET_W = 20                # width of the ▾/▴ expand-collapse zone on an item
 TICK_S = 30                 # base tick interval (seconds); adapts with zoom
 DRAG_THRESHOLD = 4          # px of movement before a press counts as a drag
@@ -300,6 +301,11 @@ class _TimelineCanvas(QWidget):
             sx = tlm.offset_to_x("start", item.start_offset, self._on, self._off, self._zoom)
             px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off, self._zoom)
             left, right = sx - HANDLE_W, px + HANDLE_W
+        elif tlm._is_ramp(item):
+            (la, lo), (ra, ro) = tlm.ramp_span(item)
+            sx = tlm.offset_to_x(la, lo, self._on, self._off, self._zoom)
+            px = tlm.offset_to_x(ra, ro, self._on, self._off, self._zoom)
+            left, right = min(sx, px) - RAMP_MIN_W / 2, max(sx, px) + RAMP_MIN_W / 2
         else:
             cx = self._run_cx(item)
             w = self._run_width(item)
@@ -382,6 +388,12 @@ class _TimelineCanvas(QWidget):
             if it.kind == "bar":
                 g["start_x"] = tlm.offset_to_x("start", it.start_offset, self._on, self._off, self._zoom)
                 g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off, self._zoom)
+            elif tlm._is_ramp(it):
+                # A ramp draws as a duration bar between its two anchored ends.
+                (la, lo), (ra, ro) = tlm.ramp_span(it)
+                g["start_x"] = tlm.offset_to_x(la, lo, self._on, self._off, self._zoom)
+                g["stop_x"] = tlm.offset_to_x(ra, ro, self._on, self._off, self._zoom)
+                g["ends"] = ((la, lo), (ra, ro))
             else:
                 g["cx"] = self._run_cx(it)
                 g["w"] = self._run_width(it)
@@ -429,6 +441,8 @@ class _TimelineCanvas(QWidget):
         for it in self._items:
             if it.kind == "bar":
                 self._paint_bar(p, it)
+            elif tlm._is_ramp(it):
+                self._paint_ramp(p, it)
             else:
                 self._paint_run(p, it)
         p.end()
@@ -563,6 +577,46 @@ class _TimelineCanvas(QWidget):
         self._paint_timing(p, px, cap_y, _timing_text(it.stop_offset, "stop", with_side=False))
         self._paint_panel(p, it, g, border)
 
+    def _paint_ramp(self, p, it):
+        """A ramp draws as a duration bar between its two anchored ends, with a
+        diagonal cue for direction and a timing chip under each end (so the anchor,
+        start and stop are all legible — like a duration task)."""
+        g = self._geom[it.uid]
+        y, sx, px = g["y"], g["start_x"], g["stop_x"]
+        known = self.task_known(it.task_name)
+        border = QColor(Palette.ACCENT if known else Palette.CRASH)
+        fill = QColor(Palette.ACCENT_SOFT if known else Palette.CRASH_SOFT)
+        left = min(sx, px)
+        rect = QRectF(left, y, max(RAMP_MIN_W, abs(px - sx)), LANE_H)
+        p.setPen(QPen(border, 2))
+        p.setBrush(QBrush(fill))
+        p.drawRoundedRect(rect, 9, 9)
+
+        # Diagonal direction cue: rises if the value increases, else falls.
+        r = dict(getattr(it, "ramp", None) or {})
+        a, b = r.get("start"), r.get("stop")
+        rising = (a is not None and b is not None and b >= a)
+        guide = QColor(border); guide.setAlpha(90)
+        p.setPen(QPen(guide, 1.5))
+        y0, y1 = ((rect.bottom() - 7, rect.top() + 7) if rising
+                  else (rect.top() + 7, rect.bottom() - 7))
+        p.drawLine(int(rect.left() + 7), int(y0), int(rect.right() - 7), int(y1))
+
+        # Centered label.
+        p.setFont(self._label_font)
+        p.setPen(QColor(Palette.ACCENT if known else Palette.CRASH))
+        fm = QFontMetrics(self._label_font)
+        label = fm.elidedText(_ramp_summary(r, it.anchor), Qt.TextElideMode.ElideRight,
+                              max(10, int(rect.width()) - 16))
+        p.drawText(rect.adjusted(8, 0, -8, 0), int(Qt.AlignmentFlag.AlignCenter), label)
+
+        # Timing chip under each end (its anchor tells start vs stop).
+        (la, lo), (ra, ro) = g.get("ends", (("start", 0.0), ("start", 0.0)))
+        cap_y = int(y + LANE_H + 1)
+        self._paint_timing(p, sx, cap_y, _timing_text(lo, la, with_side=True))
+        if abs(px - sx) > RAMP_MIN_W / 2:
+            self._paint_timing(p, px, cap_y, _timing_text(ro, ra, with_side=True))
+
     def _paint_run(self, p, it):
         g = self._geom[it.uid]
         y, cx, w = g["y"], g["cx"], g["w"]
@@ -620,6 +674,10 @@ class _TimelineCanvas(QWidget):
                         return it, "bar_stop"
                     if min(g["start_x"], g["stop_x"]) <= x <= max(g["start_x"], g["stop_x"]):
                         return it, "bar_body"
+                elif "start_x" in g:   # a ramp bar — click anywhere to edit (no drag)
+                    lo, hi = sorted((g["start_x"], g["stop_x"]))
+                    if lo - RAMP_MIN_W / 2 <= x <= hi + RAMP_MIN_W / 2:
+                        return it, "ramp_body"
                 elif abs(x - g["cx"]) <= g["w"] / 2:
                     return it, "run_body"
             # Caption + inline-panel rows below: a click there opens the editor.

@@ -84,6 +84,34 @@ class RunItem:
             self.uid = next(_ids)
 
 
+# ── Ramp geometry (a ramp draws as a bar between two anchored endpoints) ──────
+
+def _ramp_duration(r: dict) -> float:
+    from api import ramp as _ramp
+    try:
+        return _ramp.resolve_ramp(r.get("start"), r.get("stop"), step=r.get("step"),
+                                  hold_s=r.get("hold_s"), duration_s=r.get("duration_s")).duration_s
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def ramp_span(it):
+    """A ramp's two timeline endpoints as ((left_anchor, left_off), (right_anchor,
+    right_off)) — so it can be drawn as a duration bar. A 'both' ramp spans on-air
+    to off-air; a single-anchor ramp runs `duration` seconds from its anchor."""
+    r = dict(getattr(it, "ramp", None) or {})
+    if it.anchor == "both":
+        return (("start", float(it.offset)), ("stop", float(getattr(it, "offset_end", 0.0))))
+    dur = _ramp_duration(r)
+    if it.anchor == "stop":
+        return (("stop", float(it.offset) - dur), ("stop", float(it.offset)))
+    return (("start", float(it.offset)), ("start", float(it.offset) + dur))
+
+
+def _is_ramp(it) -> bool:
+    return getattr(it, "action", "run") == "ramp"
+
+
 # ── Coordinate mapping ───────────────────────────────────────────────────────
 
 def compute_anchors(items, zoom: float = 1.0) -> Tuple[float, float, int]:
@@ -107,26 +135,32 @@ def compute_anchors(items, zoom: float = 1.0) -> Tuple[float, float, int]:
     right_s = MIN_SIDE_S
     max_on = 0.0    # largest positive on-air offset that lands in the band
     max_off = 0.0   # largest |negative off-air offset| that lands in the band
+
+    def take(anchor: str, off: float):
+        nonlocal left_s, right_s, max_on, max_off
+        if anchor == "start":
+            if off < 0:
+                left_s = max(left_s, -off)
+            elif off > 0:
+                max_on = max(max_on, off)
+        else:  # off-air anchored
+            if off > 0:
+                right_s = max(right_s, off)
+            elif off < 0:
+                max_off = max(max_off, -off)
+
     for it in items:
         if it.kind == "bar":
-            if it.start_offset < 0:
-                left_s = max(left_s, -it.start_offset)
-            elif it.start_offset > 0:
-                max_on = max(max_on, it.start_offset)
-            if it.stop_offset > 0:
-                right_s = max(right_s, it.stop_offset)
-            elif it.stop_offset < 0:
-                max_off = max(max_off, -it.stop_offset)
+            take("start", it.start_offset)
+            take("stop", it.stop_offset)
+        elif _is_ramp(it):
+            (la, lo), (ra, ro) = ramp_span(it)
+            take(la, lo)
+            take(ra, ro)
         elif it.anchor == "start":
-            if it.offset < 0:
-                left_s = max(left_s, -it.offset)
-            elif it.offset > 0:
-                max_on = max(max_on, it.offset)
-        else:  # run, off-air anchored
-            if it.offset > 0:
-                right_s = max(right_s, it.offset)
-            elif it.offset < 0:
-                max_off = max(max_off, -it.offset)
+            take("start", it.offset)
+        else:  # run/tune, off-air anchored
+            take("stop", it.offset)
     left_s += HEADROOM_S
     right_s += HEADROOM_S
     band_gap = max(MIDDLE_GAP * zoom, (max_on + max_off) * eff + BAND_PAD * zoom)
