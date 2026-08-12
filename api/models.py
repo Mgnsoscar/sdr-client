@@ -60,7 +60,8 @@ class RampSpec(BaseModel):
     param: str
     start: float
     stop: float
-    step: Optional[float] = None
+    steps: Optional[int] = None          # number of equal increments (divides evenly)
+    step: Optional[float] = None         # OR a fixed value increment
     hold_s: Optional[float] = None
     duration_s: Optional[float] = None
 

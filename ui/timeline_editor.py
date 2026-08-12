@@ -110,7 +110,7 @@ def _ramp_summary(spec, anchor: str) -> str:
     if anchor == "both":
         return f"{param} {span} · fills window"
     try:
-        res = _ramp.resolve_ramp(a, b, step=spec.get("step"), hold_s=spec.get("hold_s"),
+        res = _ramp.resolve_ramp(a, b, steps=spec.get("steps"), step=spec.get("step"), hold_s=spec.get("hold_s"),
                                  duration_s=spec.get("duration_s"))
         return f"{param} {span} · {fmt_value(res.duration_s)}s"
     except (ValueError, TypeError):

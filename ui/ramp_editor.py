@@ -16,9 +16,10 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QLabel,
-    QLineEdit, QPushButton, QVBoxLayout, QWidget,
+    QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from api import ramp as _ramp
@@ -28,20 +29,20 @@ from .param_form import fmt_value
 from .theme import Palette
 
 _MODES_SINGLE = [
-    ("step_hold",     "Step size + hold time  → duration"),
-    ("step_duration", "Step size + duration  → hold time"),
-    ("duration_hold", "Duration + hold time  → step size"),
+    ("steps_hold",     "Number of steps + hold time  → duration"),
+    ("steps_duration", "Number of steps + duration  → hold time"),
+    ("duration_hold",  "Duration + hold time  → number of steps"),
 ]
 _MODES_BOTH = [
-    ("step_window", "Step size  (duration from schedule)"),
-    ("hold_window", "Hold time  (duration from schedule)"),
+    ("steps_window", "Number of steps  (duration from schedule)"),
+    ("hold_window",  "Hold time  (duration from schedule)"),
 ]
 _FIELDS = {
-    "step_hold":     ("step", "hold"),
-    "step_duration": ("step", "duration"),
-    "duration_hold": ("duration", "hold"),
-    "step_window":   ("step",),
-    "hold_window":   ("hold",),
+    "steps_hold":     ("steps", "hold"),
+    "steps_duration": ("steps", "duration"),
+    "duration_hold":  ("duration", "hold"),
+    "steps_window":   ("steps",),
+    "hold_window":    ("hold",),
 }
 
 
@@ -121,14 +122,14 @@ class RampEditorDialog(QDialog):
         self._mode = QComboBox()
         form.addRow("Define by", self._mode)
 
-        self._step = QLineEdit();     self._step.setPlaceholderText("value increment")
+        self._steps = QLineEdit();    self._steps.setPlaceholderText("count (equal increments)")
         self._hold = QLineEdit();     self._hold.setPlaceholderText("seconds per step")
         self._duration = QLineEdit(); self._duration.setPlaceholderText("seconds")
-        self._row_step = _row(form, "Step size", self._step)
+        self._row_steps = _row(form, "Number of steps", self._steps)
         self._row_hold = _row(form, "Hold time", self._hold)
         self._row_duration = _row(form, "Duration", self._duration)
-        if r.get("step") is not None:
-            self._step.setText(_fmt(r.get("step")))
+        if r.get("steps") is not None:
+            self._steps.setText(str(int(r.get("steps"))))
         if r.get("hold_s") is not None:
             self._hold.setText(_fmt(r.get("hold_s")))
         if r.get("duration_s") is not None:
@@ -139,6 +140,20 @@ class RampEditorDialog(QDialog):
         self._preview.setWordWrap(True)
         self._preview.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         outer.addWidget(self._preview)
+
+        # Collapsible per-step listing.
+        self._steps_btn = QPushButton("▸ Show steps")
+        self._steps_btn.setFlat(True); self._steps_btn.setCheckable(True)
+        self._steps_btn.setStyleSheet(
+            f"QPushButton {{ text-align: left; color: {Palette.ACCENT}; border: none; }}")
+        self._steps_btn.toggled.connect(self._toggle_steps)
+        outer.addWidget(self._steps_btn)
+        self._steps_view = QPlainTextEdit()
+        self._steps_view.setReadOnly(True)
+        self._steps_view.setFont(QFont("monospace"))
+        self._steps_view.setFixedHeight(140)
+        self._steps_view.setVisible(False)
+        outer.addWidget(self._steps_view)
 
         buttons = QDialogButtonBox()
         if not self._new:
@@ -154,7 +169,7 @@ class RampEditorDialog(QDialog):
         # Now everything exists — wire the change signals.
         self._task.currentTextChanged.connect(lambda t: self._select_task(t))
         self._param.currentTextChanged.connect(lambda _t: self._update_preview())
-        for w in (self._start, self._stop, self._step, self._hold, self._duration):
+        for w in (self._start, self._stop, self._steps, self._hold, self._duration):
             w.textChanged.connect(self._update_preview)
         self._offset.valueChanged.connect(self._update_preview)
         self._offset_end.valueChanged.connect(self._update_preview)
@@ -188,7 +203,7 @@ class RampEditorDialog(QDialog):
 
     def _sync_mode(self) -> None:
         fields = _FIELDS.get(self._mode.currentData(), ())
-        for name, widget, label in (("step", self._step, self._row_step),
+        for name, widget, label in (("steps", self._steps, self._row_steps),
                                      ("hold", self._hold, self._row_hold),
                                      ("duration", self._duration, self._row_duration)):
             on = name in fields
@@ -247,8 +262,9 @@ class RampEditorDialog(QDialog):
         fields = _FIELDS.get(self._mode.currentData(), ())
         spec = {"param": self._param.currentText().strip(),
                 "start": _num(self._start.text()), "stop": _num(self._stop.text())}
-        if "step" in fields:
-            spec["step"] = _num(self._step.text())
+        if "steps" in fields:
+            n = _num(self._steps.text())
+            spec["steps"] = int(n) if n is not None else None
         if "hold" in fields:
             spec["hold_s"] = _num(self._hold.text())
         if "duration" in fields:
@@ -281,28 +297,82 @@ class RampEditorDialog(QDialog):
         if self._is_both():
             lines.append(f"Anchor: fill on-air window  (start {_off(self._offset.value())}, "
                          f"end {_off(self._offset_end.value())} from off-air)")
-            given = "step" if _FIELDS.get(self._mode.currentData()) == ("step",) else "hold"
-            val = self._step.text().strip() if given == "step" else self._hold.text().strip()
+            steps_mode = "steps" in _FIELDS.get(self._mode.currentData(), ())
+            given = "steps" if steps_mode else "hold"
+            val = self._steps.text().strip() if steps_mode else self._hold.text().strip()
             lines.append(f"{given} = {val or '—'} · duration set by the schedule")
-            return self._set_preview("\n".join(lines))
+            self._set_preview("\n".join(lines))
+            self._refresh_steps_view(spec, both=True)
+            return
 
         anchor = "on-air" if self._anchor.currentData() == "start" else "off-air"
         lines.append(f"Anchor: {anchor}, offset {_off(self._offset.value())}")
         try:
-            res = _ramp.resolve_ramp(spec["start"], spec["stop"], step=spec.get("step"),
+            res = _ramp.resolve_ramp(spec["start"], spec["stop"], steps=spec.get("steps"),
                                      hold_s=spec.get("hold_s"), duration_s=spec.get("duration_s"))
         except (ValueError, TypeError) as exc:
             lines.append("⚠ " + str(exc))
-            return self._set_preview("\n".join(lines), error=True)
+            self._set_preview("\n".join(lines), error=True)
+            self._steps_view.setPlainText("")
+            return
         step = abs(res.values[1] - res.values[0]) if len(res.values) > 1 else 0
-        lines.append(f"{len(res.values)} points · step {fmt_value(step)}{u} · "
-                     f"hold {fmt_value(res.hold_s)}s · duration {fmt_value(res.duration_s)}s")
+        lines.append(f"{len(res.values)} points · {res.n_intervals} steps · "
+                     f"step size {fmt_value(step)}{u} · hold {fmt_value(res.hold_s)}s · "
+                     f"duration {fmt_value(res.duration_s)}s")
         self._set_preview("\n".join(lines))
+        self._refresh_steps_view(spec, both=False)
 
     def _set_preview(self, text: str, error: bool = False) -> None:
         self._preview.setStyleSheet(
             f"font-size: 11px; color: {Palette.CRASH if error else Palette.TEXT_FAINT};")
         self._preview.setText(text)
+
+    # ── Per-step listing ─────────────────────────────────────────────────────
+
+    def _toggle_steps(self, on: bool) -> None:
+        self._steps_btn.setText("▾ Hide steps" if on else "▸ Show steps")
+        self._steps_view.setVisible(on)
+        if on:
+            self._update_preview()   # populate now that it's visible
+
+    def _refresh_steps_view(self, spec: dict, both: bool) -> None:
+        """List each concrete tune point (index, time offset, value) into the
+        collapsible view. For a window-filling ('both') ramp only the value
+        sequence is known here — the times come from the schedule at arm time."""
+        if not self._steps_view.isVisible():
+            return
+        if spec.get("start") is None or spec.get("stop") is None:
+            self._steps_view.setPlainText("")
+            return
+        unit = self._param_unit()
+        u = f" {unit}" if unit else ""
+        try:
+            if both:
+                steps = spec.get("steps")
+                if steps is None:
+                    self._steps_view.setPlainText(
+                        "Hold-time ramp: the number of points depends on the on-air\n"
+                        "window, resolved when the sequence is scheduled.")
+                    return
+                res = _ramp.resolve_ramp(spec["start"], spec["stop"],
+                                         steps=steps, window_s=1.0)
+                lines = ["   #   value      (times set by the schedule window)"]
+                for i, v in enumerate(res.values):
+                    lines.append(f"  {i:>3}   {fmt_value(v)}{u}")
+                self._steps_view.setPlainText("\n".join(lines))
+                return
+            res = _ramp.resolve_ramp(spec["start"], spec["stop"], steps=spec.get("steps"),
+                                     hold_s=spec.get("hold_s"), duration_s=spec.get("duration_s"))
+        except (ValueError, TypeError) as exc:
+            self._steps_view.setPlainText(str(exc))
+            return
+        anchor = self._anchor.currentData()
+        fires = _ramp.place_ramp(anchor, float(self._offset.value()), res)
+        lines = [f"{'#':>3}  {'time':>9}   value"]
+        for i, (fa, foff, v) in enumerate(fires):
+            tag = "T0" if fa == "start" else "off"
+            lines.append(f"{i:>3}  {tag + _off(foff):>9}   {fmt_value(v)}{u}")
+        self._steps_view.setPlainText("\n".join(lines))
 
     # ── Accept ───────────────────────────────────────────────────────────────
 

@@ -89,7 +89,7 @@ class RunItem:
 def _ramp_duration(r: dict) -> float:
     from api import ramp as _ramp
     try:
-        return _ramp.resolve_ramp(r.get("start"), r.get("stop"), step=r.get("step"),
+        return _ramp.resolve_ramp(r.get("start"), r.get("stop"), steps=r.get("steps"), step=r.get("step"),
                                   hold_s=r.get("hold_s"), duration_s=r.get("duration_s")).duration_s
     except (ValueError, TypeError):
         return 0.0
@@ -366,11 +366,11 @@ def _ramp_spec_error(spec: Optional[dict], anchor: str) -> Optional[str]:
     from api import ramp as _ramp
     try:
         if anchor == "both":
-            if spec.get("step") is None and spec.get("hold_s") is None:
-                return "a window-filling ramp needs a step size or hold time"
+            if spec.get("steps") is None and spec.get("step") is None and spec.get("hold_s") is None:
+                return "a window-filling ramp needs a step count or hold time"
         else:
             _ramp.resolve_ramp(spec.get("start"), spec.get("stop"),
-                               step=spec.get("step"), hold_s=spec.get("hold_s"),
+                               steps=spec.get("steps"), step=spec.get("step"), hold_s=spec.get("hold_s"),
                                duration_s=spec.get("duration_s"))
     except (ValueError, TypeError) as exc:
         return str(exc)
@@ -388,7 +388,8 @@ def min_on_air_duration(items) -> float:
         robj = None
         if r:
             robj = SimpleNamespace(
-                start=r.get("start"), stop=r.get("stop"), step=r.get("step"),
+                start=r.get("start"), stop=r.get("stop"),
+                steps=r.get("steps"), step=r.get("step"),
                 hold_s=r.get("hold_s"), duration_s=r.get("duration_s"))
         objs.append(SimpleNamespace(
             anchor=s.get("anchor", "start"), offset_s=s.get("offset_s", 0.0),
