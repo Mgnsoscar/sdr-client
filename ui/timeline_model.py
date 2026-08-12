@@ -64,14 +64,17 @@ class RunItem:
       - "run"  — fire-and-exit one-shot: launch the task, it self-terminates.
       - "tune" — retune a *running* duration task's live parameters (params below)
                  at this offset; carries `params`, not `args`.
+      - "ramp" — sweep one live parameter over time; carries `ramp` (the spec).
+                 anchor may also be "both" (fills the on-air window).
     Sharing one item type keeps the canvas geometry (drag/lanes/hit) identical."""
     task_name: str
     args: List[str] = field(default_factory=list)
     replace_args: bool = True
-    anchor: str = "start"       # "start" (on-air) | "stop" (off-air)
+    anchor: str = "start"       # "start" (on-air) | "stop" (off-air) | "both" (ramp)
     offset: float = 0.0
-    action: str = "run"         # "run" | "tune"
+    action: str = "run"         # "run" | "tune" | "ramp"
     params: Dict[str, object] = field(default_factory=dict)   # tune: {name: value}
+    ramp: Optional[Dict[str, object]] = None                  # ramp: the RampSpec dict
     uid: int = 0
     kind: str = "run"
 
@@ -221,6 +224,11 @@ def item_to_steps(it) -> List[dict]:
             {"anchor": it.anchor, "offset_s": it.offset, "action": "tune",
              "task_name": it.task_name, "params": dict(it.params or {})},
         ]
+    if getattr(it, "action", "run") == "ramp":
+        return [
+            {"anchor": it.anchor, "offset_s": it.offset, "action": "ramp",
+             "task_name": it.task_name, "ramp": dict(it.ramp or {})},
+        ]
     return [
         {"anchor": it.anchor, "offset_s": it.offset, "action": "run",
          "task_name": it.task_name, "args": list(it.args), "replace_args": it.replace_args},
@@ -252,6 +260,11 @@ def steps_to_items(steps: List[dict]) -> List:
             items.append(RunItem(
                 task_name=s["task_name"], action="tune",
                 params=dict(s.get("params") or {}),
+                anchor=s.get("anchor", "start"), offset=float(s["offset_s"])))
+        elif action == "ramp":
+            items.append(RunItem(
+                task_name=s["task_name"], action="ramp",
+                ramp=dict(s.get("ramp") or {}),
                 anchor=s.get("anchor", "start"), offset=float(s["offset_s"])))
         elif action == "start":
             starts.append(s)
@@ -297,7 +310,50 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
     # started by a duration (bar) step in this same sequence.
     duration_tasks = {it.task_name for it in items if getattr(it, "kind", None) == "bar"}
     for it in items:
-        if getattr(it, "action", "run") == "tune" and it.task_name not in duration_tasks:
-            return (f"tune step targets '{it.task_name or '(no task)'}', which no "
+        act = getattr(it, "action", "run")
+        if act in ("tune", "ramp") and it.task_name not in duration_tasks:
+            return (f"{act} step targets '{it.task_name or '(no task)'}', which no "
                     f"duration task in this sequence starts")
+        if act == "ramp":
+            err = _ramp_spec_error(getattr(it, "ramp", None), it.anchor)
+            if err:
+                return f"ramp on '{it.task_name}': {err}"
     return None
+
+
+def _ramp_spec_error(spec: Optional[dict], anchor: str) -> Optional[str]:
+    """Validate a ramp spec the same way the agent does (so a bad ramp is caught
+    before deploy). Returns an error string or None."""
+    if not spec:
+        return "no ramp defined"
+    from api import ramp as _ramp
+    try:
+        if anchor == "both":
+            if spec.get("step") is None and spec.get("hold_s") is None:
+                return "a window-filling ramp needs a step size or hold time"
+        else:
+            _ramp.resolve_ramp(spec.get("start"), spec.get("stop"),
+                               step=spec.get("step"), hold_s=spec.get("hold_s"),
+                               duration_s=spec.get("duration_s"))
+    except (ValueError, TypeError) as exc:
+        return str(exc)
+    return None
+
+
+def min_on_air_duration(items) -> float:
+    """The shortest on-air window this item set fits in (seconds). Delegates to the
+    shared api.ramp math after normalising items to step-shaped objects."""
+    from types import SimpleNamespace
+    from api import ramp as _ramp
+    objs = []
+    for s in items_to_steps(items):
+        r = s.get("ramp")
+        robj = None
+        if r:
+            robj = SimpleNamespace(
+                start=r.get("start"), stop=r.get("stop"), step=r.get("step"),
+                hold_s=r.get("hold_s"), duration_s=r.get("duration_s"))
+        objs.append(SimpleNamespace(
+            anchor=s.get("anchor", "start"), offset_s=s.get("offset_s", 0.0),
+            action=s.get("action", ""), ramp=robj))
+    return _ramp.min_on_air_duration(objs)

@@ -49,6 +49,20 @@ class StepAction(str, Enum):
     STOP  = "stop"    # stop a long-running task
     RUN   = "run"     # fire-and-exit one-shot: launch, self-terminates, no stop
     TUNE  = "tune"    # retune a running task's live parameters (see SequenceStep.params)
+    RAMP  = "ramp"    # sweep one live parameter over time (expands to tunes on the unit)
+
+
+class RampSpec(BaseModel):
+    """A parameter ramp for a RAMP step: sweep `param` from start to stop. Give any
+    two of {step, hold_s, duration_s}; the third derives. A both-anchored ramp fills
+    the plan's on-air window, so only one of {step, hold_s} is given. Mirrors the
+    agent's RampSpec; expansion lives in api.ramp."""
+    param: str
+    start: float
+    stop: float
+    step: Optional[float] = None
+    hold_s: Optional[float] = None
+    duration_s: Optional[float] = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -239,6 +253,8 @@ class SequenceStep(BaseModel):
     inject_resume_offset: bool = False
     # TUNE step: live-parameter values to apply to the running task, {name: value}.
     params: Dict[str, Any] = {}
+    # RAMP step: the parametric sweep (expanded into tunes on the unit at arm time).
+    ramp: Optional[RampSpec] = None
 
 
 class Sequence(BaseModel):
