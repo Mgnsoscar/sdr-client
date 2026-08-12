@@ -71,7 +71,8 @@ class RunItem:
     args: List[str] = field(default_factory=list)
     replace_args: bool = True
     anchor: str = "start"       # "start" (on-air) | "stop" (off-air) | "both" (ramp)
-    offset: float = 0.0
+    offset: float = 0.0         # on-air-side offset for a "both" ramp
+    offset_end: float = 0.0     # off-air-side inset for a "both" ramp (≤ 0)
     action: str = "run"         # "run" | "tune" | "ramp"
     params: Dict[str, object] = field(default_factory=dict)   # tune: {name: value}
     ramp: Optional[Dict[str, object]] = None                  # ramp: the RampSpec dict
@@ -227,6 +228,7 @@ def item_to_steps(it) -> List[dict]:
     if getattr(it, "action", "run") == "ramp":
         return [
             {"anchor": it.anchor, "offset_s": it.offset, "action": "ramp",
+             "offset_end_s": getattr(it, "offset_end", 0.0),
              "task_name": it.task_name, "ramp": dict(it.ramp or {})},
         ]
     return [
@@ -265,7 +267,8 @@ def steps_to_items(steps: List[dict]) -> List:
             items.append(RunItem(
                 task_name=s["task_name"], action="ramp",
                 ramp=dict(s.get("ramp") or {}),
-                anchor=s.get("anchor", "start"), offset=float(s["offset_s"])))
+                anchor=s.get("anchor", "start"), offset=float(s["offset_s"]),
+                offset_end=float(s.get("offset_end_s") or 0.0)))
         elif action == "start":
             starts.append(s)
         elif action == "stop":
@@ -355,5 +358,6 @@ def min_on_air_duration(items) -> float:
                 hold_s=r.get("hold_s"), duration_s=r.get("duration_s"))
         objs.append(SimpleNamespace(
             anchor=s.get("anchor", "start"), offset_s=s.get("offset_s", 0.0),
+            offset_end_s=s.get("offset_end_s", 0.0),
             action=s.get("action", ""), ramp=robj))
     return _ramp.min_on_air_duration(objs)

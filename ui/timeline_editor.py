@@ -1258,8 +1258,10 @@ class TimelineEditor(QWidget):
         dicts = []
         for s in steps:
             ramp = getattr(s, "ramp", None)
+            end = getattr(s, "offset_end_s", None)
             dicts.append({
                 "anchor": s.anchor, "offset_s": float(s.offset_s),
+                "offset_end_s": float(end) if end is not None else 0.0,
                 "action": s.action.value if hasattr(s.action, "value") else str(s.action),
                 "task_name": s.task_name, "args": list(getattr(s, "args", []) or []),
                 "replace_args": bool(getattr(s, "replace_args", False)),
@@ -1277,6 +1279,7 @@ class TimelineEditor(QWidget):
             ramp = d.get("ramp")
             out.append(m.SequenceStep(
                 anchor=d["anchor"], offset_s=d["offset_s"],
+                offset_end_s=d.get("offset_end_s"),
                 action=m.StepAction(d["action"]), task_name=d["task_name"],
                 args=list(d.get("args") or []),
                 replace_args=bool(d.get("replace_args", False)),

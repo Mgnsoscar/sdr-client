@@ -244,8 +244,10 @@ class PatchEventRequest(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class SequenceStep(BaseModel):
-    anchor: str = "start"              # "start" | "stop"
+    anchor: str = "start"              # "start" | "stop" | "both" (ramp)
     offset_s: float
+    # "both"-anchored ramp: off-air-side inset (≤ 0). Fills [on-air+offset_s, off-air+offset_end_s].
+    offset_end_s: Optional[float] = None
     action: StepAction
     task_name: str
     args: List[str] = []               # CLI args for this step's start/run

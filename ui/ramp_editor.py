@@ -4,13 +4,13 @@ RampEditorDialog — author a parameter ramp step.
 A ramp sweeps one live parameter of a running duration task from a start value to
 a stop value over time, defined by any two of {step, hold, duration} (or, when it
 fills the on-air window, just one of {step, hold} — the duration comes from the
-plan/schedule). It's stored parametrically and expanded into tune fires on the
-unit at arm time (see api.ramp / agent.ramp).
+plan/schedule). A window-filling ramp can still be inset from each edge (start it
+after on-air, end it before off-air). It's stored parametrically and expanded into
+tune fires on the unit at arm time (see api.ramp / agent.ramp).
 
-The dialog reuses the timeline editor's task list and script-parameter cache (the
-same GET /scripts/{name}/params the step editor uses), filtered to the task's
-LIVE, numeric parameters — the only ones a ramp can sweep. It returns a RunItem
-with action="ramp" via .result_item, mirroring StepEditorDialog's contract.
+The dialog reuses the timeline editor's task list and script-parameter cache,
+filtered to the task's LIVE, numeric parameters — the only ones a ramp can sweep.
+It returns a RunItem with action="ramp" via .result_item, like StepEditorDialog.
 """
 from __future__ import annotations
 
@@ -27,9 +27,6 @@ from . import timeline_model as tlm
 from .param_form import fmt_value
 from .theme import Palette
 
-
-# Define-by modes: which two timing quantities the user supplies.
-# key -> (label, needs_step, needs_hold, needs_duration)
 _MODES_SINGLE = [
     ("step_hold",     "Step size + hold time  → duration"),
     ("step_duration", "Step size + duration  → hold time"),
@@ -66,6 +63,7 @@ class RampEditorDialog(QDialog):
         self.result_item: Optional[object] = None
         self._current_script = ""
         self._live_params: List[dict] = []
+        self._ready = False   # suppress preview callbacks until every widget exists
 
         self.setWindowTitle("New ramp" if new else "Edit ramp")
         self.setMinimumWidth(460)
@@ -84,7 +82,11 @@ class RampEditorDialog(QDialog):
         outer.setSpacing(10)
         form = QFormLayout()
         form.setSpacing(8)
+        r = dict(getattr(self._src, "ramp", None) or {})
 
+        # --- create every widget first; connect signals only afterwards, so an
+        #     early setText/setCurrentText during build can't fire a preview
+        #     callback before the widgets it reads exist. ---
         self._task = QComboBox()
         tasks = self._editor.available_tasks()
         if tasks:
@@ -93,20 +95,13 @@ class RampEditorDialog(QDialog):
             self._task.addItem(self._src.task_name)
         if self._src.task_name:
             self._task.setCurrentText(self._src.task_name)
-        self._task.currentTextChanged.connect(lambda t: self._select_task(t))
         form.addRow("Task", self._task)
 
         self._param = QComboBox()
-        self._param.currentTextChanged.connect(lambda _t: self._update_preview())
         form.addRow("Parameter", self._param)
 
-        r = dict(getattr(self._src, "ramp", None) or {})
-        self._start = QLineEdit(_fmt(r.get("start")))
-        self._start.setPlaceholderText("start value")
-        self._stop = QLineEdit(_fmt(r.get("stop")))
-        self._stop.setPlaceholderText("stop value")
-        for w in (self._start, self._stop):
-            w.textChanged.connect(self._update_preview)
+        self._start = QLineEdit(_fmt(r.get("start")));  self._start.setPlaceholderText("start value")
+        self._stop = QLineEdit(_fmt(r.get("stop")));    self._stop.setPlaceholderText("stop value")
         form.addRow("From", self._start)
         form.addRow("To", self._stop)
 
@@ -116,30 +111,22 @@ class RampEditorDialog(QDialog):
         self._anchor.addItem("Fill on-air window", "both")
         self._anchor.setCurrentIndex(
             {"start": 0, "stop": 1, "both": 2}.get(getattr(self._src, "anchor", "start"), 0))
-        self._anchor.currentIndexChanged.connect(self._sync_anchor)
-        form.addRow("Anchor", self._anchor)
 
-        self._offset = QDoubleSpinBox()
-        self._offset.setRange(-100000.0, 100000.0)
-        self._offset.setDecimals(1); self._offset.setSingleStep(1.0); self._offset.setSuffix(" s")
-        self._offset.setValue(float(getattr(self._src, "offset", 0.0)))
-        self._offset.valueChanged.connect(self._update_preview)
-        _row(form, "Offset from anchor", self._offset)
+        self._offset = _spin(float(getattr(self._src, "offset", 0.0)))
+        self._offset_end = _spin(float(getattr(self._src, "offset_end", 0.0)))
+        form.addRow("Anchor", self._anchor)
+        self._off_lbl = _row(form, "Offset from anchor", self._offset)
+        self._offend_lbl = _row(form, "End offset from off-air", self._offset_end)
 
         self._mode = QComboBox()
-        self._mode.currentIndexChanged.connect(self._sync_mode)
         form.addRow("Define by", self._mode)
 
-        # Three timing inputs; the visible subset depends on the mode.
         self._step = QLineEdit();     self._step.setPlaceholderText("value increment")
         self._hold = QLineEdit();     self._hold.setPlaceholderText("seconds per step")
         self._duration = QLineEdit(); self._duration.setPlaceholderText("seconds")
-        for w in (self._step, self._hold, self._duration):
-            w.textChanged.connect(self._update_preview)
         self._row_step = _row(form, "Step size", self._step)
         self._row_hold = _row(form, "Hold time", self._hold)
         self._row_duration = _row(form, "Duration", self._duration)
-        # Prefill timing from an existing ramp.
         if r.get("step") is not None:
             self._step.setText(_fmt(r.get("step")))
         if r.get("hold_s") is not None:
@@ -148,7 +135,6 @@ class RampEditorDialog(QDialog):
             self._duration.setText(_fmt(r.get("duration_s")))
 
         outer.addLayout(form)
-
         self._preview = QLabel("")
         self._preview.setWordWrap(True)
         self._preview.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
@@ -165,7 +151,18 @@ class RampEditorDialog(QDialog):
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
 
-        self._sync_anchor()   # also populates modes + sync_mode + preview
+        # Now everything exists — wire the change signals.
+        self._task.currentTextChanged.connect(lambda t: self._select_task(t))
+        self._param.currentTextChanged.connect(lambda _t: self._update_preview())
+        for w in (self._start, self._stop, self._step, self._hold, self._duration):
+            w.textChanged.connect(self._update_preview)
+        self._offset.valueChanged.connect(self._update_preview)
+        self._offset_end.valueChanged.connect(self._update_preview)
+        self._anchor.currentIndexChanged.connect(self._sync_anchor)
+        self._mode.currentIndexChanged.connect(self._sync_mode)
+
+        self._ready = True
+        self._sync_anchor()   # populate modes + show/hide rows + preview
 
     # ── Anchor / mode wiring ─────────────────────────────────────────────────
 
@@ -174,9 +171,11 @@ class RampEditorDialog(QDialog):
 
     def _sync_anchor(self) -> None:
         both = self._is_both()
-        self._offset.setVisible(not both)
-        self._offset._row_label.setVisible(not both)
-        # Rebuild the Define-by options for this anchor, keeping the selection if we can.
+        # A window-filling ramp is inset from BOTH edges; a single-anchor ramp has
+        # one offset from its anchor.
+        self._off_lbl.setText("Start offset from on-air" if both else "Offset from anchor")
+        self._offend_lbl.setVisible(both)
+        self._offset_end.setVisible(both)
         prev = self._mode.currentData()
         self._mode.blockSignals(True)
         self._mode.clear()
@@ -231,7 +230,6 @@ class RampEditorDialog(QDialog):
             self._set_params(self._editor.param_cache()[script])
 
     def _set_params(self, specs: List[dict]) -> None:
-        # A ramp can only sweep a live, numeric parameter.
         self._live_params = [s for s in specs if s.get("live")
                              and s.get("kind") in ("number", "integer")]
         want = (getattr(self._src, "ramp", None) or {}).get("param")
@@ -258,6 +256,8 @@ class RampEditorDialog(QDialog):
         return spec
 
     def _update_preview(self, *_) -> None:
+        if not self._ready:
+            return
         spec = self._spec_from_form()
         if not self._live_params:
             self._set_preview("This task's script has no live numeric parameters.", error=True)
@@ -266,7 +266,7 @@ class RampEditorDialog(QDialog):
             self._set_preview("Enter numeric From/To values.")
             return
         if self._is_both():
-            self._set_preview("Sweeps across the whole on-air window "
+            self._set_preview("Sweeps across the on-air window between the insets "
                               "(duration set when scheduled in a plan).")
             return
         try:
@@ -296,7 +296,6 @@ class RampEditorDialog(QDialog):
         spec = self._spec_from_form()
         if spec["start"] is None or spec["stop"] is None:
             return self._set_preview("enter numeric From/To values", error=True)
-        # Validate exactly as the agent will.
         anchor = self._anchor.currentData()
         err = tlm._ramp_spec_error(spec, anchor)
         if err:
@@ -304,7 +303,8 @@ class RampEditorDialog(QDialog):
         ramp = {k: v for k, v in spec.items() if v is not None}
         self.result_item = tlm.RunItem(
             task_name=task, action="ramp", ramp=ramp, anchor=anchor,
-            offset=0.0 if anchor == "both" else round(self._offset.value(), 1),
+            offset=round(self._offset.value(), 1),
+            offset_end=round(self._offset_end.value(), 1) if anchor == "both" else 0.0,
             uid=self._src.uid)
         self.accept()
 
@@ -319,6 +319,14 @@ class RampEditorDialog(QDialog):
 
 def _fmt(v) -> str:
     return "" if v is None else fmt_value(v) if isinstance(v, (int, float)) else str(v)
+
+
+def _spin(value: float) -> QDoubleSpinBox:
+    w = QDoubleSpinBox()
+    w.setRange(-100000.0, 100000.0)
+    w.setDecimals(1); w.setSingleStep(1.0); w.setSuffix(" s")
+    w.setValue(value)
+    return w
 
 
 def _row(form: QFormLayout, label: str, widget: QWidget) -> QLabel:
