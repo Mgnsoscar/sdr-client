@@ -82,25 +82,30 @@ class Poller:
 
     # ── One-shot polls (also usable directly, e.g. for an eager first paint) ────
 
-    def poll_fast_once(self) -> FastSnapshot:
+    def poll_fast_once(self, units: Optional[list] = None) -> FastSnapshot:
         # Build sequentially, checking the stop flag between calls. Each fleet
         # call can block on connection timeouts to an unreachable unit, so this
         # lets a shutdown interrupt the cycle promptly instead of grinding
         # through every timeout (and colliding with interpreter teardown).
+        #
+        # `units` scopes the poll to specific unit(s). An eager refresh after an
+        # action passes the one unit it touched, so its card settles immediately
+        # without waiting on connect-timeouts to every *other* (unreachable) unit —
+        # the fan-out otherwise stalls the whole poll on the slowest dead unit.
         snap = FastSnapshot()
         if self._stop.is_set():
             return snap
-        snap.health = self.fleet.health_all()
+        snap.health = self.fleet.health_all(units)
         if self._stop.is_set():
             return snap
         snap.captured_at = time.time()   # anchor for Pi-vs-PC clock-skew, set at poll time
-        snap.system = self.fleet.system_all()
+        snap.system = self.fleet.system_all(units)
         if self._stop.is_set():
             return snap
-        snap.tasks = self.fleet.tasks_all()
+        snap.tasks = self.fleet.tasks_all(units)
         if self._stop.is_set():
             return snap
-        snap.runs = self.fleet.list_runs_all()
+        snap.runs = self.fleet.list_runs_all(units)
         return snap
 
     def poll_slow_once(self) -> SlowSnapshot:

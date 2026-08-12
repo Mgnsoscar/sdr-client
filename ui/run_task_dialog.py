@@ -143,7 +143,7 @@ class RunTaskDialog(QDialog):
             if isinstance(result, Exception):
                 self._set_status(f"start failed: {result}", error=True)
             else:
-                self.hub.refresh_now()      # reflect the running state immediately
+                self.hub.refresh_now(self.hostname)   # reflect the running state immediately
                 self.accept()
             return
 

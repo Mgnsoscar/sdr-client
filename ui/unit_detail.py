@@ -359,8 +359,10 @@ class UnitDetail(QWidget):
         self._select_subtab(0)
 
         # Pull fresh data now so the task list / status appear immediately, rather
-        # than blank until the next poll tick (up to fast_interval_s away).
-        self.hub.refresh_now()
+        # than blank until the next poll tick (up to fast_interval_s away). Scope
+        # it to this unit so opening a card doesn't stall on connect-timeouts to
+        # other, unreachable units.
+        self.hub.refresh_now(hostname)
 
     def _select_subtab(self, idx: int) -> None:
         self._sub_stack.setCurrentIndex(idx)
