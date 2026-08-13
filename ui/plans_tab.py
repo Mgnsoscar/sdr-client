@@ -43,6 +43,7 @@ from state import PlanStore, new_plan_id
 from .arm_dialog import ArmDialog
 from .param_form import fmt_duration
 from .plan_editor import PlanEditorDialog
+from .plan_log_dialog import PlanLogDialog
 from .qt_adapter import DataHub
 from .theme import Palette
 from .widgets import StatusPill
@@ -162,7 +163,7 @@ class _PlanRow(QFrame):
     """One plan: name, unit/sequence summary, active-run pill, action buttons."""
 
     def __init__(self, plan: m.Plan, runs: List[m.SequenceRun], on_air_n: int,
-                 pending_n: int, on_arm, on_stop, on_edit, on_delete):
+                 pending_n: int, on_arm, on_stop, on_edit, on_delete, on_log):
         super().__init__()
         self.plan = plan
         self.setObjectName("card")
@@ -217,20 +218,24 @@ class _PlanRow(QFrame):
 
         self._arm = QPushButton("Arm")
         self._stop = QPushButton("Stop")
+        self._log = QPushButton("Log")
         self._edit = QPushButton("Edit")
         self._delete = QPushButton("Delete")
-        for b in (self._arm, self._stop, self._edit, self._delete):
+        for b in (self._arm, self._stop, self._log, self._edit, self._delete):
             b.setFixedWidth(66)
         self._arm.setToolTip("Arm every sequence in this plan at one shared on-air time")
         self._stop.setToolTip("Stop every active run in this plan")
+        self._log.setToolTip("View every sequence's run log across the plan's units, live")
         self._arm.setEnabled(not active and bool(plan.items))
         self._stop.setEnabled(active)
+        self._log.setEnabled(bool(plan.items))
         self._delete.setEnabled(not active)
         self._arm.clicked.connect(lambda: on_arm(plan))
         self._stop.clicked.connect(lambda: on_stop(plan))
+        self._log.clicked.connect(lambda: on_log(plan))
         self._edit.clicked.connect(lambda: on_edit(plan))
         self._delete.clicked.connect(lambda: on_delete(plan))
-        for b in (self._arm, self._stop, self._edit, self._delete):
+        for b in (self._arm, self._stop, self._log, self._edit, self._delete):
             lay.addWidget(b, alignment=Qt.AlignmentFlag.AlignTop)
 
 
@@ -337,6 +342,12 @@ class PlansTab(QWidget):
             self._store.upsert(dlg.result_plan)
             self._sync_units()
             self._refresh()
+
+    def _on_log(self, plan: m.Plan) -> None:
+        # Non-modal so the operator can watch the plan's logs while working elsewhere.
+        dlg = PlanLogDialog(self.hub, plan, parent=self.window())
+        dlg.setModal(False)
+        dlg.show()
 
     def _on_delete(self, plan: m.Plan) -> None:
         if QMessageBox.question(
@@ -634,7 +645,7 @@ class PlansTab(QWidget):
             self._list.addWidget(_PlanRow(
                 plan, runs, on_air_n, pending_n,
                 on_arm=self._on_arm, on_stop=self._on_stop,
-                on_edit=self._on_edit, on_delete=self._on_delete))
+                on_edit=self._on_edit, on_delete=self._on_delete, on_log=self._on_log))
         suffix = f" · {active_total} active" if active_total else ""
         self._set_status(f"{len(self._plans)} plan(s){suffix}")
 
