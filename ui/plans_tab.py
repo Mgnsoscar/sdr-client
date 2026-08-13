@@ -194,20 +194,27 @@ class _ArmPlanDialog(QDialog):
         self._countdown.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_MUTED};")
         outer.addWidget(self._countdown)
 
+        # ASAP: go on air at the earliest valid instant (computed when you press Arm),
+        # instead of a chosen grid time. Disables the picker below while ticked.
+        self._asap = QCheckBox("As soon as possible (earliest valid time)")
+        self._asap.toggled.connect(self._sync_asap)
+        outer.addWidget(self._asap)
+
+        self._time_ctrls: List[QWidget] = []   # picker widgets greyed out in ASAP mode
         quick = QHBoxLayout(); quick.setSpacing(6)
         b_min = QPushButton("Next minute  :00")
         b_half = QPushButton("Next ½ min  :30")
         b_min.clicked.connect(lambda: self._quick(60))
         b_half.clicked.connect(lambda: self._quick(30))
         for b in (b_min, b_half):
-            quick.addWidget(b)
+            quick.addWidget(b); self._time_ctrls.append(b)
         outer.addLayout(quick)
 
         nudge = QHBoxLayout(); nudge.setSpacing(6)
         for label, delta in (("− 1 min", -60), ("− 30 s", -30), ("+ 30 s", 30), ("+ 1 min", 60)):
             b = QPushButton(label)
             b.clicked.connect(lambda _=False, d=delta: self._nudge(d))
-            nudge.addWidget(b)
+            nudge.addWidget(b); self._time_ctrls.append(b)
         outer.addLayout(nudge)
 
         self._floor_note = QLabel()
@@ -289,29 +296,52 @@ class _ArmPlanDialog(QDialog):
         self._auto_note = False
         self._render()
 
+    def _effective_t0(self) -> datetime:
+        """The on-air instant that will actually be used: the earliest valid time in
+        ASAP mode (computed fresh), otherwise the operator's chosen grid time."""
+        return self._floor() if self._asap.isChecked() else self._t0
+
     def _tick(self) -> None:
-        # Never let the choice expire: if real time has caught up, hop to the next slot.
-        floor_slot = self._min_slot()
-        if self._t0 < floor_slot:
-            self._t0 = floor_slot
-            self._auto_note = True
+        # Never let a chosen time expire: if real time has caught up, hop to the next
+        # slot. (ASAP has no fixed choice — it always tracks the live floor.)
+        if not self._asap.isChecked():
+            floor_slot = self._min_slot()
+            if self._t0 < floor_slot:
+                self._t0 = floor_slot
+                self._auto_note = True
         self._render()
 
     def _render(self) -> None:
-        local = self._t0.astimezone()
-        self._on_air.setText(local.strftime("on air at  %H:%M:%S"))
-        secs = max(0.0, (self._t0 - datetime.now(timezone.utc)).total_seconds())
+        eff = self._effective_t0()
+        if self._asap.isChecked():
+            self._on_air.setText("on air as soon as possible")
+        else:
+            self._on_air.setText(eff.astimezone().strftime("on air at  %H:%M:%S"))
+        secs = max(0.0, (eff - datetime.now(timezone.utc)).total_seconds())
         note = "  ·  slot advanced (previous time passed)" if self._auto_note else ""
-        self._countdown.setText(f"in {fmt_duration(round(secs))}{note}")
+        self._countdown.setText(
+            f"in {fmt_duration(round(secs))} (~{eff.astimezone().strftime('%H:%M:%S')} local){note}"
+            if self._asap.isChecked()
+            else f"in {fmt_duration(round(secs))}{note}")
         self._floor_note.setText(
             f"Earliest valid on-air is ~{fmt_duration(round(self._safety))} from now "
             f"(warm-up + margin). Times snap to the {self.GRID_S}s grid.")
         if self._stop_on.isChecked():
-            stop_local = (self._t0 + timedelta(seconds=self._dur.value())).astimezone()
+            stop_local = (eff + timedelta(seconds=self._dur.value())).astimezone()
             self._stop_at.setText(f"→ stops at {stop_local.strftime('%H:%M:%S')} local "
                                   f"({fmt_duration(round(self._dur.value()))} on air)")
         else:
             self._stop_at.setText("Runs open-ended until manually stopped.")
+
+    def _sync_asap(self) -> None:
+        asap = self._asap.isChecked()
+        for w in self._time_ctrls:
+            w.setEnabled(not asap)
+        self._floor_note.setVisible(not asap)
+        if not asap:   # returning to manual: make sure the choice is still valid
+            self._t0 = max(self._t0, self._min_slot())
+            self._auto_note = False
+        self._render()
 
     def _sync_stop(self) -> None:
         on = self._stop_on.isChecked()
@@ -322,7 +352,7 @@ class _ArmPlanDialog(QDialog):
     # ── Results ──────────────────────────────────────────────────────────────
 
     def on_air_at(self) -> datetime:
-        return self._t0
+        return self._effective_t0()
 
     def stop_duration_s(self) -> Optional[float]:
         return round(self._dur.value(), 1) if self._stop_on.isChecked() else None
