@@ -168,10 +168,12 @@ class _ArmPlanDialog(QDialog):
     GRID_S = 30   # every selectable on-air time sits on a 30-second grid
 
     def __init__(self, n_seqs: int, n_units: int, safety_lead_s: float,
-                 min_duration_s: float, skew_note: str, parent=None):
+                 default_duration_s: float, min_floor_s: float, skew_note: str,
+                 parent=None):
         super().__init__(parent)
         self._safety = max(0.0, safety_lead_s)      # now + this = earliest valid T0
-        self._min_dur = max(1.0, min_duration_s)
+        self._min_floor = max(0.0, min_floor_s)     # hard minimum (0 = none derivable)
+        self._default_dur = max(self._min_floor, default_duration_s, 1.0)
         self.setWindowTitle("Arm plan")
         self.setMinimumWidth(440)
 
@@ -225,14 +227,22 @@ class _ArmPlanDialog(QDialog):
         stop_row = QGridLayout(); stop_row.setHorizontalSpacing(8); stop_row.setVerticalSpacing(4)
         self._dur_lbl = QLabel("Run for")
         self._dur = DurationSpinBox()
-        self._dur.setRange(1.0, 100000.0)
-        self._dur.setValue(round(self._min_dur))
+        # A derivable minimum is a hard floor: the spinbox clamps to it, so a too-short
+        # duration can't be entered (no round-trip through an arm-time error).
+        self._dur.setRange(max(1.0, self._min_floor), 100000.0)
+        self._dur.setValue(round(self._default_dur))
         self._dur.valueChanged.connect(lambda _=0: self._render())
         stop_row.addWidget(self._dur_lbl, 0, 0)
         stop_row.addWidget(self._dur, 0, 1)
+        self._min_hint = QLabel()
+        self._min_hint.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+        if self._min_floor > 0:
+            self._min_hint.setText(
+                f"minimum {fmt_duration(round(self._min_floor))} to complete the longest sequence")
+        stop_row.addWidget(self._min_hint, 1, 0, 1, 2)
         self._stop_at = QLabel()
         self._stop_at.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
-        stop_row.addWidget(self._stop_at, 1, 0, 1, 2)
+        stop_row.addWidget(self._stop_at, 2, 0, 1, 2)
         outer.addLayout(stop_row)
 
         if skew_note:
@@ -305,7 +315,7 @@ class _ArmPlanDialog(QDialog):
 
     def _sync_stop(self) -> None:
         on = self._stop_on.isChecked()
-        for w in (self._dur_lbl, self._dur):
+        for w in (self._dur_lbl, self._dur, self._min_hint):
             w.setEnabled(on)
         self._render()
 
@@ -659,7 +669,7 @@ class PlansTab(QWidget):
         n_units = len({i.hostname for i in plan.items})
         default_dur = plan_min_dur if plan_min_dur > 0 else DEFAULT_STOP_DURATION_S
         dlg = _ArmPlanDialog(len(plan.items), n_units, max(0.0, max_eff_lead) + ARM_MARGIN_S,
-                             default_dur, skew_note, parent=self)
+                             default_dur, plan_min_dur, skew_note, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             self._set_status("arm cancelled")
             return
