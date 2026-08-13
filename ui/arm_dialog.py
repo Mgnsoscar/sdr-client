@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout,
     QLabel, QPushButton, QVBoxLayout, QWidget,
@@ -53,6 +53,11 @@ class ArmDialog(QDialog):
         self._default_dur = max(self._min_floor, default_duration_s, 1.0)
         self.setWindowTitle("Arm")
         self.setMinimumWidth(440)
+        # Accept focus on a background click, so clicking anywhere outside the
+        # duration field pulls focus off it and commits what was typed (the spinbox
+        # only commits on focus-out / Enter). Without this, clicking empty space
+        # leaves focus in the field and the entry stays uncommitted.
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 14)
