@@ -41,6 +41,7 @@ from api import models as m
 from api import ramp as _ramp
 from state import PlanStore, new_plan_id
 from .arm_dialog import ArmDialog
+from .param_form import fmt_duration
 from .plan_editor import PlanEditorDialog
 from .qt_adapter import DataHub
 from .theme import Palette
@@ -78,6 +79,23 @@ def _is_on_air(run: m.SequenceRun) -> bool:
     has on_air_actual unset and reads as armed, and we never compare the laptop's
     clock to a unit-clock on_air_at."""
     return run.state == m.SequenceState.RUNNING and bool(run.on_air_actual)
+
+
+def _plan_timing(runs: List[m.SequenceRun]) -> str:
+    """A one-line 'on air HH:MM:SS · off air HH:MM:SS · duration' digest for a plan's
+    active runs: on-air is the earliest run's, off-air the latest, and the plan reads
+    open-ended if any run is. Empty string if no run has a parseable on-air time."""
+    starts = [d for d in (_parse_iso(r.on_air_at) for r in runs) if d]
+    if not starts:
+        return ""
+    on = min(starts)
+    on_txt = on.astimezone().strftime("%H:%M:%S")
+    if not all(r.on_air_end and not r.open_ended for r in runs):
+        return f"on air {on_txt}  ·  off air —  ·  open-ended"
+    off = max(d for d in (_parse_iso(r.on_air_end) for r in runs) if d)
+    dur = (off - on).total_seconds()
+    return (f"on air {on_txt}  ·  off air {off.astimezone().strftime('%H:%M:%S')}"
+            f"  ·  {fmt_duration(round(dur))}")
 
 
 def plans_to_yaml(plans: List[m.Plan]) -> str:
@@ -143,8 +161,8 @@ def _stop_plan(fleet: Fleet, runs: List[tuple]) -> List[tuple]:
 class _PlanRow(QFrame):
     """One plan: name, unit/sequence summary, active-run pill, action buttons."""
 
-    def __init__(self, plan: m.Plan, on_air_n: int, pending_n: int,
-                 on_arm, on_stop, on_edit, on_delete):
+    def __init__(self, plan: m.Plan, runs: List[m.SequenceRun], on_air_n: int,
+                 pending_n: int, on_arm, on_stop, on_edit, on_delete):
         super().__init__()
         self.plan = plan
         self.setObjectName("card")
@@ -162,10 +180,17 @@ class _PlanRow(QFrame):
             desc = QLabel(plan.description)
             desc.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
             box.addWidget(desc)
-        units = ", ".join(i.unit_label or i.hostname for i in plan.items) or "no units"
-        n_ov = sum(len(i.overrides) for i in plan.items)
-        ov_txt = f"  ·  {n_ov} override(s)" if n_ov else ""
-        summary = QLabel(f"{len(plan.items)} sequence(s)  ·  {units}{ov_txt}")
+        # Once armed, show the run's timing (on-air/off-air/duration); otherwise the
+        # plan's composition (units + overrides).
+        timing = _plan_timing(runs) if active else ""
+        if timing:
+            summary_text = timing
+        else:
+            units = ", ".join(i.unit_label or i.hostname for i in plan.items) or "no units"
+            n_ov = sum(len(i.overrides) for i in plan.items)
+            ov_txt = f"  ·  {n_ov} override(s)" if n_ov else ""
+            summary_text = f"{len(plan.items)} sequence(s)  ·  {units}{ov_txt}"
+        summary = QLabel(summary_text)
         summary.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
         summary.setWordWrap(True)
         box.addWidget(summary)
@@ -598,7 +623,7 @@ class PlansTab(QWidget):
             if runs:
                 active_total += 1
             self._list.addWidget(_PlanRow(
-                plan, on_air_n, pending_n,
+                plan, runs, on_air_n, pending_n,
                 on_arm=self._on_arm, on_stop=self._on_stop,
                 on_edit=self._on_edit, on_delete=self._on_delete))
         suffix = f" · {active_total} active" if active_total else ""

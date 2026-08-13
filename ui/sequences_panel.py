@@ -63,42 +63,6 @@ _ACTIVE = (m.SequenceState.ARMED, m.SequenceState.RUNNING)
 Result = Tuple[str, Optional[str]]   # (run_id, error-or-None)
 
 
-def _fmt_offset(offset_s: float) -> str:
-    return fmt_duration(offset_s, signed=True)
-
-
-def summarize(seq: m.Sequence) -> str:
-    """A one-line 'on-air: … · off-air: …' digest of a sequence's steps."""
-    def action_of(s) -> str:
-        return s.action.value if hasattr(s.action, "value") else str(s.action)
-
-    def desc(s) -> str:
-        act = action_of(s)
-        glyph = {"start": "▶", "run": "⚡", "tune": "◈", "ramp": "⟋"}.get(act, "⏹")
-        if act == "tune":
-            params = getattr(s, "params", None) or {}
-            detail = " " + ", ".join(f"{k}={v}" for k, v in params.items()) if params else ""
-        elif act == "ramp":
-            r = getattr(s, "ramp", None)
-            r = r.model_dump() if hasattr(r, "model_dump") else (r or {})
-            detail = f" {r.get('param','')} {r.get('start')}→{r.get('stop')}" if r else ""
-        else:
-            args = getattr(s, "args", None) or []
-            detail = f" {' '.join(args)}" if (act in ("start", "run") and args) else ""
-        return f"{glyph} {s.task_name}{detail} {_fmt_offset(s.offset_s)}"
-
-    on = sorted((s for s in seq.steps if s.anchor == "start"), key=lambda s: s.offset_s)
-    off = sorted((s for s in seq.steps if s.anchor == "stop"), key=lambda s: s.offset_s)
-    on_txt = ", ".join(desc(s) for s in on)
-    off_txt = ", ".join(desc(s) for s in off)
-    parts = []
-    if on_txt:
-        parts.append(f"on-air: {on_txt}")
-    if off_txt:
-        parts.append(f"off-air: {off_txt}")
-    return "  ·  ".join(parts) if parts else "no steps"
-
-
 def _lead_in(seq: m.Sequence) -> float:
     """Warm-up lead-in: how far before on-air the earliest start-anchored step fires
     (the magnitude of its most-negative offset), so on-air is scheduled far enough
@@ -227,15 +191,12 @@ class _SequenceRow(QFrame):
             desc = QLabel(seq.description)
             desc.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
             box.addWidget(desc)
-        # On a live unit the row shows the run's timing once armed (and just a step
-        # count when idle) — the full step list is authoring detail, kept in the
-        # Library view (can_edit) where it's useful.
+        # Show the run's timing once armed (on a live unit), otherwise just a step
+        # count — the full step list is noise here (edit the sequence to see it).
         if can_run and active:
             summary_text = _run_timing(active_run)
-        elif can_run:
-            summary_text = f"{len(seq.steps)} step(s)"
         else:
-            summary_text = f"{len(seq.steps)} step(s)  ·  {summarize(seq)}"
+            summary_text = f"{len(seq.steps)} step(s)"
         summary = QLabel(summary_text)
         summary.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
         summary.setWordWrap(True)
