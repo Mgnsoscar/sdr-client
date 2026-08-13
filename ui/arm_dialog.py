@@ -63,9 +63,17 @@ class ArmDialog(QDialog):
         head.setWordWrap(True)
         outer.addWidget(head)
 
+        # Live wall clock, so the operator can compare "now" to the on-air time they
+        # set without glancing away. Kept visually quiet (small, muted, a ⏱ marker)
+        # so it can't be mistaken for the on-air time below.
+        self._now = QLabel()
+        self._now.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_MUTED};")
+        outer.addWidget(self._now)
+
         # ── On-air time ─────────────────────────────────────────────────────
         self._on_air = QLabel()
-        self._on_air.setStyleSheet(f"font-size: 24px; font-weight: 700; color: {Palette.TEXT};")
+        self._on_air.setStyleSheet(
+            f"font-size: 24px; font-weight: 700; color: {Palette.ACCENT};")
         outer.addWidget(self._on_air)
         self._countdown = QLabel()
         self._countdown.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_MUTED};")
@@ -189,6 +197,7 @@ class ArmDialog(QDialog):
         self._render()
 
     def _render(self) -> None:
+        self._now.setText(f"⏱ now  {datetime.now().astimezone().strftime('%H:%M:%S')}")
         eff = self._effective_t0()
         if self._asap.isChecked():
             self._on_air.setText("on air as soon as possible")
