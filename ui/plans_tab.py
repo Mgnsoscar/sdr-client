@@ -194,6 +194,15 @@ class _PlanRow(QFrame):
         summary.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
         summary.setWordWrap(True)
         box.addWidget(summary)
+        # The plan's minimum on-air window — the longest of its sequences' minimums —
+        # always visible so it's legible without opening the plan. Derived from each
+        # item's plan-local steps; 0 (nothing to show) for legacy step-less items.
+        min_dur = max((_ramp.min_on_air_duration(it.steps) for it in plan.items if it.steps),
+                      default=0.0)
+        if min_dur > 0:
+            mind = QLabel(f"min duration  {fmt_duration(round(min_dur))}")
+            mind.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+            box.addWidget(mind)
         lay.addLayout(box, stretch=1)
 
         # On air (RF live) beats armed/warming: show whichever phase the plan is in.

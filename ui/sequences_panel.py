@@ -201,6 +201,14 @@ class _SequenceRow(QFrame):
         summary.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
         summary.setWordWrap(True)
         box.addWidget(summary)
+        # The shortest on-air window this sequence fits in, always visible so it's
+        # legible without opening the sequence. A sequence with no stop-anchored
+        # steps has no minimum, so nothing is shown.
+        min_dur = _ramp.min_on_air_duration(seq.steps)
+        if min_dur > 0:
+            mind = QLabel(f"min duration  {fmt_duration(round(min_dur))}")
+            mind.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+            box.addWidget(mind)
         lay.addLayout(box, stretch=1)
 
         # The run-state pill and Arm/Stop/Log belong to a live unit (can_run);
