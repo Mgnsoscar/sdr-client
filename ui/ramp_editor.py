@@ -32,17 +32,23 @@ from .theme import Palette
 _MODES_SINGLE = [
     ("steps_hold",     "Number of steps + hold time  → duration"),
     ("steps_duration", "Number of steps + duration  → hold time"),
+    ("step_hold",      "Step size + hold time  → duration"),
+    ("step_duration",  "Step size + duration  → hold time"),
     ("duration_hold",  "Duration + hold time  → number of steps"),
 ]
 _MODES_BOTH = [
     ("steps_window", "Number of steps  (duration from schedule)"),
+    ("step_window",  "Step size  (duration from schedule)"),
     ("hold_window",  "Hold time  (duration from schedule)"),
 ]
 _FIELDS = {
     "steps_hold":     ("steps", "hold"),
     "steps_duration": ("steps", "duration"),
+    "step_hold":      ("step", "hold"),
+    "step_duration":  ("step", "duration"),
     "duration_hold":  ("duration", "hold"),
     "steps_window":   ("steps",),
+    "step_window":    ("step",),
     "hold_window":    ("hold",),
 }
 
@@ -52,6 +58,15 @@ def _num(text: str) -> Optional[float]:
         return float(str(text).strip())
     except (TypeError, ValueError):
         return None
+
+
+def _clean(x: float) -> float:
+    """Strip binary floating-point noise (2.3000000000000007 → 2.3) before display,
+    keeping up to 12 significant figures — ample for any real parameter value."""
+    try:
+        return float(f"{float(x):.12g}")
+    except (TypeError, ValueError):
+        return x
 
 
 class RampEditorDialog(QDialog):
@@ -124,13 +139,17 @@ class RampEditorDialog(QDialog):
         form.addRow("Define by", self._mode)
 
         self._steps = QLineEdit();    self._steps.setPlaceholderText("count (equal increments)")
+        self._step = QLineEdit();     self._step.setPlaceholderText("increment per step")
         self._hold = QLineEdit();     self._hold.setPlaceholderText("seconds per step")
         self._duration = QLineEdit(); self._duration.setPlaceholderText("seconds")
         self._row_steps = _row(form, "Number of steps", self._steps)
+        self._row_step = _row(form, "Step size", self._step)
         self._row_hold = _row(form, "Hold time", self._hold)
         self._row_duration = _row(form, "Duration", self._duration)
         if r.get("steps") is not None:
             self._steps.setText(str(int(r.get("steps"))))
+        if r.get("step") is not None:
+            self._step.setText(_fmt(r.get("step")))
         if r.get("hold_s") is not None:
             self._hold.setText(_fmt(r.get("hold_s")))
         if r.get("duration_s") is not None:
@@ -170,7 +189,7 @@ class RampEditorDialog(QDialog):
         # Now everything exists — wire the change signals.
         self._task.currentTextChanged.connect(lambda t: self._select_task(t))
         self._param.currentTextChanged.connect(lambda _t: self._update_preview())
-        for w in (self._start, self._stop, self._steps, self._hold, self._duration):
+        for w in (self._start, self._stop, self._steps, self._step, self._hold, self._duration):
             w.textChanged.connect(self._update_preview)
         self._offset.valueChanged.connect(self._update_preview)
         self._offset_end.valueChanged.connect(self._update_preview)
@@ -205,6 +224,7 @@ class RampEditorDialog(QDialog):
     def _sync_mode(self) -> None:
         fields = _FIELDS.get(self._mode.currentData(), ())
         for name, widget, label in (("steps", self._steps, self._row_steps),
+                                     ("step", self._step, self._row_step),
                                      ("hold", self._hold, self._row_hold),
                                      ("duration", self._duration, self._row_duration)):
             on = name in fields
@@ -266,6 +286,8 @@ class RampEditorDialog(QDialog):
         if "steps" in fields:
             n = _num(self._steps.text())
             spec["steps"] = int(n) if n is not None else None
+        if "step" in fields:
+            spec["step"] = _num(self._step.text())
         if "hold" in fields:
             spec["hold_s"] = _num(self._hold.text())
         if "duration" in fields:
@@ -298,9 +320,13 @@ class RampEditorDialog(QDialog):
         if self._is_both():
             lines.append(f"Anchor: fill on-air window  (start {_off(self._offset.value())}, "
                          f"end {_off(self._offset_end.value())} from off-air)")
-            steps_mode = "steps" in _FIELDS.get(self._mode.currentData(), ())
-            given = "steps" if steps_mode else "hold"
-            val = self._steps.text().strip() if steps_mode else self._hold.text().strip()
+            fields = _FIELDS.get(self._mode.currentData(), ())
+            if "steps" in fields:
+                given, val = "steps", self._steps.text().strip()
+            elif "step" in fields:
+                given, val = "step size", self._step.text().strip()
+            else:
+                given, val = "hold", self._hold.text().strip()
             lines.append(f"{given} = {val or '—'} · duration set by the schedule")
             self._set_preview("\n".join(lines))
             self._refresh_steps_view(spec, both=True)
@@ -310,7 +336,8 @@ class RampEditorDialog(QDialog):
         lines.append(f"Anchor: {anchor}, offset {_off(self._offset.value())}")
         try:
             res = _ramp.resolve_ramp(spec["start"], spec["stop"], steps=spec.get("steps"),
-                                     hold_s=spec.get("hold_s"), duration_s=spec.get("duration_s"))
+                                     step=spec.get("step"), hold_s=spec.get("hold_s"),
+                                     duration_s=spec.get("duration_s"))
         except (ValueError, TypeError) as exc:
             lines.append("⚠ " + str(exc))
             self._set_preview("\n".join(lines), error=True)
@@ -318,7 +345,7 @@ class RampEditorDialog(QDialog):
             return
         step = abs(res.values[1] - res.values[0]) if len(res.values) > 1 else 0
         lines.append(f"{len(res.values)} points · {res.n_intervals} steps · "
-                     f"step size {fmt_value(step)}{u} · hold {fmt_duration(res.hold_s)} · "
+                     f"step size {fmt_value(_clean(step))}{u} · hold {fmt_duration(res.hold_s)} · "
                      f"duration {fmt_duration(res.duration_s)}")
         self._set_preview("\n".join(lines))
         self._refresh_steps_view(spec, both=False)
@@ -349,21 +376,23 @@ class RampEditorDialog(QDialog):
         u = f" {unit}" if unit else ""
         try:
             if both:
-                steps = spec.get("steps")
-                if steps is None:
+                # steps or step fix the value sequence regardless of the window; a
+                # hold-only ramp's point count depends on the (scheduled) window.
+                if spec.get("steps") is None and spec.get("step") is None:
                     self._steps_view.setPlainText(
                         "Hold-time ramp: the number of points depends on the on-air\n"
                         "window, resolved when the sequence is scheduled.")
                     return
-                res = _ramp.resolve_ramp(spec["start"], spec["stop"],
-                                         steps=steps, window_s=1.0)
+                res = _ramp.resolve_ramp(spec["start"], spec["stop"], steps=spec.get("steps"),
+                                         step=spec.get("step"), window_s=1.0)
                 lines = ["   #   value      (times set by the schedule window)"]
                 for i, v in enumerate(res.values):
-                    lines.append(f"  {i:>3}   {fmt_value(v)}{u}")
+                    lines.append(f"  {i:>3}   {fmt_value(_clean(v))}{u}")
                 self._steps_view.setPlainText("\n".join(lines))
                 return
             res = _ramp.resolve_ramp(spec["start"], spec["stop"], steps=spec.get("steps"),
-                                     hold_s=spec.get("hold_s"), duration_s=spec.get("duration_s"))
+                                     step=spec.get("step"), hold_s=spec.get("hold_s"),
+                                     duration_s=spec.get("duration_s"))
         except (ValueError, TypeError) as exc:
             self._steps_view.setPlainText(str(exc))
             return
@@ -372,7 +401,7 @@ class RampEditorDialog(QDialog):
         lines = [f"{'#':>3}  {'time':>9}   value"]
         for i, (fa, foff, v) in enumerate(fires):
             tag = "T0" if fa == "start" else "off"
-            lines.append(f"{i:>3}  {tag + _off(foff):>9}   {fmt_value(v)}{u}")
+            lines.append(f"{i:>3}  {tag + _off(foff):>9}   {fmt_value(_clean(v))}{u}")
         self._steps_view.setPlainText("\n".join(lines))
 
     # ── Accept ───────────────────────────────────────────────────────────────
