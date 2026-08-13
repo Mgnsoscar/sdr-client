@@ -115,6 +115,18 @@ def _parse_iso(ts: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
+def _run_timing(run: m.SequenceRun) -> str:
+    """A one-line 'on air HH:MM:SS · off air HH:MM:SS · duration' digest of an armed
+    run — the useful facts once a sequence is on the air, shown instead of its steps."""
+    on = _parse_iso(run.on_air_at).astimezone().strftime("%H:%M:%S")
+    if run.open_ended or not run.on_air_end:
+        return f"on air {on}  ·  off air —  ·  open-ended"
+    off_dt = _parse_iso(run.on_air_end)
+    off = off_dt.astimezone().strftime("%H:%M:%S")
+    dur = (off_dt - _parse_iso(run.on_air_at)).total_seconds()
+    return f"on air {on}  ·  off air {off}  ·  {fmt_duration(round(dur))}"
+
+
 def _arm_at(client, seq: m.Sequence, t0_laptop: datetime,
             duration_s: Optional[float]) -> m.SequenceRun:
     """
@@ -215,7 +227,16 @@ class _SequenceRow(QFrame):
             desc = QLabel(seq.description)
             desc.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
             box.addWidget(desc)
-        summary = QLabel(f"{len(seq.steps)} step(s)  ·  {summarize(seq)}")
+        # On a live unit the row shows the run's timing once armed (and just a step
+        # count when idle) — the full step list is authoring detail, kept in the
+        # Library view (can_edit) where it's useful.
+        if can_run and active:
+            summary_text = _run_timing(active_run)
+        elif can_run:
+            summary_text = f"{len(seq.steps)} step(s)"
+        else:
+            summary_text = f"{len(seq.steps)} step(s)  ·  {summarize(seq)}"
+        summary = QLabel(summary_text)
         summary.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
         summary.setWordWrap(True)
         box.addWidget(summary)
