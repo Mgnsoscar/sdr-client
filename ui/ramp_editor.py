@@ -60,6 +60,13 @@ def _num(text: str) -> Optional[float]:
         return None
 
 
+def _sequence_tasks(editor) -> list:
+    """Tasks a tune/ramp step may target — those started as duration bars in the
+    current sequence. Falls back to all tasks for an editor that can't report them."""
+    getter = getattr(editor, "sequence_task_names", None)
+    return getter() if getter is not None else editor.available_tasks()
+
+
 def _clean(x: float) -> float:
     """Strip binary floating-point noise (2.3000000000000007 → 2.3) before display,
     keeping up to 12 significant figures — ample for any real parameter value."""
@@ -104,13 +111,13 @@ class RampEditorDialog(QDialog):
         # --- create every widget first; connect signals only afterwards, so an
         #     early setText/setCurrentText during build can't fire a preview
         #     callback before the widgets it reads exist. ---
+        # A ramp acts on a running task, so only tasks started in this sequence
+        # (duration bars) are selectable — never an arbitrary unit task.
         self._task = QComboBox()
-        tasks = self._editor.available_tasks()
+        tasks = _sequence_tasks(self._editor)
         if tasks:
             self._task.addItems(tasks)
-        if self._src.task_name and self._task.findText(self._src.task_name) < 0:
-            self._task.addItem(self._src.task_name)
-        if self._src.task_name:
+        if self._src.task_name and self._task.findText(self._src.task_name) >= 0:
             self._task.setCurrentText(self._src.task_name)
         form.addRow("Task", self._task)
 

@@ -890,16 +890,18 @@ class StepEditorDialog(QDialog):
         self._pending_prefill: Optional[List[str]] = None
         self._prefill_params: Dict[str, object] = dict(getattr(item, "params", {}) or {})
         self._task_touched = False
+        self._built = False   # suppress task reselection during the initial build
 
         self.setWindowTitle("New step" if new else "Edit step")
         self.setMinimumWidth(440)
         self._build(item)
+        self._built = True
 
         if editor._hub is not None:
             editor._hub.task_done.connect(self._on_params)
         self.finished.connect(lambda _=0: self._disconnect())
 
-        # Initial population.
+        # Initial population (uses whatever task the type-filtered dropdown settled on).
         self._select_task(self._task.currentText(), initial=True)
 
     # ── Construction ─────────────────────────────────────────────────────────
@@ -1021,8 +1023,36 @@ class StepEditorDialog(QDialog):
     def _is_tune(self) -> bool:
         return self._type.currentData() == "tune"
 
+    def _tasks_for(self, mode: str) -> List[str]:
+        """The tasks selectable for a step of this type. A tune step acts on an
+        already-running task, so only tasks started in this sequence qualify."""
+        if mode == "tune":
+            getter = getattr(self._editor, "sequence_task_names", None)
+            if getter is not None:
+                return getter()
+        return self._editor.available_tasks()
+
+    def _repopulate_tasks(self, mode: str) -> bool:
+        """Rebuild the task dropdown for the current type. Returns True if the
+        selected task changed (e.g. switching to Tune dropped a non-sequence task)."""
+        tasks = self._tasks_for(mode)
+        cur = self._task.currentText().strip()
+        self._task.blockSignals(True)
+        self._task.clear()
+        self._task.addItems(tasks)
+        # Editing a non-tune step whose task isn't a known unit task: keep it listed.
+        if mode != "tune" and cur and self._task.findText(cur) < 0:
+            self._task.addItem(cur)
+        if cur and self._task.findText(cur) >= 0:
+            self._task.setCurrentText(cur)
+        elif self._task.count():
+            self._task.setCurrentIndex(0)
+        self._task.blockSignals(False)
+        return self._task.currentText().strip() != cur
+
     def _sync_type(self) -> None:
         mode = self._type.currentData()
+        task_changed = self._repopulate_tasks(mode)
         is_bar = mode == "bar"
         is_tune = mode == "tune"
         self._set_row_visible(self._start_off, is_bar)
@@ -1037,8 +1067,12 @@ class StepEditorDialog(QDialog):
             if is_tune else
             "Parameters are pre-filled from the task; changing them here only "
             "affects this step (the task is left unchanged).")
-        # The form's contents differ (tune shows only live params), so rebuild it.
-        if self._current_script:
+        if not self._built:
+            return   # initial build; __init__ runs the first _select_task itself
+        if task_changed:
+            self._select_task(self._task.currentText())   # different task → reload its params
+        elif self._current_script:
+            # Same task, but the form's contents differ (tune shows only live params).
             self._build_form(self._current_script)
 
     # ── Task → script → parameter form ────────────────────────────────────────
@@ -1293,6 +1327,15 @@ class TimelineEditor(QWidget):
 
     def available_tasks(self) -> List[str]:
         return self._tasks
+
+    def sequence_task_names(self) -> List[str]:
+        """Tasks started as duration bars in the current sequence — the only tasks a
+        tune or ramp step can target, since those act on an already-running task."""
+        seen: List[str] = []
+        for it in self._canvas.items():
+            if getattr(it, "kind", None) == "bar" and it.task_name and it.task_name not in seen:
+                seen.append(it.task_name)
+        return seen
 
     def min_on_air_duration(self) -> float:
         return tlm.min_on_air_duration(self._canvas.items())
