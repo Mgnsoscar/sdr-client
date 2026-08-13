@@ -123,7 +123,11 @@ class ArmDialog(QDialog):
 
         stop_row = QGridLayout(); stop_row.setHorizontalSpacing(8); stop_row.setVerticalSpacing(4)
         self._dur_lbl = QLabel("Run for")
-        self._dur = DurationSpinBox()
+        # A run duration reads a bare number as minutes (5 → 5 min); add s/m/h to be
+        # explicit (30s, 2m, 1h).
+        self._dur = DurationSpinBox(bare_unit="m")
+        self._dur.setToolTip("A plain number is minutes (5 → 5 min). "
+                             "Add a unit to be explicit: 30s, 2m, 1h.")
         # A derivable minimum is a hard floor: the spinbox clamps to it, so a too-short
         # duration can't be entered (no round-trip through an arm-time error).
         self._dur.setRange(max(1.0, self._min_floor), 100000.0)

@@ -36,8 +36,13 @@ _TOKEN_RE = re.compile(
     re.IGNORECASE)
 
 
-def parse_duration(text: str) -> Optional[float]:
-    """Parse a human duration string into seconds, or None if it can't be read."""
+def parse_duration(text: str, bare_unit: str = "s") -> Optional[float]:
+    """Parse a human duration string into seconds, or None if it can't be read.
+
+    A number with an explicit unit ('5m', '30s', '1:30') is always taken at face
+    value. A bare number ('5') is interpreted in `bare_unit` — 's' (default) reads
+    it as seconds; 'm' as minutes; 'h' as hours — so a field can default to a unit
+    that suits it (e.g. a run duration defaulting to minutes)."""
     if text is None:
         return None
     t = text.strip().lower()
@@ -76,19 +81,24 @@ def parse_duration(text: str) -> Optional[float]:
             total += float(val) * (3600 if u == "h" else 60 if u == "m" else 1)
         return -total if neg else total
 
-    # Bare number → seconds.
+    # Bare number → the field's default unit (seconds unless told otherwise).
     try:
-        secs = float(t)
+        n = float(t)
     except ValueError:
         return None
+    scale = 3600 if bare_unit == "h" else 60 if bare_unit == "m" else 1
+    secs = n * scale
     return -secs if neg else secs
 
 
 class DurationSpinBox(QDoubleSpinBox):
     """A QDoubleSpinBox valued in seconds, displayed/entered as h/min/s."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, bare_unit: str = "s"):
         super().__init__(parent)
+        # How a unitless entry is read: "s" seconds, "m" minutes, "h" hours. An
+        # entry with an explicit unit ('30s', '2m') always overrides this.
+        self._bare_unit = bare_unit
         self.setDecimals(1)
         self.setSingleStep(1.0)
         self.setRange(-100000.0, 100000.0)
@@ -100,11 +110,11 @@ class DurationSpinBox(QDoubleSpinBox):
         return fmt_duration(v, compact=True)
 
     def valueFromText(self, text: str) -> float:
-        v = parse_duration(text)
+        v = parse_duration(text, self._bare_unit)
         return v if v is not None else self.value()
 
     def validate(self, text: str, pos: int):
         # Let a partial entry stand while typing; only commit-time parsing is strict.
-        if text.strip() in ("", "+", "-") or parse_duration(text) is not None:
+        if text.strip() in ("", "+", "-") or parse_duration(text, self._bare_unit) is not None:
             return (QValidator.State.Acceptable, text, pos)
         return (QValidator.State.Intermediate, text, pos)
