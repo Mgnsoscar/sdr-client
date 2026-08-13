@@ -8,8 +8,9 @@ timeline summary and a live run-state pill, and lets you:
   - Export  → save every sequence on this unit to a portable YAML file
   - Import  → create sequences from a YAML file (existing names skipped)
   - Edit    → change an existing sequence (same dialog, prefilled)
-  - Start   → arm it to run now (open-ended): fires the on-air steps as soon as
-              the warm-up lead-in allows, then stays on air until stopped
+  - Arm     → pick an on-air time (a chosen slot or as-soon-as-possible) and an
+              optional stop, then fire the on-air steps; open-ended unless a stop
+              is set
   - Stop    → cancel the armed run / abort the running one (stops every task the
               sequence touches)
   - Delete  → remove the sequence (disabled while a run is active)
@@ -38,11 +39,13 @@ import yaml
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
     QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import models as m
+from api import ramp as _ramp
+from .arm_dialog import ArmDialog
 from .param_form import fmt_duration
 from .qt_adapter import DataHub
 from .sequence_editor import SequenceEditorDialog
@@ -53,6 +56,7 @@ from .widgets import StatusPill
 # Seconds of headroom added when arming "now", so the first step is safely in the
 # future even with a little clock skew between the laptop and the unit.
 ARM_MARGIN_S = 5.0
+DEFAULT_STOP_DURATION_S = 60.0   # fallback when a sequence has no derivable minimum
 
 _ACTIVE = (m.SequenceState.ARMED, m.SequenceState.RUNNING)
 
@@ -95,24 +99,12 @@ def summarize(seq: m.Sequence) -> str:
     return "  ·  ".join(parts) if parts else "no steps"
 
 
-def arm_now_request(seq: m.Sequence, now: Optional[datetime] = None) -> m.ArmSequenceRequest:
-    """
-    Build an ArmSequenceRequest that puts the sequence on air as soon as possible:
-    on_air_at = now + warm-up lead-in + margin, open-ended (no scheduled stop).
-
-    The lead-in is the most-negative start-anchored offset (e.g. a -120s warm-up
-    step needs on-air 120s out so it doesn't fire in the past — the agent rejects
-    a first step scheduled before now).
-    """
-    now = now or datetime.now(timezone.utc)
+def _lead_in(seq: m.Sequence) -> float:
+    """Warm-up lead-in: how far before on-air the earliest start-anchored step fires
+    (the magnitude of its most-negative offset), so on-air is scheduled far enough
+    out that no step lands in the past. 0 if there are no start-anchored steps."""
     starts = [s.offset_s for s in seq.steps if s.anchor == "start"]
-    lead_in = max(0.0, -min(starts)) if starts else 0.0
-    on_air_at = now + timedelta(seconds=lead_in + ARM_MARGIN_S)
-    return m.ArmSequenceRequest(
-        on_air_at=on_air_at.isoformat(),
-        open_ended=True,
-        note="manual test",
-    )
+    return max(0.0, -min(starts)) if starts else 0.0
 
 
 def _parse_iso(ts: str) -> datetime:
@@ -123,24 +115,32 @@ def _parse_iso(ts: str) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def _arm_now(client, seq: m.Sequence) -> m.SequenceRun:
+def _arm_at(client, seq: m.Sequence, t0_laptop: datetime,
+            duration_s: Optional[float]) -> m.SequenceRun:
     """
-    Arm a sequence to run now, basing the on-air time on the AGENT's clock rather
-    than the laptop's. The agent schedules and fires steps against its own clock,
-    so if the two clocks aren't in sync (e.g. a Pi with no NTP on an isolated
-    ethernet link), a laptop-computed on_air_at lands at the wrong Pi-time and the
-    run just sits armed. Reading the unit's utc_now first makes Start skew-proof.
-    Falls back to the laptop clock if /system is unavailable. Runs on a worker
-    thread (two quick calls: /system then arm).
+    Arm a sequence to go on air at the operator-chosen wall-clock instant t0 (given
+    in laptop UTC), translating it to the AGENT's clock so RF goes live at that same
+    wall-clock time even if the unit clock is skewed (e.g. a Pi with no NTP on an
+    isolated ethernet link). The agent fires steps against its own clock, so we send
+    on_air_at = t0 + (unit clock − laptop clock); the offset cancels when the unit
+    interprets it, and relative timing (warm-up leads) stays exact. Falls back to no
+    adjustment if /system is unavailable. When duration_s is set the run is bounded
+    (and stop-anchored steps fire); otherwise it's open-ended. Worker thread.
     """
-    now = None
+    offset = 0.0
     try:
         health = client.system()
         if health.utc_now:
-            now = _parse_iso(health.utc_now)
+            offset = (_parse_iso(health.utc_now) - datetime.now(timezone.utc)).total_seconds()
     except Exception:  # noqa: BLE001 — best-effort; fall back to the laptop clock
-        now = None
-    req = arm_now_request(seq, now=now)
+        offset = 0.0
+    on_air_at = t0_laptop + timedelta(seconds=offset)
+    req = m.ArmSequenceRequest(
+        on_air_at=on_air_at.isoformat(),
+        open_ended=(duration_s is None),
+        on_air_duration_s=(duration_s if duration_s is not None else None),
+        note="manual test",
+    )
     return client.arm_sequence(seq.id, req)
 
 
@@ -221,22 +221,22 @@ class _SequenceRow(QFrame):
         box.addWidget(summary)
         lay.addLayout(box, stretch=1)
 
-        # The run-state pill and Start/Stop/Log belong to a live unit (can_run);
+        # The run-state pill and Arm/Stop/Log belong to a live unit (can_run);
         # Edit/Delete are definition editing (can_edit, i.e. the Library).
         if can_run:
             state_word = active_run.state.value if active else "idle"
             self._pill = StatusPill(state_word, state_word)
             lay.addWidget(self._pill, alignment=Qt.AlignmentFlag.AlignTop)
 
-        self._start = QPushButton("Start")
+        self._start = QPushButton("Arm")
         self._stop = QPushButton("Stop")
         self._log = QPushButton("Log")
         self._edit = QPushButton("Edit")
         self._delete = QPushButton("Delete")
         for b in (self._start, self._stop, self._log, self._edit, self._delete):
             b.setFixedWidth(66)
-        self._start.setToolTip("Arm & run now (open-ended) — fires the on-air steps; "
-                               "use Stop to end")
+        self._start.setToolTip("Arm — pick an on-air time (or as-soon-as-possible) and "
+                               "an optional stop, then fire the on-air steps")
         self._stop.setToolTip("Stop this run — cancels if armed, aborts if running "
                               "(stops every task it touches)")
         self._log.setToolTip("View this sequence's run log — the whole run's timeline "
@@ -366,11 +366,22 @@ class SequencesPanel(QWidget):
         dlg.show()
 
     def _on_start(self, seq: m.Sequence) -> None:
+        # Pick the on-air time (and optional stop) the same way plans are armed.
+        min_dur = _ramp.min_on_air_duration(seq.steps)
+        default_dur = min_dur if min_dur > 0 else DEFAULT_STOP_DURATION_S
+        dlg = ArmDialog(f"Arm sequence “{seq.name or seq.id}”",
+                        _lead_in(seq) + ARM_MARGIN_S, default_dur, min_dur,
+                        parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            self._set_status("arm cancelled")
+            return
+        t0 = dlg.on_air_at()
+        duration_s = dlg.stop_duration_s()
         client = self.hub.fleet.get(self.hostname)
         self._set_status(f"arming {seq.name or seq.id}…")
         self.hub.run_async(
             f"seq_arm:{self.hostname}:{seq.id}",
-            lambda: _arm_now(client, seq),
+            lambda: _arm_at(client, seq, t0, duration_s),
         )
 
     def _on_stop(self, seq: m.Sequence) -> None:
@@ -545,7 +556,7 @@ class SequencesPanel(QWidget):
         elif op == "seq_arm":
             if isinstance(result, Exception):
                 self._set_status("arm failed", error=True)
-                QMessageBox.warning(self, "Could not start sequence", str(result))
+                QMessageBox.warning(self, "Could not arm sequence", str(result))
             else:
                 self._set_status("armed")
             self._refresh_runs()
