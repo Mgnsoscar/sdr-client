@@ -32,13 +32,16 @@ import yaml
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFrame, QGridLayout,
+    QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import Fleet
 from api import models as m
+from api import ramp as _ramp
 from state import PlanStore, new_plan_id
+from .duration_spin import DurationSpinBox
+from .param_form import fmt_duration
 from .plan_editor import PlanEditorDialog
 from .qt_adapter import DataHub
 from .theme import Palette
@@ -46,6 +49,7 @@ from .widgets import StatusPill
 
 ARM_MARGIN_S = 5.0
 CLOCK_WARN_SKEW_S = 1.0
+DEFAULT_STOP_DURATION_S = 60.0   # fallback when a plan has no derivable minimum
 _ACTIVE = (m.SequenceState.ARMED, m.SequenceState.RUNNING)
 
 
@@ -94,46 +98,21 @@ def plans_to_yaml(plans: List[m.Plan]) -> str:
     return yaml.safe_dump({"plans": docs}, sort_keys=False, allow_unicode=True)
 
 
-def _plan_t0(fleet: Fleet, plan: m.Plan, item_leads: Dict[int, float],
-             margin: float) -> datetime:
-    """Compute the plan's on-air anchor (T0) at arm time, so it can't drift into
-    the past while a confirm dialog is open. Each sequence goes on air at
-    T0 + its on_air_offset, and its earliest step fires that much earlier still by
-    its warm-up lead. Reading each unit's OWN clock (the agent schedules against
-    it), T0 must satisfy, for every item: T0 + offset - lead > that unit's now —
-    i.e. T0 = max over items of (unit now + lead - offset) + margin. Falls back to
-    the laptop clock for any unit whose /system is unavailable."""
-    laptop_now = datetime.now(timezone.utc)
-    now_by_host: Dict[str, datetime] = {}
-    for host in {it.hostname for it in plan.items}:
-        try:
-            health = fleet.get(host).system()
-            now_by_host[host] = _parse_iso(getattr(health, "utc_now", None)) or laptop_now
-        except Exception:  # noqa: BLE001 — best-effort; fall back to the laptop clock
-            now_by_host[host] = laptop_now
-    required = laptop_now
-    for i, item in enumerate(plan.items):
-        base = now_by_host.get(item.hostname, laptop_now)
-        eff_lead = item_leads.get(i, 0.0) - item.on_air_offset_s
-        cand = base + timedelta(seconds=eff_lead)
-        if cand > required:
-            required = cand
-    return required + timedelta(seconds=margin)
-
-
-def _arm_plan(fleet: Fleet, plan: m.Plan, item_leads: Dict[int, float],
-              margin: float) -> List[tuple]:
-    """Arm every item of a plan around one shared on-air anchor (T0), computed here
-    (not before a confirm dialog) so it stays in the future. Each sequence is armed
-    at T0 + its on_air_offset, so a plan can stagger units relative to the anchor.
-    Worker thread. Returns [(item, SequenceRun|None, error|None), ...]."""
-    t0 = _plan_t0(fleet, plan, item_leads, margin)
+def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
+              duration_s: Optional[float]) -> List[tuple]:
+    """Arm every item of a plan around one operator-chosen on-air anchor (T0). Each
+    sequence is armed at T0 + its on_air_offset (absolute UTC), so a plan can stagger
+    units relative to the anchor. When duration_s is set every sequence runs that
+    long from its own on-air (skew-robust, and stop-anchored steps then fire);
+    otherwise it's open-ended and runs until stopped. Worker thread.
+    Returns [(item, SequenceRun|None, error|None), ...]."""
     out = []
     for item in plan.items:
         on_air_at_iso = (t0 + timedelta(seconds=item.on_air_offset_s)).isoformat()
         req = m.ArmSequenceRequest(
             on_air_at=on_air_at_iso,
-            open_ended=True,
+            open_ended=(duration_s is None),
+            on_air_duration_s=(duration_s if duration_s is not None else None),
             plan_id=plan.id,
             plan_name=plan.name,
             # A plan-local step copy runs as-is; older items fall back to the stored
@@ -162,38 +141,99 @@ def _stop_plan(fleet: Fleet, runs: List[tuple]) -> List[tuple]:
     return out
 
 
-class _ArmConfirmDialog(QDialog):
-    """Confirm arming a plan, with a live-updating estimate of the shared on-air
-    time. T0 is computed at arm time as now + the longest warm-up + margin, so the
-    displayed clock time slides forward with real time — it tracks (roughly) what
-    the operator will actually get when they press Arm, however long they wait."""
+def _ceil_to(dt: datetime, step_s: int) -> datetime:
+    """Smallest wall-clock instant ≥ dt that lands on a whole `step_s`-second grid
+    (step 60 → next whole minute, step 30 → next :00/:30), microseconds dropped."""
+    base = dt.replace(microsecond=0)
+    if base < dt:
+        base += timedelta(seconds=1)
+    secs = base.hour * 3600 + base.minute * 60 + base.second
+    rem = secs % step_s
+    if rem:
+        base += timedelta(seconds=step_s - rem)
+    return base
 
-    def __init__(self, n_seqs: int, n_units: int, max_lead: float, margin: float,
-                 skew_note: str, parent=None):
+
+class _ArmPlanDialog(QDialog):
+    """Pick a shared on-air time and optional stop for a plan, built for fast-paced
+    testing: quick-select the next whole/half minute, nudge ±30 s / ±1 min, and the
+    selection auto-advances so it can never expire while the operator adjusts it.
+
+    T0 is an absolute wall-clock instant the operator can read out to participants.
+    A floor (now + warm-up lead + margin) keeps it far enough ahead that every unit
+    still has time to warm up; the selection is always ≥ the next valid grid slot at
+    or after that floor. Stop is off by default (open-ended); when enabled it
+    defaults to the plan's minimum on-air duration."""
+
+    GRID_S = 30   # every selectable on-air time sits on a 30-second grid
+
+    def __init__(self, n_seqs: int, n_units: int, safety_lead_s: float,
+                 min_duration_s: float, skew_note: str, parent=None):
         super().__init__(parent)
-        self._max_lead = max_lead
-        self._margin = margin
+        self._safety = max(0.0, safety_lead_s)      # now + this = earliest valid T0
+        self._min_dur = max(1.0, min_duration_s)
         self.setWindowTitle("Arm plan")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(440)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 16, 18, 14)
         outer.setSpacing(10)
 
-        head = QLabel(f"Arm {n_seqs} sequence(s) across {n_units} unit(s)?")
+        head = QLabel(f"Arm {n_seqs} sequence(s) across {n_units} unit(s)")
         head.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {Palette.TEXT};")
         head.setWordWrap(True)
         outer.addWidget(head)
 
+        # ── On-air time ─────────────────────────────────────────────────────
         self._on_air = QLabel()
-        self._on_air.setStyleSheet(f"font-size: 22px; font-weight: 600; color: {Palette.TEXT};")
+        self._on_air.setStyleSheet(f"font-size: 24px; font-weight: 700; color: {Palette.TEXT};")
         outer.addWidget(self._on_air)
+        self._countdown = QLabel()
+        self._countdown.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_MUTED};")
+        outer.addWidget(self._countdown)
 
-        detail = QLabel(f"Shared on-air (T0) = now + {max_lead:.0f}s warm-up + "
-                        f"{margin:.0f}s margin, computed the moment you press Arm.")
-        detail.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
-        detail.setWordWrap(True)
-        outer.addWidget(detail)
+        quick = QHBoxLayout(); quick.setSpacing(6)
+        b_min = QPushButton("Next minute  :00")
+        b_half = QPushButton("Next ½ min  :30")
+        b_min.clicked.connect(lambda: self._quick(60))
+        b_half.clicked.connect(lambda: self._quick(30))
+        for b in (b_min, b_half):
+            quick.addWidget(b)
+        outer.addLayout(quick)
+
+        nudge = QHBoxLayout(); nudge.setSpacing(6)
+        for label, delta in (("− 1 min", -60), ("− 30 s", -30), ("+ 30 s", 30), ("+ 1 min", 60)):
+            b = QPushButton(label)
+            b.clicked.connect(lambda _=False, d=delta: self._nudge(d))
+            nudge.addWidget(b)
+        outer.addLayout(nudge)
+
+        self._floor_note = QLabel()
+        self._floor_note.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
+        self._floor_note.setWordWrap(True)
+        outer.addWidget(self._floor_note)
+
+        # ── Stop time ───────────────────────────────────────────────────────
+        line = QFrame(); line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet(f"color: {Palette.BORDER};")
+        outer.addWidget(line)
+
+        self._stop_on = QCheckBox("Set a stop time (otherwise runs until stopped)")
+        self._stop_on.toggled.connect(self._sync_stop)
+        outer.addWidget(self._stop_on)
+
+        stop_row = QGridLayout(); stop_row.setHorizontalSpacing(8); stop_row.setVerticalSpacing(4)
+        self._dur_lbl = QLabel("Run for")
+        self._dur = DurationSpinBox()
+        self._dur.setRange(1.0, 100000.0)
+        self._dur.setValue(round(self._min_dur))
+        self._dur.valueChanged.connect(lambda _=0: self._render())
+        stop_row.addWidget(self._dur_lbl, 0, 0)
+        stop_row.addWidget(self._dur, 0, 1)
+        self._stop_at = QLabel()
+        self._stop_at.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
+        stop_row.addWidget(self._stop_at, 1, 0, 1, 2)
+        outer.addLayout(stop_row)
 
         if skew_note:
             warn = QLabel(skew_note.strip())
@@ -209,14 +249,73 @@ class _ArmConfirmDialog(QDialog):
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
 
+        # Start at the next whole minute at or after the floor.
+        self._t0 = _ceil_to(self._floor(), 60)
+        self._auto_note = False
+        self._sync_stop()
+
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(250)
-        self._tick()
+        self._render()
+
+    # ── Selection helpers ────────────────────────────────────────────────────
+
+    def _floor(self) -> datetime:
+        """Earliest instant an on-air time is still valid (warm-up + margin ahead)."""
+        return datetime.now(timezone.utc) + timedelta(seconds=self._safety)
+
+    def _min_slot(self) -> datetime:
+        """The next grid slot at or after the floor — the earliest selectable T0."""
+        return _ceil_to(self._floor(), self.GRID_S)
+
+    def _quick(self, step_s: int) -> None:
+        self._t0 = _ceil_to(self._floor(), step_s)
+        self._auto_note = False
+        self._render()
+
+    def _nudge(self, delta_s: int) -> None:
+        self._t0 = max(self._t0 + timedelta(seconds=delta_s), self._min_slot())
+        self._auto_note = False
+        self._render()
 
     def _tick(self) -> None:
-        est = datetime.now(timezone.utc) + timedelta(seconds=self._max_lead + self._margin)
-        self._on_air.setText(f"~ {est.astimezone().strftime('%H:%M:%S')} local")
+        # Never let the choice expire: if real time has caught up, hop to the next slot.
+        floor_slot = self._min_slot()
+        if self._t0 < floor_slot:
+            self._t0 = floor_slot
+            self._auto_note = True
+        self._render()
+
+    def _render(self) -> None:
+        local = self._t0.astimezone()
+        self._on_air.setText(local.strftime("on air at  %H:%M:%S"))
+        secs = max(0.0, (self._t0 - datetime.now(timezone.utc)).total_seconds())
+        note = "  ·  slot advanced (previous time passed)" if self._auto_note else ""
+        self._countdown.setText(f"in {fmt_duration(round(secs))}{note}")
+        self._floor_note.setText(
+            f"Earliest valid on-air is ~{fmt_duration(round(self._safety))} from now "
+            f"(warm-up + margin). Times snap to the {self.GRID_S}s grid.")
+        if self._stop_on.isChecked():
+            stop_local = (self._t0 + timedelta(seconds=self._dur.value())).astimezone()
+            self._stop_at.setText(f"→ stops at {stop_local.strftime('%H:%M:%S')} local "
+                                  f"({fmt_duration(round(self._dur.value()))} on air)")
+        else:
+            self._stop_at.setText("Runs open-ended until manually stopped.")
+
+    def _sync_stop(self) -> None:
+        on = self._stop_on.isChecked()
+        for w in (self._dur_lbl, self._dur):
+            w.setEnabled(on)
+        self._render()
+
+    # ── Results ──────────────────────────────────────────────────────────────
+
+    def on_air_at(self) -> datetime:
+        return self._t0
+
+    def stop_duration_s(self) -> Optional[float]:
+        return round(self._dur.value(), 1) if self._stop_on.isChecked() else None
 
 
 class _PlanRow(QFrame):
@@ -511,16 +610,26 @@ class PlansTab(QWidget):
             QMessageBox.warning(self, "Pre-flight failed", f"{result}")
             return
 
-        # Resolve each item's sequence to its warm-up lead-in (keyed by item index,
-        # since the shared on-air is computed per-item at arm time).
+        # Per-unit clock offset vs the laptop (unit_now − laptop_now), so an
+        # operator-picked absolute T0 stays valid on each unit even if the laptop
+        # clock is off. Best-effort: units without a clock reading contribute 0.
+        laptop_now = datetime.now(timezone.utc)
+        clock_off: Dict[str, float] = {}
+        for host, val in (systems or {}).items():
+            unit_now = _parse_iso(getattr(val, "utc_now", None)) if val is not None else None
+            clock_off[host] = (unit_now - laptop_now).total_seconds() if unit_now else 0.0
+
+        # Resolve each item's steps → warm-up lead-in and minimum on-air duration.
         seq_by: Dict[str, Dict[str, m.Sequence]] = {}
         for host, val in (seqs or {}).items():
             if isinstance(val, list):
                 seq_by[host] = {s.id: s for s in val}
-        item_leads: Dict[int, float] = {}
-        max_eff_lead = 0.0   # how far before T0 the earliest step fires, across items
+        # Earliest instant T0 is valid: for every item the earliest step must land
+        # in the unit's future, i.e. T0 ≥ now + (unit clock offset + lead − offset).
+        max_eff_lead = 0.0
+        plan_min_dur = 0.0   # longest sequence's minimum on-air window, across items
         missing_seq = []
-        for i, item in enumerate(plan.items):
+        for item in plan.items:
             # A plan-local copy carries its own steps; otherwise the source
             # sequence must still exist on the unit.
             if item.steps:
@@ -531,11 +640,9 @@ class PlansTab(QWidget):
                     missing_seq.append(item.unit_label or item.hostname)
                     continue
                 steps = seq.steps
-            lead = _lead_in(steps)
-            item_leads[i] = lead
-            # A sequence placed later (on_air_offset > 0) needs less head-room before
-            # the plan anchor; one placed earlier needs more.
-            max_eff_lead = max(max_eff_lead, lead - item.on_air_offset_s)
+            eff = _lead_in(steps) + clock_off.get(item.hostname, 0.0) - item.on_air_offset_s
+            max_eff_lead = max(max_eff_lead, eff)
+            plan_min_dur = max(plan_min_dur, _ramp.min_on_air_duration(steps))
         if missing_seq:
             QMessageBox.warning(
                 self, "Cannot arm plan",
@@ -550,16 +657,19 @@ class PlansTab(QWidget):
                          f"{max_skew:.1f}s apart.")
 
         n_units = len({i.hostname for i in plan.items})
-        dlg = _ArmConfirmDialog(len(plan.items), n_units, max(0.0, max_eff_lead),
-                                ARM_MARGIN_S, skew_note, parent=self)
+        default_dur = plan_min_dur if plan_min_dur > 0 else DEFAULT_STOP_DURATION_S
+        dlg = _ArmPlanDialog(len(plan.items), n_units, max(0.0, max_eff_lead) + ARM_MARGIN_S,
+                             default_dur, skew_note, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             self._set_status("arm cancelled")
             return
 
+        t0 = dlg.on_air_at()
+        duration_s = dlg.stop_duration_s()
         self._set_status(f"arming {plan.name or plan.id}…")
         self.hub.run_async(
             f"plan_arm:{plan.id}",
-            lambda: _arm_plan(self.fleet, plan, item_leads, ARM_MARGIN_S),
+            lambda: _arm_plan(self.fleet, plan, t0, duration_s),
         )
 
     def _on_stop(self, plan: m.Plan) -> None:
