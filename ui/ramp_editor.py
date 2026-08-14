@@ -53,6 +53,29 @@ _FIELDS = {
 }
 
 
+def _mode_for_ramp(r: dict, both: bool) -> str:
+    """Pick the 'Define by' mode that matches a saved ramp, so editing it restores
+    the way it was authored (step-size vs step-count, hold vs duration) instead of
+    defaulting to the first mode and dropping its values."""
+    has_steps = r.get("steps") is not None
+    has_step = r.get("step") is not None
+    has_hold = r.get("hold_s") is not None
+    has_dur = r.get("duration_s") is not None
+    if both:
+        return "steps_window" if has_steps else "step_window" if has_step else "hold_window"
+    if has_steps and has_dur:
+        return "steps_duration"
+    if has_step and has_hold:
+        return "step_hold"
+    if has_step and has_dur:
+        return "step_duration"
+    if has_dur and has_hold:
+        return "duration_hold"
+    if has_step:
+        return "step_hold"
+    return "steps_hold"   # steps + hold, and the default for a fresh ramp
+
+
 def _num(text: str) -> Optional[float]:
     try:
         return float(str(text).strip())
@@ -203,6 +226,9 @@ class RampEditorDialog(QDialog):
         self._anchor.currentIndexChanged.connect(self._sync_anchor)
         self._mode.currentIndexChanged.connect(self._sync_mode)
 
+        # Restore the mode this ramp was authored in (else _sync_anchor defaults to
+        # the first mode, hiding the fields the saved ramp actually uses).
+        self._init_mode = _mode_for_ramp(r, self._is_both())
         self._ready = True
         self._sync_anchor()   # populate modes + show/hide rows + preview
 
@@ -218,12 +244,14 @@ class RampEditorDialog(QDialog):
         self._off_lbl.setText("Start offset from on-air" if both else "Offset from anchor")
         self._offend_lbl.setVisible(both)
         self._offset_end.setVisible(both)
-        prev = self._mode.currentData()
+        # First populate uses the saved ramp's authored mode; later anchor switches
+        # keep whatever the user had selected.
+        want = self._mode.currentData() or getattr(self, "_init_mode", None)
         self._mode.blockSignals(True)
         self._mode.clear()
         for key, label in (_MODES_BOTH if both else _MODES_SINGLE):
             self._mode.addItem(label, key)
-        idx = self._mode.findData(prev)
+        idx = self._mode.findData(want)
         self._mode.setCurrentIndex(idx if idx >= 0 else 0)
         self._mode.blockSignals(False)
         self._sync_mode()
