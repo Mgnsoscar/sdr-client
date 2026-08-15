@@ -126,6 +126,22 @@ class AgentInfo(BaseModel):
     agent_version: str
     python_version: str
     tasks: List[str]
+    previous_version: Optional[str] = None   # OTA rollback target, if any
+
+
+class UpdateResult(BaseModel):
+    """Result of POST /admin/update or /admin/rollback."""
+    ok: bool
+    from_version: str = ""
+    to_version: str = ""
+    message: str = ""
+
+
+class AgentRelease(BaseModel):
+    version: str
+    active: bool
+    healthy: bool
+    path: str
 
 
 class SystemHealth(BaseModel):

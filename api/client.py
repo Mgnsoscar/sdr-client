@@ -203,7 +203,7 @@ class AgentClient:
     )
 
     def _request(self, method: str, path: str, *, json=None, params=None, files=None,
-                 _retry: bool = True):
+                 timeout=None, _retry: bool = True):
         # Capture the current client under the lock. The request itself runs
         # OUTSIDE the lock (so concurrent requests to this unit still overlap and a
         # slow call doesn't block others), but because we hold our own reference,
@@ -212,11 +212,14 @@ class AgentClient:
         # rebuild collided with an in-flight poll request (the intermittent "—").
         with self._lock:
             client = self._client
+        # A long per-request timeout (default: the client's) — updates stage deps
+        # on the Pi and can run for minutes.
+        extra = {"timeout": timeout} if timeout is not None else {}
         try:
             if files is not None:
-                resp = client.request(method, path, params=params, files=files)
+                resp = client.request(method, path, params=params, files=files, **extra)
             else:
-                resp = client.request(method, path, json=json, params=params)
+                resp = client.request(method, path, json=json, params=params, **extra)
         except self._TRANSPORT_ERRORS as exc:
             # A pooled connection may have gone stale while idle. Rebuild and retry
             # ONCE on a fresh connection before declaring the unit down.
@@ -232,7 +235,7 @@ class AgentClient:
                             pass
                         self._client = self._new_client()
                 return self._request(method, path, json=json, params=params,
-                                     files=files, _retry=False)
+                                     files=files, timeout=timeout, _retry=False)
             raise AgentConnectionError(self.unit_id, f"cannot reach {self.base_url}: {exc}")
         except httpx.HTTPError as exc:
             raise AgentConnectionError(self.unit_id, f"request failed: {exc}")
@@ -428,6 +431,24 @@ class AgentClient:
 
     def reload(self) -> dict:
         return self._request("POST", "/reload")
+
+    # ── OTA agent update ───────────────────────────────────────────────────────
+
+    def update_agent(self, bundle_path: str, timeout: float = 300.0) -> m.UpdateResult:
+        """Upload an agent bundle and apply it (stage → swap → restart). The unit
+        replies before restarting, so this returns quickly; the caller then polls
+        info() until agent_version changes (or the unit rolls back). Uses a long
+        timeout since staging installs dependencies on the Pi."""
+        with open(bundle_path, "rb") as fh:
+            files = {"bundle": ("bundle.tar.gz", fh, "application/gzip")}
+            data = self._request("POST", "/admin/update", files=files, timeout=timeout)
+        return m.UpdateResult(**data)
+
+    def rollback_agent(self) -> m.UpdateResult:
+        return m.UpdateResult(**self._request("POST", "/admin/rollback"))
+
+    def agent_releases(self) -> List[m.AgentRelease]:
+        return [m.AgentRelease(**r) for r in self._request("GET", "/admin/releases")]
 
     # ══════════════════════════════════════════════════════════════════════════
     # Tasks

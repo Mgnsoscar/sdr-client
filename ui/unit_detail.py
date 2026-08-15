@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
 
 from api import Fleet
 from api import models as m
+from .agent_update_dialog import AgentUpdateDialog
 from .live_tune_dialog import LiveTuneDialog
 from .qt_adapter import DataHub
 from .run_task_dialog import RunTaskDialog
@@ -292,6 +293,11 @@ class UnitDetail(QWidget):
         header.addWidget(self._status)
         header.addStretch(1)
 
+        self._update_btn = QPushButton("Update agent…")
+        self._update_btn.setToolTip("Push the agent version this client ships to the unit")
+        self._update_btn.clicked.connect(self._open_update)
+        header.addWidget(self._update_btn)
+
         # Manage this unit's identity/addresses (delegated to the Units tab).
         self._edit_btn = QPushButton("Edit unit…")
         self._edit_btn.setToolTip("Change this unit's name, addresses, or API key")
@@ -376,6 +382,11 @@ class UnitDetail(QWidget):
 
     def _handle_back(self) -> None:
         self._on_back()
+
+    def _open_update(self) -> None:
+        if not self.hostname:
+            return
+        AgentUpdateDialog(self.hub, self.hostname, parent=self.window()).exec()
 
     # ── Live updates routed from the Units tab ───────────────────────────────────
 
