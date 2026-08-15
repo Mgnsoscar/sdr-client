@@ -159,7 +159,7 @@ class RampEditorDialog(QDialog):
         # Tune mode acts on a running task (only the sequence's duration tasks are
         # selectable); run mode fires the task each point (any task). Forced on when
         # there's no duration task to tune.
-        self._run_chk = QCheckBox("Run the task each step (fires it per point — any task)")
+        self._run_chk = QCheckBox("Run a task at each ramp step (fires it per point — any task)")
         self._run_chk.setChecked(self._run_mode)
         self._run_chk.setEnabled(self._has_dur)
         if not self._has_dur:
