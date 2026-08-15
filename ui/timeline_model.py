@@ -377,6 +377,44 @@ def _ramp_spec_error(spec: Optional[dict], anchor: str) -> Optional[str]:
     return None
 
 
+def step_within_task_error(spans: List[Tuple[float, float]], anchor: str,
+                           offset: float, offset_end: float = 0.0,
+                           kind: str = "tune") -> Optional[str]:
+    """Error string if a tune/ramp step fires outside every on-air span of its target
+    task; None if it fits one. `spans` is [(start_offset, stop_offset), …] of the
+    task's duration bars.
+
+    A step fires anchor-relative (start → on-air + offset, stop → off-air + offset),
+    so only the anchor-consistent edge can be checked without the schedule's window
+    length: a start step can't precede the task's on-air start, a stop step can't
+    follow its off-air stop, and a window-filling ('both') ramp must sit inside both
+    edges."""
+    from .param_form import fmt_duration
+    if not spans:
+        return f"the target task has no duration step in this sequence for the {kind} to sit inside"
+    tol = 1e-6
+
+    def fits(s: float, e: float) -> bool:
+        if anchor == "both":
+            return offset >= s - tol and offset_end <= e + tol
+        if anchor == "stop":
+            return offset <= e + tol
+        return offset >= s - tol   # start
+
+    if any(fits(s, e) for s, e in spans):
+        return None
+    s, e = spans[0]
+    if anchor == "both":
+        return (f"the ramp must stay inside the task's on-air span — start at or after "
+                f"{fmt_duration(s, signed=True)} from on-air and end at or before "
+                f"{fmt_duration(e, signed=True)} from off-air")
+    if anchor == "stop":
+        return (f"the {kind} would fire after the task goes off air; its offset must be "
+                f"at or before {fmt_duration(e, signed=True)}")
+    return (f"the {kind} would fire before the task goes on air; its offset must be "
+            f"at or after {fmt_duration(s, signed=True)}")
+
+
 def min_on_air_duration(items) -> float:
     """The shortest on-air window this item set fits in (seconds). Delegates to the
     shared api.ramp math after normalising items to step-shaped objects."""

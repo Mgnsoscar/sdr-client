@@ -455,12 +455,18 @@ class RampEditorDialog(QDialog):
         err = tlm._ramp_spec_error(spec, anchor)
         if err:
             return self._set_preview(err, error=True)
+        offset = round(self._offset.value(), 1)
+        offset_end = round(self._offset_end.value(), 1) if anchor == "both" else 0.0
+        spans_getter = getattr(self._editor, "task_spans", None)
+        if spans_getter is not None:
+            span_err = tlm.step_within_task_error(spans_getter(task), anchor, offset,
+                                                  offset_end, kind="ramp")
+            if span_err:
+                return self._set_preview(span_err, error=True)
         ramp = {k: v for k, v in spec.items() if v is not None}
         self.result_item = tlm.RunItem(
             task_name=task, action="ramp", ramp=ramp, anchor=anchor,
-            offset=round(self._offset.value(), 1),
-            offset_end=round(self._offset_end.value(), 1) if anchor == "both" else 0.0,
-            uid=self._src.uid)
+            offset=offset, offset_end=offset_end, uid=self._src.uid)
         self.accept()
 
     def _disconnect(self) -> None:

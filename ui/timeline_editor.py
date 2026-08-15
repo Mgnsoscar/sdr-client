@@ -738,7 +738,7 @@ class _TimelineCanvas(QWidget):
             # only moves the offset, measured to scale from that fixed anchor — so
             # the seconds scale with the distance to the anchor and never jump.
             anchor_x = self._on if it.anchor == "start" else self._off
-            it.offset = tlm._snap((x - anchor_x) / self._eff())
+            it.offset = self._clamp_tune_offset(it, tlm._snap((x - anchor_x) / self._eff()))
             self._live_relayout(it)
             return
         mid = tlm.midpoint(self._on, self._off)
@@ -752,6 +752,21 @@ class _TimelineCanvas(QWidget):
             it.start_offset = min(self._drag["start0"] + ds, (mid - self._on) / eff)
             it.stop_offset = max(self._drag["stop0"] + ds, (mid - self._off) / eff)
         self._live_relayout(it)
+
+    def _clamp_tune_offset(self, it, offset: float) -> float:
+        """Keep a tune point inside the on-air span of the task it acts on: a
+        start-anchored tune can't be dragged before the task's on-air start, a
+        stop-anchored one can't pass its off-air stop. One-shots (not tunes) act on
+        their own task, so they're free to sit anywhere."""
+        if getattr(it, "action", "run") != "tune":
+            return offset
+        spans = [(b.start_offset, b.stop_offset) for b in self._items
+                 if getattr(b, "kind", None) == "bar" and b.task_name == it.task_name]
+        if not spans:
+            return offset
+        if it.anchor == "start":
+            return max(offset, min(s for s, _ in spans))
+        return min(offset, max(e for _, e in spans))
 
     def _live_relayout(self, it) -> None:
         """Update just the dragged item's geometry without resizing the canvas
@@ -1196,10 +1211,17 @@ class StepEditorDialog(QDialog):
             if not params:
                 self._params_status.setText("set at least one live parameter to tune")
                 return
+            anchor = self._anchor.currentData()
+            offset = round(self._run_off.value(), 1)
+            spans_getter = getattr(self._editor, "task_spans", None)
+            if spans_getter is not None:
+                err = tlm.step_within_task_error(spans_getter(task), anchor, offset, kind="tune")
+                if err:
+                    self._params_status.setText(err)
+                    return
             self.result_item = tlm.RunItem(
                 task_name=task, action="tune", params=params,
-                anchor=self._anchor.currentData(),
-                offset=round(self._run_off.value(), 1), uid=uid)
+                anchor=anchor, offset=offset, uid=uid)
         elif mode == "bar":
             self.result_item = tlm.BarItem(
                 task_name=task, args=self._build_args(), replace_args=True,
@@ -1336,6 +1358,13 @@ class TimelineEditor(QWidget):
             if getattr(it, "kind", None) == "bar" and it.task_name and it.task_name not in seen:
                 seen.append(it.task_name)
         return seen
+
+    def task_spans(self, task_name: str) -> List[tuple]:
+        """(start_offset, stop_offset) of each duration bar for a task — the on-air
+        span(s) a tune/ramp step on that task must fall within."""
+        return [(it.start_offset, it.stop_offset)
+                for it in self._canvas.items()
+                if getattr(it, "kind", None) == "bar" and it.task_name == task_name]
 
     def min_on_air_duration(self) -> float:
         return tlm.min_on_air_duration(self._canvas.items())
