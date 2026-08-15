@@ -28,6 +28,7 @@ from .theme import Palette
 from .unit_card import UnitCard
 from .unit_detail import UnitDetail
 from .unit_dialog import UnitDialog
+from .provision_dialog import ProvisionDialog
 from .qt_adapter import DataHub
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,11 @@ class UnitsTab(QWidget):
         self._add_btn.setToolTip("Add a unit by name and one or more addresses")
         self._add_btn.clicked.connect(self._on_add)
         header.addWidget(self._add_btn)
+        self._provision_btn = QPushButton("Provision new Pi…")
+        self._provision_btn.setToolTip("Install the agent on a fresh Raspberry Pi over "
+                                       "SSH and configure its hostname + static IP")
+        self._provision_btn.clicked.connect(self._on_provision)
+        header.addWidget(self._provision_btn)
         header.addStretch(1)
         self._summary = QLabel("")
         self._summary.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
@@ -177,6 +183,56 @@ class UnitsTab(QWidget):
         self._rebuild_grid()
         self.hub.run_async(f"warmup:{entry.uid}", client.warmup)
         self.hub.refresh_now(entry.uid)   # just the new unit — don't wait on dead ones
+
+    # ── Provision a fresh Pi (Phase 2) ──────────────────────────────────────────
+
+    def _taken_numbers(self) -> set:
+        """Unit numbers already in use, inferred from addresses on the scheme's
+        subnets and from trailing digits in labels — so the dialog defaults to the
+        next free N."""
+        import re
+        nums = set()
+        subs = (self._cfg.provision.eth_subnet + ".",
+                self._cfg.provision.wlan_subnet + ".")
+        for u in self._cfg.units:
+            for a in u.addresses:
+                for s in subs:
+                    if a.startswith(s) and a[len(s):].isdigit():
+                        nums.add(int(a[len(s):]))
+            m = re.search(r"(\d+)\s*$", u.label)
+            if m:
+                nums.add(int(m.group(1)))
+        return nums
+
+    def _on_provision(self) -> None:
+        dlg = ProvisionDialog(self.hub, self._cfg.provision,
+                              register=self._register_provisioned,
+                              default_api_key=self._cfg.api_key,
+                              taken_numbers=self._taken_numbers(),
+                              parent=self.window())
+        dlg.exec()
+        # The dialog folds any addressing-scheme edits back into self._cfg.provision;
+        # persist them (and any unit it registered is already saved).
+        self._persist()
+
+    def _register_provisioned(self, label: str, addresses: list, api_key: str) -> str:
+        """Register a freshly-provisioned unit here, at its new addresses. Returns
+        the permanent uid it was assigned. Called from the ProvisionDialog on
+        success (on the GUI thread, via the queued task_done handler)."""
+        base, uniq, taken = label, label, self._labels()
+        i = 2
+        while uniq in taken:
+            uniq = f"{base} ({i})"
+            i += 1
+        entry = UnitEntry(label=uniq, addresses=list(addresses), api_key=api_key)
+        self._cfg.units.append(entry)
+        self._persist()
+        client = self._make_client(entry)
+        self.hub.add_unit(client)
+        self._rebuild_grid()
+        self.hub.run_async(f"warmup:{entry.uid}", client.warmup)
+        self.hub.refresh_now(entry.uid)
+        return entry.uid
 
     def edit_unit(self, uid: str) -> None:
         entry = next((u for u in self._cfg.units if u.uid == uid), None)

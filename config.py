@@ -55,10 +55,57 @@ class UnitEntry:
 
 
 @dataclass
+class ProvisionScheme:
+    """Deterministic hostname/IP scheme for provisioning a new Pi from its unit
+    number N. All fields are editable in the Provision dialog and persisted to
+    units.yaml so a site's addressing plan is set once. The client computes a
+    unit's hostname + static IPs from N and shows them for confirmation before
+    anything is written to the Pi (see docs/provisioning-and-ota.md §4.3)."""
+    hostname_prefix: str = "broadcaster"   # hostname = <prefix>-<N>
+    eth_subnet: str = "10.0.0"             # eth IP  = <eth_subnet>.<N>
+    wlan_subnet: str = "10.0.1"            # wlan IP = <wlan_subnet>.<N>
+    prefix_len: int = 24                   # CIDR mask for both
+    eth_gateway: str = "10.0.0.1"
+    wlan_gateway: str = "10.0.1.1"
+    dns: str = "10.0.0.1 1.1.1.1"          # space-separated resolvers
+    ssh_user: str = "pi"                   # default SSH login on a fresh Pi
+    wifi_ssid: str = ""                    # default WiFi SSID (PSK is never stored)
+
+    def hostname_for(self, n: int) -> str:
+        return f"{self.hostname_prefix}-{n}"
+
+    def eth_ip_for(self, n: int) -> str:
+        return f"{self.eth_subnet}.{n}"
+
+    def wlan_ip_for(self, n: int) -> str:
+        return f"{self.wlan_subnet}.{n}"
+
+    def to_dict(self) -> dict:
+        return {
+            "hostname_prefix": self.hostname_prefix,
+            "eth_subnet": self.eth_subnet, "wlan_subnet": self.wlan_subnet,
+            "prefix_len": self.prefix_len,
+            "eth_gateway": self.eth_gateway, "wlan_gateway": self.wlan_gateway,
+            "dns": self.dns, "ssh_user": self.ssh_user, "wifi_ssid": self.wifi_ssid,
+        }
+
+    @classmethod
+    def from_dict(cls, raw) -> "ProvisionScheme":
+        if not isinstance(raw, dict):
+            return cls()
+        d = cls()
+        for f in cls().to_dict():
+            if f in raw and raw[f] is not None:
+                setattr(d, f, type(getattr(d, f))(raw[f]))
+        return d
+
+
+@dataclass
 class ClientConfig:
     units: List[UnitEntry] = field(default_factory=list)
     webhook_port: int = 8766
     api_key: str = ""               # fleet-wide default; per-unit can override
+    provision: ProvisionScheme = field(default_factory=ProvisionScheme)
 
     @classmethod
     def load(cls, path: Path = DEFAULT_UNITS_FILE) -> "ClientConfig":
@@ -92,6 +139,7 @@ class ClientConfig:
             units=units,
             webhook_port=int(raw.get("webhook_port", 8766)),
             api_key=api_key,
+            provision=ProvisionScheme.from_dict(raw.get("provision")),
         )
         logger.info("Loaded %d unit(s) from %s", len(cfg.units), path)
         if migrated:
@@ -134,6 +182,7 @@ class ClientConfig:
         data = {
             "webhook_port": self.webhook_port,
             "api_key": self.api_key,
+            "provision": self.provision.to_dict(),
             "units": [{"uid": u.uid, "label": u.label, "addresses": list(u.addresses),
                        "api_key": u.api_key, "machine_id": u.machine_id}
                       for u in self.units],
