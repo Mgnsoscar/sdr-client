@@ -82,7 +82,8 @@ class ProvisionDialog(QDialog):
         outer.addWidget(title)
 
         bundled = self._bundle_ver or "— no agent bundle bundled with this client"
-        sub = QLabel(f"Deploys agent {bundled} over SSH, then sets a static IP and reboots.")
+        sub = QLabel(f"Installs agent {bundled} over SSH and sets the hostname. "
+                     f"DHCP by default (no reboot); tick “static IP” only for a dedicated subnet.")
         sub.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         outer.addWidget(sub)
 
@@ -168,7 +169,15 @@ class ProvisionDialog(QDialog):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(10)
 
-        scheme_box = QGroupBox("Addressing scheme")
+        # DHCP is the default (works over WiFi, a transparent bridge, or a direct
+        # cable, and stays reachable by broadcaster-N.local). A static IP is opt-in
+        # for a dedicated fleet subnet the PC also joins.
+        self._static_chk = QCheckBox("Assign a static IP (advanced — dedicated fleet subnet)")
+        self._static_chk.toggled.connect(self._on_static_toggled)
+        lay.addWidget(self._static_chk)
+
+        self._scheme_box = QGroupBox("Addressing scheme")
+        scheme_box = self._scheme_box
         sform = QFormLayout(scheme_box)
         sform.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         sform.setSpacing(6)
@@ -193,7 +202,8 @@ class ProvisionDialog(QDialog):
         sform.addRow("DNS", self._dns)
         lay.addWidget(scheme_box)
 
-        wifi_box = QGroupBox("WiFi")
+        self._wifi_box = QGroupBox("WiFi")
+        wifi_box = self._wifi_box
         wform = QFormLayout(wifi_box)
         wform.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         wform.setSpacing(6)
@@ -208,7 +218,19 @@ class ProvisionDialog(QDialog):
         wform.addRow("Passphrase", self._psk)
         lay.addWidget(wifi_box)
         lay.addStretch(1)
+        # DHCP default: grey the static-only boxes. Set enabled state directly here —
+        # _recompute (which _on_static_toggled calls) needs widgets built later in
+        # _build; the trailing _recompute() in __init__ paints the preview.
+        self._scheme_box.setEnabled(False)
+        self._wifi_box.setEnabled(False)
         return wrap
+
+    def _on_static_toggled(self, on: bool) -> None:
+        # The addressing scheme and WiFi-static boxes only apply when assigning a
+        # static IP; grey them out under DHCP so it's clear they're not in play.
+        self._scheme_box.setEnabled(on)
+        self._wifi_box.setEnabled(on)
+        self._recompute()
 
     # ── Scheme / preview ──────────────────────────────────────────────────────
 
@@ -234,6 +256,13 @@ class ProvisionDialog(QDialog):
     def _recompute(self, *_) -> None:
         s = self._live_scheme()
         n = self._n.value()
+        if not self._static_chk.isChecked():
+            self._preview.setText(
+                f"Will configure:  <b>{s.hostname_for(n)}</b>   ·   DHCP "
+                f"(keeps its current address, no reboot; reachable at "
+                f"<b>{s.hostname_for(n)}.local</b>)")
+            self._sync_buttons()
+            return
         parts = [f"<b>{s.hostname_for(n)}</b>",
                  f"eth <b>{s.eth_ip_for(n)}/{s.prefix_len}</b>"]
         if self._wifi_chk.isChecked():
@@ -247,6 +276,8 @@ class ProvisionDialog(QDialog):
         The important one: a unit whose IP equals its gateway — a host can't be its
         own gateway, NetworkManager rejects it, and the interface comes up with no IP
         (the unit provisions but is then unreachable)."""
+        if not self._static_chk.isChecked():
+            return ""   # DHCP mode assigns no IP, so no collision is possible
         s = self._live_scheme()
         n = self._n.value()
         if s.eth_gateway and s.eth_ip_for(n) == s.eth_gateway:
@@ -292,6 +323,7 @@ class ProvisionDialog(QDialog):
             unit_id=s.hostname_for(n),
             api_key=self._api.text().strip(),
             hostname=s.hostname_for(n),
+            assign_static=self._static_chk.isChecked(),
             eth_ip=s.eth_ip_for(n),
             prefix_len=s.prefix_len,
             eth_gateway=s.eth_gateway,
@@ -354,9 +386,16 @@ class ProvisionDialog(QDialog):
         s = self._live_scheme()
         n = self._n.value()
         label = f"{s.hostname_prefix.title()} {n}"
-        addresses = [f"{s.hostname_for(n)}.local", s.eth_ip_for(n)]
-        if self._wifi_chk.isChecked():
-            addresses.append(s.wlan_ip_for(n))
+        addresses = [f"{s.hostname_for(n)}.local"]
+        if self._static_chk.isChecked():
+            addresses.append(s.eth_ip_for(n))
+            if self._wifi_chk.isChecked():
+                addresses.append(s.wlan_ip_for(n))
+        else:
+            # DHCP: the address we provisioned over is still valid and reachable now.
+            host = getattr(self, "_provision_host", "")
+            if host and host not in addresses:
+                addresses.append(host)
         try:
             self._register(label, addresses, self._api.text().strip())
             self._on_step(f"registered '{label}' at {', '.join(addresses)}", "ok")

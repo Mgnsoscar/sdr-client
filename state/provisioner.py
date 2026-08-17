@@ -58,8 +58,10 @@ class ProvisionParams:
     unit_id: str = ""               # SDR_UNIT_ID baked in (e.g. broadcaster-2)
     api_key: str = ""
 
-    # Target hostname + static IPs (computed from the scheme, confirmed by operator):
+    # Target hostname, and — only when assign_static — static IPs (computed from the
+    # scheme, confirmed by the operator). Default is DHCP: hostname only, no reboot.
     hostname: str = ""
+    assign_static: bool = False
     eth_ip: str = ""
     prefix_len: int = 24
     eth_gateway: str = ""
@@ -78,9 +80,12 @@ class ProvisionParams:
         return self.sudo_password or self.ssh_password
 
     def register_address(self) -> str:
-        """The address the unit will answer at after the reboot — its Ethernet
-        static IP (the primary), with the mDNS name as a fallback the caller adds."""
-        return self.eth_ip or self.host
+        """The address to reconnect at. In static mode it's the Ethernet static IP;
+        in DHCP mode the unit keeps its current address, so its mDNS name (which it now
+        answers to) is the portable choice."""
+        if self.assign_static and self.eth_ip:
+            return self.eth_ip
+        return f"{self.hostname}.local" if self.hostname else self.host
 
 
 def _noop(_msg: str, _level: str) -> None:
@@ -118,7 +123,10 @@ class Provisioner:
         finally:
             self._close()
         addr = self.p.register_address()
-        self.on(f"reboot triggered — the unit will come up at {addr}", "info")
+        if self.p.assign_static:
+            self.on(f"reboot triggered — the unit will come up at {addr}", "info")
+        else:
+            self.on(f"provisioning done — the unit is up now at {addr}", "info")
         return addr
 
     # ── SSH plumbing ──────────────────────────────────────────────────────────
@@ -251,32 +259,46 @@ class Provisioner:
                              "`journalctl -u sdr-agent` on the unit.")
 
     def _configure_network(self) -> None:
-        self.on(f"setting hostname {self.p.hostname} and static IP {self.p.eth_ip}"
-                f"/{self.p.prefix_len} (network change — the SSH session will drop)…", "info")
         env_file = f"{REMOTE_UNPACK}/.prov-net.env"
         values = {
             "PROV_HOSTNAME": self.p.hostname,
-            "PROV_ETH_IP": self.p.eth_ip,
-            "PROV_PREFIX": str(self.p.prefix_len),
-            "PROV_ETH_GW": self.p.eth_gateway,
-            "PROV_DNS": self.p.dns,
+            "PROV_STATIC": "1" if self.p.assign_static else "0",
         }
-        if self.p.configure_wlan and self.p.wlan_ip:
+        if self.p.assign_static:
+            self.on(f"setting hostname {self.p.hostname} and static IP {self.p.eth_ip}"
+                    f"/{self.p.prefix_len} (network change — the SSH session will drop)…", "info")
             values.update({
-                "PROV_WLAN_IP": self.p.wlan_ip,
-                "PROV_WLAN_GW": self.p.wlan_gateway or self.p.eth_gateway,
-                "PROV_WLAN_SSID": self.p.wifi_ssid,
-                "PROV_WLAN_PSK": self.p.wifi_psk,
+                "PROV_ETH_IP": self.p.eth_ip,
+                "PROV_PREFIX": str(self.p.prefix_len),
+                "PROV_ETH_GW": self.p.eth_gateway,
+                "PROV_DNS": self.p.dns,
             })
+            if self.p.configure_wlan and self.p.wlan_ip:
+                values.update({
+                    "PROV_WLAN_IP": self.p.wlan_ip,
+                    "PROV_WLAN_GW": self.p.wlan_gateway or self.p.eth_gateway,
+                    "PROV_WLAN_SSID": self.p.wifi_ssid,
+                    "PROV_WLAN_PSK": self.p.wifi_psk,
+                })
+        else:
+            self.on(f"setting hostname {self.p.hostname} (DHCP — no static IP, no reboot)…", "info")
+
         self._write_remote_env(env_file, values)
         script = f"{REMOTE_UNPACK}/deploy/provision_network.sh"
         inner = f"set -a; . {shlex.quote(env_file)}; rm -f {shlex.quote(env_file)}; " \
                 f"exec bash {shlex.quote(script)}"
-        # The script backgrounds the reboot (sleep 2) and exits 0 first, but the
-        # connection can still be torn down mid-read — treat a dropped session here
-        # as success, since the reboot is exactly what we asked for.
-        try:
-            self._run(f"bash -c {shlex.quote(inner)}", sudo=True, timeout=60, check=False)
-        except (EOFError, OSError, paramiko.SSHException):
-            pass
-        self.on("network configured; unit rebooting", "ok")
+        if self.p.assign_static:
+            # The script backgrounds the reboot (sleep 2) and exits 0 first, but the
+            # connection can still be torn down mid-read — treat a dropped session here
+            # as success, since the reboot is exactly what we asked for.
+            try:
+                self._run(f"bash -c {shlex.quote(inner)}", sudo=True, timeout=60, check=False)
+            except (EOFError, OSError, paramiko.SSHException):
+                pass
+            self.on("network configured; unit rebooting", "ok")
+        else:
+            # DHCP mode: hostname only, no reboot — the command finishes cleanly and
+            # the unit stays reachable the whole time.
+            self._run(f"bash -c {shlex.quote(inner)}", sudo=True, timeout=120)
+            self.on(f"hostname set — unit stays up and now answers to "
+                    f"{self.p.hostname}.local", "ok")

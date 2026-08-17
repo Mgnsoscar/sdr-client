@@ -128,10 +128,18 @@ def _params():
     return ProvisionParams(
         host="192.168.1.50", ssh_user="pi", ssh_password="raspberry",
         sudo_password="", unit_n=2, unit_id="broadcaster-2", api_key="APIKEY123",
-        hostname="broadcaster-2", eth_ip="10.0.0.2", prefix_len=24,
-        eth_gateway="10.0.0.1", dns="10.0.0.1 1.1.1.1",
-        configure_wlan=True, wlan_ip="10.0.1.2", wlan_gateway="10.0.1.1",
+        hostname="broadcaster-2", assign_static=True, eth_ip="10.0.0.2", prefix_len=24,
+        eth_gateway="10.0.0.254", dns="10.0.0.254 1.1.1.1",
+        configure_wlan=True, wlan_ip="10.0.1.2", wlan_gateway="10.0.1.254",
         wifi_ssid="LabNet", wifi_psk="WIFIPASS",
+    )
+
+
+def _dhcp_params():
+    return ProvisionParams(
+        host="192.168.1.50", ssh_user="pi", ssh_password="raspberry",
+        unit_n=2, unit_id="broadcaster-2", api_key="APIKEY123",
+        hostname="broadcaster-2", assign_static=False,
     )
 
 
@@ -194,9 +202,40 @@ def test_env_files_carry_identity(monkeypatch, bundle):
     assert "SDR_UNIT_ID=broadcaster-2" in stdin_text
     assert "SDR_API_KEY=APIKEY123" in stdin_text
     assert "PROV_HOSTNAME=broadcaster-2" in stdin_text
+    assert "PROV_STATIC=1" in stdin_text
     assert "PROV_ETH_IP=10.0.0.2" in stdin_text
     assert "PROV_WLAN_IP=10.0.1.2" in stdin_text
     assert "PROV_WLAN_SSID=LabNet" in stdin_text
+
+
+# ── DHCP mode (the default) ─────────────────────────────────────────────────
+
+def test_dhcp_mode_sets_hostname_only_no_static(monkeypatch, bundle):
+    client = FakeClient(_happy_responder)
+    install_fake(monkeypatch, client)
+    addr = Provisioner(_dhcp_params(), bundle).run()
+    # In DHCP mode the unit keeps its address; it's registered by its mDNS name.
+    assert addr == "broadcaster-2.local"
+    stdin_text = "\n".join(s.buf for s in client.stdins)
+    assert "PROV_HOSTNAME=broadcaster-2" in stdin_text
+    assert "PROV_STATIC=0" in stdin_text
+    # No static addressing is written in DHCP mode.
+    assert "PROV_ETH_IP" not in stdin_text
+    assert "PROV_WLAN_IP" not in stdin_text
+    # provision_network.sh still runs (to set the hostname), under sudo, from the bundle.
+    net = [c for c in client.commands if "provision_network.sh" in c]
+    assert net and all(c.startswith("sudo -S -p ''") for c in net)
+
+
+def test_dhcp_mode_still_installs_and_verifies(monkeypatch, bundle):
+    client = FakeClient(_happy_responder)
+    install_fake(monkeypatch, client)
+    steps = []
+    Provisioner(_dhcp_params(), bundle, on_step=lambda m, l: steps.append(m)).run()
+    joined = " || ".join(steps)
+    assert "agent installed" in joined
+    assert "service is active" in joined
+    assert "up now at broadcaster-2.local" in joined   # no reboot wording
 
 
 def test_auth_failure_raises(monkeypatch, bundle):
