@@ -55,7 +55,7 @@ class ProvisionDialog(QDialog):
         self._bundle_ver = bundle_version(self._bundle) if self._bundle else None
         self._busy = False
         self._done = False
-        self._verify_addr = ""
+        self._verify_addresses: List[str] = []
         self._verify_deadline = 0.0
 
         self.setWindowTitle("Provision a new unit")
@@ -365,39 +365,50 @@ class ProvisionDialog(QDialog):
         self._done = True
         self._provision_btn.setText("Provisioned")
         self._sync_buttons()
-        # Now wait for it to come back up on the network.
-        self._verify_addr = result if isinstance(result, str) and result else addresses[0]
+        # Wait for it to come back — probe EVERY registered address (mDNS name first),
+        # not just the static IP. The operator's PC often isn't on the unit's static
+        # subnet (10.0.0.x), so the static IP is unroutable from here even though the
+        # unit is perfectly reachable at broadcaster-N.local on the same LAN.
+        self._verify_addresses = list(addresses)
         self._verify_deadline = time.monotonic() + VERIFY_DEADLINE_S
-        self._status.setText(f"Waiting for {self._verify_addr} to come back after reboot…")
+        self._status.setText(f"Waiting for the unit to come back after reboot "
+                             f"(trying {', '.join(addresses)})…")
         self._verify_timer.start(VERIFY_INTERVAL_MS)
 
     def _poll_verify(self) -> None:
-        addr = self._verify_addr
+        addresses = list(self._verify_addresses)
         api = self._api.text().strip()
 
         def probe():
             from api.client import AgentClient
-            c = AgentClient(addr, addresses=[addr], api_key=api)
-            try:
-                return c.info()
-            finally:
-                c.close()
+            last = None
+            for a in addresses:
+                c = AgentClient(a, addresses=[a], api_key=api)
+                try:
+                    return (a, c.info())
+                except Exception as exc:  # noqa: BLE001 — try the next address
+                    last = exc
+                finally:
+                    c.close()
+            raise last or RuntimeError("no addresses to probe")
 
         self.hub.run_async("agentprov:verify", probe)
 
     def _on_verify_result(self, result) -> None:
         if not isinstance(result, Exception):
+            addr, info = result
             self._verify_timer.stop()
-            ver = getattr(result, "agent_version", "?")
-            self._status.setText(f"✓ Unit is up at {self._verify_addr} (agent {ver}).")
-            self._on_step(f"unit reachable at {self._verify_addr} — agent {ver}", "ok")
+            ver = getattr(info, "agent_version", "?")
+            self._status.setText(f"✓ Unit is up at {addr} (agent {ver}).")
+            self._on_step(f"unit reachable at {addr} — agent {ver}", "ok")
             return
         if time.monotonic() >= self._verify_deadline:
             self._verify_timer.stop()
             self._status.setText(
-                f"Provisioned, but not reachable from this PC yet at {self._verify_addr}. "
-                "It may still be booting, or this PC isn't on that subnet. It's registered "
-                "and will appear once reachable.")
+                "Provisioned and registered, but not reachable from this PC yet at "
+                f"{', '.join(self._verify_addresses)}. If your PC isn't on the unit's "
+                "static subnet, reach it by its broadcaster-N.local name instead — it "
+                "should appear in the Units grid shortly.")
 
     def _disconnect(self) -> None:
         self._verify_timer.stop()
