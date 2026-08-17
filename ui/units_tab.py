@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
 from api import AgentClient, Fleet
 from api import models as m
 from config import ClientConfig, UnitEntry
-from state import UnitLedger
+from state import UnitLedger, AddressCache
 from .theme import Palette
 from .unit_card import UnitCard
 from .unit_detail import UnitDetail
@@ -48,6 +48,9 @@ class UnitsTab(QWidget):
         # Permanent machine-id → uid ledger (survives unit deletion), so re-adding
         # the same physical Pi reuses its original id and keeps its plans linked.
         self._ledger = UnitLedger()
+        # Last-known IP per machine-id, so a fresh launch (on any PC) reconnects by IP
+        # instead of paying the mDNS lookup again.
+        self._addr_cache = AddressCache()
 
         self._stack = QStackedWidget()
         outer = QVBoxLayout(self)
@@ -145,8 +148,15 @@ class UnitsTab(QWidget):
         return {u.label for u in self._cfg.units}
 
     def _make_client(self, entry: UnitEntry) -> AgentClient:
+        # Seed the last-known IP first so warmup takes the fast direct-IP path before
+        # mDNS. It's only a hint: warmup's machine-id check skips it if DHCP has since
+        # handed that IP to a different unit, falling back to the other addresses.
+        addresses = list(entry.addresses)
+        cached_ip = self._addr_cache.ip_for(entry.machine_id) if entry.machine_id else None
+        if cached_ip and cached_ip not in addresses:
+            addresses.insert(0, cached_ip)
         client = AgentClient(entry.uid, label=entry.label,
-                             addresses=entry.addresses, api_key=entry.api_key)
+                             addresses=addresses, api_key=entry.api_key)
         client.machine_id = entry.machine_id
         return client
 
@@ -303,6 +313,11 @@ class UnitsTab(QWidget):
             if c.machine_id and c.machine_id != u.machine_id:
                 u.machine_id = c.machine_id
                 changed = True
+            # Cache the IP this online unit is currently reachable at, so the next
+            # launch (on this or any other PC) connects straight to it.
+            mid, ip = (c.machine_id or u.machine_id), c.active_ip()
+            if mid and ip:
+                self._addr_cache.record(mid, ip, host=c.active_address(), port=c.port)
         if changed:
             self._persist()
 

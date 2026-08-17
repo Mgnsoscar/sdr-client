@@ -274,6 +274,18 @@ class AgentClient:
         """The address currently in use (the one that last answered)."""
         return self._active_addr
 
+    def active_ip(self) -> Optional[str]:
+        """The IP the client is actually connected to — the resolved/pinned IP, or the
+        active address itself when it's already a bare IP. None if not yet resolved.
+        Used to persist a unit's last-known IP for a fast reconnect next launch."""
+        if self._resolved_ip:
+            return self._resolved_ip
+        try:
+            socket.inet_aton(self._active_addr)
+            return self._active_addr
+        except OSError:
+            return None
+
     def add_address(self, addr: str) -> bool:
         """Add a candidate connect address (e.g. learned from discovery on a new
         network). Returns True if it was new. The next warmup can then use it."""
@@ -342,6 +354,10 @@ class AgentClient:
         """
         # Try the active address first (sticky), then the rest.
         ordered = [self._active_addr] + [a for a in self._addresses if a != self._active_addr]
+        # If we already know this unit's fingerprint, an address that answers as a
+        # DIFFERENT Pi is not our unit — DHCP may have handed a cached/known IP to
+        # another device. Skip it rather than adopt the wrong unit's identity.
+        expected_mid = self.machine_id
         last_conn_err: Optional[str] = None
         for addr in ordered:
             if addr != self._active_addr or self._resolved_ip is not None:
@@ -355,6 +371,11 @@ class AgentClient:
             try:
                 data = self._request("GET", "/info")
                 info = m.AgentInfo(**data)
+                if expected_mid and info.machine_id and info.machine_id != expected_mid:
+                    # Reachable, but it's a different unit — this address is stale.
+                    last_conn_err = (f"address '{addr}' is a different unit "
+                                     f"({info.machine_id[:8]}…), skipping")
+                    continue
                 self.unit_id = info.unit_id
                 if info.machine_id:
                     self.machine_id = info.machine_id
