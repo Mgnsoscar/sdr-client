@@ -242,12 +242,41 @@ class ProvisionDialog(QDialog):
         self._preview.setText("Will configure:  " + "   ·   ".join(parts))
         self._sync_buttons()
 
+    def _collision(self) -> str:
+        """A blocking misconfiguration in the computed addressing, or '' if fine.
+        The important one: a unit whose IP equals its gateway — a host can't be its
+        own gateway, NetworkManager rejects it, and the interface comes up with no IP
+        (the unit provisions but is then unreachable)."""
+        s = self._live_scheme()
+        n = self._n.value()
+        if s.eth_gateway and s.eth_ip_for(n) == s.eth_gateway:
+            return (f"Ethernet IP {s.eth_ip_for(n)} is the same as the gateway — "
+                    f"set the gateway to something else (e.g. {s.eth_subnet}.254), "
+                    f"leave it blank for a router-less network, or pick another unit number.")
+        if self._wifi_chk.isChecked():
+            wgw = self.scheme.wlan_gateway or s.eth_gateway
+            if wgw and s.wlan_ip_for(n) == wgw:
+                return (f"WiFi IP {s.wlan_ip_for(n)} is the same as the WiFi gateway — "
+                        f"change the WiFi gateway or pick another unit number.")
+        return ""
+
     def _sync_buttons(self, *_) -> None:
+        collision = self._collision()
         ready = (not self._busy and not self._done
                  and bool(self._host.text().strip())
                  and bool(self._pw.text())
-                 and self._bundle is not None)
+                 and self._bundle is not None
+                 and not collision)
         self._provision_btn.setEnabled(ready)
+        # Surface a collision inline while idle (progress messages own the label once
+        # a run starts). Only clear our own warning, never a run's status text.
+        if not self._busy and not self._done:
+            if collision:
+                self._status.setText("⚠ " + collision)
+                self._status.setStyleSheet(f"font-size: 11px; color: {Palette.CRASH};")
+            elif self._status.text().startswith("⚠"):
+                self._status.setText("")
+                self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
 
     # ── Run ───────────────────────────────────────────────────────────────────
 

@@ -65,9 +65,13 @@ class ProvisionScheme:
     eth_subnet: str = "10.0.0"             # eth IP  = <eth_subnet>.<N>
     wlan_subnet: str = "10.0.1"            # wlan IP = <wlan_subnet>.<N>
     prefix_len: int = 24                   # CIDR mask for both
-    eth_gateway: str = "10.0.0.1"
-    wlan_gateway: str = "10.0.1.1"
-    dns: str = "10.0.0.1 1.1.1.1"          # space-separated resolvers
+    # Gateways default to .254, NOT .1 — with a "unit N → <subnet>.N" scheme, a .1
+    # gateway collides with unit 1's own address (a host can't be its own gateway;
+    # NetworkManager rejects it and the interface comes up with no IP). .254 keeps
+    # every unit number 1..253 free. Leave blank for an isolated switch with no router.
+    eth_gateway: str = "10.0.0.254"
+    wlan_gateway: str = "10.0.1.254"
+    dns: str = "10.0.0.254 1.1.1.1"        # space-separated resolvers
     ssh_user: str = "pi"                   # default SSH login on a fresh Pi
     wifi_ssid: str = ""                    # default WiFi SSID (PSK is never stored)
 
