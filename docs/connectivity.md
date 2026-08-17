@@ -76,14 +76,19 @@ Make a static IP opt-in; default to hostname-only over DHCP.
 
 Effort: S–M · Risk: low. **Highest value — makes the three modes work.**
 
-## Build order
+## Build order — all shipped
 
-1. **#3 DHCP-default provisioning** — correctness across all three modes, removes the
-   reboot/re-IP fragility.
-2. **#1 resolved-IP cache** — kills "`.local` is slow" on every PC.
-3. **#2 subnet probe** — resilience for the multicast-filtered bridge.
+1. **#3 DHCP-default provisioning** ✅ — `ui/provision_dialog.py` "Assign a static IP"
+   opt-in; `deploy/provision_network.sh` `PROV_STATIC` gate (DHCP = hostname only, no
+   reboot).
+2. **#1 resolved-IP cache** ✅ — `state/address_cache.py`; seeded in
+   `units_tab._make_client`, written in `_sync_machine_ids`; `AgentClient.warmup`
+   machine-id guard against a stale IP.
+3. **#2 subnet probe** ✅ — `Discovery.probe_subnet` sweeps the local /24
+   (`/health` then `/info`); wired behind the Add-unit dialog's Refresh and on open.
 
-Each is independent and ships with tests.
+Each shipped with tests (`tests/test_provisioner.py`, `test_address_cache.py`,
+`test_discovery_probe.py`).
 
 ## Out of scope (higher tiers)
 

@@ -163,12 +163,25 @@ class UnitsTab(QWidget):
     def _machine_ids(self) -> set:
         return {u.machine_id for u in self._cfg.units if u.machine_id}
 
+    def _deep_rescan(self) -> None:
+        """Refresh discovery: restart mDNS AND actively sweep the local subnet — the
+        fallback for a network that filters multicast (e.g. a long-range bridge). The
+        sweep runs off the UI thread; its hits merge into discovery and fire
+        discovery_changed, so the picker and machine-id auto-learn pick them up."""
+        self.hub.discovery.rescan()
+        self.hub.run_async("subnet_probe",
+                           lambda: self.hub.discovery.probe_subnet(api_key=self._cfg.api_key))
+
     def _on_add(self) -> None:
+        # Kick a subnet sweep as the dialog opens so multicast-filtered units show up
+        # without the operator having to hit Refresh first.
+        self.hub.run_async("subnet_probe",
+                           lambda: self.hub.discovery.probe_subnet(api_key=self._cfg.api_key))
         dlg = UnitDialog(taken_labels=self._labels(),
                          taken_addresses=self._known_addresses(),
                          taken_machine_ids=self._machine_ids(),
                          discovered_provider=self.hub.discovery.discovered,
-                         rescan=self.hub.discovery.rescan,
+                         rescan=self._deep_rescan,
                          parent=self.window())
         if not dlg.exec() or dlg.result_entry is None:
             return

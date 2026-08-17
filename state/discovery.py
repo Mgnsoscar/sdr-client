@@ -14,7 +14,9 @@ Qt-aware.
 from __future__ import annotations
 
 import logging
+import socket
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
@@ -154,6 +156,77 @@ class Discovery:
             self._found.clear()
         self.start()
         logger.info("Discovery: re-scanning (re-enumerated interfaces)")
+
+    def probe_subnet(self, api_key: str = "", port: int = 8765,
+                     timeout: float = 0.35, workers: int = 64) -> List[DiscoveredUnit]:
+        """Actively sweep this PC's local /24 for agents — the fallback for a network
+        that filters mDNS multicast (e.g. a long-range WiFi→Ethernet bridge), where a
+        unit is on a routable IP but never shows up via zeroconf.
+
+        For each host: a fast TCP check on `port`, then GET /health (unauthenticated)
+        to confirm it's an agent, then GET /info (with `api_key`) for its identity.
+        Hits are merged into the discovered set so the picker and the machine-id
+        auto-learn treat them exactly like an mDNS find. Blocking (~1-3 s); call it
+        from a worker thread. Best-effort — returns [] if the local IP is unknown."""
+        from .netutil import local_ip
+        ip = local_ip()
+        if not ip or ip.count(".") != 3:
+            return []
+        base = ip.rsplit(".", 1)[0]
+        targets = [f"{base}.{i}" for i in range(1, 255) if f"{base}.{i}" != ip]
+
+        def probe(host: str) -> Optional[DiscoveredUnit]:
+            try:
+                socket.create_connection((host, port), timeout=timeout).close()
+            except OSError:
+                return None   # nothing listening — the common case, fails fast
+            return self._identify(host, port, api_key)
+
+        found: List[DiscoveredUnit] = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for unit in pool.map(probe, targets):
+                if unit is not None:
+                    found.append(unit)
+        if found:
+            with self._lock:
+                for u in found:
+                    self._found[f"probe:{u.addresses[0] if u.addresses else u.unit_id}"] = u
+            logger.info("Discovery: subnet probe found %d agent(s) on %s.0/24",
+                        len(found), base)
+            if self._on_change is not None:
+                try:
+                    self._on_change()
+                except Exception:  # noqa: BLE001
+                    logger.debug("Discovery on_change callback raised", exc_info=True)
+        return found
+
+    @staticmethod
+    def _identify(host: str, port: int, api_key: str) -> Optional[DiscoveredUnit]:
+        """Confirm an agent at host:port via /health, then read /info for identity.
+        Returns a DiscoveredUnit (with machine_id when /info is readable), or None."""
+        import httpx
+        base = f"http://{host}:{port}"
+        headers = {"X-API-Key": api_key} if api_key else {}
+        try:
+            with httpx.Client(timeout=2.0) as c:
+                h = c.get(f"{base}/health")
+                if h.status_code != 200 or (h.json() or {}).get("status") != "ok":
+                    return None
+                try:
+                    r = c.get(f"{base}/info", headers=headers)
+                    if r.status_code == 200:
+                        d = r.json()
+                        return DiscoveredUnit(
+                            unit_id=d.get("unit_id") or host, hostname="",
+                            addresses=[host], port=port,
+                            machine_id=d.get("machine_id", "") or "")
+                except Exception:  # noqa: BLE001 — identity is gated; still a hit
+                    pass
+                # An agent is here but /info needs a key we don't have — surface the
+                # address anyway so the operator can add it by IP.
+                return DiscoveredUnit(unit_id=host, hostname="", addresses=[host], port=port)
+        except Exception:  # noqa: BLE001 — not an agent / not HTTP
+            return None
 
     def discovered(self) -> List[DiscoveredUnit]:
         """A snapshot of currently-advertised units, sorted by name."""

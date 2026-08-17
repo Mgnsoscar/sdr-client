@@ -130,7 +130,9 @@ class UnitDialog(QDialog):
             except Exception:  # noqa: BLE001
                 pass
         self._refresh_discovered()
-        for delay in (700, 1600):
+        # Re-read a few times: mDNS answers land within ~1-2 s, and an active subnet
+        # probe (the multicast-filtered-bridge fallback) can take a little longer.
+        for delay in (700, 1600, 2800):
             QTimer.singleShot(delay, self._refresh_discovered)
 
     def _refresh_discovered(self) -> None:
