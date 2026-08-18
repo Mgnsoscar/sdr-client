@@ -260,10 +260,14 @@ def item_to_steps(it) -> List[dict]:
              "task_name": it.task_name, "params": dict(it.params or {})},
         ]
     if getattr(it, "action", "run") == "ramp":
+        # A run-mode ramp carries the OTHER params' fixed values as args; a tune ramp
+        # has none. replace_args mirrors a one-shot (the args are the complete set).
         return [
             {"anchor": it.anchor, "offset_s": it.offset, "action": "ramp",
              "offset_end_s": getattr(it, "offset_end", 0.0),
-             "task_name": it.task_name, "ramp": dict(it.ramp or {})},
+             "task_name": it.task_name, "ramp": dict(it.ramp or {}),
+             "args": list(getattr(it, "args", []) or []),
+             "replace_args": bool(getattr(it, "replace_args", True))},
         ]
     return [
         {"anchor": it.anchor, "offset_s": it.offset, "action": "run",
@@ -301,6 +305,8 @@ def steps_to_items(steps: List[dict]) -> List:
             items.append(RunItem(
                 task_name=s["task_name"], action="ramp",
                 ramp=dict(s.get("ramp") or {}),
+                args=list(s.get("args") or []),
+                replace_args=bool(s.get("replace_args", True)),
                 anchor=s.get("anchor", "start"), offset=float(s["offset_s"]),
                 offset_end=float(s.get("offset_end_s") or 0.0)))
         elif action == "start":

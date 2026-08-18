@@ -1,15 +1,21 @@
 """
 RampEditorDialog — author a parameter ramp step.
 
-A ramp sweeps one live parameter of a running duration task from a start value to
-a stop value over time, defined by any two of {step, hold, duration} (or, when it
-fills the on-air window, just one of {step, hold} — the duration comes from the
-plan/schedule). A window-filling ramp can still be inset from each edge (start it
-after on-air, end it before off-air). It's stored parametrically and expanded into
-tune fires on the unit at arm time (see api.ramp / agent.ramp).
+A ramp sweeps one numeric parameter from a start value to a stop value over time,
+defined by any two of {step, hold, duration} (or, when it fills the on-air window,
+just one of {step, hold} — the duration comes from the plan/schedule). A
+window-filling ramp can still be inset from each edge. Stored parametrically and
+expanded on the unit at arm time (see api.ramp / agent.ramp).
 
-The dialog reuses the timeline editor's task list and script-parameter cache,
-filtered to the task's LIVE, numeric parameters — the only ones a ramp can sweep.
+Two targets:
+  - Tune (default): sweep a LIVE parameter of a duration task already running in
+    the sequence — expands to `tune` fires (set_params). Only the sequence's
+    duration tasks and their live numeric params are selectable.
+  - Run the task each step: sweep any numeric parameter by re-invoking the task
+    once per point (e.g. an attenuator-set script) — expands to `run` fires, so no
+    running task is needed. Any unit task is selectable, and the OTHER params get
+    fixed values via a parameter form.
+
 It returns a RunItem with action="ramp" via .result_item, like StepEditorDialog.
 """
 from __future__ import annotations
@@ -18,16 +24,25 @@ from typing import List, Optional
 
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel,
-    QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel,
+    QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import ramp as _ramp
 
 from . import timeline_model as tlm
 from .duration_spin import DurationSpinBox
-from .param_form import fmt_duration, fmt_value
+from .param_form import ParamForm, fmt_duration, fmt_value
 from .theme import Palette
+
+
+def _is_numeric(spec: dict) -> bool:
+    """True for a float/int parameter — the only kinds a ramp can sweep."""
+    return spec.get("kind") in ("number", "integer") or spec.get("type") in ("int", "float")
+
+
+def _is_integer(spec: dict) -> bool:
+    return spec.get("kind") == "integer" or spec.get("type") == "int"
 
 _MODES_SINGLE = [
     ("steps_hold",     "Number of steps + hold time  → duration"),
@@ -109,7 +124,14 @@ class RampEditorDialog(QDialog):
         self._new = new
         self.result_item: Optional[object] = None
         self._current_script = ""
-        self._live_params: List[dict] = []
+        self._all_params: List[dict] = []    # every param of the current script
+        self._num_params: List[dict] = []    # numeric params (run mode ramps any)
+        self._live_params: List[dict] = []   # live numeric params (tune mode)
+        # Run mode fires the task per point; forced on when the sequence has no
+        # duration task to tune. Seeded from the saved ramp.
+        self._has_dur = bool(_sequence_tasks(self._editor))
+        self._run_mode = ((getattr(self._src, "ramp", None) or {}).get("mode") == "run"
+                          or not self._has_dur)
         self._ready = False   # suppress preview callbacks until every widget exists
 
         self.setWindowTitle("New ramp" if new else "Edit ramp")
@@ -134,14 +156,19 @@ class RampEditorDialog(QDialog):
         # --- create every widget first; connect signals only afterwards, so an
         #     early setText/setCurrentText during build can't fire a preview
         #     callback before the widgets it reads exist. ---
-        # A ramp acts on a running task, so only tasks started in this sequence
-        # (duration bars) are selectable — never an arbitrary unit task.
+        # Tune mode acts on a running task (only the sequence's duration tasks are
+        # selectable); run mode fires the task each point (any task). Forced on when
+        # there's no duration task to tune.
+        self._run_chk = QCheckBox("Run a task at each ramp step (fires it per point — any task)")
+        self._run_chk.setChecked(self._run_mode)
+        self._run_chk.setEnabled(self._has_dur)
+        if not self._has_dur:
+            self._run_chk.setToolTip("No duration task in this sequence to tune, so a ramp "
+                                     "must run a task each step.")
+        form.addRow("", self._run_chk)
+
         self._task = QComboBox()
-        tasks = _sequence_tasks(self._editor)
-        if tasks:
-            self._task.addItems(tasks)
-        if self._src.task_name and self._task.findText(self._src.task_name) >= 0:
-            self._task.setCurrentText(self._src.task_name)
+        self._populate_tasks()
         form.addRow("Task", self._task)
 
         self._param = QComboBox()
@@ -186,6 +213,30 @@ class RampEditorDialog(QDialog):
             self._duration.setText(_fmt(r.get("duration_s")))
 
         outer.addLayout(form)
+
+        # Run mode: fixed values for the task's OTHER parameters (the ramped one is
+        # driven by From/To). Hidden in tune mode.
+        self._form_lbl = QLabel("Other parameters (fixed each step):")
+        self._form_lbl.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
+        outer.addWidget(self._form_lbl)
+        self._form = ParamForm()
+        self._form_scroll = QScrollArea()
+        self._form_scroll.setWidgetResizable(True)
+        self._form_scroll.setWidget(self._form)
+        self._form_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._form_scroll.setMinimumHeight(80)
+        self._form_scroll.setMaximumHeight(170)
+        self._form_scroll.setStyleSheet(
+            f"QScrollArea {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER}; "
+            f"border-radius: 8px; }}")
+        outer.addWidget(self._form_scroll)
+
+        self._warn = QLabel("")
+        self._warn.setWordWrap(True)
+        self._warn.setStyleSheet(f"font-size: 11px; color: {Palette.ARMED};")
+        self._warn.setVisible(False)
+        outer.addWidget(self._warn)
+
         self._preview = QLabel("")
         self._preview.setWordWrap(True)
         self._preview.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
@@ -217,8 +268,9 @@ class RampEditorDialog(QDialog):
         outer.addWidget(buttons)
 
         # Now everything exists — wire the change signals.
+        self._run_chk.toggled.connect(self._sync_target_mode)
         self._task.currentTextChanged.connect(lambda t: self._select_task(t))
-        self._param.currentTextChanged.connect(lambda _t: self._update_preview())
+        self._param.currentTextChanged.connect(lambda _t: self._on_param_changed())
         for w in (self._start, self._stop, self._steps, self._step, self._hold, self._duration):
             w.textChanged.connect(self._update_preview)
         self._offset.valueChanged.connect(self._update_preview)
@@ -230,7 +282,72 @@ class RampEditorDialog(QDialog):
         # the first mode, hiding the fields the saved ramp actually uses).
         self._init_mode = _mode_for_ramp(r, self._is_both())
         self._ready = True
+        self._apply_mode_visibility()
         self._sync_anchor()   # populate modes + show/hide rows + preview
+
+    # ── Target (tune vs run) wiring ──────────────────────────────────────────
+
+    def _tasks_for_mode(self) -> list:
+        return self._editor.available_tasks() if self._run_mode else _sequence_tasks(self._editor)
+
+    def _populate_tasks(self) -> None:
+        want = self._task.currentText().strip() or (self._src.task_name or "")
+        self._task.blockSignals(True)
+        self._task.clear()
+        self._task.addItems(self._tasks_for_mode())
+        if want and self._task.findText(want) >= 0:
+            self._task.setCurrentText(want)
+        elif self._task.count():
+            self._task.setCurrentIndex(0)
+        self._task.blockSignals(False)
+
+    def _apply_mode_visibility(self) -> None:
+        self._form_lbl.setVisible(self._run_mode)
+        self._form_scroll.setVisible(self._run_mode)
+
+    def _sync_target_mode(self) -> None:
+        self._run_mode = self._run_chk.isChecked()
+        self._apply_mode_visibility()
+        self._populate_tasks()
+        self._select_task(self._task.currentText())   # rebuild params + fixed-form for the mode
+
+    def _active_params(self) -> List[dict]:
+        return self._num_params if self._run_mode else self._live_params
+
+    @staticmethod
+    def _pname(s: dict) -> str:
+        return s.get("name") or s.get("dest")
+
+    def _ramped_spec(self) -> Optional[dict]:
+        name = self._param.currentText().strip()
+        for s in self._active_params():
+            if self._pname(s) == name:
+                return s
+        return None
+
+    def _rebuild_run_form(self) -> None:
+        if not self._run_mode:
+            self._form.set_params([])
+            return
+        ramped = self._param.currentText().strip()
+        self._form.set_params([s for s in self._all_params if self._pname(s) != ramped])
+        args = list(getattr(self._src, "args", []) or [])
+        if args:
+            self._form.set_values(args)
+
+    def _on_param_changed(self) -> None:
+        self._rebuild_run_form()   # the ramped param leaves the fixed-value form
+        self._update_preview()
+
+    def _update_warning(self) -> None:
+        task = self._task.currentText().strip()
+        if self._run_mode and self._has_dur and task in _sequence_tasks(self._editor):
+            self._warn.setText(
+                "⚠ This task also runs as a duration step here; re-running it each point "
+                "may collide with that. Consider tuning it instead (uncheck the box).")
+            self._warn.setVisible(True)
+        else:
+            self._warn.setVisible(False)
 
     # ── Anchor / mode wiring ─────────────────────────────────────────────────
 
@@ -301,15 +418,17 @@ class RampEditorDialog(QDialog):
             self._set_params(self._editor.param_cache()[script])
 
     def _set_params(self, specs: List[dict]) -> None:
-        self._live_params = [s for s in specs if s.get("live")
-                             and s.get("kind") in ("number", "integer")]
+        self._all_params = list(specs or [])
+        self._num_params = [s for s in self._all_params if _is_numeric(s)]   # run mode
+        self._live_params = [s for s in self._num_params if s.get("live")]   # tune mode
         want = (getattr(self._src, "ramp", None) or {}).get("param")
         self._param.blockSignals(True)
         self._param.clear()
-        self._param.addItems([s.get("name") or s.get("dest") for s in self._live_params])
+        self._param.addItems([self._pname(s) for s in self._active_params()])
         if want and self._param.findText(want) >= 0:
             self._param.setCurrentText(want)
         self._param.blockSignals(False)
+        self._rebuild_run_form()
         self._update_preview()
 
     # ── Preview ──────────────────────────────────────────────────────────────
@@ -327,21 +446,27 @@ class RampEditorDialog(QDialog):
             spec["hold_s"] = _num(self._hold.text())
         if "duration" in fields:
             spec["duration_s"] = _num(self._duration.text())
+        if self._run_mode:
+            rs = self._ramped_spec() or {}
+            flags = rs.get("flags") or []
+            spec["mode"] = "run"
+            spec["flag"] = flags[0] if flags else None
+            spec["integer"] = _is_integer(rs)
         return spec
 
     def _param_unit(self) -> str:
-        name = self._param.currentText().strip()
-        for s in self._live_params:
-            if (s.get("name") or s.get("dest")) == name:
-                return s.get("unit") or ""
-        return ""
+        s = self._ramped_spec()
+        return (s.get("unit") or "") if s else ""
 
     def _update_preview(self, *_) -> None:
         if not self._ready:
             return
         spec = self._spec_from_form()
-        if not self._live_params:
-            self._set_preview("This task's script has no live numeric parameters.", error=True)
+        self._update_warning()
+        if not self._active_params():
+            self._set_preview(
+                "This task has no numeric parameters to ramp." if self._run_mode
+                else "This task's script has no live numeric parameters.", error=True)
             return
         if spec["start"] is None or spec["stop"] is None:
             self._set_preview("Enter numeric From/To values.")
@@ -447,7 +572,9 @@ class RampEditorDialog(QDialog):
         if not task:
             return self._set_preview("pick a task", error=True)
         if not param:
-            return self._set_preview("this task has no live parameter to ramp", error=True)
+            return self._set_preview(
+                "this task has no numeric parameter to ramp" if self._run_mode
+                else "this task has no live parameter to ramp", error=True)
         spec = self._spec_from_form()
         if spec["start"] is None or spec["stop"] is None:
             return self._set_preview("enter numeric From/To values", error=True)
@@ -457,16 +584,28 @@ class RampEditorDialog(QDialog):
             return self._set_preview(err, error=True)
         offset = round(self._offset.value(), 1)
         offset_end = round(self._offset_end.value(), 1) if anchor == "both" else 0.0
-        spans_getter = getattr(self._editor, "task_spans", None)
-        if spans_getter is not None:
-            span_err = tlm.step_within_task_error(spans_getter(task), anchor, offset,
-                                                  offset_end, kind="ramp")
-            if span_err:
-                return self._set_preview(span_err, error=True)
+
+        args: List[str] = []
+        if self._run_mode:
+            # Fixed values for the other params (the ramped one is injected per point
+            # on the unit). No span check — each point is a standalone one-shot.
+            ferr = self._form.validate()
+            if ferr:
+                return self._set_preview(ferr, error=True)
+            args = self._form.build_args()
+        else:
+            spans_getter = getattr(self._editor, "task_spans", None)
+            if spans_getter is not None:
+                span_err = tlm.step_within_task_error(spans_getter(task), anchor, offset,
+                                                      offset_end, kind="ramp")
+                if span_err:
+                    return self._set_preview(span_err, error=True)
+
         ramp = {k: v for k, v in spec.items() if v is not None}
         self.result_item = tlm.RunItem(
             task_name=task, action="ramp", ramp=ramp, anchor=anchor,
-            offset=offset, offset_end=offset_end, uid=self._src.uid)
+            offset=offset, offset_end=offset_end,
+            args=args, replace_args=True, uid=self._src.uid)
         self.accept()
 
     def _disconnect(self) -> None:

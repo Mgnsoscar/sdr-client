@@ -98,19 +98,22 @@ def _fmt_offset(offset_s: float) -> str:
 
 
 def _ramp_summary(spec, anchor: str) -> str:
-    """A compact 'param start→stop · 60s' (or '· fills window') label for a ramp."""
+    """A compact 'param start→stop · 60s' (or '· fills window') label for a ramp.
+    A run-mode ramp (fires the task each point) is tagged so it's not mistaken for a
+    live tune."""
     spec = spec or {}
     param = spec.get("param") or "(param)"
+    tag = "run " if spec.get("mode") == "run" else ""
     a, b = spec.get("start"), spec.get("stop")
     span = f"{fmt_value(a)}→{fmt_value(b)}" if a is not None and b is not None else "…"
     if anchor == "both":
-        return f"{param} {span} · fills window"
+        return f"{tag}{param} {span} · fills window"
     try:
         res = _ramp.resolve_ramp(a, b, steps=spec.get("steps"), step=spec.get("step"), hold_s=spec.get("hold_s"),
                                  duration_s=spec.get("duration_s"))
-        return f"{param} {span} · {fmt_duration(res.duration_s)}"
+        return f"{tag}{param} {span} · {fmt_duration(res.duration_s)}"
     except (ValueError, TypeError):
-        return f"{param} {span}"
+        return f"{tag}{param} {span}"
 
 
 def _timing_text(offset_s: float, side: str, with_side: bool) -> str:
