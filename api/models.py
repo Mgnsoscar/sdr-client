@@ -64,6 +64,9 @@ class RampSpec(BaseModel):
     step: Optional[float] = None         # OR a fixed value increment
     hold_s: Optional[float] = None
     duration_s: Optional[float] = None
+    mode: str = "tune"                   # "tune" (live set_params) | "run" (task per point)
+    flag: Optional[str] = None           # run mode: CLI flag for the ramped param
+    integer: bool = False                # run mode: round each value to an int
 
 
 # ══════════════════════════════════════════════════════════════════════════════
