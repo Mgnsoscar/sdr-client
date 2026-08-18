@@ -304,11 +304,16 @@ class AgentClient:
 
     def _resolve_and_pin_ip(self) -> None:
         """
-        Resolve the active address to an IP once and rebuild the client to connect to
-        that IP directly. Makes future reconnects fast (no repeat mDNS lookup). If the
-        address is already an IP, or resolution fails, this is a no-op and we keep
-        using it. The slow mDNS cost is paid here, in warmup, off the UI thread — not
-        on every reconnect.
+        Resolve the active address to an IPv4 IP once and rebuild the client to connect
+        to that IP directly. This is done BEFORE the first request (see warmup) for a
+        crucial reason: a unit's mDNS name (broadcaster-N.local) resolves to BOTH an
+        A (IPv4) and an AAAA (IPv6 link-local, fe80::) record, and the OS resolver
+        often prefers IPv6 — which our IPv4-only stack (and httpx) can't use, so the
+        connect fails even though the unit is reachable on IPv4 (the exact "reachable
+        by `ping -4` but the app says offline" symptom on a direct cable). Forcing an
+        IPv4 A-record lookup and connecting to that bare IP sidesteps it entirely, and
+        also makes later reconnects fast (no repeat mDNS lookup). No-op for a bare IP
+        or if IPv4 resolution fails (we then try the name as-is).
         """
         if self._resolved_ip is not None:
             return
@@ -318,10 +323,18 @@ class AgentClient:
             return  # it's an IPv4 address already
         except OSError:
             pass
+        ip = None
         try:
-            ip = socket.gethostbyname(self._active_addr)   # resolves .local via the OS resolver
+            ip = socket.gethostbyname(self._active_addr)   # IPv4-only (A record) resolver
         except OSError:
-            return  # leave address-based; resolution may work later
+            # Fall back to an explicit IPv4 getaddrinfo — some resolvers answer here
+            # for an mDNS .local name where gethostbyname didn't.
+            try:
+                infos = socket.getaddrinfo(self._active_addr, self.port,
+                                           socket.AF_INET, socket.SOCK_STREAM)
+                ip = infos[0][4][0] if infos else None
+            except OSError:
+                return  # leave address-based; resolution may work later
         if ip and ip != self._active_addr:
             self._resolved_ip = ip
             with self._lock:
@@ -367,6 +380,11 @@ class AgentClient:
                     # a bare IPv6 literal) shouldn't abort probing the others
                     last_conn_err = f"bad address '{addr}': {exc}"
                     continue
+            # Resolve a hostname (e.g. an mDNS .local name) to IPv4 and connect to that
+            # bare IP BEFORE the first request — otherwise httpx may resolve the name to
+            # the unit's IPv6 link-local (fe80::) and fail, even though it's reachable on
+            # IPv4. No-op for a bare IP or if resolution fails.
+            self._resolve_and_pin_ip()
             t0 = time.perf_counter()
             try:
                 data = self._request("GET", "/info")
