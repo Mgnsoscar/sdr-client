@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (
 from api import Fleet
 from api import models as m
 from state import PlanStore, ScheduleStore, new_scheduled_id
+from .plan_editor import PlanEditorDialog
 from .qt_adapter import DataHub
 from .theme import Palette
 
@@ -129,14 +130,20 @@ class _ScheduleDialog(QDialog):
     REMOVE = 2
 
     def __init__(self, plans: List[m.Plan], entry: Optional[m.ScheduledPlan] = None,
-                 default_day: Optional[date] = None, parent=None):
+                 default_day: Optional[date] = None, hub: Optional[DataHub] = None,
+                 parent=None):
         super().__init__(parent)
         self._plans = plans
         self._entry = entry
+        self._hub = hub
+        # This slot's own edited copy of the plan, if any. Seeded from the entry so
+        # reopening an already-customized slot keeps its edits. None = follow library.
+        self._plan_override: Optional[m.Plan] = (
+            entry.plan.model_copy(deep=True) if entry and entry.plan else None)
         self.result_entry: Optional[m.ScheduledPlan] = None
 
         self.setWindowTitle("Edit scheduled plan" if entry else "Add plan to timeline")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(440)
         self._build(default_day or date.today())
 
     def _build(self, default_day: date) -> None:
@@ -158,6 +165,22 @@ class _ScheduleDialog(QDialog):
                 i = self._plan.findData(self._entry.plan_id)
             self._plan.setCurrentIndex(i)
         form.addRow("Plan", self._plan)
+
+        # Per-slot plan editing: edit THIS slot's copy of the plan without touching the
+        # library plan or any other slot that scheduled it.
+        edit_row = QHBoxLayout()
+        self._edit_plan_btn = QPushButton("Edit plan contents…")
+        self._edit_plan_btn.setEnabled(self._hub is not None)
+        self._edit_plan_btn.clicked.connect(self._edit_plan_contents)
+        edit_row.addWidget(self._edit_plan_btn)
+        edit_row.addStretch(1)
+        form.addRow("", edit_row)
+        self._custom_lbl = QLabel("")
+        self._custom_lbl.setWordWrap(True)
+        self._custom_lbl.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+        form.addRow("", self._custom_lbl)
+        # Switching to a different plan drops any customization tied to the old one.
+        self._plan.currentIndexChanged.connect(self._on_plan_changed)
 
         self._start = QDateTimeEdit()
         self._start.setCalendarPopup(True)
@@ -194,6 +217,45 @@ class _ScheduleDialog(QDialog):
         self._buttons.rejected.connect(self.reject)
         outer.addWidget(self._buttons)
         self._revalidate()
+        self._sync_custom_label()
+
+    def _sync_custom_label(self) -> None:
+        if self._plan_override is not None:
+            self._custom_lbl.setText("✎ Customized for this slot — edits here don't "
+                                     "affect the library plan or any other slot.")
+            self._custom_lbl.setStyleSheet(f"font-size: 11px; color: {Palette.ACCENT};")
+        else:
+            self._custom_lbl.setText("Uses the library plan. “Edit plan contents…” "
+                                     "makes an independent copy just for this slot.")
+            self._custom_lbl.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+
+    def _on_plan_changed(self) -> None:
+        # Picking a different plan than the customization belongs to drops it.
+        pid = self._plan.currentData()
+        if self._plan_override is not None and self._plan_override.id != pid:
+            self._plan_override = None
+        self._sync_custom_label()
+        self._revalidate()
+
+    def _edit_plan_contents(self) -> None:
+        if self._hub is None:
+            return
+        pid = self._plan.currentData()
+        if not pid:
+            return
+        base = self._plan_override
+        if base is None or base.id != pid:
+            lib = next((p for p in self._plans if p.id == pid), None)
+            if lib is None:
+                QMessageBox.information(self, "Plan unavailable",
+                                       "That plan no longer exists, so its contents "
+                                       "can't be edited.")
+                return
+            base = lib.model_copy(deep=True)   # a fresh copy — never edit the library
+        dlg = PlanEditorDialog(self._hub, plan=base, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_plan is not None:
+            self._plan_override = dlg.result_plan
+            self._sync_custom_label()
 
     def _revalidate(self) -> None:
         ok = self._stop.dateTime() > self._start.dateTime() and self._plan.count() > 0
@@ -216,6 +278,7 @@ class _ScheduleDialog(QDialog):
             plan_name=self._plan.currentText().replace(" (deleted)", ""),
             start=self._start.dateTime().toString(Qt.DateFormat.ISODate),
             stop=self._stop.dateTime().toString(Qt.DateFormat.ISODate),
+            plan=self._plan_override,   # None = follow the library plan
         )
         self.accept()
 
@@ -575,8 +638,13 @@ class TimelineTab(QWidget):
         qd = self._cal.selectedDate()
         return date(qd.year(), qd.month(), qd.day())
 
+    def _plan_for(self, entry: m.ScheduledPlan) -> Optional[m.Plan]:
+        """This slot's effective plan: its own edited copy if it has one, else the
+        library plan it was seeded from (None if that's since been deleted)."""
+        return entry.plan or self._plans.get(entry.plan_id)
+
     def _resolve(self, entry: m.ScheduledPlan) -> Tuple[str, str]:
-        plan = self._plans.get(entry.plan_id)
+        plan = self._plan_for(entry)
         if plan is not None:
             return plan.name or plan.id, plan.description
         return (entry.plan_name or "(unknown plan)"), "plan no longer exists"
@@ -625,7 +693,7 @@ class TimelineTab(QWidget):
             blocks.append({
                 "id": entry.id, "name": name, "desc": desc, "start": s, "stop": e,
                 "state": self._entry_state(entry),
-                "armable": self._plans.get(entry.plan_id) is not None and now < s,
+                "armable": self._plan_for(entry) is not None and now < s,
             })
         self._planner.set_day(d, blocks)
 
@@ -663,7 +731,7 @@ class TimelineTab(QWidget):
         return out
 
     def _entry_state(self, entry: m.ScheduledPlan) -> str:
-        if self._plans.get(entry.plan_id) is None:
+        if self._plan_for(entry) is None:
             return "missing"
         runs = self._entry_runs(entry)
         if not runs:
@@ -680,7 +748,8 @@ class TimelineTab(QWidget):
             QMessageBox.information(
                 self, "No plans", "There are no plans yet. Create one in the Plans tab first.")
             return
-        dlg = _ScheduleDialog(plans, default_day=self._selected_date(), parent=self.window())
+        dlg = _ScheduleDialog(plans, default_day=self._selected_date(),
+                              hub=self.hub, parent=self.window())
         if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_entry is not None:
             self._store.upsert(dlg.result_entry)
             self._sync_units()
@@ -691,7 +760,8 @@ class TimelineTab(QWidget):
         entry = self._store.get(entry_id)
         if entry is None:
             return
-        dlg = _ScheduleDialog(self._plans.plans(), entry=entry, parent=self.window())
+        dlg = _ScheduleDialog(self._plans.plans(), entry=entry,
+                              hub=self.hub, parent=self.window())
         r = dlg.exec()
         if r == _ScheduleDialog.REMOVE:
             self._store.delete(entry_id)
@@ -720,7 +790,7 @@ class TimelineTab(QWidget):
         entry = self._store.get(entry_id)
         if entry is None or self.hub is None:
             return
-        plan = self._plans.get(entry.plan_id)
+        plan = self._plan_for(entry)
         if plan is None or not plan.items:
             QMessageBox.warning(self, "Cannot arm", "This plan no longer exists or has no sequences.")
             return
@@ -740,7 +810,7 @@ class TimelineTab(QWidget):
                            lambda: self.hub.fleet.clock_skew(hostnames))
 
     def _finish_preflight(self, entry: m.ScheduledPlan, result) -> None:
-        plan = self._plans.get(entry.plan_id)
+        plan = self._plan_for(entry)
         if plan is None:
             return
         max_skew = result[1] if isinstance(result, tuple) and len(result) == 2 else None

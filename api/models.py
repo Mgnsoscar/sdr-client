@@ -403,10 +403,15 @@ class ScheduledPlan(BaseModel):
     plan's on-air (T0), stop its off-air (T_end) — both absolute local ISO-8601.
     Client-only, like plans; execution (arming at the time) is a later step."""
     id: str
-    plan_id: str
+    plan_id: str                        # the library plan this slot was seeded from
     plan_name: str = ""                 # cached for display if the plan is gone
     start: str                          # ISO-8601 local datetime — on-air (T0)
     stop: str                           # ISO-8601 local datetime — off-air (T_end)
+    # An optional per-slot COPY of the plan. When set it is this slot's source of
+    # truth — edited here without touching the library plan or any other slot that
+    # scheduled the same plan. None means "follow the library plan by plan_id" (the
+    # default, and every pre-existing entry).
+    plan: Optional[Plan] = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
