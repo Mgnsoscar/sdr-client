@@ -406,7 +406,15 @@ class LibraryTab(QWidget):
                 self._drift.pop(host, None)
                 continue
             self._drift_err.pop(host, None)
-            d = diff_state(canon_lib, canon_plans, canon_sched, val)
+            # Compare against the slice this unit actually gets (shared + its kind),
+            # not the whole canonical library — otherwise a broadcaster would look
+            # "drifted" for every x410-only item it correctly never receives.
+            try:
+                utype = self.hub.fleet.get(host).unit_type
+            except KeyError:
+                utype = m.DEFAULT_UNIT_TYPE
+            scoped = m.scoped_library(canon_lib, utype)
+            d = diff_state(scoped, canon_plans, canon_sched, val)
             self._drift[host] = d
             if not d.in_sync:
                 drifted.append(host)

@@ -77,6 +77,7 @@ class AgentClient:
         keepalive_expiry: float = 120.0,
         addresses: Optional[List[str]] = None,
         label: str = "",
+        unit_type: str = m.DEFAULT_UNIT_TYPE,
     ):
         """
         hostname : the unit's STABLE identity — the fleet key, and the value used in
@@ -93,6 +94,7 @@ class AgentClient:
         """
         self.hostname = hostname                    # identity / fleet key (not a target)
         self.label = label or hostname              # display name
+        self.unit_type = unit_type or m.DEFAULT_UNIT_TYPE   # unit kind → library scope
         self.unit_id = unit_id or self.label        # agent's reported id (from /info)
         self.machine_id = ""                        # physical Pi fingerprint (from /info)
         self.api_key = api_key

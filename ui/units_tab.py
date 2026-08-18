@@ -156,7 +156,8 @@ class UnitsTab(QWidget):
         if cached_ip and cached_ip not in addresses:
             addresses.insert(0, cached_ip)
         client = AgentClient(entry.uid, label=entry.label,
-                             addresses=addresses, api_key=entry.api_key)
+                             addresses=addresses, api_key=entry.api_key,
+                             unit_type=entry.type)
         client.machine_id = entry.machine_id
         return client
 
