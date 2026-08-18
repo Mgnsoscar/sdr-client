@@ -673,7 +673,16 @@ class PlanEditorDialog(QDialog):
         except Exception:  # noqa: BLE001 — no library ⇒ author with none
             lib_seqs = []
         hosts = self._hub.fleet.hostnames()
-        by_host: Dict[str, List[m.Sequence]] = {h: list(lib_seqs) for h in hosts}
+        # Offer each unit only the sequences its type would actually receive (shared
+        # sequences plus ones scoped to its kind) — a plan can't arm a sequence a
+        # unit was never deployed.
+        def _for(host: str) -> List[m.Sequence]:
+            try:
+                utype = self._hub.fleet.get(host).unit_type
+            except Exception:  # noqa: BLE001
+                utype = m.DEFAULT_UNIT_TYPE
+            return [s for s in lib_seqs if m.applies_to_type(s.types, utype)]
+        by_host: Dict[str, List[m.Sequence]] = {h: _for(h) for h in hosts}
         self._seqs_loaded = True
         self._seqs_by_host = by_host
         self._timeline.set_sequences(by_host)

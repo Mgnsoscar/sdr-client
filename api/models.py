@@ -319,6 +319,10 @@ class CreateSequenceRequest(BaseModel):
     name: str
     description: str = ""
     steps: List[SequenceStep]
+    # Unit types this sequence targets; empty = shared/all. Carried through the
+    # library's create/update so a sequence keeps its scope. Only the library uses
+    # it; a live unit's agent ignores the field (it holds only its own sequences).
+    types: List[str] = []
 
 
 class StepFire(BaseModel):

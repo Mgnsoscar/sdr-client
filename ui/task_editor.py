@@ -33,8 +33,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from api.fleet import LIBRARY_HOST
 from .param_form import ParamForm
 from .qt_adapter import DataHub
+from .scope_selector import ScopeSelector
 from .theme import Palette
 
 DEFAULT_SCRIPTS_DIR = "/opt/sdr-agent/scripts"
@@ -86,6 +88,14 @@ class TaskEditorDialog(QDialog):
         self._desc = QLineEdit()
         self._desc.setPlaceholderText("optional")
         form.addRow("Description", self._desc)
+
+        # Which unit types this task deploys to. Only meaningful for the canonical
+        # library (a unit already holds just its own scoped items), so it's shown
+        # in library mode only.
+        self._scope: Optional[ScopeSelector] = None
+        if self.hostname == LIBRARY_HOST:
+            self._scope = ScopeSelector()
+            form.addRow("Applies to", self._scope)
         outer.addLayout(form)
 
         # Dynamic parameter form (from the script's argparse/paramkit spec)
@@ -291,6 +301,8 @@ class TaskEditorDialog(QDialog):
             return
         self._name.setText(entry.get("name", ""))
         self._desc.setText(entry.get("description", ""))
+        if self._scope is not None:
+            self._scope.set_from_types(entry.get("types") or [])
         self._autostart.setChecked(bool(entry.get("autostart")))
         self._restart.setChecked(bool(entry.get("restart_on_crash")))
         env = entry.get("env") or {}
@@ -381,6 +393,8 @@ class TaskEditorDialog(QDialog):
             "autostart": self._autostart.isChecked(),
             "restart_on_crash": self._restart.isChecked(),
         }
+        if self._scope is not None:
+            spec["types"] = self._scope.types()
 
         self._saving = True
         self._buttons.setEnabled(False)

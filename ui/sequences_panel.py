@@ -39,19 +39,23 @@ import yaml
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QScrollArea, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox,
+    QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import models as m
 from api import ramp as _ramp
+from config import UNIT_TYPES, UNIT_TYPE_LABELS
 from .arm_dialog import ArmDialog
 from .param_form import fmt_duration
 from .qt_adapter import DataHub
+from .scope_selector import scope_chip
 from .sequence_editor import SequenceEditorDialog
 from .sequence_log_dialog import SequenceLogDialog
 from .theme import Palette
 from .widgets import StatusPill
+
+_SEQ_FILTER_ALL = "__all__"
 
 # Seconds of headroom added when arming "now", so the first step is safely in the
 # future even with a little clock skew between the laptop and the unit.
@@ -142,11 +146,14 @@ def sequences_to_yaml(seqs: List[m.Sequence]) -> str:
     for seq in seqs:
         # mode="json" turns the StepAction enum into a plain string so PyYAML's
         # safe_dump can render it (and the file stays human-readable).
-        docs.append({
+        doc = {
             "name": seq.name,
             "description": seq.description,
             "steps": [s.model_dump(mode="json") for s in seq.steps],
-        })
+        }
+        if seq.types:                       # omit when shared, to keep files tidy
+            doc["types"] = list(seq.types)
+        docs.append(doc)
     return yaml.safe_dump({"sequences": docs}, sort_keys=False, allow_unicode=True)
 
 
@@ -172,7 +179,8 @@ class _SequenceRow(QFrame):
 
     def __init__(self, seq: m.Sequence, active_run: Optional[m.SequenceRun],
                  on_start, on_stop, on_edit, on_delete, on_log,
-                 can_edit: bool = True, can_run: bool = True):
+                 can_edit: bool = True, can_run: bool = True,
+                 show_scope: bool = False):
         super().__init__()
         self.seq = seq
         self.setObjectName("card")
@@ -210,6 +218,11 @@ class _SequenceRow(QFrame):
             mind.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
             box.addWidget(mind)
         lay.addLayout(box, stretch=1)
+
+        # Library view: show which unit types this sequence targets.
+        if show_scope:
+            lay.addWidget(scope_chip(seq.types),
+                          alignment=Qt.AlignmentFlag.AlignVCenter)
 
         # The run-state pill and Arm/Stop/Log belong to a live unit (can_run);
         # Edit/Delete are definition editing (can_edit, i.e. the Library).
@@ -301,6 +314,19 @@ class SequencesPanel(QWidget):
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         row.addWidget(self._status)
         row.addStretch(1)
+
+        # Library view: filter sequences by which unit type would receive them.
+        self._filter = None
+        if self.can_edit:
+            row.addWidget(QLabel("Show"))
+            self._filter = QComboBox()
+            self._filter.addItem("All units", _SEQ_FILTER_ALL)
+            for t in UNIT_TYPES:
+                self._filter.addItem(UNIT_TYPE_LABELS.get(t, t), t)
+            self._filter.setToolTip("Show only the sequences a unit of the chosen type "
+                                    "would receive (shared sequences always shown).")
+            self._filter.currentIndexChanged.connect(lambda _=0: self._rebuild())
+            row.addWidget(self._filter)
         outer.addLayout(row)
 
         scroll = QScrollArea()
@@ -446,6 +472,7 @@ class SequencesPanel(QWidget):
                     name=name,
                     description=entry.get("description", "") or "",
                     steps=entry.get("steps", []) or [],
+                    types=entry.get("types") or [],
                 )
             except Exception as exc:  # noqa: BLE001 — malformed step schema
                 bad_parse.append(f"• {name}: {exc}")
@@ -595,8 +622,12 @@ class SequencesPanel(QWidget):
                 self._list.addWidget(empty)
             return
 
+        want = self._filter.currentData() if self._filter is not None else _SEQ_FILTER_ALL
         active_n = 0
+        shown = 0
         for seq in self._sequences:
+            if want != _SEQ_FILTER_ALL and not m.applies_to_type(seq.types, want):
+                continue
             active = self._active_run_for(seq)
             if active is not None:
                 active_n += 1
@@ -605,9 +636,18 @@ class SequencesPanel(QWidget):
                 on_start=self._on_start, on_stop=self._on_stop,
                 on_edit=self._on_edit, on_delete=self._on_delete,
                 on_log=self._on_log, can_edit=self.can_edit, can_run=self.can_run,
+                show_scope=self.can_edit,
             ))
-        suffix = f" · {active_n} active" if active_n else ""
-        self._set_status(f"{len(self._sequences)} sequence(s){suffix}")
+            shown += 1
+        if shown == 0 and want != _SEQ_FILTER_ALL:
+            empty = QLabel("No sequences match this filter.")
+            empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
+            self._list.addWidget(empty)
+        active_txt = f" · {active_n} active" if active_n else ""
+        count_txt = (f"{len(self._sequences)} sequence(s)" if want == _SEQ_FILTER_ALL
+                     else f"{shown} of {len(self._sequences)} sequence(s) shown for "
+                          f"{UNIT_TYPE_LABELS.get(want, want)}")
+        self._set_status(f"{count_txt}{active_txt}")
 
     def _set_status(self, text: str, error: bool = False) -> None:
         color = Palette.CRASH if error else Palette.TEXT_FAINT
