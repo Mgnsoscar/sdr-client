@@ -155,6 +155,10 @@ class AgentInfo(BaseModel):
     python_version: str
     tasks: List[str]
     previous_version: Optional[str] = None   # OTA rollback target, if any
+    # Where this unit keeps scripts + the interpreter its tasks launch with — used
+    # to default a new task's fields per unit (X410 differs from the Pi layout).
+    scripts_dir: str = ""
+    task_interpreter: str = "python3"
 
 
 class UpdateResult(BaseModel):
