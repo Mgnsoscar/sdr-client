@@ -33,11 +33,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from api.fleet import LIBRARY_HOST
 from .param_form import ParamForm
 from .qt_adapter import DataHub
 from .theme import Palette
 
 DEFAULT_SCRIPTS_DIR = "/opt/sdr-agent/scripts"
+DEFAULT_INTERPRETER = "python3"
 
 
 class TaskEditorDialog(QDialog):
@@ -172,6 +174,15 @@ class TaskEditorDialog(QDialog):
             f"taskdlg_scripts:{self.hostname}",
             lambda: self.hub.fleet.get(self.hostname).list_scripts(),
         )
+        # Ask the unit where it keeps scripts and which interpreter its tasks use, so
+        # a NEW task's defaults match this unit (an X410 uses /data/... + system
+        # python3, not the Pi's /opt/... ) instead of the operator re-typing them.
+        # Skipped in library mode (no live unit to ask).
+        if self.hostname != LIBRARY_HOST:
+            self.hub.run_async(
+                f"taskdlg_info:{self.hostname}",
+                lambda: self.hub.fleet.get(self.hostname).info(),
+            )
         if self.existing_name:
             self.hub.run_async(
                 f"taskdlg_yaml:{self.hostname}",
@@ -219,6 +230,21 @@ class TaskEditorDialog(QDialog):
         # so the script can be re-fetched later if needed.
         if op == "taskdlg_params":
             self._params_inflight.discard(":".join(parts[2:]))
+
+        # Per-unit defaults for a NEW task: adopt the unit's scripts dir / interpreter
+        # unless the operator has already changed those fields. Best-effort — a failed
+        # /info just leaves the Pi defaults in place. Never touches an EDIT (its paths
+        # come from the existing command via _prefill_from_yaml).
+        if op == "taskdlg_info":
+            if not isinstance(result, Exception) and not self.existing_name:
+                sdir = getattr(result, "scripts_dir", "") or ""
+                interp = getattr(result, "task_interpreter", "") or ""
+                if sdir and self._scripts_dir.text().strip() == DEFAULT_SCRIPTS_DIR:
+                    self._scripts_dir.setText(sdir)
+                if interp and self._interp.text().strip() == DEFAULT_INTERPRETER:
+                    self._interp.setText(interp)
+                self._update_preview()
+            return
 
         if op == "taskdlg_save":
             self._saving = False
