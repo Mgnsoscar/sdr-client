@@ -100,14 +100,15 @@ class LibraryClient:
     def create_sequence(self, request: m.CreateSequenceRequest) -> m.Sequence:
         self._validate_steps(request.steps)
         seq = m.Sequence(id="seq_" + secrets.token_hex(4), name=request.name,
-                         description=request.description, steps=list(request.steps))
+                         description=request.description, steps=list(request.steps),
+                         types=list(request.types))
         self._store.upsert_sequence(seq)
         return seq
 
     def update_sequence(self, seq_id: str, request: m.CreateSequenceRequest) -> m.Sequence:
         self._validate_steps(request.steps)
         seq = m.Sequence(id=seq_id, name=request.name, description=request.description,
-                         steps=list(request.steps))
+                         steps=list(request.steps), types=list(request.types))
         self._store.upsert_sequence(seq)
         return seq
 
@@ -139,8 +140,25 @@ class LibraryClient:
             params = (extract_params(text) or {}).get("params", [])
         except Exception:  # noqa: BLE001 — a script we can't parse still uploads
             params = []
-        self._store.upsert_script(m.LibraryScript(name=filename, content=text, params=params))
+        # Preserve an existing script's unit-type scope across a content edit —
+        # re-uploading (Save) would otherwise reset it to shared.
+        prev = self._store.get_script(filename)
+        types = list(prev.types) if prev is not None else []
+        self._store.upsert_script(
+            m.LibraryScript(name=filename, content=text, params=params, types=types))
         return {"uploaded": filename}
+
+    def get_script_types(self, name: str) -> List[str]:
+        s = self._store.get_script(name)
+        return list(s.types) if s is not None else []
+
+    def set_script_types(self, name: str, types: List[str]) -> dict:
+        s = self._store.get_script(name)
+        if s is None:
+            raise LibraryError(f"unknown script: {name}")
+        s.types = list(types)
+        self._store.upsert_script(s)
+        return {"name": name, "types": list(types)}
 
     def delete_script(self, name: str) -> dict:
         users = [t.name for t in self._store.tasks()

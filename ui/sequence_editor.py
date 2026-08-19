@@ -28,7 +28,9 @@ from PyQt6.QtWidgets import (
 )
 
 from api import models as m
+from api.fleet import LIBRARY_HOST
 from .qt_adapter import DataHub
+from .scope_selector import ScopeSelector
 from .theme import Palette
 from .timeline_editor import TimelineEditor
 
@@ -50,6 +52,8 @@ class SequenceEditorDialog(QDialog):
             self._name.setText(sequence.name)
             self._desc.setText(sequence.description)
             self._timeline.set_steps(sequence.steps)
+            if self._scope is not None:
+                self._scope.set_from_types(getattr(sequence, "types", []) or [])
         self.hub.task_done.connect(self._on_task_done)
         self.finished.connect(lambda _=0: self._disconnect())
         self._load()
@@ -71,6 +75,13 @@ class SequenceEditorDialog(QDialog):
         self._desc = QLineEdit()
         self._desc.setPlaceholderText("optional")
         form.addRow("Description", self._desc)
+
+        # Library-only: which unit types this sequence targets. A live unit already
+        # holds only its own sequences, so scope is meaningless there.
+        self._scope: Optional[ScopeSelector] = None
+        if self.hostname == LIBRARY_HOST:
+            self._scope = ScopeSelector()
+            form.addRow("Applies to", self._scope)
         outer.addLayout(form)
 
         self._timeline = TimelineEditor()
@@ -158,6 +169,7 @@ class SequenceEditorDialog(QDialog):
             name=self._name.text().strip(),
             description=self._desc.text().strip(),
             steps=self._timeline.steps(),
+            types=self._scope.types() if self._scope is not None else [],
         )
         self._saving = True
         self._buttons.setEnabled(False)

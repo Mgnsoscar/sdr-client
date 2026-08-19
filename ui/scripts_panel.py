@@ -29,7 +29,9 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
+from api.fleet import LIBRARY_HOST
 from .qt_adapter import DataHub
+from .scope_selector import ScopeSelector
 from .theme import Palette
 
 Result = Tuple[str, Optional[str]]   # (name, error-or-None)
@@ -115,6 +117,16 @@ class ScriptsPanel(QWidget):
         self._delete_btn.setEnabled(False)
         row.addWidget(self._delete_btn)
 
+        # Library-only: the selected script's unit-type scope, applied immediately.
+        self._scope: Optional[ScopeSelector] = None
+        if self.hostname == LIBRARY_HOST:
+            row.addSpacing(8)
+            row.addWidget(QLabel("Applies to"))
+            self._scope = ScopeSelector()
+            self._scope.setEnabled(False)
+            self._scope.currentIndexChanged.connect(self._on_scope_changed)
+            row.addWidget(self._scope)
+
         self._status = QLabel("")
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         row.addWidget(self._status)
@@ -185,12 +197,15 @@ class ScriptsPanel(QWidget):
         self._save_btn.setEnabled(has)
         if not has:
             self._selected = None
+            if self._scope is not None:
+                self._scope.setEnabled(False)
             return
         name = cur.text()
         self._selected = name
         self._loading = True
         self._view.setPlainText(f"# loading {name} …")
         self._loading = False
+        self._load_scope(name)
         self.hub.run_async(
             f"scripts_get:{self.hostname}:{name}",
             lambda: self.hub.fleet.get(self.hostname).get_script(name),
@@ -216,6 +231,29 @@ class ScriptsPanel(QWidget):
             f"scripts_save:{self.hostname}:{name}",
             lambda: self.hub.fleet.get(self.hostname).upload_script(name, content),
         )
+
+    # ── Unit-type scope (library mode only) ──────────────────────────────────
+
+    def _load_scope(self, name: str) -> None:
+        if self._scope is None:
+            return
+        try:
+            types = self.hub.fleet.get(self.hostname).get_script_types(name)
+        except Exception:  # noqa: BLE001
+            types = []
+        self._scope.blockSignals(True)
+        self._scope.set_from_types(types)
+        self._scope.setEnabled(True)
+        self._scope.blockSignals(False)
+
+    def _on_scope_changed(self, *_) -> None:
+        if self._scope is None or not self._selected:
+            return
+        try:
+            self.hub.fleet.get(self.hostname).set_script_types(
+                self._selected, self._scope.types())
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"could not set scope: {exc}", error=True)
 
     def _confirm_discard(self) -> bool:
         """True if it's OK to discard the current unsaved edits."""
@@ -385,6 +423,8 @@ class ScriptsPanel(QWidget):
             self._delete_btn.setEnabled(False)
             self._download_btn.setEnabled(False)
             self._save_btn.setEnabled(False)
+            if self._scope is not None:
+                self._scope.setEnabled(False)
             return
 
         self._set_status(f"{len(names)} script(s)")

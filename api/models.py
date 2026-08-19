@@ -17,6 +17,28 @@ from pydantic import BaseModel
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Unit types + library scoping
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# A fleet is heterogeneous: mobile Raspberry Pi "broadcaster" units and stationary
+# Ettus "x410" units. One canonical library serves both — every item carries a
+# `types` list saying which unit kinds it applies to. Empty = shared (all kinds),
+# which is the back-compatible default so pre-existing items deploy everywhere.
+# These constants live here in the dependency-free models layer; config.py
+# re-exports them for the UI.
+
+UNIT_TYPES = ("broadcaster", "x410")
+UNIT_TYPE_LABELS = {"broadcaster": "Broadcaster", "x410": "X410"}
+DEFAULT_UNIT_TYPE = "broadcaster"
+
+
+def applies_to_type(item_types: List[str], unit_type: str) -> bool:
+    """Does a library item scoped to `item_types` apply to a unit of `unit_type`?
+    Empty `item_types` means shared → applies to every unit kind."""
+    return not item_types or unit_type in item_types
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Enums
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -86,6 +108,9 @@ class TaskConfig(BaseModel):
     resume_offset_mode: str = "arg"
     resume_offset_flag: str = "--start-offset"
     resume_offset_env: str = "SDR_START_OFFSET"
+    # Which unit types this task applies to (see UNIT_TYPES in config). Empty = shared
+    # (all types) — the default, so existing tasks deploy everywhere exactly as before.
+    types: List[str] = []
 
 
 class ProcessStatus(BaseModel):
@@ -284,12 +309,20 @@ class Sequence(BaseModel):
     name: str
     description: str = ""
     steps: List[SequenceStep]
+    # Unit types this sequence targets. Empty = shared/all. A sequence runs on one
+    # unit, so its tasks must exist there — the plan editor offers a sequence only for
+    # a unit whose type matches (or a shared sequence).
+    types: List[str] = []
 
 
 class CreateSequenceRequest(BaseModel):
     name: str
     description: str = ""
     steps: List[SequenceStep]
+    # Unit types this sequence targets; empty = shared/all. Carried through the
+    # library's create/update so a sequence keeps its scope. Only the library uses
+    # it; a live unit's agent ignores the field (it holds only its own sequences).
+    types: List[str] = []
 
 
 class StepFire(BaseModel):
@@ -428,6 +461,7 @@ class LibraryScript(BaseModel):
     name: str                          # script filename, e.g. "freq.py"
     content: str = ""                  # the script's source (for upload/edit/deploy)
     params: List[dict] = []            # argparse param schema (/scripts/{name}/params)
+    types: List[str] = []              # unit types this script targets; empty = shared/all
 
 
 class Library(BaseModel):
@@ -447,3 +481,15 @@ class DeployLibraryResult(BaseModel):
     sequences_upserted: List[str] = []
     sequences_deleted: List[str] = []
     sequences_skipped: List[str] = []
+
+
+def scoped_library(library: "Library", unit_type: str) -> "Library":
+    """The slice of `library` that applies to a unit of `unit_type`: scripts, tasks,
+    and sequences whose `types` is empty (shared) or includes `unit_type`. This is
+    what actually gets deployed to a unit, so a unit only ever holds definitions
+    meant for its kind."""
+    return Library(
+        scripts=[s for s in library.scripts if applies_to_type(s.types, unit_type)],
+        tasks=[t for t in library.tasks if applies_to_type(t.types, unit_type)],
+        sequences=[q for q in library.sequences if applies_to_type(q.types, unit_type)],
+    )

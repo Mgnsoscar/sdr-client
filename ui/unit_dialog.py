@@ -13,11 +13,12 @@ from typing import Callable, List, Optional
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton, QVBoxLayout,
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
+    QVBoxLayout,
 )
 
-from config import UnitEntry
+from config import UnitEntry, UNIT_TYPES, UNIT_TYPE_LABELS, DEFAULT_UNIT_TYPE
 from .theme import Palette
 
 
@@ -50,6 +51,9 @@ class UnitDialog(QDialog):
             self._label.setText(existing.label)
             self._addrs.setPlainText("\n".join(existing.addresses))
             self._key.setText(existing.api_key)
+            idx = self._type.findData(existing.type or DEFAULT_UNIT_TYPE)
+            if idx >= 0:
+                self._type.setCurrentIndex(idx)
         if self._discovered_provider is not None:
             self._refresh_discovered()
 
@@ -86,6 +90,13 @@ class UnitDialog(QDialog):
         self._label.setPlaceholderText("e.g. Broadcaster 1")
         self._label.textChanged.connect(self._revalidate)
         form.addRow("Name *", self._label)
+
+        # Unit type — selects which slice of the library this unit is deployed
+        # (shared items plus items scoped to its kind). Defaults to broadcaster.
+        self._type = QComboBox()
+        for t in UNIT_TYPES:
+            self._type.addItem(UNIT_TYPE_LABELS.get(t, t), t)
+        form.addRow("Type", self._type)
 
         self._addrs = QPlainTextEdit()
         self._addrs.setPlaceholderText(
@@ -216,5 +227,6 @@ class UnitDialog(QDialog):
             addresses=self._parse_addresses(),
             api_key=self._key.text().strip(),
             machine_id=self._picked_machine_id,
+            type=self._type.currentData() or DEFAULT_UNIT_TYPE,
         )
         self.accept()

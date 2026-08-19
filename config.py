@@ -29,6 +29,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_UNITS_FILE = Path(__file__).parent / "units.yaml"
 
+# Unit types + library-scope helpers live in api.models (the dependency-free layer);
+# re-exported here so `config.UNIT_TYPES` etc. keep working for the UI.
+from api.models import (  # noqa: E402
+    UNIT_TYPES, UNIT_TYPE_LABELS, DEFAULT_UNIT_TYPE, applies_to_type,
+)
+
 
 def new_unit_uid() -> str:
     """A permanent internal id for a unit — the stable key that plans/schedule and
@@ -43,10 +49,13 @@ class UnitEntry:
     api_key: str = ""
     uid: str = ""                                   # permanent identity (fleet key)
     machine_id: str = ""                            # learned /etc/machine-id fingerprint
+    type: str = DEFAULT_UNIT_TYPE                   # unit kind → which library it gets
 
     def __post_init__(self):
         if not self.uid:
             self.uid = new_unit_uid()
+        if not self.type:
+            self.type = DEFAULT_UNIT_TYPE
 
     @property
     def primary(self) -> str:
@@ -164,6 +173,7 @@ class ClientConfig:
         api_key = entry.get("api_key", default_key)
         uid = entry.get("uid", "") or ""
         machine_id = entry.get("machine_id", "") or ""
+        unit_type = entry.get("type") or DEFAULT_UNIT_TYPE
         # New format: label + addresses.
         if entry.get("label") or entry.get("addresses"):
             addrs = [a for a in (entry.get("addresses") or []) if a]
@@ -174,12 +184,12 @@ class ClientConfig:
             if not label:
                 return None
             return UnitEntry(label=label, addresses=addrs, api_key=api_key,
-                             uid=uid, machine_id=machine_id)
+                             uid=uid, machine_id=machine_id, type=unit_type)
         # Legacy format: a single hostname is both the label and the address.
         if entry.get("hostname"):
             h = entry["hostname"]
             return UnitEntry(label=h, addresses=[h], api_key=api_key,
-                             uid=uid, machine_id=machine_id)
+                             uid=uid, machine_id=machine_id, type=unit_type)
         return None
 
     def save(self, path: Path = DEFAULT_UNITS_FILE) -> None:
@@ -188,7 +198,7 @@ class ClientConfig:
             "api_key": self.api_key,
             "provision": self.provision.to_dict(),
             "units": [{"uid": u.uid, "label": u.label, "addresses": list(u.addresses),
-                       "api_key": u.api_key, "machine_id": u.machine_id}
+                       "api_key": u.api_key, "machine_id": u.machine_id, "type": u.type}
                       for u in self.units],
         }
         tmp = path.with_suffix(".yaml.tmp")

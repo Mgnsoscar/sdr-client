@@ -178,10 +178,14 @@ class Fleet:
 
     def deploy_all(self, library: "m.Library", prune: bool = True,
                    units: Optional[List[str]] = None) -> Dict[str, object]:
-        """Deploy the canonical library to each unit (default: all). Values are
+        """Deploy the canonical library to each unit (default: all). Each unit gets
+        only the slice scoped to its type (shared items + its own kind), so a
+        broadcaster never receives x410-only definitions and vice versa. Values are
         m.DeployLibraryResult or an Exception. Definition-only on every unit — a
         live broadcast is never interrupted."""
-        return self._fan_out(lambda c: c.deploy_library(library, prune), units)
+        return self._fan_out(
+            lambda c: c.deploy_library(m.scoped_library(library, c.unit_type), prune),
+            units)
 
     # ── Client-state replica (plans + schedule) ───────────────────────────────
 
@@ -233,7 +237,7 @@ class Fleet:
         it. Plans/schedule are pushed only after the library succeeds, so a unit
         never ends up with plans referencing sequences it doesn't yet have."""
         def do(c):
-            res = c.deploy_library(library, prune)
+            res = c.deploy_library(m.scoped_library(library, c.unit_type), prune)
             c.put_plans(plans)
             c.put_schedule(schedule)
             return res

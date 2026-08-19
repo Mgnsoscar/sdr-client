@@ -18,22 +18,26 @@ import yaml
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
     QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import models as m
 from api.fleet import LIBRARY_HOST
+from config import UNIT_TYPES, UNIT_TYPE_LABELS
 from state import LibraryError
 from .qt_adapter import DataHub
+from .scope_selector import scope_chip
 from .task_editor import TaskEditorDialog
 from .theme import Palette
 
+_FILTER_ALL = "__all__"
+
 
 class _LibTaskRow(QFrame):
-    """One library task: name, description, Edit / Delete."""
+    """One library task: name, description, scope chip, Edit / Delete."""
 
-    def __init__(self, task: m.ProcessStatus, on_edit, on_delete):
+    def __init__(self, task: m.ProcessStatus, types, on_edit, on_delete):
         super().__init__()
         self.setObjectName("card")
         lay = QHBoxLayout(self)
@@ -50,6 +54,7 @@ class _LibTaskRow(QFrame):
             desc.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
             box.addWidget(desc)
         lay.addLayout(box, stretch=1)
+        lay.addWidget(scope_chip(types), alignment=Qt.AlignmentFlag.AlignVCenter)
 
         self._edit = QPushButton("Edit")
         self._delete = QPushButton("Delete")
@@ -93,6 +98,17 @@ class LibraryTasksPanel(QWidget):
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         row.addWidget(self._status)
         row.addStretch(1)
+
+        # Filter by which unit type would receive a task (shared items always show).
+        row.addWidget(QLabel("Show"))
+        self._filter = QComboBox()
+        self._filter.addItem("All units", _FILTER_ALL)
+        for t in UNIT_TYPES:
+            self._filter.addItem(UNIT_TYPE_LABELS.get(t, t), t)
+        self._filter.setToolTip("Show only the tasks a unit of the chosen type would "
+                                "receive (shared tasks always shown).")
+        self._filter.currentIndexChanged.connect(lambda _=0: self._refresh())
+        row.addWidget(self._filter)
         outer.addLayout(row)
 
         scroll = QScrollArea()
@@ -128,9 +144,29 @@ class LibraryTasksPanel(QWidget):
             self._list.addWidget(empty)
             self._set_status("")
             return
+        want = self._filter.currentData()
+        shown = 0
         for t in tasks:
-            self._list.addWidget(_LibTaskRow(t, self._on_edit, self._on_delete))
-        self._set_status(f"{len(tasks)} task(s)")
+            types = self._types_for(t.name)
+            if want != _FILTER_ALL and not m.applies_to_type(types, want):
+                continue
+            self._list.addWidget(_LibTaskRow(t, types, self._on_edit, self._on_delete))
+            shown += 1
+        if shown == 0:
+            empty = QLabel("No tasks match this filter.")
+            empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
+            self._list.addWidget(empty)
+        suffix = "" if want == _FILTER_ALL else f" shown for {UNIT_TYPE_LABELS.get(want, want)}"
+        self._set_status(f"{shown} of {len(tasks)} task(s){suffix}")
+
+    def _types_for(self, name: str) -> list:
+        """A task's unit-type scope, read from the shared library store (list_tasks
+        returns a lightweight status without it)."""
+        store = self.hub.fleet.library_store()
+        if store is None:
+            return []
+        t = store.get_task(name)
+        return list(t.types) if t is not None else []
 
     # ── Actions ──────────────────────────────────────────────────────────────
 
