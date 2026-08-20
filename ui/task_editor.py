@@ -45,11 +45,12 @@ DEFAULT_INTERPRETER = "python3"
 
 class TaskEditorDialog(QDialog):
     def __init__(self, hub: DataHub, hostname: str,
-                 existing_name: Optional[str] = None, parent=None):
+                 existing_name: Optional[str] = None, default_types=None, parent=None):
         super().__init__(parent)
         self.hub = hub
         self.hostname = hostname
         self.existing_name = existing_name        # None -> create, else edit
+        self._default_types = list(default_types) if default_types else None
         self._param_specs: Dict[str, list] = {}   # script -> [param dict, ...]
         self._pending_prefill: Optional[List[str]] = None  # edit-mode command args to prefill
         self._edit_script: Optional[str] = None            # script to select once loaded
@@ -96,6 +97,10 @@ class TaskEditorDialog(QDialog):
         self._scope: Optional[ScopeSelector] = None
         if self.hostname == LIBRARY_HOST:
             self._scope = ScopeSelector()
+            # A new task opened from a unit-type view defaults to that type; editing
+            # loads the task's own scope (see _load).
+            if self.existing_name is None and self._default_types is not None:
+                self._scope.set_from_types(self._default_types)
             form.addRow("Applies to", self._scope)
         outer.addLayout(form)
 

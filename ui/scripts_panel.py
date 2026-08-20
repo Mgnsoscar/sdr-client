@@ -29,9 +29,11 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
+from api import models as m
 from api.fleet import LIBRARY_HOST
+from config import DEFAULT_UNIT_TYPE, UNIT_TYPE_LABELS
 from .qt_adapter import DataHub
-from .scope_selector import ScopeSelector
+from .scope_selector import ScopeSelector, confirm_delete
 from .theme import Palette
 
 Result = Tuple[str, Optional[str]]   # (name, error-or-None)
@@ -72,6 +74,8 @@ class ScriptsPanel(QWidget):
         super().__init__(parent)
         self.hostname = hostname
         self.hub = hub
+        self._active_type = DEFAULT_UNIT_TYPE   # library view: set by the unit-type selector
+        self._upload_new: set = set()           # names uploaded that didn't exist before
         self._selected: Optional[str] = None
         self._pending_download: Optional[str] = None
         self._dirty = False           # unsaved edits in the viewer?
@@ -170,6 +174,17 @@ class ScriptsPanel(QWidget):
 
     def on_shown(self) -> None:
         self._refresh()
+
+    def set_active_type(self, unit_type: str) -> None:
+        self._active_type = unit_type
+        if self._scope is not None:        # library mode: re-filter the list
+            self._refresh()
+
+    def _types_for(self, name: str) -> list:
+        try:
+            return self.hub.fleet.get(self.hostname).get_script_types(name)
+        except Exception:  # noqa: BLE001
+            return []
 
     def _refresh(self) -> None:
         if not self._confirm_discard():
@@ -284,6 +299,14 @@ class ScriptsPanel(QWidget):
                 self._set_status(f"could not read {os.path.basename(p)}: {exc}", error=True)
                 return
         client = self.hub.fleet.get(self.hostname)
+        # Remember which of these are NEW, so we can scope them to the active unit
+        # type after upload (an overwrite of an existing script keeps its scope).
+        if self._scope is not None:
+            try:
+                existing = set(client.list_scripts())
+            except Exception:  # noqa: BLE001
+                existing = set()
+            self._upload_new = {name for name, _ in files if name not in existing}
         self._set_status(f"uploading {len(files)} file(s)…")
         self.hub.run_async(f"scripts_upload:{self.hostname}", lambda: _upload_many(client, files))
 
@@ -316,19 +339,33 @@ class ScriptsPanel(QWidget):
         name = self._selected
         if not name:
             return
-        resp = QMessageBox.question(
-            self, "Delete script",
-            f"Delete '{name}' from {self.hostname}?\nThis cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if resp != QMessageBox.StandardButton.Yes:
-            return
+        # Library (per-type view): a shared script can be removed from just this type;
+        # otherwise a plain confirm.
+        if self._scope is not None:
+            action = confirm_delete(self, "script", name, self._types_for(name),
+                                    self._active_type, self._unshare_script)
+            if action == "cancel":
+                return
+            if action == "unshared":
+                self._refresh()
+                return
+        else:
+            resp = QMessageBox.question(
+                self, "Delete script",
+                f"Delete '{name}' from {self.hostname}?\nThis cannot be undone.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)
+            if resp != QMessageBox.StandardButton.Yes:
+                return
         self._set_status(f"deleting {name}…")
         self.hub.run_async(
             f"scripts_delete:{self.hostname}:{name}",
             lambda: self.hub.fleet.get(self.hostname).delete_script(name),
         )
+
+    def _unshare_script(self, name: str, new_types: list) -> None:
+        """Re-scope a shared script off the active type (keep it on the others)."""
+        self.hub.fleet.get(self.hostname).set_script_types(name, list(new_types))
 
     # ── Result routing ───────────────────────────────────────────────────────
 
@@ -387,6 +424,18 @@ class ScriptsPanel(QWidget):
             self._loading = False
             self._refresh()
         elif op == "scripts_upload":
+            # Scope newly-uploaded scripts to the active unit type (library mode), so
+            # uploading in a type view needs no manual assignment. Only files that
+            # succeeded and didn't previously exist are scoped.
+            if self._scope is not None and self._upload_new:
+                ok = {n for n, e in result if e is None} if isinstance(result, list) else set()
+                client = self.hub.fleet.get(self.hostname)
+                for name in (self._upload_new & ok):
+                    try:
+                        client.set_script_types(name, [self._active_type])
+                    except Exception:  # noqa: BLE001
+                        pass
+            self._upload_new = set()
             self._report("Upload", result)
             self._refresh()
 
@@ -406,6 +455,12 @@ class ScriptsPanel(QWidget):
 
     def _populate(self, names: List[str]) -> None:
         keep = self._selected
+        total = len(names)
+        # Library mode: show only the scripts a unit of the active type would receive
+        # (its own + shared). A plain unit view (no scope control) shows everything.
+        if self._scope is not None:
+            names = [n for n in names
+                     if m.applies_to_type(self._types_for(n), self._active_type)]
         self._list.blockSignals(True)
         self._list.clear()
         for n in names:
@@ -413,7 +468,12 @@ class ScriptsPanel(QWidget):
         self._list.blockSignals(False)
 
         if not names:
-            self._set_status("no scripts on this unit")
+            if self._scope is not None:
+                lbl = UNIT_TYPE_LABELS.get(self._active_type, self._active_type)
+                self._set_status(f"no {lbl} scripts yet — Upload to add them"
+                                 + (f" ({total} in the library for other types)" if total else ""))
+            else:
+                self._set_status("no scripts on this unit")
             self._loading = True
             self._view.clear()
             self._loading = False
@@ -427,7 +487,11 @@ class ScriptsPanel(QWidget):
                 self._scope.setEnabled(False)
             return
 
-        self._set_status(f"{len(names)} script(s)")
+        if self._scope is not None:
+            lbl = UNIT_TYPE_LABELS.get(self._active_type, self._active_type)
+            self._set_status(f"{len(names)} script(s) for {lbl} · {total} total")
+        else:
+            self._set_status(f"{len(names)} script(s)")
         if keep in names:
             items = self._list.findItems(keep, Qt.MatchFlag.MatchExactly)
             if items:

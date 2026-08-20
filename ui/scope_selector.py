@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import List
 
-from PyQt6.QtWidgets import QComboBox, QLabel
+from PyQt6.QtWidgets import QComboBox, QLabel, QMessageBox
 
 from config import UNIT_TYPES, UNIT_TYPE_LABELS
 from .theme import Palette
@@ -35,6 +35,63 @@ def types_to_scope(types: List[str]) -> str:
 def scope_to_types(scope: str) -> List[str]:
     """The `types` list to store for a chosen scope. Shared → [] (applies to all)."""
     return [] if scope == SHARED else [scope]
+
+
+def is_shared(types: List[str]) -> bool:
+    """True when an item applies to every unit kind (empty list, or all types named)."""
+    return types_to_scope(types) == SHARED
+
+
+def types_without(active_type: str) -> List[str]:
+    """The `types` an item should keep when it's removed from `active_type` only —
+    i.e. every OTHER unit kind. With today's two kinds this is the single other type;
+    it stays correct if the roster grows."""
+    return [t for t in UNIT_TYPES if t != active_type]
+
+
+def confirm_delete(parent, kind: str, name: str, types: List[str], active_type: str,
+                   unshare) -> str:
+    """Ask how to remove a library item from a per-unit-type view, and return the
+    chosen action: 'delete' (caller deletes it outright), 'unshared' (already
+    re-scoped off this type — caller just refreshes), or 'cancel'.
+
+    A type-only item is a plain confirm. A SHARED item (applies to every type) offers
+    to remove it from `active_type` only — keeping it on the others via
+    `unshare(name, remaining_types)` — or to delete it everywhere, so a shared item
+    is never silently lost from a single-type view."""
+    label = UNIT_TYPE_LABELS.get(active_type, active_type)
+    if not is_shared(types):
+        resp = QMessageBox.question(
+            parent, f"Delete {kind}",
+            f"Delete {kind} '{name}' from the {label} library?\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        return "delete" if resp == QMessageBox.StandardButton.Yes else "cancel"
+
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setWindowTitle(f"Delete shared {kind}")
+    box.setText(f"'{name}' is a shared {kind} — it applies to every unit type.")
+    box.setInformativeText(f"Remove it from {label} only (keep it on the other "
+                           "unit types), or delete it everywhere?")
+    remove_btn = box.addButton(f"Remove from {label} only",
+                               QMessageBox.ButtonRole.AcceptRole)
+    delete_btn = box.addButton("Delete everywhere",
+                               QMessageBox.ButtonRole.DestructiveRole)
+    box.addButton(QMessageBox.StandardButton.Cancel)
+    box.setDefaultButton(remove_btn)
+    box.exec()
+    clicked = box.clickedButton()
+    if clicked is remove_btn:
+        try:
+            unshare(name, types_without(active_type))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(parent, "Could not update scope", str(exc))
+            return "cancel"
+        return "unshared"
+    if clicked is delete_btn:
+        return "delete"
+    return "cancel"
 
 
 def scope_label(types: List[str]) -> str:

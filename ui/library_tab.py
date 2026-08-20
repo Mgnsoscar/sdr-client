@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
 from api import models as m
 from api.client import AgentConnectionError
 from api.fleet import LIBRARY_HOST
+from config import UNIT_TYPES, UNIT_TYPE_LABELS, DEFAULT_UNIT_TYPE
 from state import (
     LibraryStore, PlanStore, ScheduleStore, pull_library, pull_everything,
     diff_state, UnitSnapshot,
@@ -67,6 +68,10 @@ class LibraryTab(QWidget):
         self._restore_mode = "replace"   # "merge" | "replace", chosen per Restore
         self._drift = {}          # hostname -> LibraryDiff (last check)
         self._drift_err = {}      # hostname -> error string (unreachable / failed)
+        # The library is one store presented as a per-unit-type view: the Tasks /
+        # Sequences / Scripts sub-tabs show the slice for the selected type (its own
+        # items + shared ones), and new items are scoped to it automatically.
+        self._active_type = DEFAULT_UNIT_TYPE
         self._build()
         self.hub.task_done.connect(self._on_task_done)
         # Re-check a unit's definitions against the canonical library whenever it
@@ -130,6 +135,29 @@ class LibraryTab(QWidget):
         self._units_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         outer.addWidget(self._units_status)
 
+        # Unit-type selector — the library is viewed one unit kind at a time. Drives
+        # the Tasks / Sequences / Scripts sub-tabs (Plans are cross-unit, so it's
+        # hidden there). New items in a type view are scoped to that type by default.
+        self._type_bar = QWidget()
+        typerow = QHBoxLayout(self._type_bar)
+        typerow.setContentsMargins(0, 0, 0, 0)
+        typerow.setSpacing(6)
+        lbl = QLabel("Library for")
+        lbl.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
+        typerow.addWidget(lbl)
+        self._type_buttons: List[QPushButton] = []
+        for t in UNIT_TYPES:
+            b = QPushButton(UNIT_TYPE_LABELS.get(t, t))
+            b.setObjectName("tab")
+            b.setCheckable(True)
+            b.setToolTip(f"Show and manage the {UNIT_TYPE_LABELS.get(t, t)} library "
+                         "(its own items + shared ones).")
+            b.clicked.connect(lambda _c, ut=t: self._set_active_type(ut))
+            typerow.addWidget(b)
+            self._type_buttons.append(b)
+        typerow.addStretch(1)
+        outer.addWidget(self._type_bar)
+
         # Sub-tab bar
         subbar = QHBoxLayout()
         subbar.setSpacing(6)
@@ -156,12 +184,27 @@ class LibraryTab(QWidget):
         self._stack.addWidget(self._scripts_panel)      # 2 Scripts
         self._stack.addWidget(self._plans_panel)        # 3 Plans
         outer.addWidget(self._stack, stretch=1)
+        self._set_active_type(self._active_type)   # seed the type views + buttons
         self._select_subtab(0)
+
+    # ── Unit-type view ───────────────────────────────────────────────────────────
+
+    def _set_active_type(self, unit_type: str) -> None:
+        """Point the type-scoped sub-tabs (Tasks / Sequences / Scripts) at one unit
+        kind: they show that type's slice and default new items to it."""
+        self._active_type = unit_type
+        for b, t in zip(self._type_buttons, UNIT_TYPES):
+            b.setChecked(t == unit_type)
+        for panel in (self._tasks_panel, self._sequences_panel, self._scripts_panel):
+            if hasattr(panel, "set_active_type"):
+                panel.set_active_type(unit_type)
 
     def _select_subtab(self, idx: int) -> None:
         self._stack.setCurrentIndex(idx)
         for i, b in enumerate(self._subtab_buttons):
             b.setChecked(i == idx)
+        # Plans are cross-unit; the type selector only applies to the definition tabs.
+        self._type_bar.setVisible(self.SUBTABS[idx] != "Plans")
         w = self._stack.currentWidget()
         if hasattr(w, "on_shown"):
             w.on_shown()

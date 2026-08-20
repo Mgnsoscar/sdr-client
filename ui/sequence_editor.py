@@ -37,12 +37,13 @@ from .timeline_editor import TimelineEditor
 
 class SequenceEditorDialog(QDialog):
     def __init__(self, hub: DataHub, hostname: str,
-                 sequence: Optional[m.Sequence] = None, parent=None):
+                 sequence: Optional[m.Sequence] = None, default_types=None, parent=None):
         super().__init__(parent)
         self.hub = hub
         self.hostname = hostname
         self._sequence = sequence            # None -> create, else edit
         self._editing = sequence is not None
+        self._default_types = list(default_types) if default_types else None
         self._saving = False
 
         self.setWindowTitle("Edit sequence" if self._editing else "New sequence")
@@ -54,6 +55,9 @@ class SequenceEditorDialog(QDialog):
             self._timeline.set_steps(sequence.steps)
             if self._scope is not None:
                 self._scope.set_from_types(getattr(sequence, "types", []) or [])
+        elif self._scope is not None and self._default_types is not None:
+            # New sequence opened from a unit-type view — default its scope to that type.
+            self._scope.set_from_types(self._default_types)
         self.hub.task_done.connect(self._on_task_done)
         self.finished.connect(lambda _=0: self._disconnect())
         self._load()

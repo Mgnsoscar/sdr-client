@@ -39,17 +39,17 @@ import yaml
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox,
+    QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox,
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import models as m
 from api import ramp as _ramp
-from config import UNIT_TYPES, UNIT_TYPE_LABELS
+from config import UNIT_TYPE_LABELS, DEFAULT_UNIT_TYPE
 from .arm_dialog import ArmDialog
 from .param_form import fmt_duration
 from .qt_adapter import DataHub
-from .scope_selector import scope_chip
+from .scope_selector import scope_chip, confirm_delete
 from .sequence_editor import SequenceEditorDialog
 from .sequence_log_dialog import SequenceLogDialog
 from .theme import Palette
@@ -272,6 +272,7 @@ class SequencesPanel(QWidget):
         #   Unit card→ can_edit=False, can_run=True   (run what's deployed, no editing)
         self.can_edit = can_edit
         self.can_run = can_run
+        self._active_type = DEFAULT_UNIT_TYPE   # library view: set by the unit-type selector
         self._sequences: List[m.Sequence] = []
         self._runs: List[m.SequenceRun] = []
         self._seq_loaded = False
@@ -315,18 +316,8 @@ class SequencesPanel(QWidget):
         row.addWidget(self._status)
         row.addStretch(1)
 
-        # Library view: filter sequences by which unit type would receive them.
-        self._filter = None
-        if self.can_edit:
-            row.addWidget(QLabel("Show"))
-            self._filter = QComboBox()
-            self._filter.addItem("All units", _SEQ_FILTER_ALL)
-            for t in UNIT_TYPES:
-                self._filter.addItem(UNIT_TYPE_LABELS.get(t, t), t)
-            self._filter.setToolTip("Show only the sequences a unit of the chosen type "
-                                    "would receive (shared sequences always shown).")
-            self._filter.currentIndexChanged.connect(lambda _=0: self._rebuild())
-            row.addWidget(self._filter)
+        # In the Library the unit-type view is driven by the tab's selector
+        # (set_active_type); a unit card shows only its own deployed sequences.
         outer.addLayout(row)
 
         scroll = QScrollArea()
@@ -366,7 +357,11 @@ class SequencesPanel(QWidget):
     # ── Actions ──────────────────────────────────────────────────────────────
 
     def _on_new(self) -> None:
-        dlg = SequenceEditorDialog(self.hub, self.hostname, parent=self.window())
+        # New sequences default to the active unit type; the editor's scope picker
+        # can widen them to Shared.
+        dlg = SequenceEditorDialog(self.hub, self.hostname,
+                                   default_types=[self._active_type] if self.can_edit else None,
+                                   parent=self.window())
         if dlg.exec():
             self._refresh()
 
@@ -414,20 +409,38 @@ class SequencesPanel(QWidget):
         )
 
     def _on_delete(self, seq: m.Sequence) -> None:
-        resp = QMessageBox.question(
-            self, "Delete sequence",
-            f"Delete sequence '{seq.name or seq.id}' from {self.hostname}?\n"
-            f"This cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if resp != QMessageBox.StandardButton.Yes:
-            return
-        self._set_status(f"deleting {seq.name or seq.id}…")
+        label = seq.name or seq.id
+        # In the Library (per-type view) a shared sequence can be removed from just
+        # this unit type; a unit card is a plain confirm (its sequences aren't scoped).
+        if self.can_edit:
+            action = confirm_delete(self, "sequence", label, seq.types,
+                                    self._active_type,
+                                    lambda _n, new_types: self._unshare_sequence(seq, new_types))
+            if action == "cancel":
+                return
+            if action == "unshared":
+                self._refresh()
+                return
+        else:
+            resp = QMessageBox.question(
+                self, "Delete sequence",
+                f"Delete sequence '{label}' from {self.hostname}?\nThis cannot be undone.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)
+            if resp != QMessageBox.StandardButton.Yes:
+                return
+        self._set_status(f"deleting {label}…")
         self.hub.run_async(
             f"seq_delete:{self.hostname}:{seq.id}",
             lambda: self.hub.fleet.get(self.hostname).delete_sequence(seq.id),
         )
+
+    def _unshare_sequence(self, seq: m.Sequence, new_types: list) -> None:
+        """Re-scope a shared sequence off the active type (keep it on the others),
+        via update_sequence with a request rebuilt from the sequence."""
+        req = m.CreateSequenceRequest(name=seq.name, description=seq.description,
+                                      steps=seq.steps, types=list(new_types))
+        self.hub.fleet.get(self.hostname).update_sequence(seq.id, req)
 
     # ── Export / import (deploy a sequence set across units) ─────────────────
 
@@ -622,7 +635,9 @@ class SequencesPanel(QWidget):
                 self._list.addWidget(empty)
             return
 
-        want = self._filter.currentData() if self._filter is not None else _SEQ_FILTER_ALL
+        # Library view is scoped to the selected unit type (its own + shared); a unit
+        # card is already scoped to itself, so it shows everything it holds.
+        want = self._active_type if self.can_edit else _SEQ_FILTER_ALL
         active_n = 0
         shown = 0
         for seq in self._sequences:
@@ -640,14 +655,22 @@ class SequencesPanel(QWidget):
             ))
             shown += 1
         if shown == 0 and want != _SEQ_FILTER_ALL:
-            empty = QLabel("No sequences match this filter.")
+            empty = QLabel(f"No {UNIT_TYPE_LABELS.get(want, want)} sequences yet. "
+                           "Click “New sequence” to add one (set its scope to Shared "
+                           "in the editor to apply it to all units).")
             empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
+            empty.setWordWrap(True)
             self._list.addWidget(empty)
         active_txt = f" · {active_n} active" if active_n else ""
         count_txt = (f"{len(self._sequences)} sequence(s)" if want == _SEQ_FILTER_ALL
-                     else f"{shown} of {len(self._sequences)} sequence(s) shown for "
-                          f"{UNIT_TYPE_LABELS.get(want, want)}")
+                     else f"{shown} sequence(s) for {UNIT_TYPE_LABELS.get(want, want)} "
+                          f"· {len(self._sequences)} total")
         self._set_status(f"{count_txt}{active_txt}")
+
+    def set_active_type(self, unit_type: str) -> None:
+        self._active_type = unit_type
+        if self.can_edit:
+            self._rebuild()
 
     def _set_status(self, text: str, error: bool = False) -> None:
         color = Palette.CRASH if error else Palette.TEXT_FAINT
