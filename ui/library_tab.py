@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
 )
 
 from api import models as m
+from api.client import AgentConnectionError
 from api.fleet import LIBRARY_HOST
 from state import (
     LibraryStore, PlanStore, ScheduleStore, pull_library, pull_everything,
@@ -344,7 +345,12 @@ class LibraryTab(QWidget):
             QMessageBox.warning(self, "Deploy failed", f"{result}")
             return
         ok = {h: r for h, r in result.items() if not isinstance(r, Exception)}
-        bad = {h: r for h, r in result.items() if isinstance(r, Exception)}
+        # Offline units were skipped by the reachability gate — that's expected, not
+        # a failure. Only *other* exceptions are real deploy failures.
+        offline = {h: r for h, r in result.items()
+                   if isinstance(r, AgentConnectionError)}
+        failed = {h: r for h, r in result.items()
+                  if isinstance(r, Exception) and not isinstance(r, AgentConnectionError)}
         notes = []
         for h, r in ok.items():
             parts = []
@@ -354,20 +360,36 @@ class LibraryTab(QWidget):
                 parts.append(f"sequences with active runs kept: {', '.join(r.sequences_skipped)}")
             if parts:
                 notes.append(f"{self._label(h)}: " + "; ".join(parts))
-        self._set_status(
-            f"deployed to {len(ok)} unit(s)" + (f" · {len(bad)} failed" if bad else ""),
-            error=bool(bad))
-        if bad or notes:
+        status = f"deployed to {len(ok)} unit(s)"
+        if offline:
+            status += f" · {len(offline)} offline"
+        if failed:
+            status += f" · {len(failed)} failed"
+        self._set_status(status, error=bool(failed))
+        if failed or notes:
             lines = []
-            if bad:
+            if failed:
                 lines.append("Failed (redeploy when reachable):")
-                lines += [f"• {self._label(h)}: {e}" for h, e in bad.items()]
+                lines += [f"• {self._label(h)}: {e}" for h, e in failed.items()]
+            if offline:
+                if lines:
+                    lines.append("")
+                lines.append("Skipped — offline (redeploy when back online):")
+                lines += [f"• {self._label(h)}" for h in offline]
             if notes:
                 if lines:
                     lines.append("")
                 lines.append("Left in place because in use (nothing on air was touched):")
                 lines += [f"• {n}" for n in notes]
             QMessageBox.warning(self, "Deploy — details", "\n".join(lines))
+        elif offline:
+            # No real failures — just some units offline. Benign, so inform (not warn).
+            skipped = "\n".join(f"• {self._label(h)}" for h in offline)
+            QMessageBox.information(
+                self, "Deploy complete",
+                f"Deployed to {len(ok)} unit(s).\n\n"
+                f"{len(offline)} unit(s) skipped — offline (redeploy when back "
+                f"online):\n{skipped}")
         else:
             QMessageBox.information(self, "Deploy complete", f"Deployed to {len(ok)} unit(s).")
 

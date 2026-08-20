@@ -16,7 +16,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, List, Optional, Tuple
 
-from .client import AgentClient
+from .client import AgentClient, AgentConnectionError
 from . import models as m
 
 logger = logging.getLogger(__name__)
@@ -130,6 +130,22 @@ class Fleet:
             pass
         return results
 
+    def _fan_out_reachable(
+        self, fn: Callable[[AgentClient], object],
+        units: Optional[List[str]] = None,
+    ) -> Dict[str, object]:
+        """Like _fan_out, but each unit is health-checked FIRST and the (slow) work
+        is skipped on units that don't answer. An unreachable unit surfaces as an
+        AgentConnectionError in its slot instead of stalling on several connect-
+        timeouts — so a fleet with offline units checks/deploys quickly, and callers
+        can tell 'offline' apart from a real failure (and from drift). health()'s
+        short connect-timeout means the gate costs one fast probe, run concurrently."""
+        def guarded(c: AgentClient):
+            if not c.health():
+                raise AgentConnectionError("offline")
+            return fn(c)
+        return self._fan_out(guarded, units)
+
     # ── Broadcast operations ──────────────────────────────────────────────────────
 
     def health_all(self, units: Optional[List[str]] = None) -> Dict[str, bool]:
@@ -183,7 +199,7 @@ class Fleet:
         broadcaster never receives x410-only definitions and vice versa. Values are
         m.DeployLibraryResult or an Exception. Definition-only on every unit — a
         live broadcast is never interrupted."""
-        return self._fan_out(
+        return self._fan_out_reachable(
             lambda c: c.deploy_library(m.scoped_library(library, c.unit_type), prune),
             units)
 
@@ -191,9 +207,10 @@ class Fleet:
 
     def snapshots_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
         """Each unit's full snapshot (library + plans + schedule) for drift checks.
-        Values are state.UnitSnapshot or an Exception."""
+        Values are state.UnitSnapshot or an Exception. Offline units surface as an
+        AgentConnectionError (not a misleading empty snapshot that reads as drift)."""
         from state import snapshot_unit
-        return self._fan_out(lambda c: snapshot_unit(c), units)
+        return self._fan_out_reachable(lambda c: snapshot_unit(c), units)
 
     def plans_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
         """Each unit's plan replica. Values are list[Plan] or an Exception."""
@@ -206,12 +223,12 @@ class Fleet:
     def deploy_plans_all(self, plans: List["m.Plan"],
                          units: Optional[List[str]] = None) -> Dict[str, object]:
         """Replicate the PC's plans to each unit (wholesale replace)."""
-        return self._fan_out(lambda c: c.put_plans(plans), units)
+        return self._fan_out_reachable(lambda c: c.put_plans(plans), units)
 
     def deploy_schedule_all(self, schedule: List["m.ScheduledPlan"],
                             units: Optional[List[str]] = None) -> Dict[str, object]:
         """Replicate the PC's schedule to each unit (wholesale replace)."""
-        return self._fan_out(lambda c: c.put_schedule(schedule), units)
+        return self._fan_out_reachable(lambda c: c.put_schedule(schedule), units)
 
     def sync_plans_schedule_all(self, plans: List["m.Plan"],
                                 schedule: List["m.ScheduledPlan"],
@@ -226,7 +243,7 @@ class Fleet:
             c.put_plans(plans)
             c.put_schedule(schedule)
             return True
-        return self._fan_out(do, units)
+        return self._fan_out_reachable(do, units)
 
     def deploy_state_all(self, library: "m.Library", plans: List["m.Plan"],
                          schedule: List["m.ScheduledPlan"], prune: bool = True,
@@ -241,7 +258,7 @@ class Fleet:
             c.put_plans(plans)
             c.put_schedule(schedule)
             return res
-        return self._fan_out(do, units)
+        return self._fan_out_reachable(do, units)
 
     def panic_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
         """
