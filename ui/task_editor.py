@@ -34,13 +34,16 @@ from PyQt6.QtWidgets import (
 )
 
 from api.fleet import LIBRARY_HOST
-from api.models import UNIT_TYPE_SCRIPTS_DIR
 from .param_form import ParamForm
 from .qt_adapter import DataHub
 from .scope_selector import ScopeSelector
 from .theme import Palette
 
-DEFAULT_SCRIPTS_DIR = UNIT_TYPE_SCRIPTS_DIR["broadcaster"]   # /opt/sdr-agent/scripts
+# Every unit kind presents its scripts at /opt/sdr-agent/scripts (the X410 symlinks
+# it onto /data — see sdr-agent deploy/x410), so this default is portable across
+# unit types and a shared task runs everywhere. A live unit still overrides it from
+# /info, and editing derives it from the existing command.
+DEFAULT_SCRIPTS_DIR = "/opt/sdr-agent/scripts"
 DEFAULT_INTERPRETER = "python3"
 
 
@@ -143,7 +146,7 @@ class TaskEditorDialog(QDialog):
         self._interp = QLineEdit("python3")
         self._interp.textChanged.connect(self._update_preview)
         av.addRow("Interpreter", self._interp)
-        self._scripts_dir = QLineEdit(self._default_scripts_dir())
+        self._scripts_dir = QLineEdit(DEFAULT_SCRIPTS_DIR)
         self._scripts_dir.textChanged.connect(self._update_preview)
         av.addRow("Script directory", self._scripts_dir)
         self._env = QPlainTextEdit()
@@ -181,18 +184,6 @@ class TaskEditorDialog(QDialog):
         w.setLayout(layout)
         return w
 
-    def _default_scripts_dir(self) -> str:
-        """The script directory a new task starts with. On a live unit it's the Pi
-        default, immediately overwritten by the unit's reported path (see the
-        taskdlg_info handler). In the offline library there's no unit to ask, so a
-        new task authored in a single unit-type view (Broadcaster/X410) defaults to
-        that type's on-disk layout — e.g. an X410 task lands under /data, not /opt."""
-        if self.hostname == LIBRARY_HOST and self.existing_name is None and self._default_types:
-            known = [t for t in self._default_types if t in UNIT_TYPE_SCRIPTS_DIR]
-            if len(known) == 1:
-                return UNIT_TYPE_SCRIPTS_DIR[known[0]]
-        return DEFAULT_SCRIPTS_DIR
-
     # ── Loading ──────────────────────────────────────────────────────────────
 
     def _load(self) -> None:
@@ -202,9 +193,10 @@ class TaskEditorDialog(QDialog):
             lambda: self.hub.fleet.get(self.hostname).list_scripts(),
         )
         # Ask the unit where it keeps scripts and which interpreter its tasks use, so
-        # a NEW task's defaults match this unit (an X410 uses /data/... + system
-        # python3, not the Pi's /opt/... ) instead of the operator re-typing them.
-        # Skipped in library mode (no live unit to ask).
+        # a NEW task's defaults match this unit instead of the operator re-typing
+        # them. Both kinds report /opt/sdr-agent/scripts (the X410 symlinks it onto
+        # /data), so this mostly confirms the default; a unit with a custom layout
+        # still wins. Skipped in library mode (no live unit to ask).
         if self.hostname != LIBRARY_HOST:
             self.hub.run_async(
                 f"taskdlg_info:{self.hostname}",
