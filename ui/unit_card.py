@@ -48,15 +48,6 @@ class UnitCard(QFrame):
         self._online: Optional[bool] = None
         self._build()
 
-    def set_connection(self, connected: Optional[bool]) -> None:
-        """Connection/stream status: True online, False offline, None unknown."""
-        self._online = connected
-        if connected is True:
-            ...
-        else:
-            self._dot.set_color(Palette.IDLE)
-            self._conn.setText("—")
-
     def is_online(self) -> bool:
         """True only if the latest connection/stream update said online."""
         return self._online is True
@@ -118,6 +109,7 @@ class UnitCard(QFrame):
 
     def set_connection(self, connected: Optional[bool]) -> None:
         """Connection/stream status: True online, False offline, None unknown."""
+        self._online = connected
         if connected is True:
             self._dot.set_color(Palette.ONLINE)
             self._conn.setText("online")
@@ -174,5 +166,10 @@ class UnitCard(QFrame):
             self._tasks.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_MUTED};")
 
     def set_offline(self) -> None:
-        """Mark the card offline (e.g. a poll/stream failure for this unit)."""
+        """Mark the card offline and clear its live stats — an unreachable unit's
+        last temp / clock / SDR / task counts are stale and no longer valid, so we
+        drop them to '—' rather than leave misleading values on the card."""
         self.set_connection(False)
+        for stat in (self._temp, self._clock, self._sdr, self._tasks):
+            stat.setText("—")
+            stat.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_MUTED};")

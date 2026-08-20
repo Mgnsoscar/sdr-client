@@ -347,6 +347,9 @@ class UnitDetail(QWidget):
         self.hostname = hostname
         client = self.fleet.get(hostname)
         self._title.setText(client.label)
+        # Reset the status to neutral so this unit never inherits the previously
+        # viewed unit's "online" pill — the refresh below settles it from reality.
+        self._status.set_status("checking…", "unknown")
 
         # Rebuild the sub-stack for this unit
         while self._sub_stack.count():
@@ -397,12 +400,21 @@ class UnitDetail(QWidget):
         tasksv = snap.tasks.get(self.hostname)
         if isinstance(tasksv, list) and self._tasks_panel is not None:
             self._tasks_panel.update_tasks(tasksv)
-        # Header status from system reachability
-        sysv = snap.system.get(self.hostname)
-        if isinstance(sysv, m.SystemHealth):
-            self._status.set_status("online", "online")
-        elif isinstance(sysv, Exception):
+        # Header status: reachability is authoritative (health() never raises), so a
+        # unit that's gone offline flips to "offline" instead of showing a stale
+        # "online". Fall back to system presence only when health is absent from the
+        # snapshot (e.g. a scoped refresh of a different unit leaves this one as-is).
+        reachable = snap.health.get(self.hostname)
+        if reachable is False:
             self._status.set_status("offline", "offline")
+        elif reachable is True:
+            self._status.set_status("online", "online")
+        else:
+            sysv = snap.system.get(self.hostname)
+            if isinstance(sysv, m.SystemHealth):
+                self._status.set_status("online", "online")
+            elif isinstance(sysv, Exception):
+                self._status.set_status("offline", "offline")
 
     def on_stream_status(self, hostname: str, connected: bool) -> None:
         if hostname == self.hostname:

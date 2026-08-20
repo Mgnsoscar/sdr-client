@@ -430,11 +430,22 @@ class UnitsTab(QWidget):
 
     def on_fast_update(self, snap) -> None:
         for hostname, card in self._cards.items():
+            # Reachability is authoritative (health() never raises). An unreachable
+            # unit is marked offline and its stale stats cleared; we skip painting
+            # its old system/tasks so nothing invalid lingers on the card. A host
+            # absent from this snapshot (e.g. a scoped refresh of another unit) is
+            # left untouched.
+            reachable = snap.health.get(hostname)
+            if reachable is False:
+                card.set_offline()
+                continue
+
             sysv = snap.system.get(hostname)
             if isinstance(sysv, m.SystemHealth):
                 card.update_system(sysv)
             elif isinstance(sysv, Exception):
                 card.set_offline()
+                continue
 
             tasksv = snap.tasks.get(hostname)
             if isinstance(tasksv, list):
