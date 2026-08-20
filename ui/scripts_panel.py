@@ -25,8 +25,8 @@ from typing import List, Optional, Tuple
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QFontMetricsF
 from PyQt6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMessageBox,
-    QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
 from api import models as m
@@ -35,6 +35,7 @@ from config import DEFAULT_UNIT_TYPE, UNIT_TYPE_LABELS
 from .qt_adapter import DataHub
 from .scope_selector import ScopeSelector, confirm_delete
 from .theme import Palette
+from .widgets import natural_key
 
 Result = Tuple[str, Optional[str]]   # (name, error-or-None)
 
@@ -76,6 +77,7 @@ class ScriptsPanel(QWidget):
         self.hub = hub
         self._active_type = DEFAULT_UNIT_TYPE   # library view: set by the unit-type selector
         self._upload_new: set = set()           # names uploaded that didn't exist before
+        self._all_names: List[str] = []         # last listing, re-filtered as you search
         self._selected: Optional[str] = None
         self._pending_download: Optional[str] = None
         self._dirty = False           # unsaved edits in the viewer?
@@ -135,6 +137,12 @@ class ScriptsPanel(QWidget):
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         row.addWidget(self._status)
         row.addStretch(1)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search scripts…")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFixedWidth(200)
+        self._search.textChanged.connect(lambda _=0: self._populate(self._all_names))
+        row.addWidget(self._search)
         outer.addLayout(row)
 
         split = QSplitter(Qt.Orientation.Horizontal)
@@ -455,12 +463,18 @@ class ScriptsPanel(QWidget):
 
     def _populate(self, names: List[str]) -> None:
         keep = self._selected
+        self._all_names = list(names)
         total = len(names)
+        query = self._search.text().strip().lower()
         # Library mode: show only the scripts a unit of the active type would receive
         # (its own + shared). A plain unit view (no scope control) shows everything.
         if self._scope is not None:
             names = [n for n in names
                      if m.applies_to_type(self._types_for(n), self._active_type)]
+        if query:
+            names = [n for n in names if query in n.lower()]
+        # Stable alphanumeric order — so editing a script never reorders the list.
+        names = sorted(names, key=natural_key)
         self._list.blockSignals(True)
         self._list.clear()
         for n in names:
@@ -468,7 +482,9 @@ class ScriptsPanel(QWidget):
         self._list.blockSignals(False)
 
         if not names:
-            if self._scope is not None:
+            if query:
+                self._set_status(f"no scripts match “{query}”")
+            elif self._scope is not None:
                 lbl = UNIT_TYPE_LABELS.get(self._active_type, self._active_type)
                 self._set_status(f"no {lbl} scripts yet — Upload to add them"
                                  + (f" ({total} in the library for other types)" if total else ""))
@@ -487,7 +503,9 @@ class ScriptsPanel(QWidget):
                 self._scope.setEnabled(False)
             return
 
-        if self._scope is not None:
+        if query:
+            self._set_status(f"{len(names)} script(s) match · {total} total")
+        elif self._scope is not None:
             lbl = UNIT_TYPE_LABELS.get(self._active_type, self._active_type)
             self._set_status(f"{len(names)} script(s) for {lbl} · {total} total")
         else:

@@ -39,7 +39,7 @@ import yaml
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox,
+    QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -53,7 +53,7 @@ from .scope_selector import scope_chip, confirm_delete
 from .sequence_editor import SequenceEditorDialog
 from .sequence_log_dialog import SequenceLogDialog
 from .theme import Palette
-from .widgets import StatusPill
+from .widgets import StatusPill, natural_key
 
 _SEQ_FILTER_ALL = "__all__"
 
@@ -315,6 +315,12 @@ class SequencesPanel(QWidget):
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         row.addWidget(self._status)
         row.addStretch(1)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search sequences…")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFixedWidth(200)
+        self._search.textChanged.connect(lambda _=0: self._rebuild())
+        row.addWidget(self._search)
 
         # In the Library the unit-type view is driven by the tab's selector
         # (set_active_type); a unit card shows only its own deployed sequences.
@@ -638,10 +644,16 @@ class SequencesPanel(QWidget):
         # Library view is scoped to the selected unit type (its own + shared); a unit
         # card is already scoped to itself, so it shows everything it holds.
         want = self._active_type if self.can_edit else _SEQ_FILTER_ALL
+        query = self._search.text().strip().lower()
+        # Stable alphanumeric order — so editing a sequence never reorders the list.
+        seqs = sorted(self._sequences, key=lambda s: natural_key(s.name or s.id))
         active_n = 0
         shown = 0
-        for seq in self._sequences:
+        for seq in seqs:
             if want != _SEQ_FILTER_ALL and not m.applies_to_type(seq.types, want):
+                continue
+            if query and query not in (seq.name or "").lower() \
+                    and query not in (seq.description or "").lower():
                 continue
             active = self._active_run_for(seq)
             if active is not None:
@@ -654,17 +666,29 @@ class SequencesPanel(QWidget):
                 show_scope=self.can_edit,
             ))
             shown += 1
-        if shown == 0 and want != _SEQ_FILTER_ALL:
-            empty = QLabel(f"No {UNIT_TYPE_LABELS.get(want, want)} sequences yet. "
-                           "Click “New sequence” to add one (set its scope to Shared "
-                           "in the editor to apply it to all units).")
-            empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
-            empty.setWordWrap(True)
-            self._list.addWidget(empty)
+        if shown == 0:
+            if query:
+                scope = "" if want == _SEQ_FILTER_ALL else f"{UNIT_TYPE_LABELS.get(want, want)} "
+                msg = f"No {scope}sequences match “{query}”."
+            elif want != _SEQ_FILTER_ALL:
+                msg = (f"No {UNIT_TYPE_LABELS.get(want, want)} sequences yet. "
+                       "Click “New sequence” to add one (set its scope to Shared "
+                       "in the editor to apply it to all units).")
+            else:
+                msg = None
+            if msg:
+                empty = QLabel(msg)
+                empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
+                empty.setWordWrap(True)
+                self._list.addWidget(empty)
         active_txt = f" · {active_n} active" if active_n else ""
-        count_txt = (f"{len(self._sequences)} sequence(s)" if want == _SEQ_FILTER_ALL
-                     else f"{shown} sequence(s) for {UNIT_TYPE_LABELS.get(want, want)} "
-                          f"· {len(self._sequences)} total")
+        if query:
+            count_txt = f"{shown} sequence(s) match · {len(self._sequences)} total"
+        elif want == _SEQ_FILTER_ALL:
+            count_txt = f"{len(self._sequences)} sequence(s)"
+        else:
+            count_txt = (f"{shown} sequence(s) for {UNIT_TYPE_LABELS.get(want, want)} "
+                         f"· {len(self._sequences)} total")
         self._set_status(f"{count_txt}{active_txt}")
 
     def set_active_type(self, unit_type: str) -> None:

@@ -18,7 +18,7 @@ import yaml
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -30,6 +30,7 @@ from .qt_adapter import DataHub
 from .scope_selector import scope_chip, confirm_delete
 from .task_editor import TaskEditorDialog
 from .theme import Palette
+from .widgets import natural_key
 
 
 class _LibTaskRow(QFrame):
@@ -101,6 +102,12 @@ class LibraryTasksPanel(QWidget):
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         row.addWidget(self._status)
         row.addStretch(1)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search tasks…")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFixedWidth(200)
+        self._search.textChanged.connect(lambda _=0: self._refresh())
+        row.addWidget(self._search)
         outer.addLayout(row)
 
         scroll = QScrollArea()
@@ -137,17 +144,26 @@ class LibraryTasksPanel(QWidget):
             self._set_status("")
             return
         want = self._active_type
+        query = self._search.text().strip().lower()
+        # Stable alphanumeric order — so editing a task never reorders the list.
+        tasks = sorted(tasks, key=lambda t: natural_key(t.name))
         shown = 0
         for t in tasks:
             types = self._types_for(t.name)
             if not m.applies_to_type(types, want):
                 continue
+            if query and query not in t.name.lower() and query not in (t.description or "").lower():
+                continue
             self._list.addWidget(_LibTaskRow(t, types, self._on_edit, self._on_delete))
             shown += 1
         if shown == 0:
-            empty = QLabel(f"No {UNIT_TYPE_LABELS.get(want, want)} tasks yet. "
-                           "Click “New task” to add one (shared with all units via "
-                           "the scope in the editor).")
+            if query:
+                text = f"No {UNIT_TYPE_LABELS.get(want, want)} tasks match “{query}”."
+            else:
+                text = (f"No {UNIT_TYPE_LABELS.get(want, want)} tasks yet. Click "
+                        "“New task” to add one (shared with all units via the scope "
+                        "in the editor).")
+            empty = QLabel(text)
             empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
             empty.setWordWrap(True)
             self._list.addWidget(empty)
