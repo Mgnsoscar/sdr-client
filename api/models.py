@@ -31,6 +31,15 @@ UNIT_TYPES = ("broadcaster", "x410")
 UNIT_TYPE_LABELS = {"broadcaster": "Broadcaster", "x410": "X410"}
 DEFAULT_UNIT_TYPE = "broadcaster"
 
+# Where each unit kind keeps its deployed scripts. The Pi (broadcaster) lays the
+# agent under /opt; the X410 runs off its persistent /data mount. A live unit
+# reports its real path via /info, but the offline library has no unit to ask, so
+# a new task authored in a unit-type view defaults to that type's on-disk layout.
+UNIT_TYPE_SCRIPTS_DIR = {
+    "broadcaster": "/opt/sdr-agent/scripts",
+    "x410": "/data/sdr-agent/scripts",
+}
+
 
 def applies_to_type(item_types: List[str], unit_type: str) -> bool:
     """Does a library item scoped to `item_types` apply to a unit of `unit_type`?
