@@ -32,7 +32,7 @@ import yaml
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox,
+    QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -46,7 +46,7 @@ from .plan_editor import PlanEditorDialog
 from .plan_log_dialog import PlanLogDialog
 from .qt_adapter import DataHub
 from .theme import Palette
-from .widgets import StatusPill
+from .widgets import StatusPill, natural_key
 
 ARM_MARGIN_S = 5.0
 CLOCK_WARN_SKEW_S = 1.0
@@ -282,6 +282,12 @@ class PlansTab(QWidget):
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         row.addWidget(self._status)
         row.addStretch(1)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search plans…")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFixedWidth(200)
+        self._search.textChanged.connect(lambda _=0: self._rebuild())
+        row.addWidget(self._search)
         outer.addLayout(row)
 
         scroll = QScrollArea()
@@ -656,21 +662,38 @@ class PlansTab(QWidget):
             empty.setWordWrap(True)
             self._list.addWidget(empty)
             self._set_status("")
+            self._runs_sig = self._runs_signature()
             return
 
+        query = self._search.text().strip().lower()
+        # Stable alphanumeric order — so editing a plan never reorders the list.
+        plans = sorted(self._plans, key=lambda p: natural_key(p.name or p.id))
         active_total = 0
-        for plan in self._plans:
+        shown = 0
+        for plan in plans:
+            if query and query not in (plan.name or "").lower() \
+                    and query not in (plan.description or "").lower():
+                continue
             runs = self._active_run_objs(plan)
             on_air_n = sum(1 for r in runs if _is_on_air(r))
             pending_n = len(runs) - on_air_n
             if runs:
                 active_total += 1
+            shown += 1
             self._list.addWidget(_PlanRow(
                 plan, runs, on_air_n, pending_n,
                 on_arm=self._on_arm, on_stop=self._on_stop,
                 on_edit=self._on_edit, on_delete=self._on_delete, on_log=self._on_log))
+        if shown == 0 and query:
+            empty = QLabel(f"No plans match “{query}”.")
+            empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
+            empty.setWordWrap(True)
+            self._list.addWidget(empty)
         suffix = f" · {active_total} active" if active_total else ""
-        self._set_status(f"{len(self._plans)} plan(s){suffix}")
+        if query:
+            self._set_status(f"{shown} plan(s) match · {len(self._plans)} total{suffix}")
+        else:
+            self._set_status(f"{len(self._plans)} plan(s){suffix}")
         self._runs_sig = self._runs_signature()   # rows now match this run picture
 
     def _set_status(self, text: str, error: bool = False) -> None:
