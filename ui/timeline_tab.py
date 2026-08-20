@@ -544,10 +544,15 @@ class TimelineTab(QWidget):
         self._marked: List[QDate] = []
         self._runs_by_host: Dict[str, List[m.SequenceRun]] = {}
         self._runs_pending = False
+        self._runs_sig: object = None   # last-rendered active-run signature
         self._build()
         if self.hub is not None:
             self.hub.task_done.connect(self._on_task_done)
             self.hub.event_received.connect(self._on_event)
+            # Safety net for a missed sequence webhook: fold the poller's periodic
+            # run snapshot in so a finished run clears within a poll cycle (~3s)
+            # rather than waiting on the 30s timer or a manual action.
+            self.hub.fast_update.connect(self._on_fast_update)
         # Time marches on: re-evaluate 'armable' (start passing) and the now-line,
         # and re-poll run state, on a slow tick.
         self._timer = QTimer(self)
@@ -701,6 +706,7 @@ class TimelineTab(QWidget):
         self._status.setText(
             f"{len(blocks)} plan(s) on this day · {total} scheduled in total" if total
             else "No plans scheduled yet. Click “Add plan…” to place one.")
+        self._runs_sig = self._runs_signature()   # view now matches this run picture
 
     def _on_date_changed(self) -> None:
         self._refresh_day()
@@ -854,6 +860,23 @@ class TimelineTab(QWidget):
     def _on_event(self, ev) -> None:
         if isinstance(ev, m.SequenceWebhook):
             self._refresh_runs()
+
+    def _runs_signature(self) -> frozenset:
+        """A cheap fingerprint of the active-run picture — redraw the day only when
+        run state actually changes, not on every poll tick."""
+        return frozenset(
+            (host, r.id, r.state, bool(getattr(r, "on_air_actual", None)))
+            for host, rs in self._runs_by_host.items() for r in rs)
+
+    def _on_fast_update(self, snap) -> None:
+        runs = getattr(snap, "runs", None)
+        if not isinstance(runs, dict) or not runs:
+            return
+        # Merge per host — a scoped refresh carries only one unit's runs.
+        for host, val in runs.items():
+            self._runs_by_host[host] = val if isinstance(val, list) else []
+        if self._runs_signature() != self._runs_sig and self.isVisible():
+            self._refresh_day()   # recomputes and stores the signature
 
     def _on_task_done(self, label: str, result) -> None:
         if label == "tl_runs":

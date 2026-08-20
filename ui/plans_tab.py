@@ -248,9 +248,14 @@ class PlansTab(QWidget):
         self._plans: List[m.Plan] = []
         self._runs_by_host: Dict[str, List[m.SequenceRun]] = {}
         self._runs_pending = False
+        self._runs_sig: object = None   # last-rendered active-run signature
         self._build()
         self.hub.task_done.connect(self._on_task_done)
         self.hub.event_received.connect(self._on_event)
+        # Safety net: fold the poller's periodic run snapshot in, so a finished run
+        # stops showing "running" even if its 'sequence_stopped' webhook was missed
+        # (an SSE blip). Webhooks are the fast path; this is the guaranteed backstop.
+        self.hub.fast_update.connect(self._on_fast_update)
 
     def _build(self) -> None:
         outer = QVBoxLayout(self)
@@ -557,6 +562,24 @@ class PlansTab(QWidget):
         if isinstance(ev, m.SequenceWebhook):
             self._refresh_runs()
 
+    def _runs_signature(self) -> frozenset:
+        """A cheap fingerprint of the active-run picture — used to rebuild the plan
+        rows only when run state actually changes, not on every poll tick."""
+        return frozenset(
+            (host, r.id, r.state, bool(getattr(r, "on_air_actual", None)))
+            for host, rs in self._runs_by_host.items() for r in rs)
+
+    def _on_fast_update(self, snap) -> None:
+        runs = getattr(snap, "runs", None)
+        if not isinstance(runs, dict) or not runs:
+            return
+        # Merge per host — a scoped refresh carries only one unit's runs, so we must
+        # not wipe the others.
+        for host, val in runs.items():
+            self._runs_by_host[host] = val if isinstance(val, list) else []
+        if self._runs_signature() != self._runs_sig and self.isVisible():
+            self._rebuild()   # recomputes and stores the signature
+
     # ── Result routing ─────────────────────────────────────────────────────────
 
     def _on_task_done(self, label: str, result) -> None:
@@ -648,6 +671,7 @@ class PlansTab(QWidget):
                 on_edit=self._on_edit, on_delete=self._on_delete, on_log=self._on_log))
         suffix = f" · {active_total} active" if active_total else ""
         self._set_status(f"{len(self._plans)} plan(s){suffix}")
+        self._runs_sig = self._runs_signature()   # rows now match this run picture
 
     def _set_status(self, text: str, error: bool = False) -> None:
         color = Palette.CRASH if error else Palette.TEXT_FAINT
