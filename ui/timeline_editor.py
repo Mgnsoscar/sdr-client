@@ -126,6 +126,20 @@ def _timing_text(offset_s: float, side: str, with_side: bool) -> str:
     return f"{_fmt_offset(offset_s)} · {label}" if with_side else _fmt_offset(offset_s)
 
 
+def _is_flag(s: str) -> bool:
+    """True if `s` is a CLI flag rather than a value. A leading '-' normally marks
+    a flag, but a negative number (e.g. '-20', '-3.5', '-1e6') is a value — without
+    this exception a `--power -20` pair splits into two phantom rows ('power' and
+    '20')."""
+    if not s.startswith("-"):
+        return False
+    try:
+        float(s)
+    except ValueError:
+        return True
+    return False
+
+
 def _arg_pairs(args: List[str]) -> List[Tuple[str, Optional[str]]]:
     """Group a flat CLI arg list into (flag, value) rows for orderly display.
     A flag with no following value (a boolean switch) gets value None; a bare
@@ -134,8 +148,8 @@ def _arg_pairs(args: List[str]) -> List[Tuple[str, Optional[str]]]:
     i = 0
     while i < len(args):
         a = args[i]
-        if a.startswith("-"):
-            if i + 1 < len(args) and not args[i + 1].startswith("-"):
+        if _is_flag(a):
+            if i + 1 < len(args) and not _is_flag(args[i + 1]):
                 pairs.append((a, args[i + 1])); i += 2
             else:
                 pairs.append((a, None)); i += 1
