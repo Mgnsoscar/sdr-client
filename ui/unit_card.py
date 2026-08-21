@@ -132,15 +132,30 @@ class UnitCard(QFrame):
         else:
             self._temp.setText("—")
 
-        # Clock sync
+        # Clock sync — distinguish real NTP/internet time from a hand-set PC-clock
+        # sync (the agent reports clock_source="manual" for the latter). On a direct
+        # no-internet cable, "PC clock" is the expected healthy state, so it's not an
+        # error; only a clock that's neither disciplined nor hand-set is "unsynced".
+        source = (sys.clock_source or "").lower()
         if sys.clock_synced is True:
-            self._clock.setText("synced")
+            self._clock.setText("internet time")
             self._clock.setStyleSheet(f"font-size: 12px; color: {Palette.ONLINE};")
+            self._clock.setToolTip(
+                f"NTP-synchronized{f' via {sys.clock_source}' if sys.clock_source else ''}")
+        elif source == "manual":
+            self._clock.setText("PC clock")
+            self._clock.setStyleSheet(f"font-size: 12px; color: {Palette.ONLINE};")
+            self._clock.setToolTip(
+                "Set to the PC clock (not NTP-disciplined). Will switch to internet "
+                "time automatically once this unit is back online.")
         elif sys.clock_synced is False:
             self._clock.setText("unsynced")
             self._clock.setStyleSheet(f"font-size: 12px; color: {Palette.CRASH};")
+            self._clock.setToolTip("Clock is not NTP-synced and hasn't been set to "
+                                   "the PC clock — sync it from the status bar.")
         else:
             self._clock.setText("—")
+            self._clock.setToolTip("")
 
         # Connection implied online if we got a snapshot
         self.set_connection(True)

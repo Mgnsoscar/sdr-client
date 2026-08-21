@@ -189,8 +189,9 @@ class SystemHealth(BaseModel):
     uptime_s: float
     load_avg: List[float]
     utc_now: str = ""
-    clock_synced: Optional[bool] = None
-    clock_source: str = ""
+    clock_synced: Optional[bool] = None   # True if NTP-synchronized (real internet time)
+    clock_source: str = ""                # "chrony"/"systemd-timesyncd" (NTP), "manual"
+                                          # (hand-set to the PC clock), or "" if unknown
 
 
 class SdrDevice(BaseModel):
