@@ -24,8 +24,8 @@ from typing import List, Optional
 
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel,
-    QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import ramp as _ramp
@@ -212,6 +212,27 @@ class RampEditorDialog(QDialog):
         if r.get("duration_s") is not None:
             self._duration.setText(_fmt(r.get("duration_s")))
 
+        # Which end levels to emit. Every emitted level is held for the dwell time
+        # (the ramp's duration counts all of them), so dropping an end trims one
+        # whole (level + hold) — the knob for chaining ramps without a doubled seam.
+        # Single-anchor only; a window-filling ramp always spans both edges.
+        self._inc_first = QCheckBox("Include first step")
+        self._inc_last = QCheckBox("Include last step")
+        self._inc_first.setChecked(bool(r.get("include_first", True)))
+        self._inc_last.setChecked(bool(r.get("include_last", True)))
+        self._inc_first.setToolTip("Emit and hold the start value. Uncheck to begin at "
+                                   "the next level (e.g. to follow another ramp cleanly).")
+        self._inc_last.setToolTip("Emit and hold the stop value. Uncheck to end before it "
+                                  "(e.g. so the next ramp supplies that value).")
+        inc_row = QHBoxLayout()
+        inc_row.setContentsMargins(0, 0, 0, 0)
+        inc_row.addWidget(self._inc_first)
+        inc_row.addWidget(self._inc_last)
+        inc_row.addStretch(1)
+        self._inc_container = QWidget()
+        self._inc_container.setLayout(inc_row)
+        self._inc_row_lbl = _row(form, "Include", self._inc_container)
+
         outer.addLayout(form)
 
         # Run mode: fixed values for the task's OTHER parameters (the ramped one is
@@ -273,6 +294,8 @@ class RampEditorDialog(QDialog):
         self._param.currentTextChanged.connect(lambda _t: self._on_param_changed())
         for w in (self._start, self._stop, self._steps, self._step, self._hold, self._duration):
             w.textChanged.connect(self._update_preview)
+        self._inc_first.toggled.connect(self._update_preview)
+        self._inc_last.toggled.connect(self._update_preview)
         self._offset.valueChanged.connect(self._update_preview)
         self._offset_end.valueChanged.connect(self._update_preview)
         self._anchor.currentIndexChanged.connect(self._sync_anchor)
@@ -361,6 +384,10 @@ class RampEditorDialog(QDialog):
         self._off_lbl.setText("Start offset from on-air" if both else "Offset from anchor")
         self._offend_lbl.setVisible(both)
         self._offset_end.setVisible(both)
+        # Include first/last applies to single-anchor ramps; a window-filling ramp
+        # always spans both edges, so hide the checkboxes there.
+        self._inc_row_lbl.setVisible(not both)
+        self._inc_container.setVisible(not both)
         # First populate uses the saved ramp's authored mode; later anchor switches
         # keep whatever the user had selected.
         want = self._mode.currentData() or getattr(self, "_init_mode", None)
@@ -446,6 +473,11 @@ class RampEditorDialog(QDialog):
             spec["hold_s"] = _num(self._hold.text())
         if "duration" in fields:
             spec["duration_s"] = _num(self._duration.text())
+        # First/last-level toggles are meaningful only for a single-anchor ramp; a
+        # window-filling ramp always spans both edges, so don't store them there.
+        if not self._is_both():
+            spec["include_first"] = self._inc_first.isChecked()
+            spec["include_last"] = self._inc_last.isChecked()
         if self._run_mode:
             rs = self._ramped_spec() or {}
             flags = rs.get("flags") or []
@@ -497,16 +529,21 @@ class RampEditorDialog(QDialog):
         try:
             res = _ramp.resolve_ramp(spec["start"], spec["stop"], steps=spec.get("steps"),
                                      step=spec.get("step"), hold_s=spec.get("hold_s"),
-                                     duration_s=spec.get("duration_s"))
+                                     duration_s=spec.get("duration_s"),
+                                     include_first=spec.get("include_first", True),
+                                     include_last=spec.get("include_last", True))
         except (ValueError, TypeError) as exc:
             lines.append("⚠ " + str(exc))
             self._set_preview("\n".join(lines), error=True)
             self._steps_view.setPlainText("")
             return
         step = abs(res.values[1] - res.values[0]) if len(res.values) > 1 else 0
-        lines.append(f"{len(res.values)} points · {res.n_intervals} steps · "
+        dropped = [w for w, on in (("first", self._inc_first.isChecked()),
+                                   ("last", self._inc_last.isChecked())) if not on]
+        excl = f" · {'/'.join(dropped)} excluded" if dropped else ""
+        lines.append(f"{len(res.values)} levels · {res.n_intervals} steps · "
                      f"step size {fmt_value(_clean(step))}{u} · hold {fmt_duration(res.hold_s)} · "
-                     f"duration {fmt_duration(res.duration_s)}")
+                     f"duration {fmt_duration(res.duration_s)}{excl}")
         self._set_preview("\n".join(lines))
         self._refresh_steps_view(spec, both=False)
 
@@ -552,7 +589,9 @@ class RampEditorDialog(QDialog):
                 return
             res = _ramp.resolve_ramp(spec["start"], spec["stop"], steps=spec.get("steps"),
                                      step=spec.get("step"), hold_s=spec.get("hold_s"),
-                                     duration_s=spec.get("duration_s"))
+                                     duration_s=spec.get("duration_s"),
+                                     include_first=spec.get("include_first", True),
+                                     include_last=spec.get("include_last", True))
         except (ValueError, TypeError) as exc:
             self._steps_view.setPlainText(str(exc))
             return

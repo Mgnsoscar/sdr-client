@@ -90,7 +90,9 @@ def _ramp_duration(r: dict) -> float:
     from api import ramp as _ramp
     try:
         return _ramp.resolve_ramp(r.get("start"), r.get("stop"), steps=r.get("steps"), step=r.get("step"),
-                                  hold_s=r.get("hold_s"), duration_s=r.get("duration_s")).duration_s
+                                  hold_s=r.get("hold_s"), duration_s=r.get("duration_s"),
+                                  include_first=r.get("include_first", True),
+                                  include_last=r.get("include_last", True)).duration_s
     except (ValueError, TypeError):
         return 0.0
 
@@ -377,7 +379,9 @@ def _ramp_spec_error(spec: Optional[dict], anchor: str) -> Optional[str]:
         else:
             _ramp.resolve_ramp(spec.get("start"), spec.get("stop"),
                                steps=spec.get("steps"), step=spec.get("step"), hold_s=spec.get("hold_s"),
-                               duration_s=spec.get("duration_s"))
+                               duration_s=spec.get("duration_s"),
+                               include_first=spec.get("include_first", True),
+                               include_last=spec.get("include_last", True))
     except (ValueError, TypeError) as exc:
         return str(exc)
     return None
