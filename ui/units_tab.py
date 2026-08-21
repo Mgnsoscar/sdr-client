@@ -442,7 +442,7 @@ class UnitsTab(QWidget):
 
             sysv = snap.system.get(hostname)
             if isinstance(sysv, m.SystemHealth):
-                card.update_system(sysv)
+                card.update_system(sysv, captured_at=getattr(snap, "captured_at", None))
             elif isinstance(sysv, Exception):
                 card.set_offline()
                 continue
