@@ -135,6 +135,57 @@ def range_hint(spec: dict) -> str:
     return f"{'' if lo is None else fmt_value(lo)}..{'' if hi is None else fmt_value(hi)}"
 
 
+# ── Power calibration: reflect a unit's real --power range in the form ──────────
+# A transmit script declares wide/nominal --power bounds (the true range is
+# unit-specific). When a task is run on a CALIBRATED unit, the agent's /calibration
+# reports the resolved range for that signal; apply it to the power field so the user
+# sees — and is held to — the actual acceptable min/max at the real operating plane,
+# instead of guessing.
+
+POWER_DEST = "power"
+
+
+def find_power_index(specs: List[dict]):
+    """Index of the --power parameter in a spec list, or None."""
+    for i, s in enumerate(specs):
+        if s.get("dest") == POWER_DEST or "--power" in (s.get("flags") or []):
+            return i
+    return None
+
+
+def apply_power_bounds(specs: List[dict], bounds) -> List[dict]:
+    """Return a copy of `specs` with the --power param bounded to a unit's resolved
+    calibration range and relabelled with its operating plane/quantity. No-op when
+    `bounds` is falsy, there's no power param, or the range is incomplete.
+
+    `bounds`: {min_power_dbm, max_power_dbm, quantity, operating_plane} (a signal
+    entry from GET /calibration)."""
+    i = find_power_index(specs)
+    if i is None or not bounds:
+        return specs
+    lo, hi = bounds.get("min_power_dbm"), bounds.get("max_power_dbm")
+    if lo is None or hi is None:
+        return specs
+    lo, hi = round(float(lo), 2), round(float(hi), 2)
+    quantity = (bounds.get("quantity") or "").strip()
+    plane = (bounds.get("operating_plane") or "").strip()
+
+    out = [dict(s) for s in specs]
+    sp = out[i]
+    sp["min"], sp["max"] = lo, hi
+    sp["type"] = "float"
+    sp.setdefault("step", 0.5)                 # render as a bounded spinbox → can't overshoot
+    d = sp.get("default")
+    if isinstance(d, (int, float)) and not isinstance(d, bool):
+        sp["default"] = min(max(float(d), lo), hi)
+    sp["unit"] = f"dBm {quantity}" if quantity and quantity.lower() != "power" else "dBm"
+    where = quantity + (f" at {plane}" if plane else "") if quantity else (plane or "")
+    note = f"This unit (calibrated): {lo}…{hi} dBm" + (f" — {where}." if where else ".")
+    base = (sp.get("help") or "").strip()
+    sp["help"] = f"{base}\n\n{note}" if base else note
+    return out
+
+
 _INT32 = 2_000_000_000
 
 
