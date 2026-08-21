@@ -587,6 +587,31 @@ class AgentClient:
         """Statically-extracted argparse parameters for a script (for building a form)."""
         return self._request("GET", f"/scripts/{name}/params")
 
+    # ── Per-unit data store / calibration (agent docs/calibration.md §9.2) ──────
+    def list_files(self) -> List[dict]:
+        """Files in the unit's data store: [{name, size, modified}]."""
+        return self._request("GET", "/files")
+
+    def upload_file(self, filename: str, content: bytes) -> dict:
+        """Upload a data file. calibration.json is validated agent-side before it is
+        stored; the response carries the per-signal resolved summary under
+        'calibration'. A rejected file raises AgentError with the reason."""
+        files = {"file": (filename, content, "application/octet-stream")}
+        return self._request("POST", "/files", files=files)
+
+    def get_file(self, name: str) -> str:
+        """Return a data file's text content."""
+        data = self._request("GET", f"/files/{name}")
+        return data.get("content", "")
+
+    def delete_file(self, name: str) -> dict:
+        return self._request("DELETE", f"/files/{name}")
+
+    def get_calibration(self) -> dict:
+        """This unit's calibration view: {unit_type, document, valid, signals|error}.
+        Raises AgentError(404) if the unit has no calibration document."""
+        return self._request("GET", "/calibration")
+
     def create_task(self, spec: dict) -> dict:
         """Create a task from a spec (name, command, working_dir, env, autostart,
         restart_on_crash) — the agent appends it to tasks.yaml and reloads live."""

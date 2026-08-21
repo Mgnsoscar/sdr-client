@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 from api import Fleet
 from api import models as m
 from .agent_update_dialog import AgentUpdateDialog
+from .calibration_panel import CalibrationPanel
 from .live_tune_dialog import LiveTuneDialog
 from .qt_adapter import DataHub
 from .run_task_dialog import RunTaskDialog
@@ -262,7 +263,7 @@ class _TasksPanel(QWidget):
 class UnitDetail(QWidget):
     """Header + sub-tabs for one unit. Tasks panel built; others placeholder."""
 
-    SUBTABS = ["Tasks", "Sequences"]
+    SUBTABS = ["Tasks", "Sequences", "Calibration"]
 
     def __init__(self, fleet: Fleet, hub: DataHub, on_back,
                  on_edit=None, on_remove=None, parent=None):
@@ -329,6 +330,7 @@ class UnitDetail(QWidget):
         self._sub_stack = QStackedWidget()
         self._tasks_panel: Optional[_TasksPanel] = None  # built per-unit in set_unit
         self._sequences_panel: Optional["SequencesPanel"] = None  # built per-unit in set_unit
+        self._calibration_panel: Optional[CalibrationPanel] = None  # built per-unit in set_unit
         self._placeholders: Dict[str, QWidget] = {}
         outer.addWidget(self._sub_stack, stretch=1)
 
@@ -363,8 +365,10 @@ class UnitDetail(QWidget):
         # window from each task row (see _TaskRow.Logs).
         self._sequences_panel = SequencesPanel(hostname, self.hub,
                                                can_edit=False, can_run=True)
+        self._calibration_panel = CalibrationPanel(hostname, self.hub)
         self._sub_stack.addWidget(self._tasks_panel)                       # 0 Tasks
         self._sub_stack.addWidget(self._sequences_panel)                   # 1 Sequences
+        self._sub_stack.addWidget(self._calibration_panel)                 # 2 Calibration
         self._select_subtab(0)
 
         # Pull fresh data now so the task list / status appear immediately, rather
