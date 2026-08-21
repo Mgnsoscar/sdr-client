@@ -218,6 +218,9 @@ class LibraryTab(QWidget):
     def on_shown(self) -> None:
         self._store.load()
         self._set_status()
+        # Re-render the units line off the current fleet, so a stale drift entry for
+        # a removed/re-identified unit is pruned on view (not only after a re-check).
+        self._update_units_status()
         w = self._stack.currentWidget()
         if hasattr(w, "on_shown"):
             w.on_shown()
@@ -523,6 +526,15 @@ class LibraryTab(QWidget):
         return drifted
 
     def _update_units_status(self) -> None:
+        # Drop drift entries for hosts no longer in the fleet — a unit that was
+        # removed or re-identified (new uid key) is never in a fresh check result,
+        # so its old entry would otherwise linger forever as a phantom "drifted"
+        # unit (shown by its raw uid) that no re-check can clear.
+        live = set(self.hub.fleet.hostnames())
+        for stale in [h for h in self._drift if h not in live]:
+            self._drift.pop(stale, None)
+        for stale in [h for h in self._drift_err if h not in live]:
+            self._drift_err.pop(stale, None)
         checked = set(self._drift) | set(self._drift_err)
         if not checked:
             self._units_status.setText("")
