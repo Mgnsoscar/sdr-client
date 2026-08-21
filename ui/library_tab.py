@@ -366,6 +366,29 @@ class LibraryTab(QWidget):
                 + f"\n\n⚠ These units hold plans/schedule not on this PC and a deploy "
                   f"will overwrite them: {', '.join(extra_hosts)}. Restore from one "
                   f"first if you want to keep them.")
+        # Each unit only receives the slice of the library scoped to its Type (shared
+        # items + its own kind). Flag any connected unit whose Type would receive
+        # NONE of the library's tasks — the silent case where the deploy "succeeds"
+        # but that unit gets nothing to run (its Type doesn't match your tasks' scope).
+        type_of = {}
+        for h in hosts:
+            try:
+                type_of[h] = self.hub.fleet.get(h).unit_type
+            except KeyError:
+                type_of[h] = DEFAULT_UNIT_TYPE
+        zero = []
+        for utype in sorted(set(type_of.values())):
+            if lib.tasks and not any(m.applies_to_type(t.types, utype) for t in lib.tasks):
+                names = ", ".join(self._label(h) for h in hosts if type_of[h] == utype)
+                zero.append(f"{UNIT_TYPE_LABELS.get(utype, utype)} ({names})")
+        if zero:
+            box.setInformativeText(
+                box.informativeText()
+                + "\n\n⚠ None of your "
+                + f"{len(lib.tasks)} task(s) are scoped to these unit types, so they "
+                  "will receive 0 tasks: " + "; ".join(zero) + ".\nFix by setting the "
+                  "unit's Type (Units tab → edit the unit) to match, or by marking the "
+                  "tasks Shared / authoring them in that type's Library tab.")
         prune = QCheckBox("Prune — remove library definitions the library omits "
                           "(make each unit identical)")
         prune.setChecked(True)
@@ -394,8 +417,15 @@ class LibraryTab(QWidget):
                    if isinstance(r, AgentConnectionError)}
         failed = {h: r for h, r in result.items()
                   if isinstance(r, Exception) and not isinstance(r, AgentConnectionError)}
+        lib_has_tasks = bool(self._store.library().tasks)
         notes = []
+        zero_task_units = []
         for h, r in ok.items():
+            # Tasks the unit now holds = added + unchanged (skipped were left running).
+            reload = getattr(r, "tasks_reload", None) or {}
+            n_tasks = len(reload.get("added", [])) + len(reload.get("unchanged", []))
+            if lib_has_tasks and n_tasks == 0:
+                zero_task_units.append(self._label(h))
             parts = []
             if getattr(r, "tasks_skipped", None):
                 parts.append(f"tasks kept running: {', '.join(r.tasks_skipped)}")
@@ -409,11 +439,17 @@ class LibraryTab(QWidget):
         if failed:
             status += f" · {len(failed)} failed"
         self._set_status(status, error=bool(failed))
-        if failed or notes:
+        if failed or notes or zero_task_units:
             lines = []
             if failed:
                 lines.append("Failed (redeploy when reachable):")
                 lines += [f"• {self._label(h)}: {e}" for h, e in failed.items()]
+            if zero_task_units:
+                if lines:
+                    lines.append("")
+                lines.append("⚠ Received 0 tasks (their Type doesn't match your tasks' "
+                             "scope — set the unit's Type, or mark tasks Shared):")
+                lines += [f"• {h}" for h in zero_task_units]
             if offline:
                 if lines:
                     lines.append("")
