@@ -207,6 +207,15 @@ class CalibrationPanel(QWidget):
         lim_v.addWidget(add_lim, alignment=Qt.AlignmentFlag.AlignLeft)
         self._editor_layout.addWidget(lim_box)
 
+        # Planes (RF chain topology)
+        pl_box = QGroupBox("Planes — the RF chain (SDR → amp → cable → antenna)")
+        pl_v = QVBoxLayout(pl_box)
+        self._planes_box = QVBoxLayout(); self._planes_box.setSpacing(4)
+        pl_v.addLayout(self._planes_box)
+        add_pl = QPushButton("+ Add plane"); add_pl.clicked.connect(self._on_add_plane)
+        pl_v.addWidget(add_pl, alignment=Qt.AlignmentFlag.AlignLeft)
+        self._editor_layout.addWidget(pl_box)
+
         # Signals + curve grids
         sig_box = QGroupBox("Signals — measured curves")
         sig_v = QVBoxLayout(sig_box)
@@ -258,6 +267,12 @@ class CalibrationPanel(QWidget):
         self._f["min_gain"].setText(_numstr(gl.get("min_gain_db")))
         self._f["max_gain"].setText(_numstr(gl.get("max_gain_db")))
 
+        # planes (topology)
+        self._clear_layout(self._planes_box)
+        self._f["planes"] = []
+        for pname, spec in (chain.get("planes") or {}).items():
+            self._add_plane_row(pname, spec or {})
+
         names = self._plane_names()
         self._f["operating"].clear()
         self._f["operating"].addItems(names)
@@ -294,6 +309,95 @@ class CalibrationPanel(QWidget):
         rm.clicked.connect(lambda: self._remove_row(self._limits_box, self._f["limits"], row))
         self._limits_box.addWidget(w)
         self._f["limits"].append(row)
+
+    def _on_add_plane(self) -> None:
+        try:
+            self._sync_from(self._tabs.currentIndex(), strict=False)
+        except ValueError:
+            pass
+        if self._doc is None:
+            self._doc = _template()
+        planes = self._doc.setdefault("chain", {}).setdefault("planes", {})
+        nm, i = "plane", 1
+        while nm in planes:
+            i += 1; nm = f"plane{i}"
+        planes[nm] = {"type": "measured", "quantity": ""}
+        self._download_btn.setEnabled(True)
+        self._doc_to_form()
+        self._tabs.setCurrentIndex(0)
+
+    def _add_plane_row(self, name: str = "", spec: Optional[dict] = None) -> None:
+        spec = spec or {}
+        w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(4)
+        name_e = QLineEdit(name); name_e.setPlaceholderText("name")
+        type_c = QComboBox(); type_c.addItems(["measured", "derived"])
+        type_c.setCurrentText(spec.get("type", "measured"))
+        from_lbl = QLabel("from")
+        from_c = QComboBox(); from_c.addItems([n for n in self._plane_names() if n != name])
+        if spec.get("from") in self._plane_names():
+            from_c.setCurrentText(spec["from"])
+        delta_e = QLineEdit(_numstr(spec.get("delta_db"))); delta_e.setPlaceholderText("Δ dB")
+        delta_e.setFixedWidth(72)
+        quantity_e = QLineEdit(spec.get("quantity", "")); quantity_e.setPlaceholderText("quantity label")
+        rm = QPushButton("✕"); rm.setFixedWidth(28)
+        h.addWidget(name_e, 2); h.addWidget(type_c, 1)
+        h.addWidget(from_lbl); h.addWidget(from_c, 2); h.addWidget(delta_e)
+        h.addWidget(quantity_e, 2); h.addWidget(rm)
+        row = {"w": w, "name": name_e, "type": type_c, "from": from_c,
+               "delta": delta_e, "quantity": quantity_e, "from_lbl": from_lbl}
+
+        derived = type_c.currentText() == "derived"
+        for wdg in (from_lbl, from_c, delta_e):
+            wdg.setVisible(derived)
+        # A type/name change reshapes dependents (which planes are 'measured', the
+        # from/operating/limit dropdowns), so rebuild the form from the widgets.
+        type_c.currentTextChanged.connect(lambda _=None: self._refresh_form_from_widgets())
+        name_e.editingFinished.connect(self._refresh_form_from_widgets)
+        rm.clicked.connect(lambda: self._remove_plane(row))
+        self._planes_box.addWidget(w)
+        self._f["planes"].append(row)
+
+    def _read_planes(self, strict: bool) -> dict:
+        prev = ((self._doc or {}).get("chain") or {}).get("planes") or {}
+        planes: dict = {}
+        for row in self._f.get("planes", []):
+            name = row["name"].text().strip()
+            if not name:
+                continue
+            if row["type"].currentText() == "measured":
+                p = {"type": "measured"}
+            else:
+                p = {"type": "derived", "from": row["from"].currentText()}
+                d = row["delta"].text().strip()
+                if d:
+                    p["delta_db"] = _to_float(d, f"plane '{name}' Δ dB")
+                elif strict:
+                    raise ValueError(f"derived plane '{name}' has no Δ dB")
+                else:
+                    p["delta_db"] = 0.0
+            if row["quantity"].text().strip():
+                p["quantity"] = row["quantity"].text().strip()
+            if isinstance(prev.get(name), dict) and prev[name].get("description"):
+                p["description"] = prev[name]["description"]
+            planes[name] = p
+        return planes
+
+    def _remove_plane(self, row) -> None:
+        try:
+            self._sync_from(0, strict=False)
+        except ValueError:
+            pass
+        name = row["name"].text().strip()
+        planes = (self._doc or {}).get("chain", {}).get("planes") or {}
+        planes.pop(name, None)
+        self._doc_to_form()
+
+    def _refresh_form_from_widgets(self) -> None:
+        try:
+            self._doc = self._read_form(strict=False)
+        except ValueError:
+            return
+        self._doc_to_form()
 
     def _add_signal_widget(self, sid: str, sig: dict, measured) -> None:
         box = QGroupBox(f"signal: {sid}")
@@ -337,6 +441,7 @@ class CalibrationPanel(QWidget):
         self._set_num(gl, "max_gain_db", self._f["max_gain"].text(), "max gain", strict)
         if self._f["operating"].currentText():
             chain["operating_plane"] = self._f["operating"].currentText()
+        chain["planes"] = self._read_planes(strict)
 
         limits = []
         for row in self._f.get("limits", []):

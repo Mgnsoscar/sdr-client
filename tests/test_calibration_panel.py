@@ -199,6 +199,57 @@ def test_add_and_remove_signal(monkeypatch):
     assert "gps_l1" not in p._f["signals"]
 
 
+def _full_doc():
+    d = _doc()
+    d["chain"]["operating_plane"] = "antenna_eirp"
+    d["chain"]["planes"] = {
+        "sdr_output": {"type": "measured", "quantity": "total in-band power"},
+        "amplifier_output": {"type": "measured", "quantity": "main-lobe power"},
+        "cable_output": {"type": "derived", "from": "amplifier_output", "delta_db": -1.8},
+        "antenna_eirp": {"type": "derived", "from": "cable_output", "delta_db": 6.0, "quantity": "EIRP"},
+    }
+    d["signals"]["mock"]["curves"]["amplifier_output"] = {
+        "points": [{"gain_db": 40, "power_dbm": -6}, {"gain_db": 74, "power_dbm": 24}]}
+    return d
+
+
+def test_plane_topology_round_trips_through_form():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_full_doc())
+    out = p._read_form(strict=True)["chain"]["planes"]
+    assert out["sdr_output"] == {"type": "measured", "quantity": "total in-band power"}
+    assert out["cable_output"] == {"type": "derived", "from": "amplifier_output", "delta_db": -1.8}
+    assert out["antenna_eirp"]["type"] == "derived"
+    assert out["antenna_eirp"]["from"] == "cable_output"
+    assert out["antenna_eirp"]["quantity"] == "EIRP"
+    # measured planes drive which curve grids exist per signal
+    assert set(p._f["signals"]["mock"]["curves"]) == {"sdr_output", "amplifier_output"}
+
+
+def test_add_and_remove_plane():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc())                                   # one plane: sdr_output
+    p._on_add_plane()
+    planes = p._read_form(strict=False)["chain"]["planes"]
+    assert len(planes) == 2 and "plane" in planes
+    # remove the added one via its row
+    row = next(r for r in p._f["planes"] if r["name"].text() == "plane")
+    p._remove_plane(row)
+    assert list(p._read_form(strict=False)["chain"]["planes"]) == ["sdr_output"]
+
+
+def test_derived_plane_without_delta_blocks_save():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc())
+    row = p._f["planes"][0]
+    row["type"].setCurrentText("derived")               # sdr_output → derived, no Δ
+    # the type change triggers a rebuild; grab the (rebuilt) row and clear Δ
+    row = p._f["planes"][0]
+    row["delta"].setText("")
+    with pytest.raises(ValueError):
+        p._read_form(strict=True)
+
+
 def test_template_seeds_empty_unit():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._on_new_template()
