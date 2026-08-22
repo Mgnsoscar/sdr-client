@@ -481,6 +481,24 @@ class AgentClient:
     def system(self) -> m.SystemHealth:
         return m.SystemHealth(**self._request("GET", "/system"))
 
+    def clock_offset_s(self) -> float:
+        """(unit clock − this PC's clock) in seconds. Add this to a laptop-UTC arm time
+        so RF goes live at the intended wall-clock instant even when the unit's clock is
+        skewed (a Pi with no NTP). 0.0 if /system is unavailable — best-effort, falls
+        back to the laptop clock. Network latency biases this by a few ms on a LAN,
+        which is negligible next to the skew it corrects."""
+        try:
+            health = self.system()
+            if health.utc_now:
+                import datetime as _dt
+                unit = _dt.datetime.fromisoformat(health.utc_now)
+                if unit.tzinfo is None:
+                    unit = unit.replace(tzinfo=_dt.timezone.utc)
+                return (unit - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+        except Exception:  # noqa: BLE001 — best-effort
+            pass
+        return 0.0
+
     def set_time(self, epoch: Optional[float] = None) -> dict:
         """Set the unit's system clock to `epoch` (UTC seconds; defaults to this
         PC's current time). Corrects a Pi with no NTP so scheduled plans — which

@@ -125,8 +125,18 @@ def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
     otherwise it's open-ended and runs until stopped. Worker thread.
     Returns [(item, SequenceRun|None, error|None), ...]."""
     out = []
+    _offsets: dict = {}   # per-unit clock skew, fetched once per host
+
+    def _off(host: str) -> float:
+        if host not in _offsets:
+            _offsets[host] = fleet.get(host).clock_offset_s()
+        return _offsets[host]
+
     for item in plan.items:
-        on_air_at_iso = (t0 + timedelta(seconds=item.on_air_offset_s)).isoformat()
+        # Translate the laptop-UTC anchor to THIS unit's clock (as single-sequence arm
+        # does), so a skewed unit still goes on air at the intended wall-clock time.
+        on_air_at_iso = (t0 + timedelta(seconds=item.on_air_offset_s + _off(item.hostname))
+                         ).isoformat()
         req = m.ArmSequenceRequest(
             on_air_at=on_air_at_iso,
             open_ended=(duration_s is None),

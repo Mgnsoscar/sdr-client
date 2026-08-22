@@ -107,14 +107,7 @@ def _arm_at(client, seq: m.Sequence, t0_laptop: datetime,
     adjustment if /system is unavailable. When duration_s is set the run is bounded
     (and stop-anchored steps fire); otherwise it's open-ended. Worker thread.
     """
-    offset = 0.0
-    try:
-        health = client.system()
-        if health.utc_now:
-            offset = (_parse_iso(health.utc_now) - datetime.now(timezone.utc)).total_seconds()
-    except Exception:  # noqa: BLE001 — best-effort; fall back to the laptop clock
-        offset = 0.0
-    on_air_at = t0_laptop + timedelta(seconds=offset)
+    on_air_at = t0_laptop + timedelta(seconds=client.clock_offset_s())
     req = m.ArmSequenceRequest(
         on_air_at=on_air_at.isoformat(),
         open_ended=(duration_s is None),

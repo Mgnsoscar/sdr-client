@@ -79,9 +79,19 @@ def _arm_scheduled(fleet: Fleet, plan: m.Plan, start_utc: datetime,
     open-ended): on-air = start + the item's on-air offset, off-air = stop + its
     off-air offset. Worker thread. Returns [(item, SequenceRun|None, error|None)]."""
     out = []
+    _offsets: dict = {}   # per-unit clock skew, fetched once per host
+
+    def _off(host: str) -> float:
+        if host not in _offsets:
+            _offsets[host] = fleet.get(host).clock_offset_s()
+        return _offsets[host]
+
     for item in plan.items:
-        on_air = (start_utc + timedelta(seconds=item.on_air_offset_s)).isoformat()
-        off_air = (stop_utc + timedelta(seconds=item.off_air_offset_s)).isoformat()
+        # Translate to the unit's clock so a skewed unit still fires at the intended
+        # wall-clock window (matches single-sequence and manual-plan arming).
+        skew = _off(item.hostname)
+        on_air = (start_utc + timedelta(seconds=item.on_air_offset_s + skew)).isoformat()
+        off_air = (stop_utc + timedelta(seconds=item.off_air_offset_s + skew)).isoformat()
         req = m.ArmSequenceRequest(
             on_air_at=on_air,
             on_air_end=off_air,
