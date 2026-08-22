@@ -337,6 +337,10 @@ class TaskEditorDialog(QDialog):
                 break
         if not entry:
             return
+        # Keep the full stored entry so _on_save can preserve fields the form doesn't
+        # model (max_restarts, restart_window_s/delay_s, resumable + resume config) —
+        # otherwise editing a task would silently reset those to their defaults.
+        self._orig_entry = dict(entry)
         self._name.setText(entry.get("name", ""))
         self._desc.setText(entry.get("description", ""))
         if self._scope is not None:
@@ -438,7 +442,7 @@ class TaskEditorDialog(QDialog):
             self._set_status("environment lines must be KEY=value", error=True)
             return
 
-        spec = {
+        edited = {
             "name": name,
             "description": self._desc.text().strip(),
             "command": self._build_command(),
@@ -448,7 +452,11 @@ class TaskEditorDialog(QDialog):
             "restart_on_crash": self._restart.isChecked(),
         }
         if self._scope is not None:
-            spec["types"] = self._scope.types()
+            edited["types"] = self._scope.types()
+        # Preserve any stored fields the form doesn't edit (restart tuning, resume
+        # config) by overlaying the edits onto the original entry; a new task starts
+        # from just the edited fields (the agent fills the rest with defaults).
+        spec = {**getattr(self, "_orig_entry", {}), **edited}
 
         self._saving = True
         self._buttons.setEnabled(False)
