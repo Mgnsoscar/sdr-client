@@ -182,7 +182,11 @@ class LibraryClient:
         s = self._store.get_script(name)
         if s is not None and s.content:
             try:
-                return {"params": (extract_params(s.content) or {}).get("params", [])}
+                spec = extract_params(s.content) or {}
+                out = {"params": spec.get("params", [])}
+                if spec.get("calibration_signal"):     # opt-in signal for the task's env
+                    out["calibration_signal"] = spec["calibration_signal"]
+                return out
             except Exception:  # noqa: BLE001 — a script we can't parse: use stored
                 pass
         return {"params": self._store.script_params(name)}
