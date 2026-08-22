@@ -28,16 +28,31 @@ from typing import Optional
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox,
-    QPlainTextEdit, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
-    QTabWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QAbstractScrollArea, QComboBox, QFileDialog, QFormLayout,
+    QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QTableWidget,
+    QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from api.client import AgentHTTPError
 from .theme import Palette
 
 CAL_NAME = "calibration.json"
+
+# When the unit is simply uncalibrated, the /calibration route answers 404 with this
+# detail. A generic "Not Found" 404 instead means the route itself is missing — i.e.
+# the agent deployed on the unit predates the calibration endpoints and must be updated.
+_NO_CAL_DETAIL = "no calibration document"
+_OUTDATED_AGENT_MSG = (
+    "this unit's agent is out of date — it has no calibration endpoint. "
+    "Open the unit's ••• menu → “Update agent…”, then Refresh here.")
+
+
+def _is_outdated_agent(err) -> bool:
+    """A 404 that is NOT the agent's own 'not calibrated' answer ⇒ the route is absent
+    ⇒ the deployed agent predates the calibration/files endpoints."""
+    return (isinstance(err, AgentHTTPError) and err.status_code == 404
+            and _NO_CAL_DETAIL not in (err.detail or "").lower())
 
 
 def _fmt_range(lo, hi, unit: str) -> str:
@@ -95,12 +110,31 @@ class _CurveTable(QTableWidget):
         self.verticalHeader().setVisible(False)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.setMaximumHeight(180)
+        # Grow with the rows (up to a cap) so added points are always visible, rather
+        # than hiding them behind an inner scrollbar in a fixed-height box.
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
+        self.setToolTip("Each row is one measured point: the SDR gain you set and the "
+                        "power you measured on this plane. Enter at least two points, "
+                        "with strictly increasing gain; power is interpolated between them.")
+        self._fit_height()
+
+    def _fit_height(self) -> None:
+        """Size the table to its rows (with a sensible min and max), so it expands as
+        points are added instead of scrolling inside a squat box."""
+        header = self.horizontalHeader().height()
+        row_h = self.verticalHeader().defaultSectionSize()
+        rows = max(self.rowCount(), 1)
+        wanted = header + rows * row_h + 2 * self.frameWidth() + 2
+        self.setMinimumHeight(min(wanted, header + 3 * row_h))   # show ~3 rows before scrolling
+        self.setMaximumHeight(min(wanted, header + 12 * row_h))  # cap tall grids
 
     def set_points(self, points) -> None:
         self.setRowCount(0)
         for pt in points or []:
             self._append(_numstr(pt.get("gain_db")), _numstr(pt.get("power_dbm")))
+        self._fit_height()
 
     def _append(self, g="", p="") -> None:
         r = self.rowCount()
@@ -110,10 +144,12 @@ class _CurveTable(QTableWidget):
 
     def add_blank_row(self) -> None:
         self._append()
+        self._fit_height()
 
     def remove_selected(self) -> None:
         for r in sorted({i.row() for i in self.selectedItems()}, reverse=True):
             self.removeRow(r)
+        self._fit_height()
 
     def points(self, strict: bool):
         """Return [{gain_db, power_dbm}], skipping fully-blank rows. strict=True raises
@@ -188,11 +224,34 @@ class CalibrationPanel(QWidget):
         inner = QWidget(); self._editor_layout = QVBoxLayout(inner)
         self._editor_layout.setSpacing(10)
 
+        intro = QLabel(
+            "Calibration teaches this unit what an absolute power (dBm) means for its "
+            "own hardware. You describe the RF chain as a series of <b>planes</b> "
+            "(SDR output → amplifier → cable → antenna), give the SDR-gain limits, add "
+            "safety ceilings, and enter the <b>measured gain→power points</b> per signal. "
+            "The unit interpolates those points to convert a requested power into an SDR "
+            "gain. Hover any field for details.")
+        intro.setWordWrap(True)
+        intro.setTextFormat(Qt.TextFormat.RichText)
+        intro.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+        self._editor_layout.addWidget(intro)
+
         # Chain gain limits + operating plane
         gl_box = QGroupBox("Chain")
+        gl_box.setToolTip("The SDR's usable internal-gain range and which plane an "
+                          "absolute --power figure refers to.")
         gl_form = QFormLayout(gl_box)
         self._f["min_gain"] = QLineEdit(); self._f["max_gain"] = QLineEdit()
+        self._f["min_gain"].setToolTip(
+            "Lowest SDR internal gain usable on this chain, in dB. Powers that would "
+            "need less gain than this are out of range (too quiet).")
+        self._f["max_gain"].setToolTip(
+            "Highest SDR internal gain the safety ceilings allow — usually the gain at "
+            "which the amplifier hits its P1dB input. This is the hard upper stop.")
         self._f["operating"] = QComboBox()
+        self._f["operating"].setToolTip(
+            "The plane an absolute --power value is measured at — where you care about the "
+            "delivered power, e.g. EIRP at the antenna. Pick the last plane in the chain.")
         gl_form.addRow("Min gain (dB)", self._f["min_gain"])
         gl_form.addRow("Max gain (dB)", self._f["max_gain"])
         gl_form.addRow("Operating plane", self._f["operating"])
@@ -200,7 +259,17 @@ class CalibrationPanel(QWidget):
 
         # Safety / regulatory limits
         lim_box = QGroupBox("Safety / regulatory limits  (tightest wins)")
+        lim_box.setToolTip(
+            "Hard ceilings on power at a given plane (amplifier P1dB, a licence EIRP cap, …). "
+            "Each is inverted through the chain to an SDR-gain cap; the tightest one wins. "
+            "At least one is required — with no ceiling the unit refuses to transmit.")
         lim_v = QVBoxLayout(lim_box)
+        lim_help = QLabel(
+            "Each row: the plane the ceiling applies to, the max power (dBm) allowed "
+            "there, and a short reason.")
+        lim_help.setWordWrap(True)
+        lim_help.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+        lim_v.addWidget(lim_help)
         self._limits_box = QVBoxLayout(); self._limits_box.setSpacing(4)
         lim_v.addLayout(self._limits_box)
         add_lim = QPushButton("+ Add limit"); add_lim.clicked.connect(lambda: self._add_limit_row())
@@ -209,7 +278,18 @@ class CalibrationPanel(QWidget):
 
         # Planes (RF chain topology)
         pl_box = QGroupBox("Planes — the RF chain (SDR → amp → cable → antenna)")
+        pl_box.setToolTip(
+            "Each point in the chain where you reason about power. A 'measured' plane has "
+            "its own gain→power curve (below); a 'derived' plane is another plane plus a "
+            "fixed offset — cable loss (negative Δ) or antenna gain (positive Δ).")
         pl_v = QVBoxLayout(pl_box)
+        pl_help = QLabel(
+            "Per row: a name, the type (measured = you took readings here; derived = "
+            "parent plane + a fixed Δ dB), and a short quantity label (e.g. “total in-band "
+            "power”, “main-lobe EIRP”).")
+        pl_help.setWordWrap(True)
+        pl_help.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+        pl_v.addWidget(pl_help)
         self._planes_box = QVBoxLayout(); self._planes_box.setSpacing(4)
         pl_v.addLayout(self._planes_box)
         add_pl = QPushButton("+ Add plane"); add_pl.clicked.connect(self._on_add_plane)
@@ -218,7 +298,17 @@ class CalibrationPanel(QWidget):
 
         # Signals + curve grids
         sig_box = QGroupBox("Signals — measured curves")
+        sig_box.setToolTip(
+            "For each signal this unit transmits: its baseband amplitude, occupied "
+            "bandwidth, and the measured gain→power points on each measured plane.")
         sig_v = QVBoxLayout(sig_box)
+        sig_help = QLabel(
+            "Enter the points you actually measured. Two or more per measured plane, with "
+            "strictly increasing gain — the unit interpolates between them and refuses "
+            "powers outside their range.")
+        sig_help.setWordWrap(True)
+        sig_help.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+        sig_v.addWidget(sig_help)
         self._signals_box = QVBoxLayout(); self._signals_box.setSpacing(8)
         sig_v.addLayout(self._signals_box)
         add_sig = QPushButton("+ Add signal…"); add_sig.clicked.connect(self._on_add_signal)
@@ -297,10 +387,14 @@ class CalibrationPanel(QWidget):
         lim = lim or {}
         w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
         plane = QComboBox(); plane.addItems(self._plane_names())
+        plane.setToolTip("The plane this ceiling is measured at.")
         if lim.get("plane") in self._plane_names():
             plane.setCurrentText(lim["plane"])
         max_dbm = QLineEdit(_numstr(lim.get("max_dbm"))); max_dbm.setPlaceholderText("max dBm")
+        max_dbm.setToolTip("Maximum power (dBm) permitted at that plane.")
         reason = QLineEdit(lim.get("reason", "")); reason.setPlaceholderText("reason (optional)")
+        reason.setToolTip("Why this ceiling exists — e.g. “amp P1dB input”, "
+                          "“licence EIRP cap”. Shown for context only.")
         rm = QPushButton("✕"); rm.setFixedWidth(28)
         for wdg, s in ((plane, 2), (max_dbm, 1), (reason, 3)):
             h.addWidget(wdg, s)
@@ -330,15 +424,25 @@ class CalibrationPanel(QWidget):
         spec = spec or {}
         w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(4)
         name_e = QLineEdit(name); name_e.setPlaceholderText("name")
+        name_e.setToolTip("A short id for this plane, e.g. sdr_output, amp_output, antenna.")
         type_c = QComboBox(); type_c.addItems(["measured", "derived"])
+        type_c.setToolTip("measured = you took gain→power readings at this plane. "
+                          "derived = this plane is another plane plus a fixed Δ dB "
+                          "(cable loss / antenna gain), no readings of its own.")
         type_c.setCurrentText(spec.get("type", "measured"))
         from_lbl = QLabel("from")
         from_c = QComboBox(); from_c.addItems([n for n in self._plane_names() if n != name])
+        from_c.setToolTip("The parent plane this derived plane is offset from.")
         if spec.get("from") in self._plane_names():
             from_c.setCurrentText(spec["from"])
         delta_e = QLineEdit(_numstr(spec.get("delta_db"))); delta_e.setPlaceholderText("Δ dB")
+        delta_e.setToolTip("Offset from the parent plane, in dB. Negative for a loss "
+                           "(cable), positive for a gain (antenna).")
         delta_e.setFixedWidth(72)
         quantity_e = QLineEdit(spec.get("quantity", "")); quantity_e.setPlaceholderText("quantity label")
+        quantity_e.setToolTip("A short label for what power means here — e.g. “total "
+                              "in-band power”, “main-lobe EIRP”. Keep it brief; it's a "
+                              "label, not a description.")
         rm = QPushButton("✕"); rm.setFixedWidth(28)
         h.addWidget(name_e, 2); h.addWidget(type_c, 1)
         h.addWidget(from_lbl); h.addWidget(from_c, 2); h.addWidget(delta_e)
@@ -404,7 +508,12 @@ class CalibrationPanel(QWidget):
         v = QVBoxLayout(box)
         top = QFormLayout()
         amp = QLineEdit(_numstr(sig.get("amplitude")))
+        amp.setToolTip("The baseband amplitude (0–1) the script drives for this signal. "
+                       "It must match the amplitude used while measuring the curve below, "
+                       "since power scales with it.")
         bw = QLineEdit(_numstr(sig.get("occupied_bw_hz")))
+        bw.setToolTip("Occupied bandwidth of the signal in Hz (optional) — used to relate "
+                      "total in-band power to spectral density.")
         top.addRow("Amplitude (0–1)", amp)
         top.addRow("Occupied BW (Hz)", bw)
         v.addLayout(top)
@@ -602,6 +711,11 @@ class CalibrationPanel(QWidget):
             self._handle_save(result)
 
     def _handle_get(self, result) -> None:
+        if _is_outdated_agent(result):
+            self._set_doc(None)
+            self._table.setRowCount(0)
+            self._set_status(_OUTDATED_AGENT_MSG, kind="error")
+            return
         if isinstance(result, AgentHTTPError) and result.status_code == 404:
             self._set_doc(None)
             self._table.setRowCount(0)
@@ -626,6 +740,13 @@ class CalibrationPanel(QWidget):
             self._set_status(f"stored document is INVALID: {result.get('error', '')}", kind="error")
 
     def _handle_save(self, result) -> None:
+        if _is_outdated_agent(result):
+            self._set_status(_OUTDATED_AGENT_MSG, kind="error")
+            QMessageBox.warning(self, "Agent out of date",
+                                "This unit's agent has no file-upload endpoint, so the "
+                                "calibration could not be saved.\n\nUpdate the agent "
+                                "(unit ••• menu → “Update agent…”), then try again.")
+            return
         if isinstance(result, AgentHTTPError) and result.status_code == 400:
             self._set_status("rejected — not saved", kind="error")
             QMessageBox.warning(self, "Calibration rejected",

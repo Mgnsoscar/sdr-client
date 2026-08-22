@@ -96,11 +96,34 @@ def test_renders_calibrated_summary():
 
 
 def test_not_calibrated_hint():
-    p = CalibrationPanel("u", FakeHub(FakeClient(cal=AgentHTTPError("u", 404, "none"))))
+    p = CalibrationPanel("u", FakeHub(FakeClient(
+        cal=AgentHTTPError("u", 404, "No calibration document for this unit"))))
     p.on_shown()
     assert p._table.rowCount() == 0
     assert "not calibrated" in p._status.text()
     assert not p._download_btn.isEnabled()
+
+
+def test_outdated_agent_on_get_is_flagged():
+    # A generic "Not Found" 404 (route absent) ⇒ the deployed agent predates the
+    # calibration endpoints — surface an update prompt, not a bare "not calibrated".
+    p = CalibrationPanel("u", FakeHub(FakeClient(cal=AgentHTTPError("u", 404, "Not Found"))))
+    p.on_shown()
+    assert "out of date" in p._status.text()
+    assert p._table.rowCount() == 0
+
+
+def test_outdated_agent_on_save_is_flagged(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(QMessageBox, "warning",
+                        staticmethod(lambda *a, **k: seen.setdefault("msg", a)))
+    client = FakeClient(upload=AgentHTTPError("u", 404, "Not Found"))
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(_doc())
+    p._tabs.setCurrentIndex(0)
+    p._on_save()
+    assert "out of date" in p._status.text()
+    assert "msg" in seen                                # a dialog explained the update
 
 
 def test_invalid_stored_document():
