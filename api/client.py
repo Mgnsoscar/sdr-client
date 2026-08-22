@@ -421,8 +421,16 @@ class AgentClient:
         self.last_latency_s = None
         return self.state
 
-    def health(self) -> bool:
-        """True if the agent answers /health. Never raises on HTTP — only on connect."""
+    def health(self, recover: bool = True) -> bool:
+        """True if the agent answers /health. Never raises on HTTP — only on connect.
+
+        `recover=True` (default) self-heals an address change: if the active address
+        stopped answering and the unit has other known addresses, re-probe them via
+        warmup(). That recovery is worth its cost in the background poller, but it turns
+        one offline unit into several sequential connect-timeouts — so a bulk
+        reachability gate (deploy / health fan-out) passes `recover=False` to fail fast
+        on the active address in a single connect-timeout. A moved unit is still
+        recovered on the poller's own cadence, so the next action sees it correctly."""
         t0 = time.perf_counter()
         try:
             data = self._request("GET", "/health")
@@ -436,8 +444,10 @@ class AgentClient:
         except AgentConnectionError as exc:
             # The active address stopped answering. If the unit has other known
             # addresses (e.g. it moved from wifi to ethernet), re-probe them so it
-            # recovers on its own without a manual address change.
-            if len(self._addresses) > 1:
+            # recovers on its own without a manual address change — unless the caller
+            # wants a fast gate (recover=False), where that multi-address probe is the
+            # very stall we're avoiding.
+            if recover and len(self._addresses) > 1:
                 return self.warmup() == ConnectionState.ONLINE
             self.state = ConnectionState.OFFLINE
             self.last_error = str(exc)

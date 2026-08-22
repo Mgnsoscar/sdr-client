@@ -138,10 +138,12 @@ class Fleet:
         is skipped on units that don't answer. An unreachable unit surfaces as an
         AgentConnectionError in its slot instead of stalling on several connect-
         timeouts — so a fleet with offline units checks/deploys quickly, and callers
-        can tell 'offline' apart from a real failure (and from drift). health()'s
-        short connect-timeout means the gate costs one fast probe, run concurrently."""
+        can tell 'offline' apart from a real failure (and from drift). recover=False
+        keeps the gate to ONE connect-timeout per offline unit — no multi-address
+        warmup recovery (the background poller heals a moved unit on its own), so a
+        fleet with an offline unit deploys/checks fast instead of stalling on it."""
         def guarded(c: AgentClient):
-            if not c.health():
+            if not c.health(recover=False):
                 raise AgentConnectionError("offline")
             return fn(c)
         return self._fan_out(guarded, units)
