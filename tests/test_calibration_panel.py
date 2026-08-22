@@ -202,6 +202,19 @@ def test_curve_grid_edit_is_read_back():
     assert {"gain_db": 60.0, "power_dbm": -16.0} in pts
 
 
+def test_curve_grid_remove_without_selection_drops_last_row():
+    # "− point" must remove something even when no whole row is selected (the common
+    # case right after typing into cells), rather than silently doing nothing.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc())
+    tbl = p._f["signals"]["mock"]["curves"]["sdr_output"]
+    tbl.clearSelection()
+    tbl.setCurrentCell(-1, -1)
+    before = tbl.rowCount()
+    tbl.remove_selected()
+    assert tbl.rowCount() == before - 1
+
+
 def test_bad_curve_cell_blocks_save_strictly():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(_doc())

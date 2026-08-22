@@ -147,7 +147,15 @@ class _CurveTable(QTableWidget):
         self._fit_height()
 
     def remove_selected(self) -> None:
-        for r in sorted({i.row() for i in self.selectedItems()}, reverse=True):
+        # Remove the selected rows; if nothing is selected, fall back to the current
+        # row, then the last row — so "− point" always removes something rather than
+        # silently doing nothing when the user hasn't clicked to select a whole row.
+        rows = {i.row() for i in self.selectedItems()}
+        if not rows and self.currentRow() >= 0:
+            rows = {self.currentRow()}
+        if not rows and self.rowCount() > 0:
+            rows = {self.rowCount() - 1}
+        for r in sorted(rows, reverse=True):
             self.removeRow(r)
         self._fit_height()
 
