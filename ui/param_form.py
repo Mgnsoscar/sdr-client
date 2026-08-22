@@ -427,6 +427,11 @@ class ParamForm(QWidget):
                     if n is not None:
                         w.setValue(int(n) if isinstance(w, QSpinBox) else n)
                 elif isinstance(w, QComboBox):
+                    # Fixed-choice combo: setCurrentText is a no-op for a value not in
+                    # the list, which would silently snap to the first choice and send
+                    # THAT instead. Add the stored value so it's preserved and visible.
+                    if w.findText(val) < 0:
+                        w.addItem(val)
                     w.setCurrentText(val)
                 elif isinstance(w, QLineEdit):
                     w.setText(val)

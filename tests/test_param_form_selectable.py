@@ -37,3 +37,14 @@ def test_build_args_non_selectable_emits_all():
     f.set_params(SPECS, selectable=False)
     args = f.build_args()
     assert "-Frequency" in args and "-Amp" in args
+
+
+def test_fixed_choice_preserves_unknown_stored_value():
+    # A stored arg not among the script's fixed choices must be preserved and shown,
+    # not silently snapped to the first choice (which would send the wrong value).
+    f = ParamForm()
+    f.set_params([{"dest": "otw", "flags": ["--otw"], "type": "str",
+                   "choices": ["sc8", "sc16"], "default": "sc8"}])
+    f.set_values(["--otw", "sc12"])          # sc12 isn't a declared choice
+    assert "--otw" in f.build_args()
+    assert "sc12" in f.build_args()          # preserved, not snapped to sc8
