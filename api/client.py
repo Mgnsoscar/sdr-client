@@ -97,6 +97,8 @@ class AgentClient:
         self.unit_type = unit_type or m.DEFAULT_UNIT_TYPE   # unit kind → library scope
         self.unit_id = unit_id or self.label        # agent's reported id (from /info)
         self.machine_id = ""                        # physical Pi fingerprint (from /info)
+        self.agent_version = ""                     # reported by /info (warmup/info)
+        self.capabilities: List[str] = []           # feature flags the agent advertises
         self.api_key = api_key
         self.port = port
         self.timeout = timeout
@@ -399,6 +401,8 @@ class AgentClient:
                 self.unit_id = info.unit_id
                 if info.machine_id:
                     self.machine_id = info.machine_id
+                self.agent_version = info.agent_version
+                self.capabilities = list(info.capabilities or [])
                 self.state = ConnectionState.ONLINE
                 self.last_error = ""
                 self.last_latency_s = time.perf_counter() - t0
@@ -460,11 +464,19 @@ class AgentClient:
     def info(self) -> m.AgentInfo:
         data = self._request("GET", "/info")
         info = m.AgentInfo(**data)
-        # Adopt the real unit_id + machine-id fingerprint once we know them
+        # Adopt the real unit_id + machine-id fingerprint + advertised capabilities.
         self.unit_id = info.unit_id
         if info.machine_id:
             self.machine_id = info.machine_id
+        self.agent_version = info.agent_version
+        self.capabilities = list(info.capabilities or [])
         return info
+
+    def supports(self, capability: str) -> bool:
+        """True if the unit's agent advertised this feature flag in /info. False when
+        it didn't (an older agent that predates the flag), so callers can feature-gate
+        explicitly instead of probing an endpoint and inferring support from a 404."""
+        return capability in self.capabilities
 
     def system(self) -> m.SystemHealth:
         return m.SystemHealth(**self._request("GET", "/system"))

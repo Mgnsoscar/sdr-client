@@ -159,6 +159,9 @@ class AgentInfo(BaseModel):
     python_version: str
     tasks: List[str]
     previous_version: Optional[str] = None   # OTA rollback target, if any
+    # Feature flags the agent advertises. Defaulted so an agent predating this field
+    # (which simply omits it) parses fine and reads as "no advertised capabilities".
+    capabilities: List[str] = []
     # Where this unit keeps scripts + the interpreter its tasks launch with — used
     # to default a new task's fields per unit (X410 differs from the Pi layout).
     scripts_dir: str = ""

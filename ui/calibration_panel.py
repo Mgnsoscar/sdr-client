@@ -38,6 +38,7 @@ from api.client import AgentHTTPError
 from .theme import Palette
 
 CAL_NAME = "calibration.json"
+CAL_CAPABILITY = "calibration"
 
 # When the unit is simply uncalibrated, the /calibration route answers 404 with this
 # detail. A generic "Not Found" 404 instead means the route itself is missing — i.e.
@@ -49,8 +50,9 @@ _OUTDATED_AGENT_MSG = (
 
 
 def _is_outdated_agent(err) -> bool:
-    """A 404 that is NOT the agent's own 'not calibrated' answer ⇒ the route is absent
-    ⇒ the deployed agent predates the calibration/files endpoints."""
+    """Fallback heuristic (used only before /info capabilities are known): a 404 that
+    is NOT the agent's own 'not calibrated' answer ⇒ the route is absent ⇒ the deployed
+    agent predates the calibration/files endpoints."""
     return (isinstance(err, AgentHTTPError) and err.status_code == 404
             and _NO_CAL_DETAIL not in (err.detail or "").lower())
 
@@ -723,8 +725,24 @@ class CalibrationPanel(QWidget):
         elif parts[0] == "cal_save":
             self._handle_save(result)
 
+    def _agent_lacks_calibration(self) -> bool:
+        """Definitive when the unit's /info has been read (agent_version is set): the
+        agent is reachable but advertises no calibration capability ⇒ it's too old.
+        When /info hasn't been read yet, returns False and the caller falls back to the
+        404 heuristic on the actual response."""
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(getattr(client, "agent_version", "")) and not (
+            getattr(client, "supports", lambda _c: False)(CAL_CAPABILITY))
+
+    def _is_outdated(self, result) -> bool:
+        """Prefer the explicit capability flag; fall back to the 404 heuristic."""
+        return self._agent_lacks_calibration() or _is_outdated_agent(result)
+
     def _handle_get(self, result) -> None:
-        if _is_outdated_agent(result):
+        if self._is_outdated(result):
             self._set_doc(None)
             self._table.setRowCount(0)
             self._set_status(_OUTDATED_AGENT_MSG, kind="error")
@@ -753,7 +771,7 @@ class CalibrationPanel(QWidget):
             self._set_status(f"stored document is INVALID: {result.get('error', '')}", kind="error")
 
     def _handle_save(self, result) -> None:
-        if _is_outdated_agent(result):
+        if self._is_outdated(result):
             self._set_status(_OUTDATED_AGENT_MSG, kind="error")
             QMessageBox.warning(self, "Agent out of date",
                                 "This unit's agent has no file-upload endpoint, so the "
