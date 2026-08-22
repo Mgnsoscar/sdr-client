@@ -92,13 +92,24 @@ def num_or_none(s):
         return None
 
 
+def _flex_int(s: str) -> int:
+    """Parse an int, honouring a 0x/0o/0b prefix (base 0) but also accepting a plain
+    decimal with leading zeros ('08', '0123') — which base 0 rejects, an easy trap for
+    an operator who pads a PRN or count. Mirrors paramkit._int_flexible so the form and
+    the script agree on what an integer field accepts."""
+    try:
+        return int(s, 0)
+    except ValueError:
+        return int(s, 10)
+
+
 def _typed(val_str: str, spec: dict):
     """Coerce a widget's string value to the type its schema declares (int/float),
     leaving anything else — and unparseable numbers — as the original string."""
     t = spec.get("type")
     try:
         if t == "int":
-            return int(val_str, 0)
+            return _flex_int(val_str)
         if t == "float":
             return float(val_str)
     except (TypeError, ValueError):
@@ -525,7 +536,7 @@ class ParamForm(QWidget):
                 continue
             if spec.get("type") in ("int", "float"):
                 try:
-                    num = int(val, 0) if spec["type"] == "int" else float(val)
+                    num = _flex_int(val) if spec["type"] == "int" else float(val)
                 except ValueError:
                     bad_type.append(f"{flag} ({spec['type']})")
                     continue

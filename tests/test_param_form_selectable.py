@@ -48,3 +48,13 @@ def test_fixed_choice_preserves_unknown_stored_value():
     f.set_values(["--otw", "sc12"])          # sc12 isn't a declared choice
     assert "--otw" in f.build_args()
     assert "sc12" in f.build_args()          # preserved, not snapped to sc8
+
+
+def test_leading_zero_int_accepted():
+    # An operator padding a PRN ('08') must not hit a spurious "invalid value".
+    f = ParamForm()
+    f.set_params([{"dest": "prn", "flags": ["--prn"], "type": "int",
+                   "min": 1, "max": 32, "required": True}])
+    f.set_values(["--prn", "08"])
+    assert f.validate() is None                 # not rejected
+    assert f.values()["prn"] == 8               # parsed as decimal 8
