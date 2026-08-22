@@ -546,34 +546,34 @@ class AgentClient:
         return [m.ProcessStatus(**t) for t in self._request("GET", "/tasks")]
 
     def task_status(self, name: str) -> m.ProcessStatus:
-        return m.ProcessStatus(**self._request("GET", f"/tasks/{name}"))
+        return m.ProcessStatus(**self._request("GET", f"/tasks/{quote(name, safe='/')}"))
 
     def start_task(self, name: str, request: Optional[m.StartRequest] = None) -> m.ProcessStatus:
         body = request.model_dump() if request else None
-        return m.ProcessStatus(**self._request("POST", f"/tasks/{name}/start", json=body))
+        return m.ProcessStatus(**self._request("POST", f"/tasks/{quote(name, safe='/')}/start", json=body))
 
     def stop_task(self, name: str) -> m.ProcessStatus:
-        return m.ProcessStatus(**self._request("POST", f"/tasks/{name}/stop"))
+        return m.ProcessStatus(**self._request("POST", f"/tasks/{quote(name, safe='/')}/stop"))
 
     def restart_task(self, name: str, request: Optional[m.StartRequest] = None) -> m.ProcessStatus:
         body = request.model_dump() if request else None
-        return m.ProcessStatus(**self._request("POST", f"/tasks/{name}/restart", json=body))
+        return m.ProcessStatus(**self._request("POST", f"/tasks/{quote(name, safe='/')}/restart", json=body))
 
     def set_task_params(self, name: str, values: dict, wait: float = 1.0) -> dict:
         """Retune a running task's live parameters. Returns the agent's
         {ok, accepted, rejected, applied, pending}."""
-        return self._request("POST", f"/tasks/{name}/params",
+        return self._request("POST", f"/tasks/{quote(name, safe='/')}/params",
                              json={"values": values, "wait": wait})
 
     def get_task_params(self, name: str) -> dict:
         """Current + applied live-parameter values of a running task."""
-        return self._request("GET", f"/tasks/{name}/params/live")
+        return self._request("GET", f"/tasks/{quote(name, safe='/')}/params/live")
 
     def task_logs(self, name: str, lines: int = 100) -> List[str]:
-        return self._request("GET", f"/tasks/{name}/logs", params={"lines": lines})
+        return self._request("GET", f"/tasks/{quote(name, safe='/')}/logs", params={"lines": lines})
 
     def task_history(self, name: str) -> List[m.ExitRecord]:
-        return [m.ExitRecord(**r) for r in self._request("GET", f"/tasks/{name}/history")]
+        return [m.ExitRecord(**r) for r in self._request("GET", f"/tasks/{quote(name, safe='/')}/history")]
 
     def _stream_base(self) -> str:
         """Base 'scheme://host:port' for streaming connections (WebSocket logs, SSE
@@ -665,10 +665,10 @@ class AgentClient:
         return self._request("POST", "/tasks", json=spec)
 
     def update_task(self, name: str, spec: dict) -> dict:
-        return self._request("PUT", f"/tasks/{name}", json=spec)
+        return self._request("PUT", f"/tasks/{quote(name, safe='/')}", json=spec)
 
     def delete_task(self, name: str) -> dict:
-        return self._request("DELETE", f"/tasks/{name}")
+        return self._request("DELETE", f"/tasks/{quote(name, safe='/')}")
 
     def get_tasks_yaml(self) -> str:
         data = self._request("GET", "/config/tasks-yaml")
