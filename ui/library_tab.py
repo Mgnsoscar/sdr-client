@@ -424,9 +424,11 @@ class LibraryTab(QWidget):
         notes = []
         zero_task_units = []
         for h, r in ok.items():
-            # Tasks the unit now holds = added + unchanged (skipped were left running).
+            # Tasks the unit now holds = added + unchanged + skipped (the skipped ones
+            # were left running, so they ARE present — don't count them as zero).
             reload = getattr(r, "tasks_reload", None) or {}
-            n_tasks = len(reload.get("added", [])) + len(reload.get("unchanged", []))
+            n_tasks = (len(reload.get("added", [])) + len(reload.get("unchanged", []))
+                       + len(getattr(r, "tasks_skipped", None) or []))
             if lib_has_tasks and n_tasks == 0:
                 zero_task_units.append(self._label(h))
             parts = []

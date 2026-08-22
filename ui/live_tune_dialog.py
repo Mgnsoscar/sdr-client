@@ -160,6 +160,11 @@ class LiveTuneDialog(QDialog):
                       if t.get("name") == self.task_name), None)
         self._cal_signal_id = (entry.get("env") or {}).get("SDR_CAL_SIGNAL_ID") if entry else None
         command = list(entry.get("command", [])) if entry else []
+        # Open in the mode the deployed command used (relative if it set --gain), so a
+        # task running in relative gain doesn't open showing the absolute dBm control.
+        self._default_power_mode = ("relative"
+                                    if any(a in ("-Gain", "--gain") for a in command)
+                                    else None)
         script_idx = next((i for i, a in enumerate(command)
                            if isinstance(a, str) and a.endswith(".py")), None)
         if script_idx is None:
@@ -187,7 +192,8 @@ class LiveTuneDialog(QDialog):
         if not (self._params_ready and self._cal_ready):
             return
         self._form.set_params(self._live_specs, cal_bounds=self._cal_bounds,
-                              absolute_allowed=True)
+                              absolute_allowed=True,
+                              default_power_mode=getattr(self, "_default_power_mode", None))
         if not self._live_specs:
             self._set_result("This task declares no live parameters.")
             self._form.setEnabled(False)

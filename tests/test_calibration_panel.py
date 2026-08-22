@@ -215,6 +215,19 @@ def test_curve_grid_remove_without_selection_drops_last_row():
     assert tbl.rowCount() == before - 1
 
 
+def test_read_form_preserves_unmodeled_signal_fields():
+    # The form doesn't model every signal/curve field (the JSON tab is the source of
+    # truth for those). Editing in the Editor tab and reading back must not drop them.
+    d = _doc()
+    d["signals"]["mock"]["note"] = "keep me"                      # signal-level extra
+    d["signals"]["mock"]["curves"]["sdr_output"]["interp"] = "pchip"  # curve-level extra
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(d)
+    out = p._read_form(strict=True)["signals"]["mock"]
+    assert out["note"] == "keep me"
+    assert out["curves"]["sdr_output"]["interp"] == "pchip"
+
+
 def test_bad_curve_cell_blocks_save_strictly():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(_doc())

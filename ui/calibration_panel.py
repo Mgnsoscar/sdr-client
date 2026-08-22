@@ -577,21 +577,26 @@ class CalibrationPanel(QWidget):
         signals = {}
         prev_sigs = (self._doc or {}).get("signals") or {}
         for sid, w in self._f.get("signals", {}).items():
-            sig = {}
+            # Start from the stored signal so fields the form doesn't model (the JSON
+            # tab is the source of truth for those) survive a form round-trip; then
+            # overwrite only what the form edits.
+            sig = dict(prev_sigs.get(sid) or {})
             if w["amp"].text().strip():
                 sig["amplitude"] = _to_float(w["amp"].text(), f"{sid} amplitude")
+            else:
+                sig.pop("amplitude", None)
             if w["bw"].text().strip():
                 sig["occupied_bw_hz"] = _to_float(w["bw"].text(), f"{sid} occupied BW")
+            else:
+                sig.pop("occupied_bw_hz", None)
             curves = {}
             for plane, tbl in w["curves"].items():
                 pts = tbl.points(strict)
                 if not pts:
                     continue
-                entry = {"points": pts}
                 prev = ((prev_sigs.get(sid) or {}).get("curves") or {}).get(plane) or {}
-                for k in ("interp", "offset_db"):     # preserve fields the form doesn't edit
-                    if k in prev:
-                        entry[k] = prev[k]
+                entry = dict(prev)           # preserve unmodeled curve fields too
+                entry["points"] = pts
                 curves[plane] = entry
             sig["curves"] = curves
             signals[sid] = sig

@@ -354,9 +354,12 @@ class ParamForm(QWidget):
                                if self._cal_bounds else s)
             elif i == gidx:
                 if self._power_mode == "relative":
-                    # Require a value: relative selects raw gain, so an empty field
-                    # must block (not silently fall back to the absolute default).
-                    g = dict(s); g["required"] = True
+                    # Relative selects raw gain. If the schema gives no default, an
+                    # empty field must block (don't silently fall back to the absolute
+                    # default); but a --gain that HAS its own default is fine as-is.
+                    g = dict(s)
+                    if g.get("default") is None:
+                        g["required"] = True
                     out.append(g)
             else:
                 out.append(s)
@@ -433,9 +436,16 @@ class ParamForm(QWidget):
         return extra
 
     def build_args(self) -> List[str]:
-        """The CLI args produced by the current widget values (params only)."""
+        """The CLI args produced by the current widget values (params only). In
+        selectable mode only TICKED params are emitted (mirrors values()/validate()),
+        so an unchecked param is never carried across — e.g. a power-mode toggle in a
+        tune step must not silently select params the operator left unchecked."""
         out: List[str] = []
         for dest, (w, spec) in self._widgets.items():
+            if self._selectable:
+                chk = self._checks.get(dest)
+                if chk is None or not chk.isChecked():
+                    continue
             flag = spec["flags"][0] if spec["flags"] else None
             if spec.get("is_flag"):
                 if isinstance(w, QCheckBox) and w.isChecked() and flag:
