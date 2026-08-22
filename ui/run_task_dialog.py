@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 
 from api import models as m
 
-from .param_form import ParamForm, apply_power_bounds
+from .param_form import ParamForm
 from .qt_adapter import DataHub
 from .theme import Palette
 
@@ -238,8 +238,10 @@ class RunTaskDialog(QDialog):
             self._build_form()
 
     def _build_form(self) -> None:
-        specs = apply_power_bounds(self._param_specs, self._cal_bounds)
-        self._form.set_params(specs)
+        # Open in the mode the deployed command used (relative if it set --gain).
+        mode = "relative" if any(a in ("-Gain", "--gain") for a in self._current_args) else None
+        self._form.set_params(self._param_specs, cal_bounds=self._cal_bounds,
+                              absolute_allowed=True, default_power_mode=mode)
         # Prefill from the deployed args; anything the form doesn't recognise
         # (positional args, flags not in the schema) drops into "Additional args".
         extra = self._form.set_values(self._current_args)

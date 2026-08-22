@@ -143,14 +143,40 @@ def range_hint(spec: dict) -> str:
 # instead of guessing.
 
 POWER_DEST = "power"
+GAIN_DEST = "gain"
 
 
 def find_power_index(specs: List[dict]):
-    """Index of the --power parameter in a spec list, or None."""
+    """Index of the absolute --power parameter in a spec list, or None."""
     for i, s in enumerate(specs):
         if s.get("dest") == POWER_DEST or "--power" in (s.get("flags") or []):
             return i
     return None
+
+
+def find_gain_index(specs: List[dict]):
+    """Index of the relative --gain parameter in a spec list, or None."""
+    for i, s in enumerate(specs):
+        if s.get("dest") == GAIN_DEST or "--gain" in (s.get("flags") or []):
+            return i
+    return None
+
+
+def _compute_power_modes(specs, cal_bounds, absolute_allowed) -> List[str]:
+    """Which power modes to offer. Absolute (calibrated dBm) needs a known unit
+    (`absolute_allowed`) that is calibrated for the signal (`cal_bounds`); Relative
+    (raw gain) needs a --gain param. In the Library (no unit) only Relative is
+    offered; a script with only --power keeps Absolute (its schema range)."""
+    has_power = find_power_index(specs) is not None
+    has_gain = find_gain_index(specs) is not None
+    modes: List[str] = []
+    if has_power and absolute_allowed and cal_bounds:
+        modes.append("absolute")
+    if has_gain:
+        modes.append("relative")
+    if not modes and has_power:
+        modes.append("absolute")
+    return modes
 
 
 def apply_power_bounds(specs: List[dict], bounds) -> List[dict]:
@@ -246,18 +272,44 @@ class ParamForm(QWidget):
         self._widgets: Dict[str, tuple] = {}   # dest -> (widget, spec)
         self._checks: Dict[str, QCheckBox] = {}  # dest -> include-checkbox (selectable mode)
         self._selectable = False
+        # Power mode (relative gain vs absolute dBm) — see _compute_power_modes.
+        self._base_specs: List[dict] = []
+        self._cal_bounds = None
+        self._absolute_allowed = False
+        self._power_modes: List[str] = []
+        self._power_mode = None
         self._form = QFormLayout(self)
         self._form.setContentsMargins(0, 0, 0, 0)
         self._form.setSpacing(6)
 
     # ── Build ────────────────────────────────────────────────────────────────
 
-    def set_params(self, specs: List[dict], selectable: bool = False) -> None:
+    def set_params(self, specs: List[dict], selectable: bool = False,
+                   cal_bounds=None, absolute_allowed: bool = False,
+                   default_power_mode=None) -> None:
         """Rebuild the form for a parameter schema (clears existing widgets).
 
         selectable=True prefixes each row with an include checkbox: values() then
-        returns only the ticked params. Used by tune steps, where you pick exactly
-        which live parameters to set and leave the rest untouched."""
+        returns only the ticked params. Used by tune steps.
+
+        Power mode: when a script exposes both an absolute --power (dBm) and a
+        relative --gain (raw dB), the form shows ONE of them plus a mode toggle.
+        `absolute_allowed` (a unit is known) + `cal_bounds` (that unit is calibrated
+        for the signal) unlock the Absolute option; otherwise only Relative (gain)
+        is offered — which is the correct default in the Library, where no unit is
+        attached. `default_power_mode` ('absolute'/'relative') picks the initial one."""
+        self._base_specs = list(specs)
+        self._selectable = selectable
+        self._cal_bounds = cal_bounds
+        self._absolute_allowed = absolute_allowed
+        self._power_modes = _compute_power_modes(specs, cal_bounds, absolute_allowed)
+        if default_power_mode in self._power_modes:
+            self._power_mode = default_power_mode
+        elif self._power_mode not in self._power_modes:
+            self._power_mode = self._power_modes[0] if self._power_modes else None
+        self._render()
+
+    def _render(self) -> None:
         while self._form.count():
             item = self._form.takeAt(0)
             w = item.widget()
@@ -265,8 +317,11 @@ class ParamForm(QWidget):
                 w.deleteLater()
         self._widgets.clear()
         self._checks.clear()
-        self._selectable = selectable
 
+        if len(self._power_modes) > 1:                 # relative/absolute chooser
+            self._form.addRow(self._mode_label(), self._mode_toggle())
+
+        specs = self._effective_specs()
         if not specs:
             note = QLabel("This script declares no parameters.")
             note.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
@@ -274,12 +329,60 @@ class ParamForm(QWidget):
         for spec in specs:
             widget = self._widget_for(spec)
             self._widgets[spec["dest"]] = (widget, spec)
-            if selectable:
+            if self._selectable:
                 chk = self._check_for(spec)
                 self._checks[spec["dest"]] = chk
                 self._form.addRow(chk, widget)
             else:
                 self._form.addRow(self._label_for(spec), widget)
+        self.changed.emit()
+
+    # ── Power mode ─────────────────────────────────────────────────────────────
+    def power_mode(self):
+        return self._power_mode
+
+    def _effective_specs(self) -> List[dict]:
+        """The specs actually rendered: the active power/gain field (bounds applied
+        for absolute) in place, the other one dropped, everything else unchanged."""
+        pidx = find_power_index(self._base_specs)
+        gidx = find_gain_index(self._base_specs)
+        out: List[dict] = []
+        for i, s in enumerate(self._base_specs):
+            if i == pidx:
+                if self._power_mode == "absolute":
+                    out.append(apply_power_bounds([s], self._cal_bounds)[0]
+                               if self._cal_bounds else s)
+            elif i == gidx:
+                if self._power_mode == "relative":
+                    # Require a value: relative selects raw gain, so an empty field
+                    # must block (not silently fall back to the absolute default).
+                    g = dict(s); g["required"] = True
+                    out.append(g)
+            else:
+                out.append(s)
+        return out
+
+    def _mode_label(self) -> QLabel:
+        lbl = QLabel("Power mode")
+        lbl.setStyleSheet(f"font-weight: 600; color: {Palette.TEXT};")
+        return lbl
+
+    def _mode_toggle(self) -> QComboBox:
+        combo = QComboBox()
+        names = {"absolute": "Absolute (dBm, calibrated)", "relative": "Relative (raw gain, dB)"}
+        for m in self._power_modes:
+            combo.addItem(names.get(m, m), m)
+        combo.setCurrentIndex(self._power_modes.index(self._power_mode))
+        combo.currentIndexChanged.connect(self._on_mode_changed)
+        return combo
+
+    def _on_mode_changed(self, idx: int) -> None:
+        if not (0 <= idx < len(self._power_modes)):
+            return
+        keep = self.build_args()                # carry non-power params across
+        self._power_mode = self._power_modes[idx]
+        self._render()
+        self.set_values(keep)
         self.changed.emit()
 
     def has_params(self) -> bool:

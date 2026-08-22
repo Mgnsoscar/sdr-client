@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QLabel, QScrollArea, QVBoxLayout,
 )
 
-from .param_form import ParamForm, apply_power_bounds, fmt_value
+from .param_form import ParamForm, fmt_value
 from .qt_adapter import DataHub
 from .theme import Palette
 
@@ -178,8 +178,8 @@ class LiveTuneDialog(QDialog):
     def _maybe_build(self) -> None:
         if not (self._params_ready and self._cal_ready):
             return
-        specs = apply_power_bounds(self._live_specs, self._cal_bounds)
-        self._form.set_params(specs)
+        self._form.set_params(self._live_specs, cal_bounds=self._cal_bounds,
+                              absolute_allowed=True)
         if not self._live_specs:
             self._set_result("This task declares no live parameters.")
             self._form.setEnabled(False)
