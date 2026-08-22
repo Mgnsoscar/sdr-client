@@ -32,7 +32,7 @@ from api.fleet import LIBRARY_HOST
 from .qt_adapter import DataHub
 from .scope_selector import ScopeSelector
 from .theme import Palette
-from .timeline_editor import TimelineEditor
+from .timeline_editor import TimelineEditor, task_signals_from_yaml
 
 
 class SequenceEditorDialog(QDialog):
@@ -91,6 +91,9 @@ class SequenceEditorDialog(QDialog):
         self._timeline = TimelineEditor()
         self._timeline.changed.connect(self._revalidate)
         self._timeline.set_context(self.hub, self.hostname)
+        # This sequence runs on this unit, so absolute power is bounded by its
+        # calibration (relative otherwise).
+        self._timeline.set_calibration(self.hub, self.hostname)
         outer.addWidget(self._timeline, stretch=1)
 
         self._status = QLabel("loading tasks…")
@@ -137,6 +140,7 @@ class SequenceEditorDialog(QDialog):
 
         if op == "seqdlg_yaml":
             self._timeline.set_task_commands(self._parse_task_commands(result))
+            self._timeline.set_task_signals(task_signals_from_yaml(result))
             return
 
         if op == "seqdlg_tasks":

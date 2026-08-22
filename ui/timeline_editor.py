@@ -92,6 +92,25 @@ PANEL_MIN_W = 112
 DRAG_PARTS = ("bar_start", "bar_stop", "bar_body", "run_body")
 
 
+def task_signals_from_yaml(yaml_text) -> Dict[str, str]:
+    """task_name -> SDR_CAL_SIGNAL_ID, parsed from a tasks.yaml document. Used to
+    look up a task's calibration signal so a step form can offer absolute power."""
+    import yaml as _yaml
+    if not isinstance(yaml_text, str) or not yaml_text.strip():
+        return {}
+    try:
+        doc = _yaml.safe_load(yaml_text) or {}
+    except _yaml.YAMLError:
+        return {}
+    out: Dict[str, str] = {}
+    for entry in (doc.get("tasks") or []):
+        name = entry.get("name")
+        sid = (entry.get("env") or {}).get("SDR_CAL_SIGNAL_ID")
+        if name and sid:
+            out[name] = str(sid)
+    return out
+
+
 def _fmt_offset(offset_s: float) -> str:
     """'-2 min', '+5 s', '0 s' — signed, split into min/h past each threshold."""
     return fmt_duration(offset_s, signed=True)
@@ -1164,17 +1183,27 @@ class StepEditorDialog(QDialog):
 
     def _build_form(self, script: str) -> None:
         specs = self._editor.param_cache().get(script, [])
+        # Absolute power is offered when a unit is targeted (plan/sequences tab) AND
+        # it's calibrated for this task's signal; else relative (gain) only. Open in
+        # the mode the step's args used (relative if they set --gain).
+        task = self._task.currentText().strip()
+        bounds = self._editor.cal_bounds_for_task(task)
+        abs_allowed = self._editor.absolute_allowed()
+        prefill = self._pending_prefill or self._src.args or []
+        mode = "relative" if any(a in ("-Gain", "--gain") for a in prefill) else None
         if self._is_tune():
             # Only live-tunable params can be changed mid-run; the checkboxes let
             # you pick exactly which ones this step sets.
             specs = [s for s in specs if s.get("live")]
-            self._form.set_params(specs, selectable=True)
+            self._form.set_params(specs, selectable=True, cal_bounds=bounds,
+                                  absolute_allowed=abs_allowed, default_power_mode=mode)
             self._params_status.setText(
                 "tick the parameters to set at this offset" if specs
                 else "this task's script declares no live parameters")
             self._seed_from_params()
         else:
-            self._form.set_params(specs)
+            self._form.set_params(specs, cal_bounds=bounds,
+                                  absolute_allowed=abs_allowed, default_power_mode=mode)
             self._params_status.setText(
                 "" if specs else "this script declares no parameters — use extra args")
             self._apply_prefill()
@@ -1277,6 +1306,14 @@ class TimelineEditor(QWidget):
         self._task_commands: Dict[str, List[str]] = {}
         self._param_specs: Dict[str, list] = {}
         self._params_inflight: set = set()
+        # Calibration context: params come from the library (same across units), but
+        # absolute-power bounds are per-UNIT, so the calibration host is tracked
+        # separately (the unit a plan will arm on / the unit whose sequences tab this
+        # is). _task_signals maps a task → its SDR_CAL_SIGNAL_ID (from tasks.yaml env).
+        self._cal_hostname = ""
+        self._calibration = None                 # the unit's GET /calibration result
+        self._task_signals: Dict[str, str] = {}
+        self._cal_connected = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1343,6 +1380,46 @@ class TimelineEditor(QWidget):
 
     def set_task_commands(self, mapping: Dict[str, List[str]]) -> None:
         self._task_commands = dict(mapping)
+
+    def set_task_signals(self, mapping: Dict[str, str]) -> None:
+        """task_name -> SDR_CAL_SIGNAL_ID (the task's calibration opt-in signal)."""
+        self._task_signals = dict(mapping)
+
+    def set_calibration(self, hub, hostname: str) -> None:
+        """Point the step editor at the UNIT whose calibration governs absolute power
+        (the plan's target unit, or the sequences-tab unit). Empty hostname → no unit,
+        so only relative power is offered. Fetches GET /calibration once and caches
+        it; step forms read it via cal_bounds_for_task()."""
+        self._cal_hostname = hostname or ""
+        self._calibration = None
+        if not hostname or hub is None:
+            return
+        if not self._cal_connected:
+            hub.task_done.connect(self._on_cal_result)
+            self._cal_connected = True
+        hub.run_async(f"tl_cal:{hostname}",
+                      lambda h=hostname: hub.fleet.get(h).get_calibration())
+
+    def _on_cal_result(self, label: str, result) -> None:
+        if not isinstance(label, str) or not label.startswith("tl_cal:"):
+            return
+        if label.split(":", 1)[1] != self._cal_hostname:
+            return
+        # Uncalibrated units 404 (an Exception) — just means no bounds.
+        self._calibration = result if (isinstance(result, dict) and result.get("valid")) else None
+
+    def absolute_allowed(self) -> bool:
+        """Absolute (calibrated dBm) power is offered only when a unit is targeted."""
+        return bool(self._cal_hostname)
+
+    def cal_bounds_for_task(self, task: str):
+        """Resolved --power bounds for a task's signal on the target unit, or None."""
+        if not self._calibration:
+            return None
+        sid = self._task_signals.get(task)
+        if not sid:
+            return None
+        return (self._calibration.get("signals") or {}).get(sid)
 
     def script_for_task(self, task: str) -> Tuple[str, List[str]]:
         """(script_filename, default_args) for a task name — for the step editor."""
