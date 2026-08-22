@@ -13,13 +13,19 @@ import time
 from typing import Optional
 
 from PyQt6.QtCore import QTimer
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
+    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
+    QVBoxLayout,
 )
 
 from api.client import AgentHTTPError
 from .qt_adapter import DataHub
 from .theme import Palette
+
+
+def _esc(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 from state.agent_bundle import bundle_version, find_bundle, is_newer
 
 POLL_INTERVAL_MS = 3000
@@ -79,6 +85,17 @@ class AgentUpdateDialog(QDialog):
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         outer.addWidget(self._status)
 
+        # A running log of the update, so the operator can read off each phase (stage →
+        # restart → back online → confirm/rollback) the way the Provision dialog does.
+        self._log = QPlainTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setFixedHeight(150)
+        self._log.setFont(QFont("monospace", 10))
+        self._log.setStyleSheet(
+            f"background: {Palette.BG}; color: {Palette.TEXT_MUTED}; "
+            f"border: 1px solid {Palette.BORDER}; border-radius: 6px;")
+        outer.addWidget(self._log)
+
         row = QHBoxLayout()
         self._update_btn = QPushButton("Update")
         self._update_btn.setObjectName("primary")
@@ -131,14 +148,20 @@ class AgentUpdateDialog(QDialog):
         self._busy = True
         self._from_version = self._current       # to recognise an auto-rollback later
         self._sync_buttons()
+        self._log.clear()
+        self._log_step(f"updating {self._current or '?'} → {self._bundle_ver}", "info")
         self._status.setText("uploading & staging on the unit (installs dependencies)…")
+        self._log_step("uploading bundle, staging release, installing dependencies…")
         path = str(self._bundle)
         self.hub.run_async(f"agentupd_apply:{self.hostname}",
                            lambda: self.hub.fleet.get(self.hostname).update_agent(path))
 
     def _start_rollback(self) -> None:
         self._busy = True
+        self._from_version = self._current
         self._sync_buttons()
+        self._log.clear()
+        self._log_step(f"rolling back to {self._previous}…", "warn")
         self._status.setText("rolling back…")
         self.hub.run_async(f"agentupd_rollback:{self.hostname}",
                            lambda: self.hub.fleet.get(self.hostname).rollback_agent())
@@ -148,6 +171,7 @@ class AgentUpdateDialog(QDialog):
         self._phase = "restart"
         self._deadline = time.monotonic() + UPDATE_DEADLINE_S
         self._status.setText(f"unit restarting — waiting for version {target}…")
+        self._log_step(f"unit restarting (it briefly goes offline) — waiting for {target}…")
         self._poll.start(POLL_INTERVAL_MS)
 
     def _poll_info(self) -> None:
@@ -183,14 +207,19 @@ class AgentUpdateDialog(QDialog):
     def _on_apply(self, result, rolling_back: bool = False) -> None:
         if isinstance(result, Exception):
             self._busy = False
+            self._log_step(f"failed: {result}", "error")
             self._status.setText(f"failed: {result}")
             self._sync_buttons()
             return
         if not getattr(result, "ok", False):
+            msg = getattr(result, "message", "update rejected")
             self._busy = False
-            self._status.setText(f"failed: {getattr(result, 'message', 'update rejected')}")
+            self._log_step(f"failed: {msg}", "error")
+            self._status.setText(f"failed: {msg}")
             self._sync_buttons()
             return
+        if getattr(result, "message", ""):
+            self._log_step(result.message, "ok")
         self._begin_polling(result.to_version)
 
     def _on_poll(self, result) -> None:
@@ -200,6 +229,7 @@ class AgentUpdateDialog(QDialog):
             self._previous = getattr(result, "previous_version", None)
             self._cur_lbl.setText(f"current: {self._current}"
                                   + (f"  (rollback → {self._previous})" if self._previous else ""))
+            self._log_step(f"unit back online on {self._current}", "ok")
             # Version flipped. If the unit can report its confirm state, wait for it to
             # mark the release healthy (or roll it back) so we give a definitive
             # outcome instead of declaring success just before a silent revert.
@@ -212,6 +242,9 @@ class AgentUpdateDialog(QDialog):
         if time.monotonic() >= self._deadline:
             self._poll.stop()
             self._busy = False
+            self._log_step(
+                "timed out waiting for the new version — the unit may have rolled back. "
+                "Re-check its version.", "error")
             self._status.setText(
                 "timed out waiting for the new version — the unit may have rolled "
                 "back to the previous release. Re-check its version.")
@@ -223,6 +256,7 @@ class AgentUpdateDialog(QDialog):
         self._deadline = time.monotonic() + CONFIRM_DEADLINE_S
         self._status.setText(
             f"now on {self._target} — waiting for the unit to confirm it healthy…")
+        self._log_step("waiting for the unit to confirm the new release healthy…")
 
     def _on_confirm(self, result) -> None:
         # An old agent without the route, or a transient error: don't block on
@@ -245,6 +279,9 @@ class AgentUpdateDialog(QDialog):
                 self._busy = False
                 self._current = cur
                 self._cur_lbl.setText(f"current: {cur}")
+                self._log_step(
+                    f"new release {self._target} did not confirm healthy — unit rolled "
+                    f"back to {cur}. Check `journalctl -u sdr-agent` on the unit.", "error")
                 self._status.setText(
                     f"⚠ the new release {self._target} did not confirm healthy and the "
                     f"unit rolled back to {cur}. Check `journalctl -u sdr-agent` on the "
@@ -254,6 +291,7 @@ class AgentUpdateDialog(QDialog):
         if time.monotonic() >= self._deadline:
             # Version is on target but we never saw a confirm — report it as running,
             # with a hint, rather than hanging.
+            self._log_step("could not verify the health-confirm — re-check shortly", "warn")
             self._finish_ok(note=" (could not verify health-confirm — re-check shortly)")
 
     def _finish_ok(self, confirmed: bool = False, note: str = "") -> None:
@@ -263,8 +301,17 @@ class AgentUpdateDialog(QDialog):
         self._cur_lbl.setText(f"current: {self._current}"
                               + (f"  (rollback → {self._previous})" if self._previous else ""))
         tick = "✓ confirmed healthy — " if confirmed else "✓ "
+        self._log_step(
+            f"{'confirmed healthy — ' if confirmed else ''}now running {self._current}", "ok")
         self._status.setText(f"{tick}now running {self._current}{note}")
         self._sync_buttons()
+
+    def _log_step(self, message: str, level: str = "info") -> None:
+        color = {"ok": Palette.ONLINE, "warn": Palette.ARMED,
+                 "error": Palette.CRASH, "info": Palette.TEXT}.get(level, Palette.TEXT_MUTED)
+        prefix = {"ok": "✓ ", "warn": "! ", "error": "✗ ", "info": "» "}.get(level, "  ")
+        self._log.appendHtml(f'<span style="color:{color};">{prefix}{_esc(message)}</span>')
+        self._log.verticalScrollBar().setValue(self._log.verticalScrollBar().maximum())
 
     def _disconnect(self) -> None:
         self._poll.stop()

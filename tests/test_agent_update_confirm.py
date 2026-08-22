@@ -76,6 +76,19 @@ def test_confirm_detects_rollback():
     assert dlg._current == "1.1.0"
 
 
+def test_log_accumulates_phase_lines():
+    dlg = _dialog(_Client())
+    info = m.AgentInfo(hostname="u", unit_id="u", agent_version="1.1.5",
+                       python_version="3.11", tasks=[])
+    dlg._on_poll(info)          # version flip → back online + confirm phase
+    dlg._on_confirm({"current_version": "1.1.5", "previous_version": "1.1.0",
+                     "pending_version": None, "pending_confirmed": True})
+    log = dlg._log.toPlainText()
+    assert "back online on 1.1.5" in log
+    assert "confirm the new release healthy" in log
+    assert "now running 1.1.5" in log
+
+
 def test_flip_without_capability_finishes_immediately():
     dlg = _dialog(_Client(caps=()))          # agent doesn't advertise ota-status
     info = m.AgentInfo(hostname="u", unit_id="u", agent_version="1.1.5",
