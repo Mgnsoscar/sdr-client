@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 
 from .qt_adapter import DataHub
 from .theme import Palette
-from state.agent_bundle import bundle_version, find_bundle
+from state.agent_bundle import bundle_version, find_bundle, is_newer
 
 POLL_INTERVAL_MS = 3000
 UPDATE_DEADLINE_S = 240.0      # give the Pi time to install deps + restart
@@ -105,13 +105,17 @@ class AgentUpdateDialog(QDialog):
                            lambda: self.hub.fleet.get(self.hostname).info())
 
     def _sync_buttons(self) -> None:
+        # Offer the update only when the bundle is strictly NEWER (numeric compare, so
+        # 1.0.10 > 1.0.9). To move to an older build, use Roll back.
+        newer = is_newer(self._bundle_ver, self._current)
         can_update = (not self._busy and self._bundle is not None
-                      and self._bundle_ver is not None
-                      and self._current is not None
-                      and self._bundle_ver != self._current)
+                      and self._current is not None and newer)
         self._update_btn.setEnabled(bool(can_update))
-        self._update_btn.setText(
-            f"Update to {self._bundle_ver}" if self._bundle_ver else "Update")
+        if self._bundle_ver and self._current and not newer:
+            self._update_btn.setText(f"Up to date ({self._current})")
+        else:
+            self._update_btn.setText(
+                f"Update to {self._bundle_ver}" if self._bundle_ver else "Update")
         self._rollback_btn.setEnabled(not self._busy and bool(self._previous))
         if self._previous:
             self._rollback_btn.setText(f"Roll back to {self._previous}")
