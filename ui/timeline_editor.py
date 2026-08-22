@@ -1207,6 +1207,9 @@ class StepEditorDialog(QDialog):
             self._params_status.setText(
                 "" if specs else "this script declares no parameters — use extra args")
             self._apply_prefill()
+        if bounds and self._editor.cal_is_stale():
+            self._params_status.setText("absolute power uses last-known calibration "
+                                        "(unit offline) — refreshes when it reconnects")
 
     def _apply_prefill(self) -> None:
         if self._pending_prefill is None:
@@ -1312,6 +1315,7 @@ class TimelineEditor(QWidget):
         # is). _task_signals maps a task → its SDR_CAL_SIGNAL_ID (from tasks.yaml env).
         self._cal_hostname = ""
         self._calibration = None                 # the unit's GET /calibration result
+        self._cal_stale = False                  # True when served from the offline cache
         self._task_signals: Dict[str, str] = {}
         self._cal_connected = False
 
@@ -1401,16 +1405,34 @@ class TimelineEditor(QWidget):
                       lambda h=hostname: hub.fleet.get(h).get_calibration())
 
     def _on_cal_result(self, label: str, result) -> None:
+        from api.client import AgentConnectionError
+        from state.calibration_cache import get_calibration_cache
         if not isinstance(label, str) or not label.startswith("tl_cal:"):
             return
-        if label.split(":", 1)[1] != self._cal_hostname:
+        host = label.split(":", 1)[1]
+        if host != self._cal_hostname:
             return
-        # Uncalibrated units 404 (an Exception) — just means no bounds.
-        self._calibration = result if (isinstance(result, dict) and result.get("valid")) else None
+        cache = get_calibration_cache()
+        if isinstance(result, dict) and result.get("valid"):
+            self._calibration = result
+            self._cal_stale = False
+            cache.put(host, result)                      # remember for offline authoring
+        elif isinstance(result, AgentConnectionError):
+            # Unit offline — fall back to the last-known calibration we cached.
+            self._calibration = cache.get(host)
+            self._cal_stale = self._calibration is not None
+        else:
+            # Reachable but uncalibrated (404) or invalid — no absolute, don't use cache.
+            self._calibration = None
+            self._cal_stale = False
 
     def absolute_allowed(self) -> bool:
         """Absolute (calibrated dBm) power is offered only when a unit is targeted."""
         return bool(self._cal_hostname)
+
+    def cal_is_stale(self) -> bool:
+        """True when the bounds in use came from the offline cache, not a live fetch."""
+        return self._cal_stale
 
     def cal_bounds_for_task(self, task: str):
         """Resolved --power bounds for a task's signal on the target unit, or None."""

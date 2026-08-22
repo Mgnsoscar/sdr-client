@@ -616,6 +616,8 @@ class CalibrationPanel(QWidget):
         self._set_doc(result.get("document"))
         utype = result.get("unit_type") or "—"
         if result.get("valid"):
+            from state.calibration_cache import get_calibration_cache
+            get_calibration_cache().put(self.hostname, result)   # remember for offline
             self._populate_table(result.get("signals") or {})
             n = len(result.get("signals") or {})
             self._set_status(f"calibrated ✓  ·  type {utype}  ·  {n} signal(s) resolve", kind="ok")

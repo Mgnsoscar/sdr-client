@@ -121,10 +121,18 @@ class LiveTuneDialog(QDialog):
             return
 
         if op == "livetune_cal":
-            # Uncalibrated units 404 here (an Exception) — not an error, just no bounds.
+            # 404 (uncalibrated) → schema range; offline → last-known cached bounds.
+            from api.client import AgentConnectionError
+            from state.calibration_cache import get_calibration_cache
+            cache = get_calibration_cache()
             self._cal_bounds = None
             if isinstance(result, dict) and result.get("valid"):
+                cache.put(self.hostname, result)
                 self._cal_bounds = (result.get("signals") or {}).get(self._cal_signal_id)
+            elif isinstance(result, AgentConnectionError):
+                cached = cache.get(self.hostname)
+                if cached:
+                    self._cal_bounds = (cached.get("signals") or {}).get(self._cal_signal_id)
             self._cal_ready = True
             self._maybe_build()
             return
