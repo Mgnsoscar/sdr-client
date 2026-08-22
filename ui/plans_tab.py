@@ -477,12 +477,15 @@ class PlansTab(QWidget):
     # ── Arm (shared on-air, clock-skew pre-flight) ─────────────────────────────
 
     def _on_arm(self, plan: m.Plan) -> None:
+        if getattr(self, "_arm_busy", False):
+            return                       # a preflight is already in flight — no double-arm
         missing = [i for i in plan.items if i.hostname not in self.fleet]
         if missing:
             names = ", ".join(i.unit_label or i.hostname for i in missing)
             QMessageBox.warning(self, "Cannot arm plan",
                                 f"These units are not in the fleet: {names}")
             return
+        self._arm_busy = True
         self._set_status(f"pre-flight for {plan.name or plan.id}…")
         hostnames = sorted({i.hostname for i in plan.items})
         self.hub.run_async(
@@ -614,6 +617,7 @@ class PlansTab(QWidget):
         plan = self._store.get(plan_id)
 
         if op == "plan_preflight":
+            self._arm_busy = False       # preflight done; the modal dialog guards the rest
             if plan is None:
                 return
             self._finish_arm_preflight(plan, result)

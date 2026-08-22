@@ -803,6 +803,8 @@ class TimelineTab(QWidget):
     # ── Arm / stop ──────────────────────────────────────────────────────────────
 
     def _on_arm(self, entry_id: str) -> None:
+        if getattr(self, "_arm_busy", False):
+            return                       # a preflight is already in flight — no double-arm
         entry = self._store.get(entry_id)
         if entry is None or self.hub is None:
             return
@@ -821,6 +823,7 @@ class TimelineTab(QWidget):
             QMessageBox.warning(self, "Cannot arm", f"These units are not in the fleet: {names}")
             return
         hostnames = sorted({i.hostname for i in plan.items})
+        self._arm_busy = True
         self._status.setText(f"pre-flight for {plan.name}…")
         self.hub.run_async(f"tl_preflight:{entry.id}",
                            lambda: self.hub.fleet.clock_skew(hostnames))
@@ -903,6 +906,7 @@ class TimelineTab(QWidget):
         op, entry_id = label.split(":", 1)
         entry = self._store.get(entry_id)
         if op == "tl_preflight":
+            self._arm_busy = False       # preflight done; the modal dialog guards the rest
             if entry is not None:
                 self._finish_preflight(entry, result)
         elif op == "tl_arm":
