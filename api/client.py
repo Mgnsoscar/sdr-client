@@ -513,6 +513,13 @@ class AgentClient:
     def agent_releases(self) -> List[m.AgentRelease]:
         return [m.AgentRelease(**r) for r in self._request("GET", "/admin/releases")]
 
+    def update_status(self) -> dict:
+        """The unit's OTA lifecycle state (current/previous/pending version + whether a
+        pending release has confirmed healthy), so the client can show real update
+        progress and detect an auto-rollback. Requires the agent's 'ota-status'
+        capability; older agents 404 this route."""
+        return self._request("GET", "/admin/update-status") or {}
+
     # ══════════════════════════════════════════════════════════════════════════
     # Tasks
     # ══════════════════════════════════════════════════════════════════════════
