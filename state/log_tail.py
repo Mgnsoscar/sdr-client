@@ -1,7 +1,7 @@
 """
 Live log tailing over WebSocket.
 
-The agent exposes ws://<unit>/tasks/{name}/logs/stream which sends the recent
+The agent exposes ws://<unit>/task-log-stream/{name} which sends the recent
 backlog then follows the file in real time as plain-text frames. This client
 opens that socket on a background thread and hands each chunk of text to a
 callback. A thin Qt adapter turns the callback into a signal so the log view

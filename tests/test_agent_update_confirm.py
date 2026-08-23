@@ -96,3 +96,42 @@ def test_flip_without_capability_finishes_immediately():
     dlg._on_poll(info)
     assert dlg._phase != "confirm"
     assert "now running 1.1.5" in dlg._status.text()
+
+
+def _run(state):
+    return m.SequenceRun(id="run_1", sequence_id="seq_1", sequence_name="broadcast",
+                         state=state, on_air_at="2026-01-01T00:00:00+00:00")
+
+
+def test_precheck_proceeds_when_no_active_run(monkeypatch):
+    dlg = _dialog(_Client())
+    called = []
+    monkeypatch.setattr(dlg, "_do_update", lambda: called.append(True))
+    dlg._confirm_and_update([_run(m.SequenceState.COMPLETED)])
+    assert called == [True]              # no armed/running run → straight to update
+
+
+def test_precheck_warns_and_cancels_when_running(monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+    dlg = _dialog(_Client())
+    dlg._busy = True
+    called = []
+    monkeypatch.setattr(dlg, "_do_update", lambda: called.append(True))
+    # Operator declines the "sequence on air — update anyway?" prompt.
+    monkeypatch.setattr(QMessageBox, "exec",
+                        lambda self: QMessageBox.StandardButton.Cancel)
+    dlg._confirm_and_update([_run(m.SequenceState.RUNNING)])
+    assert called == []                  # update NOT started
+    assert dlg._busy is False            # re-enabled for another try
+    assert "in progress" in dlg._status.text()
+
+
+def test_precheck_proceeds_when_running_confirmed(monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+    dlg = _dialog(_Client())
+    called = []
+    monkeypatch.setattr(dlg, "_do_update", lambda: called.append(True))
+    monkeypatch.setattr(QMessageBox, "exec",
+                        lambda self: QMessageBox.StandardButton.Yes)
+    dlg._confirm_and_update([_run(m.SequenceState.RUNNING)])
+    assert called == [True]              # operator confirmed → update proceeds

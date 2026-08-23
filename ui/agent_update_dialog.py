@@ -15,9 +15,11 @@ from typing import Optional
 from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
-    QVBoxLayout,
+    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
+    QPushButton, QVBoxLayout,
 )
+
+from api.models import SequenceState
 
 from api.client import AgentHTTPError
 from .qt_adapter import DataHub
@@ -145,6 +147,49 @@ class AgentUpdateDialog(QDialog):
     def _start_update(self) -> None:
         if not self._bundle:
             return
+        # Restarting the agent aborts any in-flight sequence run (the unit fail-safes
+        # stale/mid-flight runs on startup). Warn before pulling RF out from under a
+        # live transmission. Check runs off the UI thread, then confirm in _on_done.
+        self._busy = True
+        self._sync_buttons()
+        self._status.setText("checking for a running sequence on the unit…")
+        self.hub.run_async(f"agentupd_precheck:{self.hostname}",
+                           lambda: self.hub.fleet.get(self.hostname).list_sequence_runs())
+
+    def _confirm_and_update(self, runs) -> None:
+        """Called on the UI thread once the run list is back. Warn+confirm if a run is
+        armed/running; otherwise proceed straight to the update."""
+        active = []
+        if not isinstance(runs, Exception):
+            active = [r for r in runs
+                      if r.state in (SequenceState.ARMED, SequenceState.RUNNING)]
+        if active:
+            names = ", ".join(sorted({r.sequence_name for r in active}))
+            running = any(r.state == SequenceState.RUNNING for r in active)
+            verb = "on air now" if running else "armed"
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Sequence in progress")
+            box.setText(f"A sequence is {verb} on this unit ({_esc(names)}).")
+            box.setInformativeText(
+                "Updating restarts the agent, which will abort the run and stop "
+                "transmission. Update anyway?")
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
+            box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            if box.exec() != QMessageBox.StandardButton.Yes:
+                self._busy = False
+                self._status.setText("update cancelled — a sequence is in progress")
+                self._sync_buttons()
+                return
+            self._log_step(f"operator confirmed update while '{_esc(names)}' is {verb}", "warn")
+        self._do_update()
+
+    def _do_update(self) -> None:
+        if not self._bundle:
+            self._busy = False
+            self._sync_buttons()
+            return
         self._busy = True
         self._from_version = self._current       # to recognise an auto-rollback later
         self._sync_buttons()
@@ -195,6 +240,8 @@ class AgentUpdateDialog(QDialog):
                 self._cur_lbl.setText(f"current: {self._current}"
                                       + (f"  (rollback → {self._previous})" if self._previous else ""))
             self._sync_buttons()
+        elif label == f"agentupd_precheck:{host}":
+            self._confirm_and_update(result)
         elif label == f"agentupd_apply:{host}":
             self._on_apply(result)
         elif label == f"agentupd_rollback:{host}":

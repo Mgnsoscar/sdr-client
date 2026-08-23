@@ -567,13 +567,15 @@ class AgentClient:
 
     def get_task_params(self, name: str) -> dict:
         """Current + applied live-parameter values of a running task."""
-        return self._request("GET", f"/tasks/{quote(name, safe='/')}/params/live")
+        # Read-only sub-resources live under /task-* prefixes (name as the terminal
+        # segment) so a '/'-containing name can't be misrouted (agent ≥ 1.1.8).
+        return self._request("GET", f"/task-live-params/{quote(name, safe='/')}")
 
     def task_logs(self, name: str, lines: int = 100) -> List[str]:
-        return self._request("GET", f"/tasks/{quote(name, safe='/')}/logs", params={"lines": lines})
+        return self._request("GET", f"/task-logs/{quote(name, safe='/')}", params={"lines": lines})
 
     def task_history(self, name: str) -> List[m.ExitRecord]:
-        return [m.ExitRecord(**r) for r in self._request("GET", f"/tasks/{quote(name, safe='/')}/history")]
+        return [m.ExitRecord(**r) for r in self._request("GET", f"/task-history/{quote(name, safe='/')}")]
 
     def _stream_base(self) -> str:
         """Base 'scheme://host:port' for streaming connections (WebSocket logs, SSE
@@ -598,7 +600,7 @@ class AgentClient:
         if self.api_key:
             params["api_key"] = self.api_key
         return (f"{ws_scheme}://{host_port}"
-                f"/tasks/{quote(name, safe='')}/logs/stream?{urlencode(params)}")
+                f"/task-log-stream/{quote(name, safe='')}?{urlencode(params)}")
 
     def sequence_log_stream_url(self, seq_id: str, lines: int = 200) -> str:
         """WebSocket URL for a sequence run's log (whole-run timeline + output)."""

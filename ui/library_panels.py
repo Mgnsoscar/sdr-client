@@ -194,6 +194,17 @@ class LibraryTasksPanel(QWidget):
             self._refresh()
 
     def _on_delete(self, task: m.ProcessStatus) -> None:
+        # Pre-delete warning: a task a sequence still references can't be deleted (the
+        # delete is rejected), and even a successful delete would dangle those steps.
+        # Tell the operator up front which sequences use it, before the confirm.
+        used = self._sequences_using(task.name)
+        if used:
+            QMessageBox.warning(
+                self, "Task is in use",
+                f"'{task.name}' is used by {len(used)} sequence(s):\n\n"
+                f"  • " + "\n  • ".join(used) + "\n\n"
+                "Remove it from those sequences before deleting it.")
+            return
         types = self._types_for(task.name)
         action = confirm_delete(self, "task", task.name, types, self._active_type,
                                 self._unshare_task)
@@ -211,6 +222,17 @@ class LibraryTasksPanel(QWidget):
             QMessageBox.warning(self, "Delete failed", str(exc))
             return
         self._refresh()
+
+    def _sequences_using(self, name: str) -> list:
+        """Names of library sequences whose steps reference this task (empty if the
+        store is unavailable — the delete path still hard-blocks as a backstop)."""
+        store = self.hub.fleet.library_store()
+        if store is None:
+            return []
+        try:
+            return store.sequences_using_task(name)
+        except Exception:  # noqa: BLE001
+            return []
 
     def _unshare_task(self, name: str, new_types: list) -> None:
         """Re-scope a shared task to `new_types` (remove it from the active type) via

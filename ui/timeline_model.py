@@ -49,6 +49,9 @@ class BarItem:
     replace_args: bool = True
     start_offset: float = 0.0   # seconds relative to ON-AIR  (anchor="start")
     stop_offset: float = 0.0    # seconds relative to OFF-AIR (anchor="stop")
+    # If the run is armed with a resume offset, pass it to this task's start (only a
+    # resumable duration task honours it). Carried through edit so it isn't reset.
+    inject_resume_offset: bool = False
     uid: int = 0
     kind: str = "bar"
 
@@ -252,7 +255,8 @@ def item_to_steps(it) -> List[dict]:
     if it.kind == "bar":
         return [
             {"anchor": "start", "offset_s": it.start_offset, "action": "start",
-             "task_name": it.task_name, "args": list(it.args), "replace_args": it.replace_args},
+             "task_name": it.task_name, "args": list(it.args), "replace_args": it.replace_args,
+             "inject_resume_offset": bool(getattr(it, "inject_resume_offset", False))},
             {"anchor": "stop", "offset_s": it.stop_offset, "action": "stop",
              "task_name": it.task_name, "args": [], "replace_args": False},
         ]
@@ -324,7 +328,8 @@ def steps_to_items(steps: List[dict]) -> List:
             task_name=task, args=list(st.get("args") or []),
             replace_args=bool(st.get("replace_args", True)),
             start_offset=float(st["offset_s"]),
-            stop_offset=float(stop["offset_s"]) if stop else 0.0))
+            stop_offset=float(stop["offset_s"]) if stop else 0.0,
+            inject_resume_offset=bool(st.get("inject_resume_offset", False))))
 
     # A stop with no matching start → a bar whose start sits at on-air (0s).
     for task, rem in stops_by_task.items():
