@@ -498,6 +498,49 @@ def test_validate_without_capability_reports_local_only():
     assert "no local issues" in p._status.text()         # clean doc, agent can't dry-run
 
 
+def test_validate_rejects_non_numeric_curve_cell():
+    # The bug: Validate parsed the form leniently, silently dropping a bad cell, so it
+    # reported valid even though Save (strict) would reject it. Validate must catch it.
+    client = FakeClient(caps=("cal-validate",),
+                        validate={"valid": True, "signals": {}})
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(_doc())
+    p._tabs.setCurrentIndex(0)                            # Editor tab
+    tbl = p._f["signals"]["mock"]["curves"]["sdr_output"]
+    tbl.add_blank_row()
+    r = tbl.rowCount() - 1
+    tbl.item(r, 0).setText("oops")                       # non-numeric gain
+    tbl.item(r, 1).setText("5")
+    p._on_validate()
+    assert "invalid" in p._status.text().lower()
+    assert "not a number" in p._status.text()
+    assert client.validated == []                         # never dry-ran a bad doc
+
+
+def test_validate_rejects_bad_json_tab():
+    client = FakeClient(caps=("cal-validate",))
+    p = CalibrationPanel("u", FakeHub(client))
+    p._tabs.setCurrentIndex(1)                            # JSON tab is authoritative
+    p._view.setPlainText("{ not valid json")
+    p._on_validate()
+    assert "invalid" in p._status.text().lower()
+    assert client.validated == []
+
+
+def test_validate_still_passes_a_clean_doc():
+    # Regression: the stricter parse must not reject a genuinely valid document.
+    client = FakeClient(caps=("cal-validate",), validate={
+        "valid": True, "signals": {"mock": {"operating_plane": "sdr_output",
+        "quantity": "q", "min_gain_db": 0.0, "max_gain_db": 74.0,
+        "min_power_dbm": -36.0, "max_power_dbm": -2.5}}})
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(_doc())
+    p._tabs.setCurrentIndex(0)
+    p._on_validate()
+    assert client.validated                               # dry-ran the clean doc
+    assert "dry run" in p._status.text()
+
+
 # ── F: curve polish (CSV paste, sparkline, inherited-amplitude placeholder) ────────
 
 def test_csv_paste_adds_points():

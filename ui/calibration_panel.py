@@ -1266,10 +1266,16 @@ class CalibrationPanel(QWidget):
             "Local checks still run above; use Save to validate on the unit.")
 
     def _on_validate(self) -> None:
+        # Parse the form the SAME way Save does (strict). A non-strict read silently
+        # drops malformed input — e.g. text typed into a numeric cell — so the doc
+        # would validate "clean" and then fail on Save. Surface those errors here
+        # instead, before any dry-run against the unit.
         try:
-            self._sync_from(self._tabs.currentIndex(), strict=False)
-        except ValueError:
-            pass
+            self._sync_from(self._tabs.currentIndex(), strict=True)
+        except ValueError as exc:
+            self._update_issues()          # reflect what local checks can see too
+            self._set_status(f"invalid — would fail to save: {exc}", kind="error")
+            return
         if self._doc is None:
             self._set_status("nothing to validate", kind="faint")
             return
