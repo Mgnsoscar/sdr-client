@@ -281,22 +281,19 @@ class _CurveTable(QTableWidget):
         self.setHorizontalHeaderLabels(["gain (dB)", "power (dBm)"])
         self.verticalHeader().setVisible(False)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        # Spreadsheet-style: select individual cells (not whole rows), and let a range
-        # be selected with Shift/Ctrl so several points can be deleted at once.
-        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        # Edit on a single click (see mousePressEvent) or just by typing on the current
-        # cell — no double-click needed. Keep the double-click and F2 triggers too.
+        # No persistent selection fill: clicking a cell (or arrow-keying to it) makes
+        # it the CURRENT cell, and that outline is the only in-focus visual — it shows
+        # only while the grid has focus, so nothing stays highlighted after you click
+        # away. (NoSelection still supports a current cell + arrow-key navigation.)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        # Edit on a double-click or F2, or just by typing on the current cell.
         self.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked
-            | QAbstractItemView.EditTrigger.SelectedClicked
             | QAbstractItemView.EditTrigger.AnyKeyPressed
             | QAbstractItemView.EditTrigger.EditKeyPressed)
-        # Softer selection than the default loud blue, and a clear outline on the
-        # current (focused) cell so "selected", "current", and "editing" read apart.
+        # The current (focused) cell gets a clear accent outline — the only in-focus
+        # visual, and it disappears on its own when the grid loses focus.
         self.setStyleSheet(
-            f"QTableWidget::item:selected {{ background: {Palette.ACCENT_SOFT}; "
-            f"color: {Palette.TEXT}; }}"
             f"QTableWidget::item:focus {{ background: {Palette.SURFACE}; "
             f"border: 1px solid {Palette.ACCENT}; }}")
         # Grow with the rows (up to a cap) so added points are always visible, rather
@@ -307,13 +304,24 @@ class _CurveTable(QTableWidget):
         self.setToolTip("Each row is one measured point: the SDR gain you set and the "
                         "power you measured on this plane. Enter at least two points, "
                         "with gain AND power both strictly increasing.\n\n"
-                        "Click a cell to edit it · type to overwrite · Del clears the "
-                        "selected cells · Esc or click away to deselect · paste rows of "
-                        "\"gain, power\" (Ctrl+V) straight from a spreadsheet.")
+                        "Double-click a cell (or just type) to edit · Del clears the "
+                        "current cell · Ctrl+Z / Ctrl+Y undo/redo · Esc or click away "
+                        "to deselect · paste rows of \"gain, power\" (Ctrl+V) from a "
+                        "spreadsheet.")
+        # Undo/redo history of row snapshots (see _record_history / undo / redo).
+        self._history: list = [[]]
+        self._hist_idx = 0
+        self._restoring = False
         self.cellChanged.connect(lambda *_: self._changed())
+        # Clicking anywhere outside the grid (including out of its own cell editor)
+        # drops the current cell, so no highlight lingers after clicking away.
+        app = QApplication.instance()
+        if app is not None:
+            app.focusChanged.connect(self._on_focus_changed)
         self._fit_height()
 
     def _changed(self) -> None:
+        self._record_history()
         if self._on_changed:
             self._on_changed()
 
@@ -333,43 +341,36 @@ class _CurveTable(QTableWidget):
         # Ctrl+V pastes spreadsheet rows: lines of "gain, power" (comma, tab, or
         # whitespace separated) become new points, so an operator can copy a measured
         # table straight in instead of retyping it cell by cell.
-        if event.matches(QKeySequence.StandardKey.Paste):
-            if self._paste_csv():
-                return
+        if event.matches(QKeySequence.StandardKey.Paste) and self._paste_csv():
+            return
+        if event.matches(QKeySequence.StandardKey.Undo):
+            self.undo()
+            return
+        # Redo: the platform's standard chord, plus an explicit Ctrl+Y so it works the
+        # same everywhere (StandardKey.Redo is Ctrl+Y on Windows but Ctrl+Shift+Z on
+        # some Linux setups).
+        if event.matches(QKeySequence.StandardKey.Redo) or (
+                event.modifiers() == Qt.KeyboardModifier.ControlModifier
+                and event.key() == Qt.Key.Key_Y):
+            self.redo()
+            return
         key = event.key()
         if key == Qt.Key.Key_Escape:
-            self._deselect()               # Esc clears the selection / current cell
+            self._deselect()               # Esc drops the current cell
             return
         if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) \
-                and self._clear_selected_contents():
-            return                         # Del/Backspace empties the selected cells
+                and self._clear_current_contents():
+            return                         # Del/Backspace empties the current cell
         super().keyPressEvent(event)
 
-    # ── Selection / edit ergonomics ──────────────────────────────────────────
+    # ── Focus / current-cell ergonomics ──────────────────────────────────────
 
-    def mousePressEvent(self, event) -> None:
-        index = self.indexAt(event.pos())
-        if not index.isValid():
-            # A click on the empty area below the rows clears the selection — the
-            # obvious "click away to deselect" the grid was missing.
-            self._deselect()
-            super().mousePressEvent(event)   # still take focus (so Ctrl+V works)
+    def _on_focus_changed(self, _old, new) -> None:
+        # When focus leaves the grid entirely (including its own cell editor), drop
+        # the current cell so no highlight lingers after clicking away.
+        if new is self or (new is not None and self.isAncestorOf(new)):
             return
-        super().mousePressEvent(event)       # selects the cell / sets it current
-        # A plain left-click edits immediately — no double-click. A modified click
-        # (Ctrl/Shift) keeps extending the selection for a multi-row delete instead.
-        if (event.button() == Qt.MouseButton.LeftButton
-                and event.modifiers() == Qt.KeyboardModifier.NoModifier):
-            item = self.item(index.row(), index.column())
-            if item is not None:
-                self.editItem(item)
-
-    def focusOutEvent(self, event) -> None:
-        super().focusOutEvent(event)
-        # Clicking away from the grid clears the lingering highlight — but not while a
-        # cell editor is open (focus just moved into the editor; we're still editing).
-        if self.state() != QAbstractItemView.State.EditingState:
-            self._deselect()
+        self.setCurrentCell(-1, -1)
 
     def _deselect(self) -> None:
         self.clearSelection()
@@ -386,16 +387,62 @@ class _CurveTable(QTableWidget):
             self.commitData(editor)
             self.closeEditor(editor, QAbstractItemDelegate.EndEditHint.NoHint)
 
-    def _clear_selected_contents(self) -> bool:
-        items = [it for it in self.selectedItems() if it is not None]
-        if not items:
+    def _clear_current_contents(self) -> bool:
+        it = self.currentItem()
+        if it is None or it.text() == "":
             return False
-        self.blockSignals(True)
-        for it in items:
-            it.setText("")
-        self.blockSignals(False)
-        self._changed()
+        it.setText("")                     # fires cellChanged → history + sparkline
         return True
+
+    # ── Undo / redo ──────────────────────────────────────────────────────────
+
+    def _snapshot(self) -> list:
+        return [((self.item(r, 0).text() if self.item(r, 0) else ""),
+                 (self.item(r, 1).text() if self.item(r, 1) else ""))
+                for r in range(self.rowCount())]
+
+    def _reset_history(self) -> None:
+        """Make the current grid the baseline (called after a programmatic load), so
+        undo never reaches back past it."""
+        self._history = [self._snapshot()]
+        self._hist_idx = 0
+
+    def _record_history(self) -> None:
+        if self._restoring:
+            return
+        snap = self._snapshot()
+        if snap == self._history[self._hist_idx]:
+            return                         # nothing actually changed
+        del self._history[self._hist_idx + 1:]     # a fresh edit drops the redo branch
+        self._history.append(snap)
+        self._hist_idx += 1
+        cap = 200
+        if len(self._history) > cap:
+            drop = len(self._history) - cap
+            del self._history[:drop]
+            self._hist_idx -= drop
+
+    def _restore(self, snap) -> None:
+        self._restoring = True
+        self.blockSignals(True)
+        self.setRowCount(0)
+        for g, p in snap:
+            self._append(g, p)
+        self.blockSignals(False)
+        self._restoring = False
+        self._fit_height()
+        if self._on_changed:
+            self._on_changed()             # refresh the sparkline, but don't re-record
+
+    def undo(self) -> None:
+        if self._hist_idx > 0:
+            self._hist_idx -= 1
+            self._restore(self._history[self._hist_idx])
+
+    def redo(self) -> None:
+        if self._hist_idx < len(self._history) - 1:
+            self._hist_idx += 1
+            self._restore(self._history[self._hist_idx])
 
     def _paste_csv(self) -> bool:
         text = QApplication.clipboard().text()
@@ -443,6 +490,7 @@ class _CurveTable(QTableWidget):
             self._append(_numstr(pt.get("gain_db")), _numstr(pt.get("power_dbm")))
         self.blockSignals(False)
         self._fit_height()
+        self._reset_history()   # the loaded points are the undo baseline
 
     def _append(self, g="", p="") -> None:
         r = self.rowCount()
