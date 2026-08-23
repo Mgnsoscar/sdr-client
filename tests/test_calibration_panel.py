@@ -305,3 +305,83 @@ def test_template_seeds_empty_unit():
     assert p._doc is not None
     assert p._download_btn.isEnabled()
     assert "mock" in p._f["signals"]
+
+
+# ── new-document unit_type comes from the unit, not a hardcoded 'broadcaster' ──────
+
+class _TypedClient(FakeClient):
+    def __init__(self, unit_type, unit_id):
+        super().__init__()
+        self.unit_type = unit_type
+        self.unit_id = unit_id
+
+
+def test_template_uses_units_real_type_and_id():
+    p = CalibrationPanel("u", FakeHub(_TypedClient("x410", "unit_x410_7")))
+    p._on_new_template()
+    assert p._doc["unit_type"] == "x410"
+    assert p._doc["unit_id"] == "unit_x410_7"
+
+
+# ── renaming a plane propagates to everything that references it ───────────────────
+
+def test_rename_plane_updates_all_references():
+    from ui.calibration_panel import _rename_plane_in_doc
+    d = _full_doc()                                  # antenna_eirp ← cable_output ← amplifier_output
+    out = _rename_plane_in_doc(d, "amplifier_output", "amp_out")
+    assert "amp_out" in out["chain"]["planes"]
+    assert "amplifier_output" not in out["chain"]["planes"]
+    # derived plane's parent pointer follows the rename
+    assert out["chain"]["planes"]["cable_output"]["from"] == "amp_out"
+    # the signal's curve keyed by the plane follows too
+    assert "amp_out" in out["signals"]["mock"]["curves"]
+    assert "amplifier_output" not in out["signals"]["mock"]["curves"]
+
+
+def test_rename_operating_and_limit_plane_follow():
+    from ui.calibration_panel import _rename_plane_in_doc
+    d = _doc()                                       # operating + limit both on sdr_output
+    out = _rename_plane_in_doc(d, "sdr_output", "sdr_port")
+    assert out["chain"]["operating_plane"] == "sdr_port"
+    assert out["chain"]["limits"][0]["plane"] == "sdr_port"
+    assert "sdr_port" in out["signals"]["mock"]["curves"]
+
+
+def test_rename_in_form_keeps_document_valid_shape():
+    # End-to-end through the widget handler: rename the single plane and confirm the
+    # operating plane + curve key follow, so the read-back doc has no dangling refs.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc())
+    row = p._f["planes"][0]
+    assert row["orig"] == "sdr_output"
+    row["name"].setText("sdr_port")
+    p._on_plane_name_changed(row)
+    out = p._read_form(strict=False)
+    assert list(out["chain"]["planes"]) == ["sdr_port"]
+    assert out["chain"]["operating_plane"] == "sdr_port"
+    assert "sdr_port" in out["signals"]["mock"]["curves"]
+
+
+def test_removing_plane_purges_its_references():
+    d = _full_doc()
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(d)
+    # remove sdr_output (which carries a limit + a curve + is not the operating plane)
+    row = next(r for r in p._f["planes"] if r["name"].text() == "sdr_output")
+    p._remove_plane(row)
+    chain = p._doc["chain"]
+    assert "sdr_output" not in chain["planes"]
+    assert all(l["plane"] != "sdr_output" for l in chain["limits"])
+    assert "sdr_output" not in p._doc["signals"]["mock"]["curves"]
+
+
+# ── invalid JSON must not be silently discarded when leaving the JSON tab ──────────
+
+def test_leaving_json_tab_with_bad_json_is_blocked():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc())
+    p._tabs.setCurrentIndex(1)                       # go to JSON
+    p._view.setPlainText("{ not valid json")
+    p._tabs.setCurrentIndex(0)                       # try to leave → should be blocked
+    assert p._tabs.currentIndex() == 1               # kept on JSON
+    assert "JSON has an error" in p._status.text()

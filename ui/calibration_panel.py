@@ -82,6 +82,33 @@ def _to_float(s: str, field: str) -> float:
         raise ValueError(f"{field}: '{s}' is not a number")
 
 
+def _rename_plane_in_doc(doc: dict, old: str, new: str) -> dict:
+    """Rename a plane throughout a calibration document: the chain.planes key (order
+    preserved), operating_plane, every limit's plane, every derived plane's 'from', and
+    each signal's curve keyed by this plane. Keeps the document internally consistent so
+    a rename never leaves a dangling reference. Mutates and returns `doc`."""
+    if old == new or not new:
+        return doc
+    chain = doc.get("chain") or {}
+    planes = chain.get("planes")
+    if isinstance(planes, dict) and old in planes:
+        # rebuild preserving insertion order with the one key swapped
+        chain["planes"] = {(new if k == old else k): v for k, v in planes.items()}
+    if chain.get("operating_plane") == old:
+        chain["operating_plane"] = new
+    for lim in (chain.get("limits") or []):
+        if isinstance(lim, dict) and lim.get("plane") == old:
+            lim["plane"] = new
+    for spec in (chain.get("planes") or {}).values():
+        if isinstance(spec, dict) and spec.get("from") == old:
+            spec["from"] = new
+    for sig in (doc.get("signals") or {}).values():
+        curves = (sig or {}).get("curves")
+        if isinstance(curves, dict) and old in curves:
+            sig["curves"] = {(new if k == old else k): v for k, v in curves.items()}
+    return doc
+
+
 def _template() -> dict:
     """A minimal, valid starting document (broadcaster, one measured plane)."""
     return {
@@ -287,16 +314,18 @@ class CalibrationPanel(QWidget):
         self._editor_layout.addWidget(lim_box)
 
         # Planes (RF chain topology)
-        pl_box = QGroupBox("Planes — the RF chain (SDR → amp → cable → antenna)")
+        pl_box = QGroupBox("Planes — the RF chain (SDR → amp → cable → antenna) · shared by every signal")
         pl_box.setToolTip(
-            "Each point in the chain where you reason about power. A 'measured' plane has "
-            "its own gain→power curve (below); a 'derived' plane is another plane plus a "
-            "fixed offset — cable loss (negative Δ) or antenna gain (positive Δ).")
+            "The chain topology is unit HARDWARE: define it once here and every signal "
+            "reuses it — you don't repeat planes per signal. A 'measured' plane has its "
+            "own gain→power curve (entered per signal below); a 'derived' plane is another "
+            "plane plus a fixed offset — cable loss (negative Δ) or antenna gain (positive Δ).")
         pl_v = QVBoxLayout(pl_box)
         pl_help = QLabel(
-            "Per row: a name, the type (measured = you took readings here; derived = "
-            "parent plane + a fixed Δ dB), and a short quantity label (e.g. “total in-band "
-            "power”, “main-lobe EIRP”).")
+            "Defined once for the whole unit — every signal shares these planes. Per row: "
+            "a name, the type (measured = you took readings here; derived = parent plane + "
+            "a fixed Δ dB), and a short quantity label (e.g. “total in-band power”, "
+            "“main-lobe EIRP”).")
         pl_help.setWordWrap(True)
         pl_help.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         pl_v.addWidget(pl_help)
@@ -313,9 +342,11 @@ class CalibrationPanel(QWidget):
             "bandwidth, and the measured gain→power points on each measured plane.")
         sig_v = QVBoxLayout(sig_box)
         sig_help = QLabel(
-            "Enter the points you actually measured. Two or more per measured plane, with "
-            "strictly increasing gain — the unit interpolates between them and refuses "
-            "powers outside their range.")
+            "The planes are shared (defined once above); here you enter only the points "
+            "YOU MEASURED for this signal on each measured plane. Two or more per plane, "
+            "with gain AND power both strictly increasing — the unit interpolates between "
+            "them and refuses powers outside their range. (Different signals need their "
+            "own points because power-vs-gain depends on the waveform.)")
         sig_help.setWordWrap(True)
         sig_help.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         sig_v.addWidget(sig_help)
@@ -325,8 +356,10 @@ class CalibrationPanel(QWidget):
         sig_v.addWidget(add_sig, alignment=Qt.AlignmentFlag.AlignLeft)
         self._editor_layout.addWidget(sig_box)
 
-        # Empty-state hint / template button (shown when there's no document)
-        self._empty_hint = QPushButton("New from broadcaster template")
+        # Empty-state hint / template button (shown when there's no document). Its label
+        # is filled with the unit's real type in _doc_to_form so it doesn't imply
+        # broadcaster on, say, an X410.
+        self._empty_hint = QPushButton("New from template")
         self._empty_hint.clicked.connect(self._on_new_template)
         self._editor_layout.addWidget(self._empty_hint, alignment=Qt.AlignmentFlag.AlignLeft)
         self._editor_layout.addStretch(1)
@@ -362,6 +395,9 @@ class CalibrationPanel(QWidget):
         doc = self._doc
         have = doc is not None
         self._empty_hint.setVisible(not have)
+        if not have:
+            utype, _ = self._unit_meta()
+            self._empty_hint.setText(f"New from {utype} template")
         chain = (doc or {}).get("chain") or {}
         gl = chain.get("gain_limits") or {}
         self._f["min_gain"].setText(_numstr(gl.get("min_gain_db")))
@@ -420,7 +456,7 @@ class CalibrationPanel(QWidget):
         except ValueError:
             pass
         if self._doc is None:
-            self._doc = _template()
+            self._doc = self._blank_doc()
         planes = self._doc.setdefault("chain", {}).setdefault("planes", {})
         nm, i = "plane", 1
         while nm in planes:
@@ -457,8 +493,12 @@ class CalibrationPanel(QWidget):
         h.addWidget(name_e, 2); h.addWidget(type_c, 1)
         h.addWidget(from_lbl); h.addWidget(from_c, 2); h.addWidget(delta_e)
         h.addWidget(quantity_e, 2); h.addWidget(rm)
+        # "orig" is the plane's last-committed name, so a rename can be propagated to
+        # everything that references it (operating plane, limits, derived 'from', and
+        # each signal's curve keyed by this plane) instead of silently dangling.
         row = {"w": w, "name": name_e, "type": type_c, "from": from_c,
-               "delta": delta_e, "quantity": quantity_e, "from_lbl": from_lbl}
+               "delta": delta_e, "quantity": quantity_e, "from_lbl": from_lbl,
+               "orig": name}
 
         derived = type_c.currentText() == "derived"
         for wdg in (from_lbl, from_c, delta_e):
@@ -466,7 +506,7 @@ class CalibrationPanel(QWidget):
         # A type/name change reshapes dependents (which planes are 'measured', the
         # from/operating/limit dropdowns), so rebuild the form from the widgets.
         type_c.currentTextChanged.connect(lambda _=None: self._refresh_form_from_widgets())
-        name_e.editingFinished.connect(self._refresh_form_from_widgets)
+        name_e.editingFinished.connect(lambda r=row: self._on_plane_name_changed(r))
         rm.clicked.connect(lambda: self._remove_plane(row))
         self._planes_box.addWidget(w)
         self._f["planes"].append(row)
@@ -502,8 +542,21 @@ class CalibrationPanel(QWidget):
         except ValueError:
             pass
         name = row["name"].text().strip()
-        planes = (self._doc or {}).get("chain", {}).get("planes") or {}
+        chain = (self._doc or {}).get("chain", {})
+        planes = chain.get("planes") or {}
         planes.pop(name, None)
+        # Drop references to the removed plane so the document stays consistent: its
+        # safety limits, its per-signal curves, and the operating-plane pointer if it
+        # pointed here. (A derived plane whose parent this was is left for the agent to
+        # flag clearly — silently rewiring the chain would be worse than a plain error.)
+        chain["limits"] = [l for l in (chain.get("limits") or [])
+                           if not (isinstance(l, dict) and l.get("plane") == name)]
+        if chain.get("operating_plane") == name:
+            chain["operating_plane"] = ""
+        for sig in ((self._doc or {}).get("signals") or {}).values():
+            curves = (sig or {}).get("curves")
+            if isinstance(curves, dict):
+                curves.pop(name, None)
         self._doc_to_form()
 
     def _refresh_form_from_widgets(self) -> None:
@@ -511,6 +564,31 @@ class CalibrationPanel(QWidget):
             self._doc = self._read_form(strict=False)
         except ValueError:
             return
+        self._doc_to_form()
+
+    def _on_plane_name_changed(self, row: dict) -> None:
+        """A plane was renamed in the form. Read the form back with the OLD name (so
+        curves/operating/limits stay consistent), then rename the plane everywhere it's
+        referenced, so nothing dangles. Falls back to a plain rebuild when there's no
+        real rename or the new name would collide with another plane."""
+        new = row["name"].text().strip()
+        old = row.get("orig", "")
+        planes_now = {r["name"].text().strip() for r in self._f.get("planes", []) if r is not row}
+        if not new or new == old or new in planes_now:
+            # nothing to propagate (or a name clash — let the generic rebuild/agent
+            # surface it); just resync so the rest of the form stays current.
+            self._refresh_form_from_widgets()
+            return
+        row["name"].setText(old)                      # read the form under the old name…
+        try:
+            doc = self._read_form(strict=False)
+        except ValueError:
+            row["name"].setText(new)
+            self._refresh_form_from_widgets()
+            return
+        row["name"].setText(new)
+        self._doc = _rename_plane_in_doc(doc, old, new)
+        row["orig"] = new
         self._doc_to_form()
 
     def _add_signal_widget(self, sid: str, sig: dict, measured) -> None:
@@ -636,6 +714,22 @@ class CalibrationPanel(QWidget):
             self._json_to_doc(strict)
 
     def _on_tab_changed(self, idx: int) -> None:
+        # Leaving the JSON tab with unparseable text would silently discard those edits
+        # (best-effort sync swallows the error and the Editor repaints from the stale
+        # model). Keep the user on JSON with a clear error instead of losing their work.
+        if self._prev_tab == 1 and idx != 1:
+            text = self._view.toPlainText().strip()
+            if text:
+                try:
+                    json.loads(text)
+                except ValueError as exc:
+                    self._set_status(
+                        f"JSON has an error — fix it or clear it before leaving this tab: {exc}",
+                        kind="error")
+                    self._tabs.blockSignals(True)
+                    self._tabs.setCurrentIndex(1)
+                    self._tabs.blockSignals(False)
+                    return
         # Sync the tab we're leaving into the model (best-effort), then repaint the
         # tab we're entering from the model.
         try:
@@ -659,9 +753,29 @@ class CalibrationPanel(QWidget):
             lambda: self.hub.fleet.get(self.hostname).get_calibration(),
         )
 
+    def _unit_meta(self) -> tuple[str, str]:
+        """This unit's type + id, read from its client, to seed a new document with
+        the RIGHT unit_type (it selects the shared type-defaults layer, so a wrong one
+        silently mis-resolves) instead of the template's hardcoded 'broadcaster'."""
+        try:
+            c = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001
+            return "broadcaster", self.hostname
+        return (getattr(c, "unit_type", "") or "broadcaster",
+                getattr(c, "unit_id", "") or self.hostname)
+
+    def _blank_doc(self) -> dict:
+        """A fresh template stamped with this unit's real type + id."""
+        doc = _template()
+        utype, uid = self._unit_meta()
+        doc["unit_type"] = utype
+        doc["unit_id"] = uid
+        return doc
+
     def _on_new_template(self) -> None:
-        self._set_doc(_template())
-        self._set_status("template loaded — edit, then Save", kind="warn")
+        self._set_doc(self._blank_doc())
+        utype, _ = self._unit_meta()
+        self._set_status(f"template loaded (unit type: {utype}) — edit, then Save", kind="warn")
 
     # ── actions ───────────────────────────────────────────────────────────────
     def _on_upload(self) -> None:
@@ -804,7 +918,7 @@ class CalibrationPanel(QWidget):
         except ValueError:
             pass
         if self._doc is None:
-            self._doc = _template()
+            self._doc = self._blank_doc()
         self._doc.setdefault("signals", {})[sid] = {"curves": {}}
         self._download_btn.setEnabled(True)
         self._doc_to_form()
