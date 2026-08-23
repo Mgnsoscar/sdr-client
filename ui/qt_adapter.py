@@ -123,6 +123,12 @@ class DataHub(QObject):
         task_done(label, result_or_exception) on the GUI thread. Use for panic,
         arm, start/stop, deploy, etc. — anything that hits the network.
         """
+        # Tearing down the streams on close fires stream_status callbacks, whose
+        # slots (e.g. LibraryTab._on_stream_status) call back in here — after the
+        # executor is shut down. Drop late submits instead of raising "cannot
+        # schedule new futures after shutdown". (refresh_now guards the same way.)
+        if self._stopped:
+            return
         def _wrapped():
             try:
                 result = fn()

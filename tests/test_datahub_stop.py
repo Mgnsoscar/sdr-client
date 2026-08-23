@@ -32,3 +32,43 @@ def test_stop_is_idempotent():
     hub.stop()
     hub.stop()
     assert hub._stopped is True
+
+
+class _FakeExecutor:
+    def __init__(self):
+        self.submitted = 0
+
+    def submit(self, fn):
+        self.submitted += 1
+
+    def shutdown(self, **kwargs):
+        pass
+
+
+def test_run_async_after_stop_does_not_raise():
+    # Stopping shuts the executor down; a stream-status callback firing during
+    # teardown then calls run_async. It must not raise "cannot schedule new
+    # futures after shutdown".
+    hub = _hub()
+    hub.stop()
+    hub.run_async("late", lambda: 1)      # must be a silent no-op
+    assert hub._stopped is True
+
+
+def test_run_async_after_stop_never_touches_the_executor():
+    hub = _hub()
+    hub.stop()
+    fake = _FakeExecutor()
+    hub._executor = fake                   # would record any submit attempt
+    hub.run_async("late", lambda: 1)
+    assert fake.submitted == 0             # guarded out before submitting
+
+
+def test_run_async_before_stop_still_submits():
+    # The guard must not break normal operation.
+    hub = _hub()
+    fake = _FakeExecutor()
+    hub._executor = fake
+    hub.run_async("x", lambda: 1)
+    assert fake.submitted == 1
+    hub.stop()
