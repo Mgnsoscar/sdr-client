@@ -96,7 +96,8 @@ class DataHub(QObject):
         self.poller.stop()
         self.streams.stop()
         self.discovery.stop()
-        self.log_tailer.stop()
+        # Note: there is no shared hub log tailer to stop — the log dialogs each
+        # own (and stop) their own LogTailer; see sequence/task/plan_log_dialog.
         self._executor.shutdown(wait=False, cancel_futures=True)
         logger.info("DataHub stopped")
 
