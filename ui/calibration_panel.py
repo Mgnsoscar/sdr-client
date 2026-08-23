@@ -28,10 +28,10 @@ from typing import Optional
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QAbstractScrollArea, QApplication, QComboBox, QFileDialog,
-    QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
-    QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QTableWidget,
-    QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QAbstractItemDelegate, QAbstractItemView, QAbstractScrollArea, QApplication,
+    QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView,
+    QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
+    QScrollArea, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from api.client import AgentHTTPError
@@ -281,7 +281,24 @@ class _CurveTable(QTableWidget):
         self.setHorizontalHeaderLabels(["gain (dB)", "power (dBm)"])
         self.verticalHeader().setVisible(False)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        # Spreadsheet-style: select individual cells (not whole rows), and let a range
+        # be selected with Shift/Ctrl so several points can be deleted at once.
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        # Edit on a single click (see mousePressEvent) or just by typing on the current
+        # cell — no double-click needed. Keep the double-click and F2 triggers too.
+        self.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.SelectedClicked
+            | QAbstractItemView.EditTrigger.AnyKeyPressed
+            | QAbstractItemView.EditTrigger.EditKeyPressed)
+        # Softer selection than the default loud blue, and a clear outline on the
+        # current (focused) cell so "selected", "current", and "editing" read apart.
+        self.setStyleSheet(
+            f"QTableWidget::item:selected {{ background: {Palette.ACCENT_SOFT}; "
+            f"color: {Palette.TEXT}; }}"
+            f"QTableWidget::item:focus {{ background: {Palette.SURFACE}; "
+            f"border: 1px solid {Palette.ACCENT}; }}")
         # Grow with the rows (up to a cap) so added points are always visible, rather
         # than hiding them behind an inner scrollbar in a fixed-height box.
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -289,7 +306,9 @@ class _CurveTable(QTableWidget):
         self.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
         self.setToolTip("Each row is one measured point: the SDR gain you set and the "
                         "power you measured on this plane. Enter at least two points, "
-                        "with gain AND power both strictly increasing. Tip: paste rows of "
+                        "with gain AND power both strictly increasing.\n\n"
+                        "Click a cell to edit it · type to overwrite · Del clears the "
+                        "selected cells · Esc or click away to deselect · paste rows of "
                         "\"gain, power\" (Ctrl+V) straight from a spreadsheet.")
         self.cellChanged.connect(lambda *_: self._changed())
         self._fit_height()
@@ -317,7 +336,66 @@ class _CurveTable(QTableWidget):
         if event.matches(QKeySequence.StandardKey.Paste):
             if self._paste_csv():
                 return
+        key = event.key()
+        if key == Qt.Key.Key_Escape:
+            self._deselect()               # Esc clears the selection / current cell
+            return
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) \
+                and self._clear_selected_contents():
+            return                         # Del/Backspace empties the selected cells
         super().keyPressEvent(event)
+
+    # ── Selection / edit ergonomics ──────────────────────────────────────────
+
+    def mousePressEvent(self, event) -> None:
+        index = self.indexAt(event.pos())
+        if not index.isValid():
+            # A click on the empty area below the rows clears the selection — the
+            # obvious "click away to deselect" the grid was missing.
+            self._deselect()
+            super().mousePressEvent(event)   # still take focus (so Ctrl+V works)
+            return
+        super().mousePressEvent(event)       # selects the cell / sets it current
+        # A plain left-click edits immediately — no double-click. A modified click
+        # (Ctrl/Shift) keeps extending the selection for a multi-row delete instead.
+        if (event.button() == Qt.MouseButton.LeftButton
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            item = self.item(index.row(), index.column())
+            if item is not None:
+                self.editItem(item)
+
+    def focusOutEvent(self, event) -> None:
+        super().focusOutEvent(event)
+        # Clicking away from the grid clears the lingering highlight — but not while a
+        # cell editor is open (focus just moved into the editor; we're still editing).
+        if self.state() != QAbstractItemView.State.EditingState:
+            self._deselect()
+
+    def _deselect(self) -> None:
+        self.clearSelection()
+        self.setCurrentCell(-1, -1)
+
+    def _finish_edit(self) -> None:
+        """Commit and close any open cell editor, so its value is saved before rows
+        are added/removed underneath it (the +/− buttons are focus-less, so a click
+        on them doesn't itself end the edit)."""
+        if self.state() != QAbstractItemView.State.EditingState:
+            return
+        editor = self.focusWidget()
+        if editor is not None and editor is not self:
+            self.commitData(editor)
+            self.closeEditor(editor, QAbstractItemDelegate.EndEditHint.NoHint)
+
+    def _clear_selected_contents(self) -> bool:
+        items = [it for it in self.selectedItems() if it is not None]
+        if not items:
+            return False
+        self.blockSignals(True)
+        for it in items:
+            it.setText("")
+        self.blockSignals(False)
+        self._changed()
+        return True
 
     def _paste_csv(self) -> bool:
         text = QApplication.clipboard().text()
@@ -373,14 +451,20 @@ class _CurveTable(QTableWidget):
         self.setItem(r, 1, QTableWidgetItem(p))
 
     def add_blank_row(self) -> None:
+        self._finish_edit()
         self._append()
         self._fit_height()
         self._changed()
+        # Land on the new row's first cell, ready to type straight away.
+        r = self.rowCount() - 1
+        if r >= 0:
+            self.setCurrentCell(r, 0)
 
     def remove_selected(self) -> None:
         # Remove the selected rows; if nothing is selected, fall back to the current
         # row, then the last row — so "− point" always removes something rather than
         # silently doing nothing when the user hasn't clicked to select a whole row.
+        self._finish_edit()
         rows = {i.row() for i in self.selectedItems()}
         if not rows and self.currentRow() >= 0:
             rows = {self.currentRow()}
@@ -902,6 +986,11 @@ class CalibrationPanel(QWidget):
             btns = QHBoxLayout()
             addp = QPushButton("+ point"); addp.clicked.connect(tbl.add_blank_row)
             rmp = QPushButton("− point"); rmp.clicked.connect(tbl.remove_selected)
+            # Focus-less so clicking them doesn't pull focus off the grid — that keeps
+            # the current selection intact (so "− point" removes what you picked) and
+            # avoids the click-away deselect firing for the grid's own controls.
+            addp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            rmp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btns.addWidget(addp); btns.addWidget(rmp); btns.addStretch(1)
             v.addLayout(btns)
             curves[plane] = tbl
