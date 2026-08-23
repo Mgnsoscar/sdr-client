@@ -19,6 +19,7 @@ from api import AgentClient, Fleet
 from config import ClientConfig
 from state import LibraryStore, LibraryClient
 from ui.click_focus import ClickFocusFilter
+from ui.no_wheel import NoComboWheelFilter
 from ui.main_window import MainWindow
 from ui.qt_adapter import DataHub
 from ui.theme import apply_theme
@@ -64,6 +65,8 @@ def main() -> int:
     apply_theme(app)
     # Commit any focused input when the user clicks outside it (app-wide).
     app.installEventFilter(ClickFocusFilter(app))
+    # Stop a stray mouse wheel from changing any drop-down's selection (app-wide).
+    app.installEventFilter(NoComboWheelFilter(app))
 
     fleet = build_fleet(cfg)
     migrate_plan_refs(cfg)
