@@ -32,7 +32,7 @@ from api import ramp as _ramp
 
 from . import timeline_model as tlm
 from .duration_spin import DurationSpinBox
-from .param_form import ParamForm, fmt_duration, fmt_value
+from .param_form import ParamForm, fmt_duration, fmt_value, range_hint
 from .theme import Palette
 
 
@@ -103,6 +103,31 @@ def _sequence_tasks(editor) -> list:
     current sequence. Falls back to all tasks for an editor that can't report them."""
     getter = getattr(editor, "sequence_task_names", None)
     return getter() if getter is not None else editor.available_tasks()
+
+
+def _ramp_range_error(spec: Optional[dict], start, stop) -> Optional[str]:
+    """If From/To fall outside the ramped parameter's declared min/max, describe it
+    — else None. A ramp is monotonic between its endpoints, so every intermediate
+    level lies within [From, To]; checking the two endpoints covers the whole sweep.
+    Mirrors ParamForm.validate()'s out-of-range wording so the two feel the same."""
+    if not spec:
+        return None
+    lo, hi = spec.get("min"), spec.get("max")
+    if lo is None and hi is None:
+        return None
+    unit = spec.get("unit") or ""
+    u = f" {unit}" if unit else ""
+    bad = []
+    for label, val in (("From", start), ("To", stop)):
+        if val is None:
+            continue
+        if (lo is not None and val < lo) or (hi is not None and val > hi):
+            bad.append(f"{label} {fmt_value(val)}{u}")
+    if not bad:
+        return None
+    name = spec.get("name") or spec.get("dest") or "parameter"
+    joined = " and ".join(bad)
+    return f"{joined} outside allowed range {range_hint(spec)}{u} for {name}"
 
 
 def _clean(x: float) -> float:
@@ -490,6 +515,11 @@ class RampEditorDialog(QDialog):
         s = self._ramped_spec()
         return (s.get("unit") or "") if s else ""
 
+    def _range_error(self) -> Optional[str]:
+        """From/To against the ramped parameter's allowed range (or None)."""
+        return _ramp_range_error(self._ramped_spec(),
+                                 _num(self._start.text()), _num(self._stop.text()))
+
     def _update_preview(self, *_) -> None:
         if not self._ready:
             return
@@ -504,6 +534,7 @@ class RampEditorDialog(QDialog):
             self._set_preview("Enter numeric From/To values.")
             return
 
+        range_err = self._range_error()   # From/To vs the parameter's allowed range
         unit = self._param_unit()
         u = f" {unit}" if unit else ""
         lines = [f"Ramp {spec['param'] or '(param)'}:  "
@@ -520,7 +551,9 @@ class RampEditorDialog(QDialog):
             else:
                 given, val = "hold", self._hold.text().strip()
             lines.append(f"{given} = {val or '—'} · duration set by the schedule")
-            self._set_preview("\n".join(lines))
+            if range_err:
+                lines.append("⚠ " + range_err)
+            self._set_preview("\n".join(lines), error=bool(range_err))
             self._refresh_steps_view(spec, both=True)
             return
 
@@ -544,7 +577,9 @@ class RampEditorDialog(QDialog):
         lines.append(f"{len(res.values)} levels · {res.n_intervals} steps · "
                      f"step size {fmt_value(_clean(step))}{u} · hold {fmt_duration(res.hold_s)} · "
                      f"duration {fmt_duration(res.duration_s)}{excl}")
-        self._set_preview("\n".join(lines))
+        if range_err:
+            lines.append("⚠ " + range_err)
+        self._set_preview("\n".join(lines), error=bool(range_err))
         self._refresh_steps_view(spec, both=False)
 
     def _set_preview(self, text: str, error: bool = False) -> None:
@@ -617,6 +652,9 @@ class RampEditorDialog(QDialog):
         spec = self._spec_from_form()
         if spec["start"] is None or spec["stop"] is None:
             return self._set_preview("enter numeric From/To values", error=True)
+        range_err = self._range_error()
+        if range_err:
+            return self._set_preview(range_err, error=True)
         anchor = self._anchor.currentData()
         err = tlm._ramp_spec_error(spec, anchor)
         if err:
