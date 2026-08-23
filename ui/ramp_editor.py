@@ -32,7 +32,7 @@ from api import ramp as _ramp
 
 from . import timeline_model as tlm
 from .duration_spin import DurationSpinBox
-from .param_form import ParamForm, fmt_duration, fmt_value, range_hint
+from .param_form import ParamForm, apply_power_bounds, fmt_duration, fmt_value, range_hint
 from .theme import Palette
 
 
@@ -370,8 +370,20 @@ class RampEditorDialog(QDialog):
         name = self._param.currentText().strip()
         for s in self._active_params():
             if self._pname(s) == name:
-                return s
+                return self._with_cal_bounds(s)
         return None
+
+    def _with_cal_bounds(self, spec: dict) -> dict:
+        """If the ramped parameter is the calibrated --power field, narrow its min/max
+        to the target unit's resolved dBm range (the task's calibration signal), so
+        the range check, preview and unit conform to calibration rather than the
+        script's wider declared bounds. Non-power params, no unit, or an uncalibrated
+        unit pass through unchanged — exactly as apply_power_bounds does for the forms."""
+        getter = getattr(self._editor, "cal_bounds_for_task", None)
+        if getter is None:
+            return spec
+        bounds = getter(self._task.currentText().strip())
+        return apply_power_bounds([spec], bounds)[0] if bounds else spec
 
     def _rebuild_run_form(self) -> None:
         if not self._run_mode:
