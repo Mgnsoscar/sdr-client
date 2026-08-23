@@ -26,19 +26,21 @@ import json
 from typing import Optional
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QAbstractScrollArea, QComboBox, QFileDialog, QFormLayout,
-    QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+    QAbstractItemView, QAbstractScrollArea, QApplication, QComboBox, QFileDialog,
+    QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
     QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from api.client import AgentHTTPError
+from api.models import UNIT_TYPES, UNIT_TYPE_LABELS
 from .theme import Palette
 
 CAL_NAME = "calibration.json"
 CAL_CAPABILITY = "calibration"
+CAL_VALIDATE_CAPABILITY = "cal-validate"   # agent >= 1.1.9 dry-run endpoint
 
 # When the unit is simply uncalibrated, the /calibration route answers 404 with this
 # detail. A generic "Not Found" 404 instead means the route itself is missing — i.e.
@@ -80,6 +82,146 @@ def _to_float(s: str, field: str) -> float:
         return float(s)
     except ValueError:
         raise ValueError(f"{field}: '{s}' is not a number")
+
+
+def _curve_issues(sid: str, plane: str, pts) -> list:
+    """Cheap monotonicity checks on one signal/plane curve, mirroring the resolver:
+    points sorted by gain must have strictly increasing gain AND power (invertible)."""
+    vals = []
+    for pt in pts or []:
+        try:
+            vals.append((float(pt["gain_db"]), float(pt["power_dbm"])))
+        except (KeyError, TypeError, ValueError):
+            return [f"signal '{sid}' · {plane}: a point isn't numeric"]
+    if len(vals) < 2:
+        return []                              # 0 pts = latent (legal); 1 pt = slope-1 ok
+    vals.sort(key=lambda gp: gp[0])
+    out = []
+    if any(vals[i][0] <= vals[i - 1][0] for i in range(1, len(vals))):
+        out.append(f"signal '{sid}' · {plane}: two points share a gain")
+    if any(vals[i][1] <= vals[i - 1][1] for i in range(1, len(vals))):
+        out.append(f"signal '{sid}' · {plane}: power must increase with gain (not invertible)")
+    return out
+
+
+def local_calibration_issues(doc) -> list:
+    """A fast, best-effort structural check of a working document, for instant editor
+    feedback BEFORE the authoritative agent validate/save. Catches the common mistakes
+    (non-monotonic curve, no safety ceiling, unset/dangling operating plane, a derived
+    plane missing its parent/Δ, a curve on a non-measured plane). Not exhaustive — the
+    agent's resolver remains the source of truth."""
+    if not isinstance(doc, dict):
+        return ["document is not an object"]
+    issues: list = []
+    if doc.get("schema_version") != 1:
+        issues.append(f"schema_version should be 1 (is {doc.get('schema_version')!r})")
+    chain = doc.get("chain") or {}
+    planes = chain.get("planes") or {}
+    if not isinstance(planes, dict) or not planes:
+        return issues + ["no planes defined — add at least one measured plane"]
+
+    measured = {n for n, p in planes.items()
+                if isinstance(p, dict) and p.get("type") == "measured"}
+    for name, p in planes.items():
+        if not isinstance(p, dict):
+            issues.append(f"plane '{name}' is malformed"); continue
+        t = p.get("type")
+        if t == "derived":
+            frm = p.get("from")
+            if not frm:
+                issues.append(f"derived plane '{name}' has no parent plane")
+            elif frm not in planes:
+                issues.append(f"derived plane '{name}' points at unknown plane '{frm}'")
+            if p.get("delta_db") is None:
+                issues.append(f"derived plane '{name}' has no Δ dB")
+        elif t != "measured":
+            issues.append(f"plane '{name}' has an unknown type")
+
+    op = chain.get("operating_plane")
+    if not op:
+        issues.append("no operating plane set")
+    elif op not in planes:
+        issues.append(f"operating plane '{op}' is not one of the planes")
+    else:
+        seen, cur = set(), op                  # walk derived hops to a measured anchor
+        while isinstance(planes.get(cur), dict) and planes[cur].get("type") == "derived":
+            if cur in seen:
+                issues.append(f"derived plane cycle through '{cur}'"); break
+            seen.add(cur)
+            cur = planes[cur].get("from")
+            if cur not in planes:
+                break
+
+    gl = chain.get("gain_limits") or {}
+    if gl.get("max_gain_db") is None and not chain.get("limits"):
+        issues.append("no safety ceiling — set a max gain or add at least one limit")
+    for lim in (chain.get("limits") or []):
+        if isinstance(lim, dict) and lim.get("plane") not in planes:
+            issues.append(f"limit references unknown plane '{lim.get('plane')}'")
+
+    signals = doc.get("signals") or {}
+    if not signals:
+        issues.append("no signals — add at least one")
+    for sid, sig in signals.items():
+        for pname, curve in ((sig or {}).get("curves") or {}).items():
+            if pname not in planes:
+                issues.append(f"signal '{sid}': curve for unknown plane '{pname}'")
+            elif pname not in measured:
+                issues.append(f"signal '{sid}': curve given for derived plane '{pname}'")
+            issues.extend(_curve_issues(sid, pname, (curve or {}).get("points")))
+    return issues
+
+
+class _Sparkline(QWidget):
+    """A tiny gain→power plot of a curve's points, so a fat-fingered point (a dip, a
+    duplicate) is obvious at a glance next to the grid."""
+    def __init__(self):
+        super().__init__()
+        self._pts: list = []
+        self.setFixedHeight(46)
+        self.setMinimumWidth(120)
+        self.setToolTip("gain (x) → power (y) for the points above")
+
+    def set_points(self, pts) -> None:
+        vals = []
+        for g, p in pts or []:
+            try:
+                vals.append((float(g), float(p)))
+            except (TypeError, ValueError):
+                continue
+        vals.sort(key=lambda gp: gp[0])
+        self._pts = vals
+        self.update()
+
+    def paintEvent(self, _evt) -> None:
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h, pad = self.width(), self.height(), 6
+        if len(self._pts) < 1:
+            qp.setPen(QColor(Palette.TEXT_FAINT))
+            qp.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "no points")
+            return
+        gs = [g for g, _ in self._pts]; ps = [p for _, p in self._pts]
+        g0, g1 = min(gs), max(gs); p0, p1 = min(ps), max(ps)
+        gspan = (g1 - g0) or 1.0; pspan = (p1 - p0) or 1.0
+
+        def xy(g, p):
+            x = pad + (g - g0) / gspan * (w - 2 * pad)
+            y = h - pad - (p - p0) / pspan * (h - 2 * pad)   # y grows downward
+            return x, y
+
+        # detect a non-monotonic (non-invertible) power sequence → draw the line red
+        bad = any(ps[i] <= ps[i - 1] for i in range(1, len(ps)))
+        line = QColor(Palette.CRASH if bad else Palette.ACCENT)
+        qp.setPen(QPen(line, 1.5))
+        for i in range(1, len(self._pts)):
+            x0, y0 = xy(*self._pts[i - 1]); x1, y1 = xy(*self._pts[i])
+            qp.drawLine(int(x0), int(y0), int(x1), int(y1))
+        qp.setPen(QPen(line, 1))
+        qp.setBrush(line)
+        for g, p in self._pts:
+            x, y = xy(g, p)
+            qp.drawEllipse(int(x) - 2, int(y) - 2, 4, 4)
 
 
 def _rename_plane_in_doc(doc: dict, old: str, new: str) -> dict:
@@ -133,8 +275,9 @@ def _template() -> dict:
 # ── A small editable (gain, power) grid ─────────────────────────────────────────
 
 class _CurveTable(QTableWidget):
-    def __init__(self):
+    def __init__(self, on_changed=None):
         super().__init__(0, 2)
+        self._on_changed = on_changed          # called after any edit (live feedback)
         self.setHorizontalHeaderLabels(["gain (dB)", "power (dBm)"])
         self.verticalHeader().setVisible(False)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -146,8 +289,57 @@ class _CurveTable(QTableWidget):
         self.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
         self.setToolTip("Each row is one measured point: the SDR gain you set and the "
                         "power you measured on this plane. Enter at least two points, "
-                        "with strictly increasing gain; power is interpolated between them.")
+                        "with gain AND power both strictly increasing. Tip: paste rows of "
+                        "\"gain, power\" (Ctrl+V) straight from a spreadsheet.")
+        self.cellChanged.connect(lambda *_: self._changed())
         self._fit_height()
+
+    def _changed(self) -> None:
+        if self._on_changed:
+            self._on_changed()
+
+    def numeric_points(self) -> list:
+        """(gain, power) tuples for the sparkline — skips blank/non-numeric rows."""
+        out = []
+        for r in range(self.rowCount()):
+            g = self.item(r, 0).text().strip() if self.item(r, 0) else ""
+            p = self.item(r, 1).text().strip() if self.item(r, 1) else ""
+            try:
+                out.append((float(g), float(p)))
+            except ValueError:
+                continue
+        return out
+
+    def keyPressEvent(self, event) -> None:
+        # Ctrl+V pastes spreadsheet rows: lines of "gain, power" (comma, tab, or
+        # whitespace separated) become new points, so an operator can copy a measured
+        # table straight in instead of retyping it cell by cell.
+        if event.matches(QKeySequence.StandardKey.Paste):
+            if self._paste_csv():
+                return
+        super().keyPressEvent(event)
+
+    def _paste_csv(self) -> bool:
+        text = QApplication.clipboard().text()
+        if not text or not text.strip():
+            return False
+        rows = []
+        for line in text.splitlines():
+            line = line.strip().replace(",", " ").replace("\t", " ")
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                rows.append((parts[0], parts[1]))
+        if not rows:
+            return False
+        self.blockSignals(True)
+        for g, p in rows:
+            self._append(g, p)
+        self.blockSignals(False)
+        self._fit_height()
+        self._changed()
+        return True
 
     def _fit_height(self) -> None:
         """Size the table to its rows (with a sensible min and max), so it expands as
@@ -160,9 +352,18 @@ class _CurveTable(QTableWidget):
         self.setMaximumHeight(min(wanted, header + 12 * row_h))  # cap tall grids
 
     def set_points(self, points) -> None:
+        # Display sorted by gain (the resolver sorts internally anyway) so the grid
+        # reads in the order the curve is actually interpolated.
+        def _key(pt):
+            try:
+                return (0, float(pt.get("gain_db")))
+            except (TypeError, ValueError):
+                return (1, 0.0)                # unparseable rows sink to the bottom
+        self.blockSignals(True)
         self.setRowCount(0)
-        for pt in points or []:
+        for pt in sorted(points or [], key=_key):
             self._append(_numstr(pt.get("gain_db")), _numstr(pt.get("power_dbm")))
+        self.blockSignals(False)
         self._fit_height()
 
     def _append(self, g="", p="") -> None:
@@ -174,6 +375,7 @@ class _CurveTable(QTableWidget):
     def add_blank_row(self) -> None:
         self._append()
         self._fit_height()
+        self._changed()
 
     def remove_selected(self) -> None:
         # Remove the selected rows; if nothing is selected, fall back to the current
@@ -187,6 +389,7 @@ class _CurveTable(QTableWidget):
         for r in sorted(rows, reverse=True):
             self.removeRow(r)
         self._fit_height()
+        self._changed()
 
     def points(self, strict: bool):
         """Return [{gain_db, power_dbm}], skipping fully-blank rows. strict=True raises
@@ -226,12 +429,17 @@ class CalibrationPanel(QWidget):
         row = QHBoxLayout()
         row.setSpacing(8)
         self._refresh_btn = QPushButton("Refresh"); self._refresh_btn.clicked.connect(self._refresh)
+        self._validate_btn = QPushButton("Validate"); self._validate_btn.clicked.connect(self._on_validate)
+        self._validate_btn.setToolTip("Check this document against the unit WITHOUT saving "
+                                      "it — preview what each signal resolves to, or why "
+                                      "it's rejected.")
         self._upload_btn = QPushButton("Upload…"); self._upload_btn.setObjectName("primary")
         self._upload_btn.clicked.connect(self._on_upload)
         self._save_btn = QPushButton("Save"); self._save_btn.clicked.connect(self._on_save)
         self._download_btn = QPushButton("Download…"); self._download_btn.setEnabled(False)
         self._download_btn.clicked.connect(self._on_download)
-        for b in (self._refresh_btn, self._upload_btn, self._save_btn, self._download_btn):
+        for b in (self._refresh_btn, self._validate_btn, self._upload_btn,
+                  self._save_btn, self._download_btn):
             row.addWidget(b)
         row.addStretch(1)
         outer.addLayout(row)
@@ -239,6 +447,14 @@ class CalibrationPanel(QWidget):
         self._status = QLabel("")
         self._status.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_MUTED};")
         outer.addWidget(self._status)
+
+        # Live local check — instant, structural, complementing the authoritative
+        # agent Validate/Save. Hidden when the working document has no issues.
+        self._issues = QLabel("")
+        self._issues.setWordWrap(True)
+        self._issues.setVisible(False)
+        self._issues.setStyleSheet(f"font-size: 11px; color: {Palette.ARMED};")
+        outer.addWidget(self._issues)
 
         # Resolved per-signal summary (read-only, reflects the last validated load)
         self._table = QTableWidget(0, 5)
@@ -278,6 +494,12 @@ class CalibrationPanel(QWidget):
         gl_box.setToolTip("The SDR's usable internal-gain range and which plane an "
                           "absolute --power figure refers to.")
         gl_form = QFormLayout(gl_box)
+        self._f["unit_type"] = QComboBox()
+        for t in UNIT_TYPES:
+            self._f["unit_type"].addItem(UNIT_TYPE_LABELS.get(t, t), t)
+        self._f["unit_type"].setToolTip(
+            "This unit's hardware type. It selects the shared type-defaults chain that's "
+            "merged in, so it must match the real unit — a wrong type silently mis-resolves.")
         self._f["min_gain"] = QLineEdit(); self._f["max_gain"] = QLineEdit()
         self._f["min_gain"].setToolTip(
             "Lowest SDR internal gain usable on this chain, in dB. Powers that would "
@@ -289,9 +511,15 @@ class CalibrationPanel(QWidget):
         self._f["operating"].setToolTip(
             "The plane an absolute --power value is measured at — where you care about the "
             "delivered power, e.g. EIRP at the antenna. Pick the last plane in the chain.")
+        self._f["def_amp"] = QLineEdit()
+        self._f["def_amp"].setToolTip(
+            "The default baseband amplitude (0–1) a signal uses when it doesn't set its "
+            "own. A signal's own amplitude, when set, overrides this.")
+        gl_form.addRow("Unit type", self._f["unit_type"])
         gl_form.addRow("Min gain (dB)", self._f["min_gain"])
         gl_form.addRow("Max gain (dB)", self._f["max_gain"])
         gl_form.addRow("Operating plane", self._f["operating"])
+        gl_form.addRow("Default amplitude", self._f["def_amp"])
         self._editor_layout.addWidget(gl_box)
 
         # Safety / regulatory limits
@@ -403,6 +631,15 @@ class CalibrationPanel(QWidget):
         self._f["min_gain"].setText(_numstr(gl.get("min_gain_db")))
         self._f["max_gain"].setText(_numstr(gl.get("max_gain_db")))
 
+        ut = (doc or {}).get("unit_type", "")
+        i = self._f["unit_type"].findData(ut)
+        if i >= 0:
+            self._f["unit_type"].setCurrentIndex(i)
+        elif ut:                                    # a type we don't have a label for
+            self._f["unit_type"].addItem(ut, ut)
+            self._f["unit_type"].setCurrentIndex(self._f["unit_type"].count() - 1)
+        self._f["def_amp"].setText(_numstr(((doc or {}).get("defaults") or {}).get("amplitude")))
+
         # planes (topology)
         self._clear_layout(self._planes_box)
         self._f["planes"] = []
@@ -425,9 +662,30 @@ class CalibrationPanel(QWidget):
         # signals
         self._clear_layout(self._signals_box)
         self._f["signals"] = {}
+        self._spark_src = {}                # sparkline → its source curve table
         measured = self._measured_planes()
         for sid, sig in ((doc or {}).get("signals") or {}).items():
             self._add_signal_widget(sid, sig or {}, measured)
+
+        self._update_issues()
+        self._sync_validate_button()
+
+    def _update_issues(self) -> None:
+        """Recompute the instant local structural check from the current widgets and
+        show the top few problems (or hide the panel when the document is clean)."""
+        try:
+            doc = self._read_form(strict=False)
+        except ValueError:
+            return
+        issues = local_calibration_issues(doc)
+        if not issues:
+            self._issues.setVisible(False)
+            self._issues.clear()
+            return
+        shown = issues[:6]
+        more = f"  (+{len(issues) - len(shown)} more)" if len(issues) > len(shown) else ""
+        self._issues.setText("⚠ " + " · ".join(shown) + more)
+        self._issues.setVisible(True)
 
     def _add_limit_row(self, lim: Optional[dict] = None) -> None:
         lim = lim or {}
@@ -542,6 +800,24 @@ class CalibrationPanel(QWidget):
         except ValueError:
             pass
         name = row["name"].text().strip()
+        # Removing a plane cascades — it drops that plane's measured points from every
+        # signal that has them, plus its limits, and clears the operating pointer if it
+        # pointed here. Confirm first, since that's easy to do by a mis-click and not
+        # obviously reversible.
+        affected = sorted(
+            sid for sid, sig in ((self._doc or {}).get("signals") or {}).items()
+            if isinstance((sig or {}).get("curves"), dict) and name in sig["curves"])
+        if name:
+            detail = (f"\n\nThis also removes its measured points from "
+                      f"{len(affected)} signal(s): {', '.join(affected)}." if affected else "")
+            resp = QMessageBox.question(
+                self, "Remove plane",
+                f"Remove plane '{name}' from the chain?{detail}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)
+            if resp != QMessageBox.StandardButton.Yes:
+                self._doc_to_form()               # repaint (undo the widget-level edit)
+                return
         chain = (self._doc or {}).get("chain", {})
         planes = chain.get("planes") or {}
         planes.pop(name, None)
@@ -596,9 +872,15 @@ class CalibrationPanel(QWidget):
         v = QVBoxLayout(box)
         top = QFormLayout()
         amp = QLineEdit(_numstr(sig.get("amplitude")))
+        # Show the inherited default as a placeholder so a blank field visibly means
+        # "inherit defaults.amplitude", not "unset".
+        def_amp = ((self._doc or {}).get("defaults") or {}).get("amplitude")
+        if def_amp is not None:
+            amp.setPlaceholderText(f"inherits default ({_numstr(def_amp)})")
         amp.setToolTip("The baseband amplitude (0–1) the script drives for this signal. "
                        "It must match the amplitude used while measuring the curve below, "
-                       "since power scales with it.")
+                       "since power scales with it. Leave blank to inherit the chain's "
+                       "default amplitude.")
         bw = QLineEdit(_numstr(sig.get("occupied_bw_hz")))
         bw.setToolTip("Occupied bandwidth of the signal in Hz (optional) — used to relate "
                       "total in-band power to spectral density.")
@@ -609,9 +891,14 @@ class CalibrationPanel(QWidget):
         curves = {}
         for plane in measured:
             v.addWidget(QLabel(f"curve · {plane}"))
-            tbl = _CurveTable()
+            spark = _Sparkline()
+            tbl = _CurveTable(on_changed=lambda t=None, s=spark: self._on_curve_changed(s))
             tbl.set_points(((sig.get("curves") or {}).get(plane) or {}).get("points"))
-            v.addWidget(tbl)
+            spark.set_points(tbl.numeric_points())
+            row = QHBoxLayout()
+            row.addWidget(tbl, 3); row.addWidget(spark, 2)
+            v.addLayout(row)
+            self._spark_src[spark] = tbl   # so the change handler can refresh the plot
             btns = QHBoxLayout()
             addp = QPushButton("+ point"); addp.clicked.connect(tbl.add_blank_row)
             rmp = QPushButton("− point"); rmp.clicked.connect(tbl.remove_selected)
@@ -626,12 +913,35 @@ class CalibrationPanel(QWidget):
         self._signals_box.addWidget(box)
         self._f["signals"][sid] = entry
 
+    def _on_curve_changed(self, spark: "_Sparkline") -> None:
+        """A curve grid was edited: repaint its sparkline from its source table and
+        refresh the live local-issues panel."""
+        src = getattr(self, "_spark_src", {}).get(spark)
+        if src is not None:
+            spark.set_points(src.numeric_points())
+        self._update_issues()
+
     # ── views → model ─────────────────────────────────────────────────────────────
     def _read_form(self, strict: bool) -> dict:
         """Rebuild the document from the editor widgets, preserving fields the form
         doesn't model (schema_version, unit_id, meta, chain.planes, interp/offset_db).
         strict=True raises ValueError on bad numeric input."""
         doc = copy.deepcopy(self._doc) if self._doc else _template()
+        ut = self._f["unit_type"].currentData()
+        if ut:
+            doc["unit_type"] = ut
+        def_amp_text = self._f["def_amp"].text().strip()
+        defaults = doc.setdefault("defaults", {})
+        if def_amp_text:
+            try:
+                defaults["amplitude"] = _to_float(def_amp_text, "default amplitude")
+            except ValueError:
+                if strict:
+                    raise
+        else:
+            defaults.pop("amplitude", None)       # blank ⇒ no chain-wide default
+        if not defaults:
+            doc.pop("defaults", None)
         chain = doc.setdefault("chain", {})
         gl = chain.setdefault("gain_limits", {})
         self._set_num(gl, "min_gain_db", self._f["min_gain"].text(), "min gain", strict)
@@ -802,6 +1112,44 @@ class CalibrationPanel(QWidget):
             return
         self._send(json.dumps(self._doc).encode("utf-8"))
 
+    def _supports(self, capability: str) -> bool:
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(getattr(client, "supports", lambda _c: False)(capability))
+
+    def _sync_validate_button(self) -> None:
+        ok = self._supports(CAL_VALIDATE_CAPABILITY)
+        self._validate_btn.setEnabled(ok)
+        self._validate_btn.setToolTip(
+            "Check this document against the unit WITHOUT saving it — preview what each "
+            "signal resolves to, or why it's rejected." if ok else
+            "This unit's agent is too old for dry-run validate (needs 1.1.9+). "
+            "Local checks still run above; use Save to validate on the unit.")
+
+    def _on_validate(self) -> None:
+        try:
+            self._sync_from(self._tabs.currentIndex(), strict=False)
+        except ValueError:
+            pass
+        if self._doc is None:
+            self._set_status("nothing to validate", kind="faint")
+            return
+        self._update_issues()                       # instant local pass
+        issues = local_calibration_issues(self._doc)
+        if not self._supports(CAL_VALIDATE_CAPABILITY):
+            self._set_status(
+                f"{len(issues)} local issue(s) found — see above" if issues else
+                "no local issues found (agent too old to dry-run on the unit)",
+                kind="error" if issues else "warn")
+            return
+        self._set_status("validating (dry run — not saving)…")
+        doc = self._doc
+        self.hub.run_async(
+            f"cal_validate:{self.hostname}",
+            lambda: self.hub.fleet.get(self.hostname).validate_calibration(doc))
+
     def _send(self, content: bytes) -> None:
         self._set_status("validating + saving…")
         self.hub.run_async(
@@ -838,6 +1186,23 @@ class CalibrationPanel(QWidget):
             self._handle_get(result)
         elif parts[0] == "cal_save":
             self._handle_save(result)
+        elif parts[0] == "cal_validate":
+            self._handle_validate(result)
+
+    def _handle_validate(self, result) -> None:
+        if isinstance(result, Exception):
+            self._set_status(f"validate failed: {result}", kind="error")
+            return
+        if not isinstance(result, dict):
+            self._set_status("unexpected response", kind="error")
+            return
+        if result.get("valid"):
+            self._populate_table(result.get("signals") or {})
+            n = len(result.get("signals") or {})
+            self._set_status(
+                f"valid ✓ (dry run) · {n} signal(s) resolve — NOT saved yet", kind="ok")
+        else:
+            self._set_status(f"would be REJECTED: {result.get('error', '')}", kind="error")
 
     def _agent_lacks_calibration(self) -> bool:
         """Definitive when the unit's /info has been read (agent_version is set): the

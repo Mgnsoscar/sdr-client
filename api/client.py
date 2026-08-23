@@ -661,6 +661,12 @@ class AgentClient:
         Raises AgentError(404) if the unit has no calibration document."""
         return self._request("GET", "/calibration")
 
+    def validate_calibration(self, document: dict) -> dict:
+        """Dry-run a calibration document against this unit WITHOUT storing it (agent
+        >= 1.1.9, capability 'cal-validate'). Returns {valid: bool, signals|error} —
+        the same verdict Save would produce, for a pre-Save preview."""
+        return self._request("POST", "/calibration/validate", json=document)
+
     def create_task(self, spec: dict) -> dict:
         """Create a task from a spec (name, command, working_dir, env, autostart,
         restart_on_crash) — the agent appends it to tasks.yaml and reloads live."""

@@ -19,10 +19,13 @@ _app = QApplication.instance() or QApplication([])
 
 
 class FakeClient:
-    def __init__(self, cal=None, upload=None):
+    def __init__(self, cal=None, upload=None, caps=(), validate=None):
         self._cal = cal
         self._upload = upload or {"saved": "calibration.json", "calibration": {}}
+        self._caps = list(caps)
+        self._validate = validate
         self.uploaded = []
+        self.validated = []
 
     def get_calibration(self):
         if isinstance(self._cal, Exception):
@@ -34,6 +37,15 @@ class FakeClient:
             raise self._upload
         self.uploaded.append((name, content))
         return self._upload
+
+    def supports(self, cap):
+        return cap in self._caps
+
+    def validate_calibration(self, document):
+        self.validated.append(document)
+        if isinstance(self._validate, Exception):
+            raise self._validate
+        return self._validate
 
 
 class FakeFleet:
@@ -275,7 +287,9 @@ def test_plane_topology_round_trips_through_form():
     assert set(p._f["signals"]["mock"]["curves"]) == {"sdr_output", "amplifier_output"}
 
 
-def test_add_and_remove_plane():
+def test_add_and_remove_plane(monkeypatch):
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(_doc())                                   # one plane: sdr_output
     p._on_add_plane()
@@ -362,7 +376,9 @@ def test_rename_in_form_keeps_document_valid_shape():
     assert "sdr_port" in out["signals"]["mock"]["curves"]
 
 
-def test_removing_plane_purges_its_references():
+def test_removing_plane_purges_its_references(monkeypatch):
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
     d = _full_doc()
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(d)
@@ -385,3 +401,132 @@ def test_leaving_json_tab_with_bad_json_is_blocked():
     p._tabs.setCurrentIndex(0)                       # try to leave → should be blocked
     assert p._tabs.currentIndex() == 1               # kept on JSON
     assert "JSON has an error" in p._status.text()
+
+
+# ── B: local structural checks ────────────────────────────────────────────────────
+
+def test_local_issues_clean_doc_has_none():
+    from ui.calibration_panel import local_calibration_issues
+    assert local_calibration_issues(_doc()) == []
+
+
+def test_local_issues_flags_non_invertible_curve():
+    from ui.calibration_panel import local_calibration_issues
+    d = _doc()
+    d["signals"]["mock"]["curves"]["sdr_output"]["points"] = [
+        {"gain_db": 40, "power_dbm": -20}, {"gain_db": 50, "power_dbm": -20}]  # flat power
+    issues = local_calibration_issues(d)
+    assert any("not invertible" in i for i in issues)
+
+
+def test_local_issues_flags_missing_ceiling_and_unset_operating():
+    from ui.calibration_panel import local_calibration_issues
+    d = _doc()
+    d["chain"]["gain_limits"].pop("max_gain_db")
+    d["chain"]["limits"] = []
+    d["chain"]["operating_plane"] = ""
+    issues = local_calibration_issues(d)
+    assert any("safety ceiling" in i for i in issues)
+    assert any("operating plane" in i for i in issues)
+
+
+def test_issues_panel_shows_after_bad_edit():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc())
+    tbl = p._f["signals"]["mock"]["curves"]["sdr_output"]
+    tbl.item(1, 1).setText("-36")                    # make power flat (40→-36, 74→-36)
+    # (isVisible() is unreliable on a never-shown offscreen widget; the label text is
+    # cleared when there are no issues, so a non-empty text means the panel is showing.)
+    assert "not invertible" in p._issues.text()
+
+
+# ── C: unit_type + defaults.amplitude round-trip through the Editor ────────────────
+
+def test_unit_type_and_default_amplitude_round_trip():
+    d = _doc()
+    d["unit_type"] = "x410"
+    d["defaults"] = {"amplitude": 0.7}
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(d)
+    out = p._read_form(strict=True)
+    assert out["unit_type"] == "x410"
+    assert out["defaults"]["amplitude"] == 0.7
+    # editing them in the form is read back
+    p._f["def_amp"].setText("0.55")
+    assert p._read_form(strict=True)["defaults"]["amplitude"] == 0.55
+
+
+# ── D: dry-run validate ───────────────────────────────────────────────────────────
+
+def test_validate_button_gated_on_capability():
+    p_no = CalibrationPanel("u", FakeHub(FakeClient()))            # no caps
+    p_no._set_doc(_doc())
+    assert not p_no._validate_btn.isEnabled()
+    p_yes = CalibrationPanel("u", FakeHub(FakeClient(caps=("cal-validate",))))
+    p_yes._set_doc(_doc())
+    assert p_yes._validate_btn.isEnabled()
+
+
+def test_validate_valid_populates_summary_without_saving():
+    client = FakeClient(caps=("cal-validate",), validate={
+        "valid": True, "signals": {"mock": {"operating_plane": "sdr_output",
+        "quantity": "q", "min_gain_db": 0.0, "max_gain_db": 74.0,
+        "min_power_dbm": -36.0, "max_power_dbm": -2.5}}})
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(_doc())
+    p._on_validate()
+    assert client.validated                              # posted to the agent
+    assert client.uploaded == []                         # but NOT stored
+    assert p._table.rowCount() == 1
+    assert "dry run" in p._status.text()
+
+
+def test_validate_rejection_shows_reason():
+    client = FakeClient(caps=("cal-validate",),
+                        validate={"valid": False, "error": "curve not invertible"})
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(_doc())
+    p._on_validate()
+    assert "REJECTED" in p._status.text()
+    assert "curve not invertible" in p._status.text()
+
+
+def test_validate_without_capability_reports_local_only():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))     # no cal-validate
+    p._set_doc(_doc())
+    p._on_validate()
+    assert "no local issues" in p._status.text()         # clean doc, agent can't dry-run
+
+
+# ── F: curve polish (CSV paste, sparkline, inherited-amplitude placeholder) ────────
+
+def test_csv_paste_adds_points():
+    from PyQt6.QtWidgets import QApplication
+    from ui.calibration_panel import _CurveTable
+    QApplication.clipboard().setText("30, -40\n60,\t-10\n")
+    tbl = _CurveTable()
+    added = tbl._paste_csv()
+    assert added
+    pts = tbl.points(strict=True)
+    assert {"gain_db": 30.0, "power_dbm": -40.0} in pts
+    assert {"gain_db": 60.0, "power_dbm": -10.0} in pts
+
+
+def test_sparkline_handles_points_and_empty():
+    from ui.calibration_panel import _Sparkline
+    s = _Sparkline()
+    s.set_points([(40, -36), (74, -2.5)])
+    assert len(s._pts) == 2
+    s.set_points([])                                     # must not raise
+    assert s._pts == []
+
+
+def test_blank_amplitude_shows_inherited_default_placeholder():
+    d = _doc()
+    d["defaults"] = {"amplitude": 0.8}
+    d["signals"]["mock"].pop("amplitude", None)          # inherit
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(d)
+    amp = p._f["signals"]["mock"]["amp"]
+    assert amp.text() == ""
+    assert "0.8" in amp.placeholderText()
