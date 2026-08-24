@@ -769,6 +769,45 @@ def test_signal_without_points_inherits_previous_stage():
     assert not any("amplifier_output" in i for i in local_calibration_issues(out))
 
 
+def _two_measured_doc(measure_second: bool):
+    d = _doc()
+    d["chain"]["operating_plane"] = "amplifier_output"
+    d["chain"]["planes"] = {
+        "sdr_output": {"type": "measured", "quantity": "tp"},
+        "amplifier_output": {"type": "measured", "quantity": "mlp"},
+    }
+    if measure_second:
+        d["signals"]["mock"]["curves"]["amplifier_output"] = {
+            "points": [{"gain_db": 40, "power_dbm": -6}, {"gain_db": 74, "power_dbm": 24}]}
+    return d
+
+
+def test_partial_stage_detection():
+    # A signal missing the curve for the 2nd measured stage relies on the fallback…
+    assert CalibrationPanel._doc_uses_partial_stages(_two_measured_doc(False)) is True
+    # …but a fully-measured document does not.
+    assert CalibrationPanel._doc_uses_partial_stages(_two_measured_doc(True)) is False
+
+
+def test_partial_stage_save_blocked_on_old_agent():
+    # An agent without the 1.3.0 capability would reject the partial-stage doc, so Save
+    # warns instead of pushing it.
+    client = FakeClient(caps=["calibration"])
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(_two_measured_doc(False))
+    p._on_save()
+    assert "1.3.0" in p._status.text()
+    assert client.uploaded == []                         # nothing was pushed
+
+
+def test_partial_stage_save_allowed_on_capable_agent():
+    client = FakeClient(caps=["calibration", "calibration-partial-stages"])
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(_two_measured_doc(False))
+    p._on_save()
+    assert client.uploaded                                # the file was pushed (not blocked)
+
+
 def test_library_grid_has_a_card_per_component_plus_add():
     from ui.calibration_panel import _ClickCard
     p = CalibrationPanel("u", FakeHub(FakeClient()))

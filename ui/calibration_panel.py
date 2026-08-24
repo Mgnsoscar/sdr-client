@@ -54,6 +54,10 @@ CAL_COMPONENTS_CAPABILITY = "calibration-components"   # agent >= 1.2.0 (v2 comp
 _COMPONENTS_NEEDS_NEWER = (
     "this unit's agent is too old for component-based calibration (needs 1.2.0+). "
     "Update the agent, or use a constant Δ dB on the passive planes.")
+CAL_PARTIAL_STAGES_CAPABILITY = "calibration-partial-stages"  # agent >= 1.3.0
+_PARTIAL_STAGES_NEEDS_NEWER = (
+    "this unit's agent is too old to leave a measured stage unmeasured for some signals "
+    "(needs 1.3.0+). Update the agent, or measure every signal on each measured stage.")
 
 # When the unit is simply uncalibrated, the /calibration route answers 404 with this
 # detail. A generic "Not Found" 404 instead means the route itself is missing — i.e.
@@ -2239,7 +2243,7 @@ class CalibrationPanel(QWidget):
         if self._doc is None:
             self._set_status("nothing to save", kind="error")
             return
-        if self._blocks_on_components():
+        if self._blocks_on_components() or self._blocks_on_partial_stages():
             return
         self._send(json.dumps(self._doc).encode("utf-8"))
 
@@ -2254,6 +2258,32 @@ class CalibrationPanel(QWidget):
         shows why) when blocked."""
         if self._doc_uses_components(self._doc) and not self._supports(CAL_COMPONENTS_CAPABILITY):
             self._set_status(_COMPONENTS_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
+    @staticmethod
+    def _doc_uses_partial_stages(doc) -> bool:
+        """True when a signal omits the curve for a non-first MEASURED stage — it would
+        rely on the agent's inherit-the-upstream-curve fallback (agent >= 1.3.0)."""
+        planes = ((doc or {}).get("chain") or {}).get("planes") or {}
+        names = list(planes.keys())
+        downstream_measured = [n for i, n in enumerate(names)
+                               if i > 0 and isinstance(planes.get(n), dict)
+                               and planes[n].get("type") == "measured"]
+        if not downstream_measured:
+            return False
+        for sig in ((doc or {}).get("signals") or {}).values():
+            curves = (sig or {}).get("curves") or {}
+            if any(dm not in curves for dm in downstream_measured):
+                return True
+        return False
+
+    def _blocks_on_partial_stages(self) -> bool:
+        """Guard: an agent older than 1.3.0 rejects a signal that skips a downstream
+        measured stage, so warn rather than let it fail confusingly on the unit."""
+        if self._doc_uses_partial_stages(self._doc) and not self._supports(
+                CAL_PARTIAL_STAGES_CAPABILITY):
+            self._set_status(_PARTIAL_STAGES_NEEDS_NEWER, kind="error")
             return True
         return False
 
@@ -2295,7 +2325,7 @@ class CalibrationPanel(QWidget):
                 "no local issues found (agent too old to dry-run on the unit)",
                 kind="error" if issues else "warn")
             return
-        if self._blocks_on_components():
+        if self._blocks_on_components() or self._blocks_on_partial_stages():
             return
         self._set_status("validating (dry run — not saving)…")
         doc = self._doc
