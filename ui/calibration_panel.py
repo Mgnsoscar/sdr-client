@@ -880,6 +880,8 @@ class CalibrationPanel(QWidget):
         self._f: dict = {}                      # references to editor widgets
         self._expanded_signals: set = set()    # measured-detail signals shown expanded
         self._task_signal_ids: list = []       # signal ids this unit's tasks reference (hints)
+        self._task_signals: dict = {}          # task name → SDR_CAL_SIGNAL_ID it references
+        self._tasks_yaml: str = ""             # last-fetched tasks.yaml (for task renames)
         # plane id → set of signal ids opened on a NON-source measured stage that don't
         # yet have data there (so the user can enter points). Reset on a fresh document.
         self._stage_extra: dict = {}
@@ -2620,15 +2622,20 @@ class CalibrationPanel(QWidget):
             self._handle_components(result)
         elif parts[0] == "cal_tasks":
             self._handle_tasks(result)
+        elif parts[0] == "cal_taskrename":
+            self._handle_task_rename(parts[2] if len(parts) > 2 else "", result)
 
     def _handle_tasks(self, result) -> None:
-        """Record the calibration signal ids this unit's tasks reference (via each task's
-        SDR_CAL_SIGNAL_ID), used to suggest ids when adding a signal. Best-effort."""
+        """Record which calibration signal each of this unit's tasks references (via its
+        SDR_CAL_SIGNAL_ID) — used to suggest ids when adding a signal, and to offer to
+        rename a task's signal when the signal is renamed here. Best-effort."""
         if isinstance(result, Exception) or not isinstance(result, str) or not result.strip():
             return
         try:
             from .timeline_editor import task_signals_from_yaml
-            self._task_signal_ids = sorted(set(task_signals_from_yaml(result).values()))
+            self._tasks_yaml = result
+            self._task_signals = task_signals_from_yaml(result)
+            self._task_signal_ids = sorted(set(self._task_signals.values()))
         except Exception:  # noqa: BLE001 — a broken tasks file shouldn't break the panel
             return
 
@@ -2820,6 +2827,69 @@ class CalibrationPanel(QWidget):
                 shown.add(new)
         self._set_status(f"renamed signal “{old}” → “{new}”", kind="ok")
         self._doc_to_form()
+        self._offer_task_rename(old, new)
+
+    def _offer_task_rename(self, old: str, new: str) -> None:
+        """After a signal is renamed here, any of this unit's tasks that referenced the old
+        id (via SDR_CAL_SIGNAL_ID) now point at a signal that no longer exists. Offer to
+        update them so the two stay in sync."""
+        affected = sorted(n for n, s in self._task_signals.items() if s == old)
+        if not affected:
+            return
+        word = "task" if len(affected) == 1 else "tasks"
+        listed = ", ".join(affected)
+        if QMessageBox.question(
+                self, "Update tasks too?",
+                f"{len(affected)} {word} still reference the old calibration signal "
+                f"“{old}” (via SDR_CAL_SIGNAL_ID):\n\n{listed}\n\n"
+                f"Update {'it' if len(affected) == 1 else 'them'} to “{new}” as well?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+            return
+        self._rename_tasks_signal(affected, new)
+
+    def _rename_tasks_signal(self, names: list, new: str) -> None:
+        """Point each named task's SDR_CAL_SIGNAL_ID at `new`, preserving every other field
+        (the full stored entry is sent back). Each update is a live PUT the agent reloads."""
+        import yaml as _yaml
+        try:
+            doc = _yaml.safe_load(self._tasks_yaml) or {}
+        except _yaml.YAMLError:
+            self._set_status("couldn't parse this unit's tasks to update them", kind="error")
+            return
+        entries = {e.get("name"): e for e in (doc.get("tasks") or []) if isinstance(e, dict)}
+        host = self.hostname
+        self._task_rename_total = 0
+        self._task_rename_errors = []
+        for name in names:
+            entry = entries.get(name)
+            if not isinstance(entry, dict):
+                continue
+            spec = dict(entry)
+            spec["env"] = {**(spec.get("env") or {}), "SDR_CAL_SIGNAL_ID": new}
+            self._task_signals[name] = new           # optimistic; re-fetched on completion
+            self._task_rename_total += 1
+            self.hub.run_async(
+                f"cal_taskrename:{host}:{name}",
+                lambda n=name, s=spec: self.hub.fleet.get(host).update_task(n, s))
+        if self._task_rename_total:
+            self._set_status(f"updating {self._task_rename_total} task(s) to “{new}”…")
+
+    def _handle_task_rename(self, name: str, result) -> None:
+        if isinstance(result, Exception):
+            self._task_rename_errors.append(name)
+        self._task_rename_total = max(0, getattr(self, "_task_rename_total", 1) - 1)
+        if self._task_rename_total > 0:
+            return                                    # wait for the rest to land
+        errs = getattr(self, "_task_rename_errors", [])
+        if errs:
+            self._set_status(f"couldn't update {len(errs)} task(s): {', '.join(errs)}",
+                             kind="error")
+        else:
+            self._set_status("tasks updated to the new signal id", kind="ok")
+        # Re-sync our view of the unit's tasks so a later rename sees the fresh state.
+        self.hub.run_async(f"cal_tasks:{self.hostname}",
+                           lambda: self.hub.fleet.get(self.hostname).get_tasks_yaml())
 
     def _on_remove_signal_from_stage(self, sid: str, plane: str) -> None:
         """Downstream-stage remove: clear this signal's measured points from ``plane`` and

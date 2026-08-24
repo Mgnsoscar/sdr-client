@@ -765,6 +765,76 @@ def test_rename_signal_keeps_it_expanded():
     assert p._expanded_signals == {"gnss_l1"}
 
 
+class _TasksClient(FakeClient):
+    """A FakeClient that also serves/updates this unit's tasks.yaml."""
+    def __init__(self, tasks_yaml, **kw):
+        super().__init__(**kw)
+        self._tasks_yaml = tasks_yaml
+        self.task_updates = []
+
+    def get_tasks_yaml(self):
+        return self._tasks_yaml
+
+    def update_task(self, name, spec):
+        self.task_updates.append((name, spec))
+        return {"updated": name}
+
+
+_TASKS_YAML = (
+    "tasks:\n"
+    "  - name: l1_tx\n"
+    "    command: [python3, tx.py]\n"
+    "    env: { SDR_CAL_SIGNAL_ID: mock, FOO: bar }\n"
+    "  - name: unrelated\n"
+    "    command: [python3, other.py]\n"
+    "    env: { SDR_CAL_SIGNAL_ID: something_else }\n"
+)
+
+
+def test_renaming_a_signal_offers_to_update_referencing_tasks(monkeypatch):
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    client = _TasksClient(_TASKS_YAML)
+    p = CalibrationPanel("u", FakeHub(client))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    p._handle_tasks(_TASKS_YAML)                      # as the cal_tasks fetch would
+    p._rename_signal("mock", "gnss_l1")
+    assert len(client.task_updates) == 1             # only the referencing task
+    name, spec = client.task_updates[0]
+    assert name == "l1_tx"
+    assert spec["env"]["SDR_CAL_SIGNAL_ID"] == "gnss_l1"
+    assert spec["env"]["FOO"] == "bar"               # other env preserved
+    assert spec["command"] == ["python3", "tx.py"]   # rest of the entry preserved
+
+
+def test_declining_task_update_still_renames_the_signal(monkeypatch):
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.No))
+    client = _TasksClient(_TASKS_YAML)
+    p = CalibrationPanel("u", FakeHub(client))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    p._handle_tasks(_TASKS_YAML)
+    p._rename_signal("mock", "gnss_l1")
+    assert client.task_updates == []                 # tasks left alone
+    assert "gnss_l1" in p._read_form(strict=False)["signals"]   # local rename still applied
+
+
+def test_rename_without_referencing_tasks_does_not_prompt(monkeypatch):
+    asked = {}
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(
+        lambda *a, **k: asked.setdefault("q", True) or QMessageBox.StandardButton.Yes))
+    client = _TasksClient("tasks:\n  - name: x\n    env: { SDR_CAL_SIGNAL_ID: other }\n")
+    p = CalibrationPanel("u", FakeHub(client))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    p._handle_tasks(client._tasks_yaml)
+    p._rename_signal("mock", "gnss_l1")
+    assert "q" not in asked                           # no task references "mock" → no prompt
+    assert client.task_updates == []
+
+
 def test_remove_signal_from_measured_detail(monkeypatch):
     # The expanded signal section carries a "Remove signal" action; confirming it drops
     # the signal (and all its curves) from the document.
