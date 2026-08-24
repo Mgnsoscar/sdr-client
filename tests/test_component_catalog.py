@@ -232,7 +232,8 @@ def test_deploy_components_to_keeps_referenced_part():
     unit = _FakeUnit(cal, dump_components({"ant_a": _spec(6.0, "antenna"),
                                            "junk": _spec(-9.0)}))
     # library no longer has ant_a (deleted) — but the unit's calibration references it.
-    info = Fleet._deploy_components_to(unit, library={"cab_a": _spec(-2.0)}, prune=True)
+    info = Fleet._deploy_components_to(unit, library={"cab_a": _spec(-2.0)}, prune=True,
+                                       cal=Fleet._fetch_calibration(unit))
     assert unit.uploaded is not None
     pushed = ComponentCatalog.parse_wire(unit.uploaded)
     assert set(pushed) == {"cab_a", "ant_a"}             # ant_a persisted, junk pruned
@@ -244,7 +245,8 @@ def test_deploy_components_to_skips_upload_when_unchanged():
     same = {"cab_a": _spec(-2.0)}
     unit = _FakeUnit({"document": {"chain": {"planes": {"sdr": {"type": "measured"}}}}},
                      dump_components(same))
-    info = Fleet._deploy_components_to(unit, library=same, prune=True)
+    info = Fleet._deploy_components_to(unit, library=same, prune=True,
+                                       cal=Fleet._fetch_calibration(unit))
     assert unit.uploaded is None                          # nothing changed → no re-upload
     assert info["added"] == [] and info["pruned"] == []
 
@@ -252,6 +254,7 @@ def test_deploy_components_to_skips_upload_when_unchanged():
 def test_deploy_components_to_handles_uncalibrated_unit():
     from api.fleet import Fleet
     unit = _FakeUnit(None, "")                            # 404 calibration, no components yet
-    info = Fleet._deploy_components_to(unit, library={"cab_a": _spec(-2.0)}, prune=True)
+    info = Fleet._deploy_components_to(unit, library={"cab_a": _spec(-2.0)}, prune=True,
+                                       cal=Fleet._fetch_calibration(unit))
     assert ComponentCatalog.parse_wire(unit.uploaded) == {"cab_a": _spec(-2.0)}
     assert info["added"] == ["cab_a"]

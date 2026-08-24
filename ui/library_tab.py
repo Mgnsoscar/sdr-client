@@ -482,13 +482,22 @@ class LibraryTab(QWidget):
                               "(missing from the library AND the unit — that calibration "
                               "won't resolve until you re-add the part or re-point the chain):")
             comp_lines += [f"• {n}" for n in comp_dangling]
+        # Absolute --power levels a unit can't produce (it clips them at transmit).
+        power_lines = []
+        for h, r in ok.items():
+            warns = getattr(r, "power_warnings", None) or []
+            for w in warns:
+                arrow = "above" if w.get("side") == "above" else "below"
+                power_lines.append(
+                    f"{self._label(h)} — {w['where']}: {w['dbm']:g} dBm is {arrow} the "
+                    f"unit's {w['limit']:g} dBm; it will transmit clipped to {w['limit']:g}.")
         status = f"deployed to {len(ok)} unit(s)"
         if offline:
             status += f" · {len(offline)} offline"
         if failed:
             status += f" · {len(failed)} failed"
         self._set_status(status, error=bool(failed))
-        if failed or notes or zero_task_units or comp_lines:
+        if failed or notes or zero_task_units or comp_lines or power_lines:
             lines = []
             if failed:
                 lines.append("Failed (redeploy when reachable):")
@@ -513,6 +522,13 @@ class LibraryTab(QWidget):
                 if lines:
                     lines.append("")
                 lines += comp_lines
+            if power_lines:
+                if lines:
+                    lines.append("")
+                lines.append("⚠ Absolute power levels this unit can't produce (transmit "
+                             "clipped to its limit — set the level within range, or run on "
+                             "a more capable unit, if the plan needs the full power):")
+                lines += [f"• {n}" for n in power_lines]
             QMessageBox.warning(self, "Deploy — details", "\n".join(lines))
         elif offline:
             # No real failures — just some units offline. Benign, so inform (not warn).

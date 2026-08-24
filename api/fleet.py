@@ -275,26 +275,36 @@ class Fleet:
         still references is never removed (see :func:`state.plan_unit_deploy`)."""
         def do(c):
             res = c.deploy_library(m.scoped_library(library, c.unit_type), prune)
+            cal = self._fetch_calibration(c)          # once — used below for both checks
             if components is not None:
-                res.components = self._deploy_components_to(c, components, prune)
+                res.components = self._deploy_components_to(c, components, prune, cal)
+            # Absolute --power levels this unit can't produce (the agent clips them at
+            # transmit) — surfaced so the operator knows before it happens.
+            from state import scan_absolute_power, power_out_of_range
+            scoped = m.scoped_library(library, c.unit_type)
+            res.power_warnings = power_out_of_range(scan_absolute_power(scoped), cal)
             c.put_plans(plans)
             c.put_schedule(schedule)
             return res
         return self._fan_out_reachable(do, units)
 
     @staticmethod
-    def _deploy_components_to(c, library: Dict[str, dict], prune: bool) -> dict:
+    def _fetch_calibration(c) -> dict:
+        """The unit's calibration result ({} when it's uncalibrated / has no document)."""
+        from .client import AgentHTTPError
+        try:
+            return c.get_calibration() or {}
+        except AgentHTTPError as exc:
+            if exc.status_code != 404:
+                raise
+            return {}
+
+    @staticmethod
+    def _deploy_components_to(c, library: Dict[str, dict], prune: bool, cal: dict) -> dict:
         """Reconcile one unit's ``components.yaml`` to the shared library, keeping any
         component the unit's calibration still references. Returns the change summary."""
         from state import (ComponentCatalog, dump_components, plan_unit_deploy,
                            referenced_components)
-        from .client import AgentHTTPError
-        try:                                          # what the unit's calibration uses
-            cal = c.get_calibration()
-        except AgentHTTPError as exc:
-            if exc.status_code != 404:
-                raise
-            cal = {}
         referenced = referenced_components((cal or {}).get("document"))
         try:
             on_unit = ComponentCatalog.parse_wire(c.get_components() or "")
