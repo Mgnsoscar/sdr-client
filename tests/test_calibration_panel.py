@@ -581,3 +581,107 @@ def test_blank_amplitude_shows_inherited_default_placeholder():
     amp = p._f["signals"]["mock"]["amp"]
     assert amp.text() == ""
     assert "0.8" in amp.placeholderText()
+
+
+# ── calibration v2: the chain-builder UI (mockup) ─────────────────────────────────
+
+def _v2_doc():
+    d = _doc()
+    d["chain"]["operating_plane"] = "antenna_eirp"
+    d["chain"]["planes"] = {
+        "sdr_output": {"type": "measured", "quantity": "total in-band power"},
+        "amplifier_output": {"type": "measured", "quantity": "main-lobe"},
+        "cable_output": {"type": "derived", "from": "amplifier_output",
+                         "component": "cable_lmr240_3m_a"},
+        "antenna_eirp": {"type": "derived", "from": "cable_output",
+                         "component": "patch_a", "quantity": "EIRP"},
+    }
+    d["signals"]["mock"]["center_freq_hz"] = 1575.42e6
+    return d
+
+
+def _seed_catalog(p):
+    # Isolate the catalog to a throwaway file so tests never touch the repo's
+    # components.json (ComponentCatalog.put persists to disk).
+    import tempfile
+    from pathlib import Path
+    from state import ComponentCatalog
+    p._catalog = ComponentCatalog(Path(tempfile.mkdtemp()) / "components.json")
+    p._catalog.put("cable_lmr240_3m_a", "cable",
+                   [[1.10e9, -2.30], [1.40e9, -2.62], [1.60e9, -2.81]], "LMR-240 · 3 m · A")
+    p._catalog.put("patch_a", "antenna", [[1.15e9, 5.1], [1.60e9, 6.0]], "Patch A · 6 dBi")
+
+
+def test_component_derived_plane_passes_local_check():
+    # A derived plane whose Δ dB comes from a library component (not an inline delta_db)
+    # must NOT be flagged "no Δ dB" — that was a v1-only requirement.
+    from ui.calibration_panel import local_calibration_issues
+    assert local_calibration_issues(_v2_doc()) == []
+
+
+def test_chain_renders_a_stage_per_plane():
+    from ui.calibration_panel import _ClickCard
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    stages = [p._chain_row.itemAt(i).widget() for i in range(p._chain_row.count())]
+    cards = [w for w in stages if isinstance(w, _ClickCard)]
+    assert len(cards) == 4                       # one stage per plane
+
+
+def test_selecting_a_stage_updates_selection_and_survives_read():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    p._select_plane("cable_output")
+    assert p._selected_plane == "cable_output"
+    # the passive stage's component is still read back from the (re-hosted) picker
+    out = p._read_form(strict=True)
+    assert out["chain"]["planes"]["cable_output"]["component"] == "cable_lmr240_3m_a"
+    assert out["chain"]["planes"]["antenna_eirp"]["component"] == "patch_a"
+
+
+def test_signals_table_shows_freq_and_amplitude():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    p._populate_table({"mock": {"min_power_dbm": -12.4, "max_power_dbm": 28.2}})
+    assert p._table.columnCount() == 4
+    assert p._table.item(0, 0).text() == "mock"
+    assert p._table.item(0, 1).text() == "1575.42"       # centre freq in MHz
+    assert p._table.item(0, 2).text() == "0.8"           # amplitude
+    assert "28.2" in p._table.item(0, 3).text()          # resolved --power range
+
+
+def test_multifreq_signal_shows_at_run():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    d = _v2_doc()
+    d["signals"]["mock"].pop("center_freq_hz", None)     # a chirp: many frequencies
+    p._set_doc(d)
+    p._populate_table({"mock": {}})
+    assert p._table.item(0, 1).text() == "at run"
+    assert p._table.item(0, 3).text() == "per frequency"
+
+
+def test_library_grid_has_a_card_per_component_plus_add():
+    from ui.calibration_panel import _ClickCard
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    cards = [p._lib_grid.itemAt(i).widget() for i in range(p._lib_grid.count())]
+    clickables = [w for w in cards if isinstance(w, _ClickCard)]
+    # one card per catalogued component, plus the trailing "add" card
+    assert len(clickables) == len(p._catalog.ids()) + 1
+    assert len(p._catalog.ids()) >= 2            # our two seeded parts are present
+
+
+def test_freq_interp_endpoint_clamped():
+    from ui.calibration_panel import _interp_db
+    table = [[1.1e9, -2.30], [1.6e9, -2.81]]
+    assert _interp_db(table, 1.1e9) == -2.30
+    assert _interp_db(table, 0.5e9) == -2.30     # below span → clamp low
+    assert _interp_db(table, 2.0e9) == -2.81     # above span → clamp high
+    mid = _interp_db(table, 1.35e9)
+    assert -2.81 < mid < -2.30                    # interpolated
+    assert _interp_db([[0, -3.0]], 5e9) == -3.0  # single point → constant

@@ -4,15 +4,23 @@ CalibrationPanel — the Calibration sub-tab of the unit detail view.
 Shows this unit's power calibration (whether it's calibrated + a resolved per-signal
 summary) and lets you edit `calibration.json` two ways:
 
-  • Editor  — forms: chain gain limits, the safety/regulatory limits list, and a
-              per-(signal × measured-plane) CURVE GRID for entering measured points.
+  • Editor  — the "chain builder" (calibration v2, docs/calibration-v2.md §8): the RF
+              chain reads left-to-right as a flow of STAGES. Source/measured stages show
+              their gain→power minicurve; PASSIVE stages (cable/antenna/pad) are pickers
+              onto the fleet-wide component library, their loss evaluated at each
+              signal's frequency. Selecting a stage opens a detail pane — a frequency-
+              response plot + component picker for a passive stage, or the per-signal
+              measured curve grids for a measured stage. Alongside: the resolved Signals
+              table, the Limits/ceiling, the Component library grid, and the chain
+              settings (gains, operating plane, defaults).
   • JSON    — the raw document (source of truth for the plane topology and anything
-              the forms don't cover).
+              the editor doesn't cover).
 
 Both views drive one document model (self._doc); switching tabs syncs it. Upload or
-Save sends the document to the agent, which VALIDATES it (the full resolver checks,
-docs/calibration.md §9.2) before storing — so a bad curve is rejected with the
-agent's exact reason, never at transmit.
+Save sends the document to the agent, which VALIDATES it (the full resolver checks)
+before storing — so a bad curve is rejected with the agent's exact reason, never at
+transmit. Passive planes reference components by id; the catalog (components.yaml) is
+uploaded to the unit first so those refs resolve.
 
 Network calls go through the DataHub run_async / task_done pattern, filtered to this
 host + ops:
@@ -29,9 +37,10 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractItemDelegate, QAbstractItemView, QAbstractScrollArea, QApplication,
-    QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView,
-    QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
-    QScrollArea, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
+    QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
+    QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
+    QPushButton, QScrollArea, QSizePolicy, QTableWidget, QTableWidgetItem, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 from api.client import AgentHTTPError
@@ -136,8 +145,11 @@ def local_calibration_issues(doc) -> list:
                 issues.append(f"derived plane '{name}' has no parent plane")
             elif frm not in planes:
                 issues.append(f"derived plane '{name}' points at unknown plane '{frm}'")
-            if p.get("delta_db") is None:
-                issues.append(f"derived plane '{name}' has no Δ dB")
+            # A passive hop's Δ dB comes from either an inline constant (delta_db) OR a
+            # library component (component, possibly frequency-dependent) — v2. Only flag
+            # when it has NEITHER.
+            if p.get("delta_db") is None and not p.get("component"):
+                issues.append(f"derived plane '{name}' has no Δ dB or component")
         elif t != "measured":
             issues.append(f"plane '{name}' has an unknown type")
 
@@ -226,6 +238,219 @@ class _Sparkline(QWidget):
         for g, p in self._pts:
             x, y = xy(g, p)
             qp.drawEllipse(int(x) - 2, int(y) - 2, 4, 4)
+
+
+# ── calibration v2 "chain builder" visual pieces (the mockup) ────────────────────
+
+def _interp_db(table, f: float) -> float:
+    """Linear interpolation of a [[freq_hz, delta_db], …] table at frequency f, with
+    endpoint clamping (mirrors the agent/calkit interp). Empty table → 0.0."""
+    pts = sorted(((float(a), float(b)) for a, b in (table or [])), key=lambda p: p[0])
+    if not pts:
+        return 0.0
+    if len(pts) == 1 or f <= pts[0][0]:
+        return pts[0][1]
+    if f >= pts[-1][0]:
+        return pts[-1][1]
+    for i in range(1, len(pts)):
+        if f <= pts[i][0]:
+            (x0, y0), (x1, y1) = pts[i - 1], pts[i]
+            return y0 + (y1 - y0) * (f - x0) / (x1 - x0)
+    return pts[-1][1]
+
+
+def _freq_span(table):
+    """(min_freq_hz, max_freq_hz) of a delta table, or None if empty."""
+    fs = [float(a) for a, _ in (table or [])]
+    return (min(fs), max(fs)) if fs else None
+
+
+def _fmt_ghz_span(table) -> str:
+    span = _freq_span(table)
+    if not span:
+        return "—"
+    lo, hi = span
+    if lo == hi:
+        return "flat · constant"
+    return f"{lo/1e9:.2f}–{hi/1e9:.2f} GHz"
+
+
+def _badge(text: str, fg: str, bg: str) -> QLabel:
+    lab = QLabel(text)
+    lab.setStyleSheet(
+        f"color: {fg}; background: {bg}; font-size: 10px; font-weight: 700; "
+        f"letter-spacing: .06em; padding: 2px 7px; border-radius: 5px;")
+    return lab
+
+
+# kind → (foreground, background) for badges, matching the mockup
+_KIND_COLORS = {
+    "source":   (Palette.TEXT_MUTED, Palette.IDLE_SOFT),
+    "measured": (Palette.ACCENT, Palette.ACCENT_SOFT),
+    "passive":  (Palette.ARMED, Palette.ARMED_SOFT),
+    "cable":    (Palette.ACCENT, Palette.ACCENT_SOFT),
+    "antenna":  (Palette.ONLINE, Palette.ONLINE_SOFT),
+    "pad":      (Palette.TEXT_MUTED, Palette.IDLE_SOFT),
+}
+
+
+class _FreqSparkline(QWidget):
+    """A tiny ΔdB-vs-frequency curve for a component (loss/gain sweep). A single point
+    draws as a flat line (a constant hop)."""
+    def __init__(self, height: int = 40):
+        super().__init__()
+        self._pts: list = []
+        self._color = Palette.ACCENT
+        self.setFixedHeight(height)
+        self.setMinimumWidth(80)
+
+    def set_table(self, table, color: str = Palette.ACCENT) -> None:
+        self._pts = sorted(((float(a), float(b)) for a, b in (table or [])),
+                           key=lambda p: p[0])
+        self._color = color
+        self.update()
+
+    def paintEvent(self, _evt) -> None:
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h, pad = self.width(), self.height(), 5
+        if not self._pts:
+            return
+        col = QColor(self._color)
+        if len(self._pts) == 1:
+            qp.setPen(QPen(QColor(Palette.IDLE), 2))
+            y = h // 2
+            qp.drawLine(pad, y, w - pad, y)
+            return
+        fs = [f for f, _ in self._pts]; ds = [d for _, d in self._pts]
+        f0, f1 = min(fs), max(fs); d0, d1 = min(ds), max(ds)
+        fspan = (f1 - f0) or 1.0; dspan = (d1 - d0) or 1.0
+
+        def xy(f, d):
+            x = pad + (f - f0) / fspan * (w - 2 * pad)
+            y = h - pad - (d - d0) / dspan * (h - 2 * pad)
+            return int(x), int(y)
+
+        qp.setPen(QPen(col, 2))
+        for i in range(1, len(self._pts)):
+            x0, y0 = xy(*self._pts[i - 1]); x1, y1 = xy(*self._pts[i])
+            qp.drawLine(x0, y0, x1, y1)
+
+
+class _FreqResponsePlot(QWidget):
+    """The big per-component frequency-response plot: the ΔdB(f) sweep with its measured
+    points, vertical band markers at the signals' frequencies, and an evaluated dot on
+    the curve at each. Δ negative = loss, positive = gain."""
+    def __init__(self):
+        super().__init__()
+        self._table: list = []
+        self._markers: list = []      # [(label, freq_hz, color), …]
+        self.setMinimumHeight(190)
+        self.setSizePolicy(self.sizePolicy().horizontalPolicy(),
+                           self.sizePolicy().verticalPolicy())
+
+    def set_data(self, table, markers) -> None:
+        self._table = sorted(((float(a), float(b)) for a, b in (table or [])),
+                             key=lambda p: p[0])
+        self._markers = list(markers or [])
+        self.update()
+
+    def paintEvent(self, _evt) -> None:
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        W, H = self.width(), self.height()
+        L, R, T, B = 44, 12, 16, 26
+        x0, x1, y0, y1 = L, W - R, T, H - B
+        qp.fillRect(self.rect(), QColor(Palette.SURFACE))
+        # axes
+        qp.setPen(QPen(QColor(Palette.BORDER), 1))
+        qp.drawLine(x0, y0, x0, y1)
+        qp.drawLine(x0, y1, x1, y1)
+        if not self._table:
+            qp.setPen(QColor(Palette.TEXT_FAINT))
+            qp.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                        "select a passive stage to see its frequency response")
+            return
+        fs = [f for f, _ in self._table]; ds = [d for _, d in self._table]
+        # include marker freqs in the x-range so their lines land on the plot
+        mfs = [m[1] for m in self._markers]
+        fmin = min(fs + mfs); fmax = max(fs + mfs)
+        if fmax == fmin:
+            fmax = fmin + 1.0
+        dmin = min(ds); dmax = max(ds)
+        if dmax == dmin:
+            dmin -= 0.5; dmax += 0.5
+        dpad = (dmax - dmin) * 0.15
+        dmin -= dpad; dmax += dpad
+
+        def X(f):
+            return x0 + (f - fmin) / (fmax - fmin) * (x1 - x0)
+
+        def Y(d):
+            return y1 - (d - dmin) / (dmax - dmin) * (y1 - y0)
+
+        mono = QFont("monospace"); mono.setPointSize(8)
+        qp.setFont(mono)
+        # y grid + labels (dB)
+        qp.setPen(QColor(Palette.TEXT_FAINT))
+        for frac in (0.0, 0.5, 1.0):
+            d = dmax - frac * (dmax - dmin)
+            yy = int(Y(d))
+            qp.setPen(QPen(QColor(Palette.SURFACE_ALT), 1))
+            qp.drawLine(x0, yy, x1, yy)
+            qp.setPen(QColor(Palette.TEXT_FAINT))
+            qp.drawText(0, yy - 6, L - 6, 12,
+                        int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+                        f"{d:+.2f}")
+        # x labels (GHz) at the ends + middle
+        for frac in (0.0, 0.5, 1.0):
+            f = fmin + frac * (fmax - fmin)
+            xx = int(X(f))
+            al = (Qt.AlignmentFlag.AlignHCenter if frac == 0.5 else
+                  (Qt.AlignmentFlag.AlignLeft if frac == 0.0 else Qt.AlignmentFlag.AlignRight))
+            qp.drawText(xx - 24, y1 + 4, 48, 14,
+                        int(al | Qt.AlignmentFlag.AlignTop), f"{f/1e9:.2f}")
+        # band markers (vertical dashed) + evaluated dots
+        for label, freq, color in self._markers:
+            xx = int(X(freq))
+            pen = QPen(QColor(color), 1.5); pen.setDashPattern([3, 3])
+            qp.setPen(pen)
+            qp.drawLine(xx, y0, xx, y1)
+            qp.setPen(QColor(color))
+            qp.drawText(xx - 20, y0 - 2, 40, 12,
+                        int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom),
+                        label)
+        # the measured Δ(f) curve
+        qp.setPen(QPen(QColor(Palette.ACCENT), 2.5))
+        prev = None
+        for f, d in self._table:
+            pt = (int(X(f)), int(Y(d)))
+            if prev is not None:
+                qp.drawLine(prev[0], prev[1], pt[0], pt[1])
+            prev = pt
+        qp.setBrush(QColor(Palette.ACCENT)); qp.setPen(QColor(Palette.ACCENT))
+        for f, d in self._table:
+            qp.drawEllipse(int(X(f)) - 3, int(Y(d)) - 3, 6, 6)
+        # evaluated dots on the curve at each marker freq
+        for label, freq, color in self._markers:
+            d = _interp_db(self._table, freq)
+            qp.setBrush(QColor(color))
+            qp.setPen(QPen(QColor(Palette.SURFACE), 1.5))
+            qp.drawEllipse(int(X(freq)) - 4, int(Y(d)) - 4, 8, 8)
+
+
+class _ClickCard(QFrame):
+    """A QFrame that runs a callback when clicked — used for the chain stages and the
+    component-library cards."""
+    def __init__(self, on_click=None):
+        super().__init__()
+        self._on_click = on_click
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if self._on_click is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._on_click()
+        super().mousePressEvent(event)
 
 
 def _rename_plane_in_doc(doc: dict, old: str, new: str) -> dict:
@@ -625,15 +850,8 @@ class CalibrationPanel(QWidget):
         self._issues.setStyleSheet(f"font-size: 11px; color: {Palette.ARMED};")
         outer.addWidget(self._issues)
 
-        # Resolved per-signal summary (read-only, reflects the last validated load)
-        self._table = QTableWidget(0, 5)
-        self._table.setHorizontalHeaderLabels(["Signal", "Operating plane", "Quantity", "Gain", "Power"])
-        self._table.verticalHeader().setVisible(False)
-        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self._table.setMaximumHeight(150)
-        outer.addWidget(self._table)
+        # The resolved per-signal summary table now lives inside the editor's Signals
+        # card (built in _build_editor_tab); _populate_table fills it after a get/validate.
 
         self._tabs = QTabWidget()
         self._tabs.addTab(self._build_editor_tab(), "Editor")
@@ -641,28 +859,129 @@ class CalibrationPanel(QWidget):
         self._tabs.currentChanged.connect(self._on_tab_changed)
         outer.addWidget(self._tabs, stretch=1)
 
+    # ── card scaffolding (matches the mockup's .card + header) ───────────────────
+    def _make_card(self, *, number=None, title=None, desc=None, lbl=None, sub=None,
+                   trailing: Optional[QWidget] = None):
+        """A surface card with a header, returning (frame, body_layout). The header is
+        either a numbered eyebrow (number ● title — desc) or an uppercase lbl · sub."""
+        frame = QFrame(); frame.setObjectName("calcard")
+        frame.setStyleSheet(
+            f"QFrame#calcard {{ background: {Palette.SURFACE}; border: 1px solid "
+            f"{Palette.BORDER}; border-radius: 10px; }}")
+        outer = QVBoxLayout(frame); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
+
+        header = QWidget(); header.setObjectName("calhdr")
+        header.setStyleSheet(f"#calhdr {{ border-bottom: 1px solid {Palette.BORDER}; }}")
+        hb = QHBoxLayout(header); hb.setContentsMargins(14, 11, 14, 11); hb.setSpacing(10)
+        if number is not None:
+            num = QLabel(str(number)); num.setFixedSize(20, 20)
+            num.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            num.setStyleSheet(
+                f"background: {Palette.ACCENT}; color: #fff; border-radius: 10px; "
+                f"font-size: 11px; font-weight: 700;")
+            hb.addWidget(num)
+            txt = QLabel(f"<span style='color:{Palette.TEXT};font-weight:600;'>{title}</span>"
+                         f" <span style='color:{Palette.TEXT_FAINT};'>{desc or ''}</span>")
+            txt.setObjectName("cardtitle")
+            txt.setTextFormat(Qt.TextFormat.RichText)
+            hb.addWidget(txt)
+        else:
+            l = QLabel((lbl or "").upper())
+            l.setStyleSheet(f"font-size: 11px; font-weight: 700; letter-spacing: .09em; "
+                            f"color: {Palette.TEXT_FAINT};")
+            hb.addWidget(l)
+            if sub:
+                s = QLabel(sub); s.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
+                hb.addWidget(s)
+        hb.addStretch(1)
+        if trailing is not None:
+            hb.addWidget(trailing)
+        outer.addWidget(header)
+
+        content = QWidget(); body = QVBoxLayout(content)
+        body.setContentsMargins(14, 12, 14, 12); body.setSpacing(10)
+        outer.addWidget(content)
+        return frame, body
+
     def _build_editor_tab(self) -> QWidget:
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         inner = QWidget(); self._editor_layout = QVBoxLayout(inner)
-        self._editor_layout.setSpacing(10)
+        self._editor_layout.setContentsMargins(2, 2, 2, 2)
+        self._editor_layout.setSpacing(14)
+        self._selected_plane: Optional[str] = None
 
         intro = QLabel(
-            "Calibration teaches this unit what an absolute power (dBm) means for its "
-            "own hardware. You describe the RF chain as a series of <b>planes</b> "
-            "(SDR output → amplifier → cable → antenna), give the SDR-gain limits, add "
-            "safety ceilings, and enter the <b>measured gain→power points</b> per signal. "
-            "The unit interpolates those points to convert a requested power into an SDR "
-            "gain. Hover any field for details.")
+            "Build this unit's RF chain from parts you characterized once. Passive stages "
+            "become pickers — choose the cable and antenna you actually wired — and their "
+            "loss is evaluated at each signal's frequency.")
         intro.setWordWrap(True)
-        intro.setTextFormat(Qt.TextFormat.RichText)
-        intro.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+        intro.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
         self._editor_layout.addWidget(intro)
 
-        # Chain gain limits + operating plane
-        gl_box = QGroupBox("Chain")
-        gl_box.setToolTip("The SDR's usable internal-gain range and which plane an "
-                          "absolute --power figure refers to.")
-        gl_form = QFormLayout(gl_box)
+        # ── Section 2: hardware chain (a left-to-right flow of stages) ───────────
+        chain_card, chain_body = self._make_card(
+            number="2", title="Hardware chain",
+            desc="— drop in the parts you wired this unit with")
+        chain_scroll = QScrollArea(); chain_scroll.setWidgetResizable(True)
+        chain_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        chain_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        chain_scroll.setMinimumHeight(190)
+        holder = QWidget(); self._chain_row = QHBoxLayout(holder)
+        self._chain_row.setContentsMargins(0, 2, 0, 2); self._chain_row.setSpacing(0)
+        chain_scroll.setWidget(holder)
+        chain_body.addWidget(chain_scroll)
+        self._editor_layout.addWidget(chain_card)
+
+        # ── Section 3 + signals/limits: two columns ─────────────────────────────
+        cols = QHBoxLayout(); cols.setSpacing(14)
+        self._detail_card, self._detail_body = self._make_card(
+            number="3", title="Stage detail", desc="— pick a stage above")
+        self._detail_hdr = self._detail_card.findChild(QLabel, "cardtitle")  # title, not the "3"
+        cols.addWidget(self._detail_card, 3)
+
+        rightw = QWidget(); rcol = QVBoxLayout(rightw)
+        rcol.setContentsMargins(0, 0, 0, 0); rcol.setSpacing(14)
+        add_sig = QPushButton("+ Add signal…"); add_sig.clicked.connect(self._on_add_signal)
+        add_sig.setStyleSheet("font-size: 11px;")
+        sig_card, sig_body = self._make_card(
+            lbl="Signals", sub="resolved --power at each frequency", trailing=add_sig)
+        sig_body.setContentsMargins(0, 0, 0, 0)
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(["Signal", "Freq MHz", "Ampl.", "--power dBm"])
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._table.setMaximumHeight(180)
+        sig_body.addWidget(self._table)
+        rcol.addWidget(sig_card)
+
+        add_lim = QPushButton("+ Add"); add_lim.clicked.connect(lambda: (self._add_limit_row(), None))
+        add_lim.setStyleSheet("font-size: 11px;")
+        lim_card, lim_body = self._make_card(lbl="Limits · ceiling", trailing=add_lim)
+        lim_body.setContentsMargins(0, 0, 0, 4)
+        self._limits_box = QVBoxLayout(); self._limits_box.setContentsMargins(0, 0, 0, 0)
+        self._limits_box.setSpacing(0)
+        lim_body.addLayout(self._limits_box)
+        rcol.addWidget(lim_card)
+        rcol.addStretch(1)
+        cols.addWidget(rightw, 2)
+        self._editor_layout.addLayout(cols)
+
+        # ── Section 1: component library ────────────────────────────────────────
+        fleet = QLabel("fleet-wide · deployed to units")
+        fleet.setStyleSheet(f"font-size: 10px; font-weight: 700; letter-spacing: .06em; "
+                            f"color: {Palette.ACCENT}; background: {Palette.ACCENT_SOFT}; "
+                            f"padding: 3px 9px; border-radius: 5px;")
+        lib_card, lib_body = self._make_card(
+            number="1", title="Component library",
+            desc="— characterize a part once; every unit reuses it", trailing=fleet)
+        self._lib_grid = QGridLayout(); self._lib_grid.setSpacing(12)
+        lib_body.addLayout(self._lib_grid)
+        self._editor_layout.addWidget(lib_card)
+
+        # ── Chain settings (gains / operating / defaults — needed by the resolver) ─
         self._f["unit_type"] = QComboBox()
         for t in UNIT_TYPES:
             self._f["unit_type"].addItem(UNIT_TYPE_LABELS.get(t, t), t)
@@ -670,92 +989,28 @@ class CalibrationPanel(QWidget):
             "This unit's hardware type. It selects the shared type-defaults chain that's "
             "merged in, so it must match the real unit — a wrong type silently mis-resolves.")
         self._f["min_gain"] = QLineEdit(); self._f["max_gain"] = QLineEdit()
-        self._f["min_gain"].setToolTip(
-            "Lowest SDR internal gain usable on this chain, in dB. Powers that would "
-            "need less gain than this are out of range (too quiet).")
+        self._f["min_gain"].setToolTip("Lowest usable SDR internal gain (dB).")
         self._f["max_gain"].setToolTip(
-            "Highest SDR internal gain the safety ceilings allow — usually the gain at "
-            "which the amplifier hits its P1dB input. This is the hard upper stop.")
+            "Highest SDR gain the safety ceilings allow (usually the amp's P1dB gain).")
         self._f["operating"] = QComboBox()
+        self._f["operating"].currentIndexChanged.connect(self._on_operating_changed)
         self._f["operating"].setToolTip(
-            "The plane an absolute --power value is measured at — where you care about the "
-            "delivered power, e.g. EIRP at the antenna. Pick the last plane in the chain.")
+            "The plane an absolute --power value reads at (e.g. EIRP at the antenna).")
         self._f["def_amp"] = QLineEdit()
         self._f["def_amp"].setToolTip(
-            "The default baseband amplitude (0–1) a signal uses when it doesn't set its "
-            "own. A signal's own amplitude, when set, overrides this.")
-        gl_form.addRow("Unit type", self._f["unit_type"])
-        gl_form.addRow("Min gain (dB)", self._f["min_gain"])
-        gl_form.addRow("Max gain (dB)", self._f["max_gain"])
-        gl_form.addRow("Operating plane", self._f["operating"])
-        gl_form.addRow("Default amplitude", self._f["def_amp"])
-        self._editor_layout.addWidget(gl_box)
+            "Default baseband amplitude (0–1) a signal uses when it sets none of its own.")
+        set_card, set_body = self._make_card(
+            lbl="Chain settings", sub="gain range · operating plane · defaults")
+        form = QFormLayout(); form.setContentsMargins(0, 0, 0, 0)
+        form.addRow("Unit type", self._f["unit_type"])
+        form.addRow("Min gain (dB)", self._f["min_gain"])
+        form.addRow("Max gain (dB)", self._f["max_gain"])
+        form.addRow("Operating plane", self._f["operating"])
+        form.addRow("Default amplitude", self._f["def_amp"])
+        set_body.addLayout(form)
+        self._editor_layout.addWidget(set_card)
 
-        # Safety / regulatory limits
-        lim_box = QGroupBox("Safety / regulatory limits  (tightest wins)")
-        lim_box.setToolTip(
-            "Hard ceilings on power at a given plane (amplifier P1dB, a licence EIRP cap, …). "
-            "Each is inverted through the chain to an SDR-gain cap; the tightest one wins. "
-            "At least one is required — with no ceiling the unit refuses to transmit.")
-        lim_v = QVBoxLayout(lim_box)
-        lim_help = QLabel(
-            "Each row: the plane the ceiling applies to, the max power (dBm) allowed "
-            "there, and a short reason.")
-        lim_help.setWordWrap(True)
-        lim_help.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-        lim_v.addWidget(lim_help)
-        self._limits_box = QVBoxLayout(); self._limits_box.setSpacing(4)
-        lim_v.addLayout(self._limits_box)
-        add_lim = QPushButton("+ Add limit"); add_lim.clicked.connect(lambda: self._add_limit_row())
-        lim_v.addWidget(add_lim, alignment=Qt.AlignmentFlag.AlignLeft)
-        self._editor_layout.addWidget(lim_box)
-
-        # Planes (RF chain topology)
-        pl_box = QGroupBox("Planes — the RF chain (SDR → amp → cable → antenna) · shared by every signal")
-        pl_box.setToolTip(
-            "The chain topology is unit HARDWARE: define it once here and every signal "
-            "reuses it — you don't repeat planes per signal. A 'measured' plane has its "
-            "own gain→power curve (entered per signal below); a 'derived' plane is another "
-            "plane plus a fixed offset — cable loss (negative Δ) or antenna gain (positive Δ).")
-        pl_v = QVBoxLayout(pl_box)
-        pl_help = QLabel(
-            "Defined once for the whole unit — every signal shares these planes. Per row: "
-            "a name, the type (measured = you took readings here; derived = parent plane + "
-            "a fixed Δ dB), and a short quantity label (e.g. “total in-band power”, "
-            "“main-lobe EIRP”).")
-        pl_help.setWordWrap(True)
-        pl_help.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-        pl_v.addWidget(pl_help)
-        self._planes_box = QVBoxLayout(); self._planes_box.setSpacing(4)
-        pl_v.addLayout(self._planes_box)
-        add_pl = QPushButton("+ Add plane"); add_pl.clicked.connect(self._on_add_plane)
-        pl_v.addWidget(add_pl, alignment=Qt.AlignmentFlag.AlignLeft)
-        self._editor_layout.addWidget(pl_box)
-
-        # Signals + curve grids
-        sig_box = QGroupBox("Signals — measured curves")
-        sig_box.setToolTip(
-            "For each signal this unit transmits: its baseband amplitude, occupied "
-            "bandwidth, and the measured gain→power points on each measured plane.")
-        sig_v = QVBoxLayout(sig_box)
-        sig_help = QLabel(
-            "The planes are shared (defined once above); here you enter only the points "
-            "YOU MEASURED for this signal on each measured plane. Two or more per plane, "
-            "with gain AND power both strictly increasing — the unit interpolates between "
-            "them and refuses powers outside their range. (Different signals need their "
-            "own points because power-vs-gain depends on the waveform.)")
-        sig_help.setWordWrap(True)
-        sig_help.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-        sig_v.addWidget(sig_help)
-        self._signals_box = QVBoxLayout(); self._signals_box.setSpacing(8)
-        sig_v.addLayout(self._signals_box)
-        add_sig = QPushButton("+ Add signal…"); add_sig.clicked.connect(self._on_add_signal)
-        sig_v.addWidget(add_sig, alignment=Qt.AlignmentFlag.AlignLeft)
-        self._editor_layout.addWidget(sig_box)
-
-        # Empty-state hint / template button (shown when there's no document). Its label
-        # is filled with the unit's real type in _doc_to_form so it doesn't imply
-        # broadcaster on, say, an X410.
+        # Empty-state hint / template button (shown when there's no document).
         self._empty_hint = QPushButton("New from template")
         self._empty_hint.clicked.connect(self._on_new_template)
         self._editor_layout.addWidget(self._empty_hint, alignment=Qt.AlignmentFlag.AlignLeft)
@@ -763,6 +1018,13 @@ class CalibrationPanel(QWidget):
 
         scroll.setWidget(inner)
         return scroll
+
+    def _on_operating_changed(self) -> None:
+        """The operating-plane combo changed: repaint the chain so the green 'operating'
+        badge follows, without a full form rebuild (which would fight combo editing)."""
+        if getattr(self, "_syncing", False):
+            return
+        self._render_chain()
 
     def _build_json_tab(self) -> QWidget:
         self._view = QPlainTextEdit()
@@ -789,6 +1051,11 @@ class CalibrationPanel(QWidget):
         return [n for n, p in planes.items() if isinstance(p, dict) and p.get("type") == "measured"]
 
     def _doc_to_form(self) -> None:
+        """Rebuild every editor widget from the model, then render the chain flow, the
+        selected-stage detail, the resolved signals table, the limits, and the component
+        library. A full rebuild each time keeps widget lifetimes simple (see
+        _select_plane)."""
+        self._syncing = True
         doc = self._doc
         have = doc is not None
         self._empty_hint.setVisible(not have)
@@ -809,11 +1076,15 @@ class CalibrationPanel(QWidget):
             self._f["unit_type"].setCurrentIndex(self._f["unit_type"].count() - 1)
         self._f["def_amp"].setText(_numstr(((doc or {}).get("defaults") or {}).get("amplitude")))
 
-        # planes (topology)
-        self._clear_layout(self._planes_box)
-        self._f["planes"] = []
-        for pname, spec in (chain.get("planes") or {}).items():
-            self._add_plane_row(pname, spec or {})
+        # plane rows + signal entries: create the editable widgets (the chain/detail
+        # render decides where the selected ones are shown).
+        self._f["planes"] = [self._make_plane_row(n, s or {})
+                             for n, s in (chain.get("planes") or {}).items()]
+        self._f["signals"] = {}
+        self._spark_src = {}                # sparkline → its source curve table
+        measured = self._measured_planes()
+        for sid, sig in ((doc or {}).get("signals") or {}).items():
+            self._build_signal_entry(sid, sig or {}, measured)
 
         names = self._plane_names()
         self._f["operating"].clear()
@@ -827,17 +1098,56 @@ class CalibrationPanel(QWidget):
         self._f["limits"] = []
         for lim in (chain.get("limits") or []):
             self._add_limit_row(lim)
+        if not (chain.get("limits") or []):
+            hint = QLabel("no ceiling yet — add one (the unit refuses to transmit "
+                          "without a safety ceiling)")
+            hint.setWordWrap(True)
+            hint.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};padding:10px 14px;")
+            self._limits_box.addWidget(hint)
 
-        # signals
-        self._clear_layout(self._signals_box)
-        self._f["signals"] = {}
-        self._spark_src = {}                # sparkline → its source curve table
-        measured = self._measured_planes()
-        for sid, sig in ((doc or {}).get("signals") or {}).items():
-            self._add_signal_widget(sid, sig or {}, measured)
+        self._syncing = False
 
+        # keep the current selection if the plane still exists, else operating / first
+        if self._selected_plane not in names:
+            self._selected_plane = op if op in names else (names[0] if names else None)
+
+        self._render_chain()
+        self._render_detail()
+        self._render_library()
         self._update_issues()
         self._sync_validate_button()
+
+    # ── representative frequency (for stage values / plots) ──────────────────────
+    def _rep_freq(self) -> float:
+        """A representative transmit frequency for previewing passive-hop dB: the first
+        signal that declares a centre frequency, else 1.5 GHz (mid GNSS band)."""
+        for sig in ((self._doc or {}).get("signals") or {}).values():
+            f = (sig or {}).get("center_freq_hz")
+            if f:
+                try:
+                    return float(f)
+                except (TypeError, ValueError):
+                    pass
+        return 1.5e9
+
+    def _signal_markers(self):
+        """Band markers for the frequency plot: (short label, freq_hz, colour) for each
+        signal with a centre frequency, cycling accent/green so they read apart."""
+        cols = [Palette.ACCENT, Palette.ONLINE, Palette.ARMED, Palette.TEXT_MUTED]
+        out = []
+        for i, (sid, sig) in enumerate(sorted(((self._doc or {}).get("signals") or {}).items())):
+            f = (sig or {}).get("center_freq_hz")
+            if not f:
+                continue
+            try:
+                out.append((sid.split("_")[-1][:4] or sid[:4], float(f), cols[i % len(cols)]))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def _comp_table(self, comp_id: str):
+        spec = self._catalog.get(comp_id) if comp_id else None
+        return (spec or {}).get("delta_db_by_freq") or []
 
     def _update_issues(self) -> None:
         """Recompute the instant local structural check from the current widgets and
@@ -893,56 +1203,346 @@ class CalibrationPanel(QWidget):
         self._doc_to_form()
         self._tabs.setCurrentIndex(0)
 
-    def _add_plane_row(self, name: str = "", spec: Optional[dict] = None) -> None:
+    def _make_plane_row(self, name: str = "", spec: Optional[dict] = None) -> dict:
+        """Create (but do not place) the editable widgets for one plane, returning the
+        row dict _read_planes reads. The chain-flow shows a summary of each row; the
+        selected row's editable widgets are placed in the detail pane by _render_detail."""
         spec = spec or {}
-        w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(4)
-        name_e = QLineEdit(name); name_e.setPlaceholderText("name")
-        name_e.setToolTip("A short id for this plane, e.g. sdr_output, amp_output, antenna.")
+        name_e = QLineEdit(name); name_e.setPlaceholderText("plane id (e.g. antenna_eirp)")
+        name_e.setToolTip("A short id for this plane, e.g. sdr_output, amplifier_output, "
+                          "antenna_eirp.")
         type_c = QComboBox(); type_c.addItems(["measured", "derived"])
-        type_c.setToolTip("measured = you took gain→power readings at this plane. "
-                          "derived = this plane is another plane plus a fixed Δ dB "
-                          "(cable loss / antenna gain), no readings of its own.")
+        type_c.setToolTip("measured = a gain→power curve taken on this box (SDR, amp). "
+                          "derived / passive = a cable/antenna/pad hop (a component or a "
+                          "constant Δ dB) off the parent plane.")
         type_c.setCurrentText(spec.get("type", "measured"))
         from_lbl = QLabel("from")
         from_c = QComboBox(); from_c.addItems([n for n in self._plane_names() if n != name])
-        from_c.setToolTip("The parent plane this derived plane is offset from.")
+        from_c.setToolTip("The parent plane this passive hop sits after.")
         if spec.get("from") in self._plane_names():
             from_c.setCurrentText(spec["from"])
-        # A passive stage's Δ dB comes from a library component (a cable/antenna
-        # characterized once, possibly frequency-dependent) OR an inline constant.
         comp_c = QComboBox()
-        comp_c.setToolTip("Where this hop's Δ dB comes from: a component from the "
-                          "library (a cable/antenna, possibly frequency-dependent) or a "
-                          "constant you type here.")
+        comp_c.setToolTip("The characterized part wired here — a cable/antenna/pad from "
+                          "the component library — or a constant Δ dB you type.")
         self._fill_comp_combo(comp_c, spec.get("component"))
         delta_e = QLineEdit(_numstr(spec.get("delta_db"))); delta_e.setPlaceholderText("Δ dB")
-        delta_e.setToolTip("Constant offset from the parent plane, in dB. Negative for a "
-                           "loss (cable), positive for a gain (antenna).")
-        delta_e.setFixedWidth(72)
+        delta_e.setToolTip("Constant offset from the parent plane, in dB. Negative = loss "
+                           "(cable), positive = gain (antenna).")
         quantity_e = QLineEdit(spec.get("quantity", "")); quantity_e.setPlaceholderText("quantity label")
         quantity_e.setToolTip("A short label for what power means here — e.g. “total "
-                              "in-band power”, “main-lobe EIRP”. Keep it brief; it's a "
-                              "label, not a description.")
-        rm = QPushButton("✕"); rm.setFixedWidth(28)
-        h.addWidget(name_e, 2); h.addWidget(type_c, 1)
-        h.addWidget(from_lbl); h.addWidget(from_c, 2); h.addWidget(comp_c, 2); h.addWidget(delta_e)
-        h.addWidget(quantity_e, 2); h.addWidget(rm)
-        # "orig" is the plane's last-committed name, so a rename can be propagated to
-        # everything that references it (operating plane, limits, derived 'from', and
-        # each signal's curve keyed by this plane) instead of silently dangling.
-        row = {"w": w, "name": name_e, "type": type_c, "from": from_c, "comp": comp_c,
-               "delta": delta_e, "quantity": quantity_e, "from_lbl": from_lbl,
-               "orig": name}
-
-        self._sync_plane_row(row)
-        # A type/name change reshapes dependents (which planes are 'measured', the
-        # from/operating/limit dropdowns), so rebuild the form from the widgets.
+                              "in-band power”, “EIRP”.")
+        # "orig" is the plane's last-committed name, so a rename propagates to everything
+        # that references it instead of silently dangling.
+        row = {"name": name_e, "type": type_c, "from": from_c, "comp": comp_c,
+               "delta": delta_e, "quantity": quantity_e, "from_lbl": from_lbl, "orig": name}
         type_c.currentTextChanged.connect(lambda _=None: self._refresh_form_from_widgets())
-        comp_c.currentIndexChanged.connect(lambda _=None, r=row: self._sync_plane_row(r))
+        comp_c.currentIndexChanged.connect(lambda _=None: self._refresh_form_from_widgets())
         name_e.editingFinished.connect(lambda r=row: self._on_plane_name_changed(r))
-        rm.clicked.connect(lambda: self._remove_plane(row))
-        self._planes_box.addWidget(w)
-        self._f["planes"].append(row)
+        return row
+
+    # ── chain flow (mockup section 2) ────────────────────────────────────────────
+    def _render_chain(self) -> None:
+        self._clear_layout(self._chain_row)
+        rows = self._f.get("planes", [])
+        if not rows:
+            empty = QLabel("no chain yet — click “New from template”, or add a stage in "
+                           "the JSON tab")
+            empty.setWordWrap(True)
+            empty.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_FAINT};padding:20px;")
+            self._chain_row.addWidget(empty); self._chain_row.addStretch(1)
+            return
+        op = self._f["operating"].currentText()
+        rep = self._rep_freq()
+        for i, row in enumerate(rows):
+            self._chain_row.addWidget(self._stage_card(row, i, op, rep))
+            if i < len(rows) - 1:
+                arrow = QLabel("→")
+                arrow.setStyleSheet(f"color:{Palette.BORDER_STRONG};font-size:18px;")
+                arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                arrow.setFixedWidth(26)
+                self._chain_row.addWidget(arrow)
+        self._chain_row.addStretch(1)
+
+    def _stage_card(self, row, index: int, op: str, rep_freq: float) -> QWidget:
+        name = row["name"].text().strip()
+        derived = row["type"].currentText() == "derived"
+        kind = "source" if index == 0 else ("passive" if derived else "measured")
+        selected = (name == self._selected_plane)
+        operating = bool(name) and (name == op)
+        border = (Palette.ONLINE if operating else
+                  Palette.ACCENT if selected else Palette.BORDER)
+        bg = Palette.SURFACE if (operating or selected) else Palette.SURFACE_ALT
+        card = _ClickCard(on_click=lambda n=name: self._select_plane(n))
+        card.setObjectName("stage")
+        card.setStyleSheet(f"#stage {{ background:{bg}; border:1px solid {border}; "
+                           f"border-radius:10px; }}")
+        card.setMinimumWidth(172); card.setMaximumWidth(230)
+        v = QVBoxLayout(card); v.setContentsMargins(12, 12, 12, 12); v.setSpacing(8)
+
+        if operating:
+            opb = QLabel("--power reads here")
+            opb.setStyleSheet(f"color:#fff;background:{Palette.ONLINE};font-size:10px;"
+                              f"font-weight:700;padding:2px 8px;border-radius:999px;")
+            opb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            v.addWidget(opb, alignment=Qt.AlignmentFlag.AlignRight)
+
+        fg, kbg = _KIND_COLORS[kind]
+        badge_text = {"source": "Source", "measured": "Measured",
+                      "passive": "Passive · from library"}[kind]
+        b = _badge(badge_text, fg, kbg); b.setText(badge_text.upper() if kind != "passive" else badge_text)
+        v.addWidget(b, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        title = QLabel(name or "(unnamed)")
+        title.setStyleSheet(f"font-size:13px;font-weight:600;color:{Palette.TEXT};")
+        v.addWidget(title)
+
+        q = row["quantity"].text().strip()
+        if q:
+            meta = QLabel(q); meta.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+            meta.setWordWrap(True)
+            v.addWidget(meta)
+
+        if derived:
+            comp = row["comp"].currentData()
+            picker = QLabel(f"{comp}  ▾" if comp else "constant Δ dB  ▾")
+            picker.setStyleSheet(
+                f"border:1px solid {Palette.BORDER_STRONG};border-radius:7px;"
+                f"padding:6px 9px;font-size:12px;font-weight:500;color:{Palette.TEXT};"
+                f"background:{Palette.SURFACE};")
+            v.addWidget(picker)
+            if comp:
+                db = _interp_db(self._comp_table(comp), rep_freq)
+                val = QLabel(f"{db:+.2f} dB  @ {rep_freq/1e6:.0f} MHz")
+            else:
+                d = row["delta"].text().strip()
+                val = QLabel(f"{d or '0'} dB · constant")
+            val.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+            v.addWidget(val)
+        else:
+            spark = _Sparkline(); spark.setFixedHeight(30)
+            spark.set_points(self._first_curve_points(name))
+            v.addWidget(spark)
+            hint = QLabel("gain → power · this unit")
+            hint.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+            v.addWidget(hint)
+        v.addStretch(1)
+        return card
+
+    def _first_curve_points(self, plane: str):
+        """The first signal's measured points on `plane`, for a stage minicurve."""
+        for sig in ((self._doc or {}).get("signals") or {}).values():
+            pts = ((sig or {}).get("curves") or {}).get(plane, {}).get("points")
+            if pts:
+                return [(p.get("gain_db"), p.get("power_dbm")) for p in pts]
+        return []
+
+    def _select_plane(self, name: str) -> None:
+        """Select a chain stage: fold the current edits into the model, then rebuild so
+        the detail pane and stage borders follow the selection."""
+        try:
+            self._doc = self._read_form(strict=False)
+        except ValueError:
+            pass
+        self._selected_plane = name or None
+        self._doc_to_form()
+
+    # ── stage detail (mockup section 3) ──────────────────────────────────────────
+    def _render_detail(self) -> None:
+        self._clear_layout(self._detail_body)
+        name = self._selected_plane
+        rows = self._f.get("planes", [])
+        row = next((r for r in rows if r["name"].text().strip() == name), None)
+        if self._detail_hdr is not None:
+            if row is None:
+                self._detail_hdr.setText(
+                    f"<span style='color:{Palette.TEXT};font-weight:600;'>Stage detail</span>"
+                    f" <span style='color:{Palette.TEXT_FAINT};'>— pick a stage above</span>")
+            else:
+                derived = row["type"].currentText() == "derived"
+                idx = rows.index(row)
+                knd = "Source" if idx == 0 else ("Passive" if derived else "Measured")
+                desc = ("loss evaluated at each signal's frequency" if derived
+                        else "measured gain→power on this box")
+                self._detail_hdr.setText(
+                    f"<span style='color:{Palette.TEXT};font-weight:600;'>{knd} · {name}</span>"
+                    f" <span style='color:{Palette.TEXT_FAINT};'>— {desc}</span>")
+        if row is None:
+            ph = QLabel("Select a stage in the chain above to edit it.")
+            ph.setStyleSheet(f"color:{Palette.TEXT_FAINT};font-size:12px;padding:16px 0;")
+            self._detail_body.addWidget(ph)
+            return
+        if row["type"].currentText() == "derived":
+            self._detail_passive(row)
+        else:
+            self._detail_measured(row)
+        self._detail_body.addWidget(self._stage_advanced(row))
+
+    def _detail_passive(self, row) -> None:
+        comp = row["comp"].currentData()
+        table = self._comp_table(comp)
+        markers = self._signal_markers()
+        if comp:
+            plot = _FreqResponsePlot()
+            plot.set_data(table, markers)
+            self._detail_body.addWidget(plot)
+            leg = QHBoxLayout(); leg.setSpacing(16)
+            sw = QLabel("● VNA sweep (measured points)")
+            sw.setStyleSheet(f"font-size:11px;color:{Palette.ACCENT};")
+            leg.addWidget(sw)
+            for label, freq, color in markers:
+                db = _interp_db(table, freq)
+                l = QLabel(f"{label} → {db:+.2f} dB")
+                l.setStyleSheet(f"font-size:11px;color:{color};")
+                leg.addWidget(l)
+            leg.addStretch(1)
+            self._detail_body.addLayout(leg)
+        pr = QHBoxLayout()
+        lab = QLabel("Component"); lab.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+        pr.addWidget(lab)
+        row["comp"].setMinimumWidth(220)
+        pr.addWidget(row["comp"], 1)
+        self._detail_body.addLayout(pr)
+        if not comp:
+            dr = QHBoxLayout()
+            dl = QLabel("Constant Δ dB"); dl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+            dr.addWidget(dl); row["delta"].setFixedWidth(90); dr.addWidget(row["delta"])
+            dr.addStretch(1)
+            self._detail_body.addLayout(dr)
+        note = QLabel("Characterized in the Component library · shared across the fleet. "
+                      "Change it here to re-wire this unit — no numbers to retype.")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+        self._detail_body.addWidget(note)
+
+    def _detail_measured(self, row) -> None:
+        plane = row["name"].text().strip()
+        sigs = self._f.get("signals", {})
+        if not sigs:
+            l = QLabel("No signals yet — “+ Add signal…” (right), then enter its measured "
+                       "gain→power points here.")
+            l.setWordWrap(True); l.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_FAINT};")
+            self._detail_body.addWidget(l)
+            return
+        intro = QLabel("Enter the gain→power points you measured on this plane, per signal. "
+                       "Two or more, gain AND power both strictly increasing.")
+        intro.setWordWrap(True); intro.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+        self._detail_body.addWidget(intro)
+        for sid, entry in sigs.items():
+            tbl = entry["curves"].get(plane)
+            if tbl is None:
+                continue
+            box = QFrame(); box.setObjectName("sigbox")
+            box.setStyleSheet(f"#sigbox {{ border:1px solid {Palette.BORDER}; border-radius:8px; }}")
+            bv = QVBoxLayout(box); bv.setContentsMargins(10, 8, 10, 8); bv.setSpacing(6)
+            head = QHBoxLayout()
+            nm = QLabel(sid); nm.setStyleSheet(f"font-weight:600;color:{Palette.TEXT};")
+            head.addWidget(nm); head.addStretch(1)
+            head.addWidget(QLabel("ampl.")); entry["amp"].setFixedWidth(64); head.addWidget(entry["amp"])
+            head.addWidget(QLabel("freq Hz")); entry["cfreq"].setFixedWidth(104); head.addWidget(entry["cfreq"])
+            bv.addLayout(head)
+            grid = QHBoxLayout()
+            grid.addWidget(tbl, 3); grid.addWidget(entry["sparks"][plane], 2)
+            bv.addLayout(grid)
+            btns = QHBoxLayout()
+            addp = QPushButton("+ point"); addp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            addp.clicked.connect(tbl.add_blank_row)
+            rmp = QPushButton("− point"); rmp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            rmp.clicked.connect(tbl.remove_selected)
+            btns.addWidget(addp); btns.addWidget(rmp); btns.addStretch(1)
+            bv.addLayout(btns)
+            self._detail_body.addWidget(box)
+
+    def _stage_advanced(self, row) -> QWidget:
+        """Topology controls for the selected stage: id, type, parent, quantity, and the
+        set-operating / remove actions — the bits the chain flow doesn't show inline."""
+        frame = QFrame(); frame.setObjectName("adv")
+        frame.setStyleSheet(f"#adv {{ border-top:1px solid {Palette.BORDER}; }}")
+        v = QVBoxLayout(frame); v.setContentsMargins(0, 8, 0, 0); v.setSpacing(6)
+        cap = QLabel("STAGE SETTINGS")
+        cap.setStyleSheet(f"font-size:10px;font-weight:700;letter-spacing:.08em;"
+                          f"color:{Palette.TEXT_FAINT};")
+        v.addWidget(cap)
+        form = QFormLayout(); form.setContentsMargins(0, 0, 0, 0)
+        form.addRow("Plane id", row["name"])
+        form.addRow("Type", row["type"])
+        if row["type"].currentText() == "derived":
+            form.addRow(row["from_lbl"], row["from"])
+            row["from_lbl"].setText("Parent plane")
+        form.addRow("Quantity", row["quantity"])
+        v.addLayout(form)
+        actions = QHBoxLayout()
+        name = row["name"].text().strip()
+        setop = QPushButton("Set as operating plane")
+        setop.setToolTip("Make --power read at this plane (e.g. EIRP at the antenna).")
+        setop.clicked.connect(lambda: self._f["operating"].setCurrentText(name))
+        setop.setEnabled(bool(name) and name != self._f["operating"].currentText())
+        rm = QPushButton("Remove stage")
+        rm.clicked.connect(lambda r=row: self._remove_plane(r))
+        actions.addWidget(setop); actions.addStretch(1); actions.addWidget(rm)
+        v.addLayout(actions)
+        return frame
+
+    # ── component library (mockup section 1) ─────────────────────────────────────
+    def _render_library(self) -> None:
+        while self._lib_grid.count():
+            it = self._lib_grid.takeAt(0); w = it.widget()
+            if w is not None:
+                w.setParent(None); w.deleteLater()
+        used = {p.get("component") for p in
+                (((self._doc or {}).get("chain") or {}).get("planes") or {}).values()
+                if isinstance(p, dict)}
+        comps = self._catalog.components()
+        cols = 4
+        idx = 0
+        for cid in self._catalog.ids():
+            self._lib_grid.addWidget(
+                self._component_card(cid, comps.get(cid) or {}, cid in used), idx // cols, idx % cols)
+            idx += 1
+        add = _ClickCard(on_click=self._open_components)
+        add.setObjectName("addcomp")
+        add.setStyleSheet(f"#addcomp {{ border:1px dashed {Palette.BORDER_STRONG}; "
+                          f"border-radius:9px; }}")
+        av = QVBoxLayout(add); av.setContentsMargins(11, 16, 11, 16); av.setSpacing(4)
+        plus = QLabel("+"); plus.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        plus.setStyleSheet(f"font-size:22px;color:{Palette.ACCENT};font-weight:600;")
+        t = QLabel("Characterize component"); t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        t.setStyleSheet(f"font-size:13px;font-weight:600;color:{Palette.ACCENT};")
+        h = QLabel("paste a VNA sweep"); h.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        h.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+        av.addStretch(1); av.addWidget(plus); av.addWidget(t); av.addWidget(h); av.addStretch(1)
+        self._lib_grid.addWidget(add, idx // cols, idx % cols)
+
+    def _component_card(self, cid: str, spec: dict, in_chain: bool) -> QWidget:
+        kind = (spec.get("kind") or "cable").lower()
+        table = spec.get("delta_db_by_freq") or []
+        desc = spec.get("description") or ""
+        card = _ClickCard(on_click=self._open_components)
+        card.setObjectName("comp")
+        card.setStyleSheet(f"#comp {{ background:{Palette.SURFACE_ALT}; "
+                           f"border:1px solid {Palette.BORDER}; border-radius:9px; }}")
+        v = QVBoxLayout(card); v.setContentsMargins(11, 11, 11, 11); v.setSpacing(8)
+        top = QHBoxLayout()
+        nm = QLabel(desc or cid); nm.setStyleSheet(f"font-size:13px;font-weight:600;color:{Palette.TEXT};")
+        nm.setWordWrap(True)
+        top.addWidget(nm, 1)
+        fg, bg = _KIND_COLORS.get(kind, _KIND_COLORS["pad"])
+        top.addWidget(_badge(kind.capitalize(), fg, bg))
+        v.addLayout(top)
+        if desc:
+            sub = QLabel(cid); sub.setStyleSheet(
+                f"font-family:monospace;font-size:10px;color:{Palette.TEXT_FAINT};")
+            v.addWidget(sub)
+        spark = _FreqSparkline(40); spark.set_table(table, _KIND_COLORS.get(kind, (Palette.ACCENT,))[0])
+        v.addWidget(spark)
+        foot = QHBoxLayout()
+        span = QLabel(_fmt_ghz_span(table))
+        span.setStyleSheet(f"font-family:monospace;font-size:10px;color:{Palette.TEXT_MUTED};")
+        foot.addWidget(span); foot.addStretch(1)
+        tag = QLabel("in this chain" if in_chain else "in library")
+        tag.setStyleSheet(f"font-size:10px;color:{Palette.TEXT_FAINT};")
+        foot.addWidget(tag)
+        v.addLayout(foot)
+        return card
 
     def _fill_comp_combo(self, combo: QComboBox, selected: Optional[str]) -> None:
         """Populate a plane row's component picker: a 'constant Δ dB' sentinel plus every
@@ -1073,63 +1673,39 @@ class CalibrationPanel(QWidget):
         row["orig"] = new
         self._doc_to_form()
 
-    def _add_signal_widget(self, sid: str, sig: dict, measured) -> None:
-        box = QGroupBox(f"signal: {sid}")
-        v = QVBoxLayout(box)
-        top = QFormLayout()
+    def _build_signal_entry(self, sid: str, sig: dict, measured) -> None:
+        """Create (but do not place) a signal's editable widgets: amplitude, occupied
+        BW, centre frequency, and a curve grid + sparkline per measured plane. The
+        measured-stage detail places the ones for the selected plane; _read_form reads
+        them all regardless of placement."""
         amp = QLineEdit(_numstr(sig.get("amplitude")))
-        # Show the inherited default as a placeholder so a blank field visibly means
-        # "inherit defaults.amplitude", not "unset".
         def_amp = ((self._doc or {}).get("defaults") or {}).get("amplitude")
         if def_amp is not None:
-            amp.setPlaceholderText(f"inherits default ({_numstr(def_amp)})")
-        amp.setToolTip("The baseband amplitude (0–1) the script drives for this signal. "
-                       "It must match the amplitude used while measuring the curve below, "
-                       "since power scales with it. Leave blank to inherit the chain's "
-                       "default amplitude.")
+            amp.setPlaceholderText(f"inherits ({_numstr(def_amp)})")
+        amp.setToolTip("Baseband amplitude (0–1) for this signal — must match the "
+                       "amplitude used while measuring the curve. Blank = inherit the "
+                       "chain default.")
+        amp.editingFinished.connect(self._update_issues)
         bw = QLineEdit(_numstr(sig.get("occupied_bw_hz")))
-        bw.setToolTip("Occupied bandwidth of the signal in Hz (optional) — used to relate "
-                      "total in-band power to spectral density.")
+        bw.setToolTip("Occupied bandwidth (Hz), optional.")
         cfreq = QLineEdit(_numstr(sig.get("center_freq_hz")))
-        cfreq.setPlaceholderText("Hz — required if the chain has a frequency-dependent part")
+        cfreq.setPlaceholderText("Hz — required for a frequency-dependent chain")
         cfreq.setToolTip("Centre frequency (Hz) at which this signal's chain is evaluated "
-                         "for the --power bounds and the representative curve. Required "
-                         "when the cable/antenna is frequency-dependent; leave blank for a "
-                         "signal transmitted at many frequencies (a chirp) or a flat chain.")
-        top.addRow("Amplitude (0–1)", amp)
-        top.addRow("Occupied BW (Hz)", bw)
-        top.addRow("Centre freq (Hz)", cfreq)
-        v.addLayout(top)
+                         "for the --power bounds. Required when a cable/antenna is "
+                         "frequency-dependent; blank for a chirp (many frequencies) or a "
+                         "flat chain.")
+        cfreq.editingFinished.connect(self._refresh_form_from_widgets)
 
-        curves = {}
+        curves = {}; sparks = {}
         for plane in measured:
-            v.addWidget(QLabel(f"curve · {plane}"))
             spark = _Sparkline()
             tbl = _CurveTable(on_changed=lambda t=None, s=spark: self._on_curve_changed(s))
             tbl.set_points(((sig.get("curves") or {}).get(plane) or {}).get("points"))
             spark.set_points(tbl.numeric_points())
-            row = QHBoxLayout()
-            row.addWidget(tbl, 3); row.addWidget(spark, 2)
-            v.addLayout(row)
-            self._spark_src[spark] = tbl   # so the change handler can refresh the plot
-            btns = QHBoxLayout()
-            addp = QPushButton("+ point"); addp.clicked.connect(tbl.add_blank_row)
-            rmp = QPushButton("− point"); rmp.clicked.connect(tbl.remove_selected)
-            # Focus-less so clicking them doesn't pull focus off the grid — that keeps
-            # the current selection intact (so "− point" removes what you picked) and
-            # avoids the click-away deselect firing for the grid's own controls.
-            addp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            rmp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            btns.addWidget(addp); btns.addWidget(rmp); btns.addStretch(1)
-            v.addLayout(btns)
-            curves[plane] = tbl
-
-        rm = QPushButton("Remove signal")
-        entry = {"w": box, "amp": amp, "bw": bw, "cfreq": cfreq, "curves": curves}
-        rm.clicked.connect(lambda: self._remove_signal(sid))
-        v.addWidget(rm, alignment=Qt.AlignmentFlag.AlignRight)
-        self._signals_box.addWidget(box)
-        self._f["signals"][sid] = entry
+            self._spark_src[spark] = tbl
+            curves[plane] = tbl; sparks[plane] = spark
+        self._f["signals"][sid] = {"amp": amp, "bw": bw, "cfreq": cfreq,
+                                   "curves": curves, "sparks": sparks}
 
     def _on_curve_changed(self, spark: "_Sparkline") -> None:
         """A curve grid was edited: repaint its sparkline from its source table and
@@ -1599,16 +2175,33 @@ class CalibrationPanel(QWidget):
             item = layout.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.hide()               # so it can't briefly paint as an orphan before…
                 w.setParent(None)
-                w.deleteLater()
+                w.deleteLater()        # …deleteLater runs on the event loop
+            else:
+                child = item.layout()
+                if child is not None:
+                    CalibrationPanel._clear_layout(child)
 
     def _populate_table(self, signals: dict) -> None:
+        """Fill the resolved Signals table (Signal | Freq | Ampl. | --power range). Freq
+        and amplitude come from the document; the --power range from the resolver."""
+        doc_sigs = (self._doc or {}).get("signals") or {}
+        def_amp = ((self._doc or {}).get("defaults") or {}).get("amplitude")
         self._table.setRowCount(len(signals))
-        for r, (sig, info) in enumerate(sorted(signals.items())):
-            cells = [sig, info.get("operating_plane", ""), info.get("quantity", ""),
-                     _fmt_range(info.get("min_gain_db"), info.get("max_gain_db"), "dB"),
-                     _fmt_range(info.get("min_power_dbm"), info.get("max_power_dbm"), "dBm")]
-            for c, text in enumerate(cells):
+        for r, (sid, info) in enumerate(sorted(signals.items())):
+            dsig = doc_sigs.get(sid) or {}
+            f = dsig.get("center_freq_hz")
+            try:
+                freq = f"{float(f)/1e6:.2f}" if f else "at run"
+            except (TypeError, ValueError):
+                freq = "at run"
+            amp = dsig.get("amplitude", def_amp)
+            ampl = _numstr(amp) if amp is not None else "—"
+            rng = _fmt_range(info.get("min_power_dbm"), info.get("max_power_dbm"), "").strip()
+            if rng in ("—", "") and not f:
+                rng = "per frequency"
+            for c, text in enumerate([sid, freq, ampl, rng or "—"]):
                 self._table.setItem(r, c, QTableWidgetItem(str(text)))
 
     def _set_status(self, text: str, kind: str = "muted") -> None:
