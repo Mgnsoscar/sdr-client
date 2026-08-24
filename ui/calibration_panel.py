@@ -1402,8 +1402,31 @@ class CalibrationPanel(QWidget):
             sl.addWidget(arrow)
             self._chain_row.addWidget(slot)
             self._chain_slots.append((row["name"].text().strip(), slot))
+        if n:                                    # mark the operating plane beside the end
+            self._chain_row.addWidget(self._operating_marker())
         self._chain_row.addWidget(self._add_stage_card())
         self._chain_row.addStretch(1)
+
+    def _operating_marker(self) -> QWidget:
+        """The “operating plane” callout, placed to the RIGHT of the last stage (not on it):
+        the last stage's output is where an absolute --power value is read. Kept as its own
+        fixed element so it doesn't travel with a card during a drag reorder."""
+        marker = QWidget()
+        marker.setToolTip("Operating plane — where an absolute --power value is read "
+                          "(the output of the last stage). It's always the final stage.")
+        col = QVBoxLayout(marker); col.setContentsMargins(2, 0, 10, 0); col.setSpacing(0)
+        col.addStretch(1)
+        inner = QHBoxLayout(); inner.setSpacing(6)
+        arrow = QLabel("◀")
+        arrow.setStyleSheet(f"color:{Palette.ONLINE};font-size:16px;font-weight:700;")
+        pill = QLabel("--power\nreads here")
+        pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pill.setStyleSheet(f"color:#fff;background:{Palette.ONLINE};font-size:10px;"
+                           f"font-weight:700;padding:4px 9px;border-radius:8px;")
+        inner.addWidget(arrow); inner.addWidget(pill)
+        col.addLayout(inner)
+        col.addStretch(1)
+        return marker
 
     def _add_stage_card(self) -> QWidget:
         """The dashed “+ Add stage” tile at the end of the chain."""
@@ -1427,10 +1450,11 @@ class CalibrationPanel(QWidget):
         role = row.get("role", "measured")
         kind = "source" if index == 0 else ("passive" if role != "measured" else "measured")
         selected = (name == self._selected_plane)
-        operating = (index == total - 1)          # operating plane = last stage, always
-        border = (Palette.ONLINE if operating else
-                  Palette.ACCENT if selected else Palette.BORDER)
-        bg = Palette.SURFACE if (operating or selected) else Palette.SURFACE_ALT
+        # The operating plane (always the last stage) is marked by a callout to the RIGHT
+        # of the chain, not by styling this card — so a card doesn't flash "operating"
+        # while being dragged past the end. Cards are visually uniform bar the selection.
+        border = Palette.ACCENT if selected else Palette.BORDER
+        bg = Palette.SURFACE if selected else Palette.SURFACE_ALT
         card = _ClickCard(on_click=lambda n=name: self._select_plane(n))
         card.setObjectName("stage")
         card.setStyleSheet(f"#stage {{ background:{bg}; border:1px solid {border}; "
@@ -1438,16 +1462,11 @@ class CalibrationPanel(QWidget):
         card.setMinimumWidth(178); card.setMaximumWidth(230)
         v = QVBoxLayout(card); v.setContentsMargins(12, 10, 12, 12); v.setSpacing(7)
 
-        # top row: drag grip + operating badge + move ◀▶ handles (none on the source)
+        # top row: drag grip + move ◀▶ handles (none on the source)
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0)
         if index > 0:
             top.addWidget(_DragHandle(name, self._chain_drag_start,
                                       self._chain_drag_move, self._chain_drag_end))
-        if operating:
-            opb = QLabel("--power reads here")
-            opb.setStyleSheet(f"color:#fff;background:{Palette.ONLINE};font-size:10px;"
-                              f"font-weight:700;padding:2px 8px;border-radius:999px;")
-            top.addWidget(opb)
         top.addStretch(1)
         if index > 0:                             # the source stage stays first
             for glyph, delta, en in (("◀", -1, index > 1), ("▶", +1, index < total - 1)):

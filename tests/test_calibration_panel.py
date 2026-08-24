@@ -643,6 +643,37 @@ def test_chain_renders_a_stage_per_plane():
     assert len(p._chain_slots) == 4
 
 
+def _chain_widgets(p):
+    return [p._chain_row.itemAt(i).widget() for i in range(p._chain_row.count())]
+
+
+def _operating_marker(p):
+    return next((w for w in _chain_widgets(p)
+                 if w is not None and w.toolTip().startswith("Operating plane")), None)
+
+
+def test_operating_marker_sits_after_the_last_stage_not_on_a_card():
+    # The "--power reads here" callout is a standalone element to the RIGHT of the last
+    # stage (so it doesn't travel with a card during a drag), not styling on the card.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    widgets = _chain_widgets(p)
+    marker = _operating_marker(p)
+    assert marker is not None                              # the callout exists
+    # it comes after every stage slot and before the "+ Add stage" tile
+    slot_idxs = [widgets.index(s) for _, s in p._chain_slots]
+    add = next(w for w in widgets if w is not None and w.objectName() == "addstage")
+    assert widgets.index(marker) > max(slot_idxs)
+    assert widgets.index(marker) < widgets.index(add)
+
+
+def test_no_operating_marker_without_stages():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc({"schema_version": 1, "chain": {"planes": {}}, "signals": {}})
+    assert _operating_marker(p) is None
+
+
 def test_selecting_a_stage_updates_selection_and_survives_read():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     _seed_catalog(p)
