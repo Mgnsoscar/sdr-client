@@ -275,10 +275,10 @@ def _template() -> dict:
 # ── A small editable (gain, power) grid ─────────────────────────────────────────
 
 class _CurveTable(QTableWidget):
-    def __init__(self, on_changed=None):
+    def __init__(self, on_changed=None, headers=("gain (dB)", "power (dBm)")):
         super().__init__(0, 2)
         self._on_changed = on_changed          # called after any edit (live feedback)
-        self.setHorizontalHeaderLabels(["gain (dB)", "power (dBm)"])
+        self.setHorizontalHeaderLabels(list(headers))
         self.verticalHeader().setVisible(False)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         # No persistent selection fill: clicking a cell (or arrow-keying to it) makes
@@ -540,6 +540,31 @@ class _CurveTable(QTableWidget):
                     raise
         return out
 
+    # Generic two-column accessors (used when this grid holds a freq→Δ dB table for a
+    # component, not a gain→power curve).
+    def set_rows(self, pairs) -> None:
+        self.blockSignals(True)
+        self.setRowCount(0)
+        for x, y in (pairs or []):
+            self._append(_numstr(x), _numstr(y))
+        self.blockSignals(False)
+        self._fit_height()
+        self._reset_history()
+
+    def rows(self, strict: bool) -> list:
+        out = []
+        for r in range(self.rowCount()):
+            a = self.item(r, 0).text().strip() if self.item(r, 0) else ""
+            b = self.item(r, 1).text().strip() if self.item(r, 1) else ""
+            if not a and not b:
+                continue
+            try:
+                out.append([_to_float(a, f"row {r+1} col 1"), _to_float(b, f"row {r+1} col 2")])
+            except ValueError:
+                if strict:
+                    raise
+        return out
+
 
 class CalibrationPanel(QWidget):
     def __init__(self, hostname: str, hub, parent=None):
@@ -549,6 +574,9 @@ class CalibrationPanel(QWidget):
         self._doc: Optional[dict] = None       # the working document model
         self._f: dict = {}                      # references to editor widgets
         self._prev_tab = 0
+        from state import ComponentCatalog
+        self._catalog = ComponentCatalog()      # the client's canonical component library
+        self._components_synced = False          # merged this unit's catalog on first load
         self._build()
         self.hub.task_done.connect(self._on_task_done)
 
@@ -570,10 +598,15 @@ class CalibrationPanel(QWidget):
         self._save_btn = QPushButton("Save"); self._save_btn.clicked.connect(self._on_save)
         self._download_btn = QPushButton("Download…"); self._download_btn.setEnabled(False)
         self._download_btn.clicked.connect(self._on_download)
+        self._components_btn = QPushButton("Components…")
+        self._components_btn.setToolTip("Open the component library — characterize cables "
+                                        "and antennas once, then pick them in the chain.")
+        self._components_btn.clicked.connect(self._open_components)
         for b in (self._refresh_btn, self._validate_btn, self._upload_btn,
                   self._save_btn, self._download_btn):
             row.addWidget(b)
         row.addStretch(1)
+        row.addWidget(self._components_btn)
         outer.addLayout(row)
 
         self._status = QLabel("")
@@ -871,9 +904,16 @@ class CalibrationPanel(QWidget):
         from_c.setToolTip("The parent plane this derived plane is offset from.")
         if spec.get("from") in self._plane_names():
             from_c.setCurrentText(spec["from"])
+        # A passive stage's Δ dB comes from a library component (a cable/antenna
+        # characterized once, possibly frequency-dependent) OR an inline constant.
+        comp_c = QComboBox()
+        comp_c.setToolTip("Where this hop's Δ dB comes from: a component from the "
+                          "library (a cable/antenna, possibly frequency-dependent) or a "
+                          "constant you type here.")
+        self._fill_comp_combo(comp_c, spec.get("component"))
         delta_e = QLineEdit(_numstr(spec.get("delta_db"))); delta_e.setPlaceholderText("Δ dB")
-        delta_e.setToolTip("Offset from the parent plane, in dB. Negative for a loss "
-                           "(cable), positive for a gain (antenna).")
+        delta_e.setToolTip("Constant offset from the parent plane, in dB. Negative for a "
+                           "loss (cable), positive for a gain (antenna).")
         delta_e.setFixedWidth(72)
         quantity_e = QLineEdit(spec.get("quantity", "")); quantity_e.setPlaceholderText("quantity label")
         quantity_e.setToolTip("A short label for what power means here — e.g. “total "
@@ -881,25 +921,51 @@ class CalibrationPanel(QWidget):
                               "label, not a description.")
         rm = QPushButton("✕"); rm.setFixedWidth(28)
         h.addWidget(name_e, 2); h.addWidget(type_c, 1)
-        h.addWidget(from_lbl); h.addWidget(from_c, 2); h.addWidget(delta_e)
+        h.addWidget(from_lbl); h.addWidget(from_c, 2); h.addWidget(comp_c, 2); h.addWidget(delta_e)
         h.addWidget(quantity_e, 2); h.addWidget(rm)
         # "orig" is the plane's last-committed name, so a rename can be propagated to
         # everything that references it (operating plane, limits, derived 'from', and
         # each signal's curve keyed by this plane) instead of silently dangling.
-        row = {"w": w, "name": name_e, "type": type_c, "from": from_c,
+        row = {"w": w, "name": name_e, "type": type_c, "from": from_c, "comp": comp_c,
                "delta": delta_e, "quantity": quantity_e, "from_lbl": from_lbl,
                "orig": name}
 
-        derived = type_c.currentText() == "derived"
-        for wdg in (from_lbl, from_c, delta_e):
-            wdg.setVisible(derived)
+        self._sync_plane_row(row)
         # A type/name change reshapes dependents (which planes are 'measured', the
         # from/operating/limit dropdowns), so rebuild the form from the widgets.
         type_c.currentTextChanged.connect(lambda _=None: self._refresh_form_from_widgets())
+        comp_c.currentIndexChanged.connect(lambda _=None, r=row: self._sync_plane_row(r))
         name_e.editingFinished.connect(lambda r=row: self._on_plane_name_changed(r))
         rm.clicked.connect(lambda: self._remove_plane(row))
         self._planes_box.addWidget(w)
         self._f["planes"].append(row)
+
+    def _fill_comp_combo(self, combo: QComboBox, selected: Optional[str]) -> None:
+        """Populate a plane row's component picker: a 'constant Δ dB' sentinel plus every
+        catalogued component, pre-selecting `selected`."""
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("— constant Δ dB —", "")
+        for cid in self._catalog.ids():
+            spec = self._catalog.get(cid) or {}
+            combo.addItem(f"{cid}  ·  {spec.get('kind', '')}", cid)
+        if selected:
+            idx = combo.findData(selected)
+            if idx < 0:                          # referenced but not in the local catalog
+                combo.addItem(f"{selected}  ·  (missing)", selected)
+                idx = combo.count() - 1
+            combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+
+    def _sync_plane_row(self, row) -> None:
+        """Show the right controls for a plane row: nothing extra for measured; for
+        derived, the parent + either a component picker or the constant Δ field."""
+        derived = row["type"].currentText() == "derived"
+        uses_comp = bool(row["comp"].currentData())
+        row["from_lbl"].setVisible(derived)
+        row["from"].setVisible(derived)
+        row["comp"].setVisible(derived)
+        row["delta"].setVisible(derived and not uses_comp)
 
     def _read_planes(self, strict: bool) -> dict:
         prev = ((self._doc or {}).get("chain") or {}).get("planes") or {}
@@ -912,13 +978,17 @@ class CalibrationPanel(QWidget):
                 p = {"type": "measured"}
             else:
                 p = {"type": "derived", "from": row["from"].currentText()}
-                d = row["delta"].text().strip()
-                if d:
-                    p["delta_db"] = _to_float(d, f"plane '{name}' Δ dB")
-                elif strict:
-                    raise ValueError(f"derived plane '{name}' has no Δ dB")
+                comp = row["comp"].currentData()
+                if comp:
+                    p["component"] = comp             # a library component supplies Δ dB(f)
                 else:
-                    p["delta_db"] = 0.0
+                    d = row["delta"].text().strip()
+                    if d:
+                        p["delta_db"] = _to_float(d, f"plane '{name}' Δ dB")
+                    elif strict:
+                        raise ValueError(f"derived plane '{name}' has no Δ dB or component")
+                    else:
+                        p["delta_db"] = 0.0
             if row["quantity"].text().strip():
                 p["quantity"] = row["quantity"].text().strip()
             if isinstance(prev.get(name), dict) and prev[name].get("description"):
@@ -1016,8 +1086,15 @@ class CalibrationPanel(QWidget):
         bw = QLineEdit(_numstr(sig.get("occupied_bw_hz")))
         bw.setToolTip("Occupied bandwidth of the signal in Hz (optional) — used to relate "
                       "total in-band power to spectral density.")
+        cfreq = QLineEdit(_numstr(sig.get("center_freq_hz")))
+        cfreq.setPlaceholderText("Hz — required if the chain has a frequency-dependent part")
+        cfreq.setToolTip("Centre frequency (Hz) at which this signal's chain is evaluated "
+                         "for the --power bounds and the representative curve. Required "
+                         "when the cable/antenna is frequency-dependent; leave blank for a "
+                         "signal transmitted at many frequencies (a chirp) or a flat chain.")
         top.addRow("Amplitude (0–1)", amp)
         top.addRow("Occupied BW (Hz)", bw)
+        top.addRow("Centre freq (Hz)", cfreq)
         v.addLayout(top)
 
         curves = {}
@@ -1044,7 +1121,7 @@ class CalibrationPanel(QWidget):
             curves[plane] = tbl
 
         rm = QPushButton("Remove signal")
-        entry = {"w": box, "amp": amp, "bw": bw, "curves": curves}
+        entry = {"w": box, "amp": amp, "bw": bw, "cfreq": cfreq, "curves": curves}
         rm.clicked.connect(lambda: self._remove_signal(sid))
         v.addWidget(rm, alignment=Qt.AlignmentFlag.AlignRight)
         self._signals_box.addWidget(box)
@@ -1116,6 +1193,10 @@ class CalibrationPanel(QWidget):
                 sig["occupied_bw_hz"] = _to_float(w["bw"].text(), f"{sid} occupied BW")
             else:
                 sig.pop("occupied_bw_hz", None)
+            if w["cfreq"].text().strip():
+                sig["center_freq_hz"] = _to_float(w["cfreq"].text(), f"{sid} centre freq")
+            else:
+                sig.pop("center_freq_hz", None)
             curves = {}
             for plane, tbl in w["curves"].items():
                 pts = tbl.points(strict)
@@ -1199,6 +1280,13 @@ class CalibrationPanel(QWidget):
             f"cal_get:{self.hostname}",
             lambda: self.hub.fleet.get(self.hostname).get_calibration(),
         )
+        # Learn this unit's component catalog once, so a fresh client sees the parts
+        # already deployed and the chain pickers can resolve existing references.
+        if not self._components_synced:
+            self._components_synced = True
+            self.hub.run_async(
+                f"cal_components:{self.hostname}",
+                lambda: self.hub.fleet.get(self.hostname).get_components())
 
     def _unit_meta(self) -> tuple[str, str]:
         """This unit's type + id, read from its client, to seed a new document with
@@ -1289,16 +1377,38 @@ class CalibrationPanel(QWidget):
             return
         self._set_status("validating (dry run — not saving)…")
         doc = self._doc
-        self.hub.run_async(
-            f"cal_validate:{self.hostname}",
-            lambda: self.hub.fleet.get(self.hostname).validate_calibration(doc))
+        wire = self._catalog.to_wire()
+        host = self.hostname
+
+        def _do():
+            client = self.hub.fleet.get(host)
+            client.upload_components(wire)       # so component refs resolve in the dry-run
+            return client.validate_calibration(doc)
+        self.hub.run_async(f"cal_validate:{host}", _do)
 
     def _send(self, content: bytes) -> None:
         self._set_status("validating + saving…")
-        self.hub.run_async(
-            f"cal_save:{self.hostname}",
-            lambda: self.hub.fleet.get(self.hostname).upload_file(CAL_NAME, content),
-        )
+        wire = self._catalog.to_wire()
+        host = self.hostname
+
+        def _do():
+            client = self.hub.fleet.get(host)
+            client.upload_components(wire)       # push the catalog first so refs resolve
+            return client.upload_file(CAL_NAME, content)
+        self.hub.run_async(f"cal_save:{host}", _do)
+
+    # ── Component library ────────────────────────────────────────────────────────
+    def _open_components(self) -> None:
+        """Open the shared component library; refresh the chain's pickers afterward so a
+        newly-characterized cable/antenna is immediately selectable."""
+        try:
+            self._sync_from(self._tabs.currentIndex(), strict=False)
+        except ValueError:
+            pass
+        from .component_library_dialog import ComponentLibraryDialog
+        ComponentLibraryDialog(self._catalog, parent=self.window()).exec()
+        if self._tabs.currentIndex() == 0:
+            self._doc_to_form()                  # rebuild plane rows with the updated catalog
 
     def _on_download(self) -> None:
         try:
@@ -1331,6 +1441,21 @@ class CalibrationPanel(QWidget):
             self._handle_save(result)
         elif parts[0] == "cal_validate":
             self._handle_validate(result)
+        elif parts[0] == "cal_components":
+            self._handle_components(result)
+
+    def _handle_components(self, result) -> None:
+        """Merge the unit's stored catalog into the local one (additive — never clobbers
+        a locally-authored component), then refresh the chain pickers."""
+        if isinstance(result, Exception) or not isinstance(result, str) or not result.strip():
+            return
+        try:
+            from state import ComponentCatalog
+            added = self._catalog.merge(ComponentCatalog.parse_wire(result))
+        except Exception:  # noqa: BLE001 — a broken unit catalog shouldn't break the panel
+            return
+        if added and self._tabs.currentIndex() == 0:
+            self._doc_to_form()                  # so the new components appear in pickers
 
     def _handle_validate(self, result) -> None:
         if isinstance(result, Exception):

@@ -26,6 +26,14 @@ class FakeClient:
         self._validate = validate
         self.uploaded = []
         self.validated = []
+        self.components_uploaded = []
+
+    def upload_components(self, content):
+        self.components_uploaded.append(content)
+        return {"saved": "components.yaml"}
+
+    def get_components(self):
+        return ""
 
     def get_calibration(self):
         if isinstance(self._cal, Exception):

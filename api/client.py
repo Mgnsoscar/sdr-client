@@ -656,6 +656,25 @@ class AgentClient:
     def delete_file(self, name: str) -> dict:
         return self._request("DELETE", f"/files/{name}")
 
+    def upload_components(self, content: str) -> dict:
+        """Upload the shared component catalog (components.yaml) to this unit's store.
+        Validated agent-side before it's stored; a bad table raises AgentError. Deploy
+        this before a calibration.json that references a component, so the reference
+        resolves (calibration v2)."""
+        from state.component_catalog import COMPONENTS_WIRE_NAME
+        return self.upload_file(COMPONENTS_WIRE_NAME, content.encode("utf-8"))
+
+    def get_components(self) -> str:
+        """This unit's stored component catalog as text ('' if it has none yet)."""
+        from api.client import AgentHTTPError  # local import to avoid a cycle at module load
+        from state.component_catalog import COMPONENTS_WIRE_NAME
+        try:
+            return self.get_file(COMPONENTS_WIRE_NAME)
+        except AgentHTTPError as exc:
+            if exc.status_code == 404:
+                return ""
+            raise
+
     def get_calibration(self) -> dict:
         """This unit's calibration view: {unit_type, document, valid, signals|error}.
         Raises AgentError(404) if the unit has no calibration document."""
