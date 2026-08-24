@@ -53,6 +53,7 @@ from PyQt6.QtWidgets import (
 from api import models as m
 from . import timeline_model as tlm
 from api import ramp as _ramp
+from api.fleet import LIBRARY_HOST
 
 from .duration_spin import DurationSpinBox
 from .param_form import ParamForm, fmt_duration, fmt_value
@@ -1399,9 +1400,13 @@ class TimelineEditor(QWidget):
 
     def set_calibration(self, hub, hostname: str) -> None:
         """Point the step editor at the UNIT whose calibration governs absolute power
-        (the plan's target unit, or the sequences-tab unit). Empty hostname → no unit,
-        so only relative power is offered. Fetches GET /calibration once and caches
-        it; step forms read it via cal_bounds_for_task()."""
+        (the plan's target unit, or the sequences-tab unit). Empty hostname — or the
+        reserved LIBRARY_HOST, which is offline Library authoring, not a real unit — means
+        no unit is targeted, so absolute power is free-form (see _compute_power_modes).
+        Fetches GET /calibration once and caches it; step forms read it via
+        cal_bounds_for_task()."""
+        if hostname == LIBRARY_HOST:
+            hostname = ""                            # the library isn't a real unit
         self._cal_hostname = hostname or ""
         self._calibration = None
         if not hostname or hub is None:
