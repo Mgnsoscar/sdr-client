@@ -992,20 +992,15 @@ class CalibrationPanel(QWidget):
         self._f["min_gain"].setToolTip("Lowest usable SDR internal gain (dB).")
         self._f["max_gain"].setToolTip(
             "Highest SDR gain the safety ceilings allow (usually the amp's P1dB gain).")
-        self._f["operating"] = QComboBox()
-        self._f["operating"].currentIndexChanged.connect(self._on_operating_changed)
-        self._f["operating"].setToolTip(
-            "The plane an absolute --power value reads at (e.g. EIRP at the antenna).")
         self._f["def_amp"] = QLineEdit()
         self._f["def_amp"].setToolTip(
             "Default baseband amplitude (0–1) a signal uses when it sets none of its own.")
         set_card, set_body = self._make_card(
-            lbl="Chain settings", sub="gain range · operating plane · defaults")
+            lbl="Chain settings", sub="gain range · defaults")
         form = QFormLayout(); form.setContentsMargins(0, 0, 0, 0)
         form.addRow("Unit type", self._f["unit_type"])
         form.addRow("Min gain (dB)", self._f["min_gain"])
         form.addRow("Max gain (dB)", self._f["max_gain"])
-        form.addRow("Operating plane", self._f["operating"])
         form.addRow("Default amplitude", self._f["def_amp"])
         set_body.addLayout(form)
         self._editor_layout.addWidget(set_card)
@@ -1018,13 +1013,6 @@ class CalibrationPanel(QWidget):
 
         scroll.setWidget(inner)
         return scroll
-
-    def _on_operating_changed(self) -> None:
-        """The operating-plane combo changed: repaint the chain so the green 'operating'
-        badge follows, without a full form rebuild (which would fight combo editing)."""
-        if getattr(self, "_syncing", False):
-            return
-        self._render_chain()
 
     def _build_json_tab(self) -> QWidget:
         self._view = QPlainTextEdit()
@@ -1087,11 +1075,7 @@ class CalibrationPanel(QWidget):
             self._build_signal_entry(sid, sig or {}, measured)
 
         names = self._plane_names()
-        self._f["operating"].clear()
-        self._f["operating"].addItems(names)
-        op = chain.get("operating_plane")
-        if op in names:
-            self._f["operating"].setCurrentText(op)
+        op = names[-1] if names else None       # operating plane = the last stage, always
 
         # limits
         self._clear_layout(self._limits_box)
@@ -1204,39 +1188,31 @@ class CalibrationPanel(QWidget):
         self._tabs.setCurrentIndex(0)
 
     def _make_plane_row(self, name: str = "", spec: Optional[dict] = None) -> dict:
-        """Create (but do not place) the editable widgets for one plane, returning the
-        row dict _read_planes reads. The chain-flow shows a summary of each row; the
-        selected row's editable widgets are placed in the detail pane by _render_detail."""
+        """Create (but do not place) the editable widgets for one chain stage, returning
+        the row dict _read_planes reads. The chain is an ordered LINEAR sequence: a
+        stage's parent is the stage before it and the operating plane is always the last
+        stage, so there is no parent picker and no operating control. A stage is one of:
+          • measured  — a gain→power curve measured on this box (SDR, amp),
+          • component  — a library component (its Δ dB(f) fixed at add-time), or
+          • constant   — an inline constant Δ dB (editable).
+        The role is fixed when the stage is added; to change a stage's part, add a new
+        stage and remove the old one, then drag/move it into place."""
         spec = spec or {}
+        if spec.get("type") == "derived":
+            role = "component" if spec.get("component") else "constant"
+        else:
+            role = "measured"
         name_e = QLineEdit(name); name_e.setPlaceholderText("plane id (e.g. antenna_eirp)")
-        name_e.setToolTip("A short id for this plane, e.g. sdr_output, amplifier_output, "
-                          "antenna_eirp.")
-        type_c = QComboBox(); type_c.addItems(["measured", "derived"])
-        type_c.setToolTip("measured = a gain→power curve taken on this box (SDR, amp). "
-                          "derived / passive = a cable/antenna/pad hop (a component or a "
-                          "constant Δ dB) off the parent plane.")
-        type_c.setCurrentText(spec.get("type", "measured"))
-        from_lbl = QLabel("from")
-        from_c = QComboBox(); from_c.addItems([n for n in self._plane_names() if n != name])
-        from_c.setToolTip("The parent plane this passive hop sits after.")
-        if spec.get("from") in self._plane_names():
-            from_c.setCurrentText(spec["from"])
-        comp_c = QComboBox()
-        comp_c.setToolTip("The characterized part wired here — a cable/antenna/pad from "
-                          "the component library — or a constant Δ dB you type.")
-        self._fill_comp_combo(comp_c, spec.get("component"))
+        name_e.setToolTip("A short id for this stage, e.g. sdr_output, amplifier_output, "
+                          "antenna_eirp. Renaming it re-points everything that references it.")
         delta_e = QLineEdit(_numstr(spec.get("delta_db"))); delta_e.setPlaceholderText("Δ dB")
-        delta_e.setToolTip("Constant offset from the parent plane, in dB. Negative = loss "
-                           "(cable), positive = gain (antenna).")
-        quantity_e = QLineEdit(spec.get("quantity", "")); quantity_e.setPlaceholderText("quantity label")
-        quantity_e.setToolTip("A short label for what power means here — e.g. “total "
-                              "in-band power”, “EIRP”.")
+        delta_e.setToolTip("Constant offset from the previous stage, in dB. Negative = "
+                           "loss (cable/pad), positive = gain (antenna).")
+        delta_e.editingFinished.connect(self._refresh_form_from_widgets)
         # "orig" is the plane's last-committed name, so a rename propagates to everything
         # that references it instead of silently dangling.
-        row = {"name": name_e, "type": type_c, "from": from_c, "comp": comp_c,
-               "delta": delta_e, "quantity": quantity_e, "from_lbl": from_lbl, "orig": name}
-        type_c.currentTextChanged.connect(lambda _=None: self._refresh_form_from_widgets())
-        comp_c.currentIndexChanged.connect(lambda _=None: self._refresh_form_from_widgets())
+        row = {"name": name_e, "role": role, "comp_id": spec.get("component") or "",
+               "delta": delta_e, "orig": name}
         name_e.editingFinished.connect(lambda r=row: self._on_plane_name_changed(r))
         return row
 
@@ -1244,31 +1220,41 @@ class CalibrationPanel(QWidget):
     def _render_chain(self) -> None:
         self._clear_layout(self._chain_row)
         rows = self._f.get("planes", [])
-        if not rows:
-            empty = QLabel("no chain yet — click “New from template”, or add a stage in "
-                           "the JSON tab")
-            empty.setWordWrap(True)
-            empty.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_FAINT};padding:20px;")
-            self._chain_row.addWidget(empty); self._chain_row.addStretch(1)
-            return
-        op = self._f["operating"].currentText()
         rep = self._rep_freq()
+        n = len(rows)
         for i, row in enumerate(rows):
-            self._chain_row.addWidget(self._stage_card(row, i, op, rep))
-            if i < len(rows) - 1:
-                arrow = QLabel("→")
-                arrow.setStyleSheet(f"color:{Palette.BORDER_STRONG};font-size:18px;")
-                arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                arrow.setFixedWidth(26)
-                self._chain_row.addWidget(arrow)
+            self._chain_row.addWidget(self._stage_card(row, i, n, rep))
+            arrow = QLabel("→")
+            arrow.setStyleSheet(f"color:{Palette.BORDER_STRONG};font-size:18px;")
+            arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            arrow.setFixedWidth(26)
+            self._chain_row.addWidget(arrow)
+        self._chain_row.addWidget(self._add_stage_card())
         self._chain_row.addStretch(1)
 
-    def _stage_card(self, row, index: int, op: str, rep_freq: float) -> QWidget:
+    def _add_stage_card(self) -> QWidget:
+        """The dashed “+ Add stage” tile at the end of the chain."""
+        card = _ClickCard(on_click=self._add_stage)
+        card.setObjectName("addstage")
+        card.setStyleSheet(f"#addstage {{ border:1px dashed {Palette.BORDER_STRONG}; "
+                           f"border-radius:10px; }}")
+        card.setMinimumWidth(150); card.setMaximumWidth(180)
+        v = QVBoxLayout(card); v.setContentsMargins(12, 12, 12, 12)
+        plus = QLabel("+"); plus.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        plus.setStyleSheet(f"font-size:22px;color:{Palette.ACCENT};font-weight:600;")
+        t = QLabel("Add stage"); t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        t.setStyleSheet(f"font-size:13px;font-weight:600;color:{Palette.ACCENT};")
+        h = QLabel("component, measured\nor constant"); h.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        h.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+        v.addStretch(1); v.addWidget(plus); v.addWidget(t); v.addWidget(h); v.addStretch(1)
+        return card
+
+    def _stage_card(self, row, index: int, total: int, rep_freq: float) -> QWidget:
         name = row["name"].text().strip()
-        derived = row["type"].currentText() == "derived"
-        kind = "source" if index == 0 else ("passive" if derived else "measured")
+        role = row.get("role", "measured")
+        kind = "source" if index == 0 else ("passive" if role != "measured" else "measured")
         selected = (name == self._selected_plane)
-        operating = bool(name) and (name == op)
+        operating = (index == total - 1)          # operating plane = last stage, always
         border = (Palette.ONLINE if operating else
                   Palette.ACCENT if selected else Palette.BORDER)
         bg = Palette.SURFACE if (operating or selected) else Palette.SURFACE_ALT
@@ -1276,46 +1262,49 @@ class CalibrationPanel(QWidget):
         card.setObjectName("stage")
         card.setStyleSheet(f"#stage {{ background:{bg}; border:1px solid {border}; "
                            f"border-radius:10px; }}")
-        card.setMinimumWidth(172); card.setMaximumWidth(230)
-        v = QVBoxLayout(card); v.setContentsMargins(12, 12, 12, 12); v.setSpacing(8)
+        card.setMinimumWidth(178); card.setMaximumWidth(230)
+        v = QVBoxLayout(card); v.setContentsMargins(12, 10, 12, 12); v.setSpacing(7)
 
+        # top row: operating badge (or spacer) + move ◀▶ handles (not on the source)
+        top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0)
         if operating:
             opb = QLabel("--power reads here")
             opb.setStyleSheet(f"color:#fff;background:{Palette.ONLINE};font-size:10px;"
                               f"font-weight:700;padding:2px 8px;border-radius:999px;")
-            opb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            v.addWidget(opb, alignment=Qt.AlignmentFlag.AlignRight)
+            top.addWidget(opb)
+        top.addStretch(1)
+        if index > 0:                             # the source stage stays first
+            for glyph, delta, en in (("◀", -1, index > 1), ("▶", +1, index < total - 1)):
+                mv = QPushButton(glyph); mv.setFixedSize(20, 20)
+                mv.setFocusPolicy(Qt.FocusPolicy.NoFocus); mv.setEnabled(en)
+                mv.setStyleSheet("font-size:10px;padding:0;")
+                mv.setToolTip("Move this stage earlier" if delta < 0 else "Move this stage later")
+                mv.clicked.connect(lambda _=False, r=row, d=delta: self._move_stage(r, d))
+                top.addWidget(mv)
+        v.addLayout(top)
 
         fg, kbg = _KIND_COLORS[kind]
-        badge_text = {"source": "Source", "measured": "Measured",
+        badge_text = {"source": "SOURCE", "measured": "MEASURED",
                       "passive": "Passive · from library"}[kind]
-        b = _badge(badge_text, fg, kbg); b.setText(badge_text.upper() if kind != "passive" else badge_text)
-        v.addWidget(b, alignment=Qt.AlignmentFlag.AlignLeft)
+        v.addWidget(_badge(badge_text, fg, kbg), alignment=Qt.AlignmentFlag.AlignLeft)
 
         title = QLabel(name or "(unnamed)")
         title.setStyleSheet(f"font-size:13px;font-weight:600;color:{Palette.TEXT};")
         v.addWidget(title)
 
-        q = row["quantity"].text().strip()
-        if q:
-            meta = QLabel(q); meta.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
-            meta.setWordWrap(True)
-            v.addWidget(meta)
-
-        if derived:
-            comp = row["comp"].currentData()
-            picker = QLabel(f"{comp}  ▾" if comp else "constant Δ dB  ▾")
-            picker.setStyleSheet(
-                f"border:1px solid {Palette.BORDER_STRONG};border-radius:7px;"
-                f"padding:6px 9px;font-size:12px;font-weight:500;color:{Palette.TEXT};"
-                f"background:{Palette.SURFACE};")
-            v.addWidget(picker)
-            if comp:
-                db = _interp_db(self._comp_table(comp), rep_freq)
-                val = QLabel(f"{db:+.2f} dB  @ {rep_freq/1e6:.0f} MHz")
-            else:
-                d = row["delta"].text().strip()
-                val = QLabel(f"{d or '0'} dB · constant")
+        if role == "component":
+            comp = row.get("comp_id", "")
+            cn = QLabel(comp or "(missing component)")
+            cn.setStyleSheet(f"font-size:12px;font-weight:500;color:{Palette.TEXT};")
+            cn.setWordWrap(True)
+            v.addWidget(cn)
+            db = _interp_db(self._comp_table(comp), rep_freq)
+            val = QLabel(f"{db:+.2f} dB  @ {rep_freq/1e6:.0f} MHz")
+            val.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+            v.addWidget(val)
+        elif role == "constant":
+            d = row["delta"].text().strip()
+            val = QLabel(f"{d or '0'} dB · constant")
             val.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
             v.addWidget(val)
         else:
@@ -1327,6 +1316,97 @@ class CalibrationPanel(QWidget):
             v.addWidget(hint)
         v.addStretch(1)
         return card
+
+    # ── add / reorder stages ─────────────────────────────────────────────────────
+    def _add_stage(self) -> None:
+        """Add a stage to the end of the chain — a library component, a fresh measured
+        plane, or a constant Δ dB. (Reorder with the ◀▶ handles.)"""
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        menu.addAction("Component from library…", lambda: self._add_component_stage())
+        menu.addAction("Measured plane…", lambda: self._add_measured_stage())
+        menu.addAction("Constant Δ dB…", lambda: self._add_constant_stage())
+        menu.exec(self.cursor().pos())
+
+    def _prepare_add(self):
+        """Fold current edits into the model and return the planes dict to append to."""
+        try:
+            self._doc = self._read_form(strict=False)
+        except ValueError:
+            pass
+        if self._doc is None:
+            self._doc = self._blank_doc()
+        self._download_btn.setEnabled(True)
+        return self._doc.setdefault("chain", {}).setdefault("planes", {})
+
+    def _unique_plane_id(self, base: str, planes) -> str:
+        base = base or "stage"
+        nm, i = base, 1
+        while nm in planes:
+            i += 1; nm = f"{base}_{i}"
+        return nm
+
+    def _add_component_stage(self) -> None:
+        ids = self._catalog.ids()
+        if not ids:
+            QMessageBox.information(self, "Add component stage",
+                                   "No components yet — characterize a cable/antenna in the "
+                                   "Component library first.")
+            self._open_components()
+            return
+        cid, ok = QInputDialog.getItem(self, "Add component stage",
+                                       "Component (from the library):", ids, 0, False)
+        if not ok or not cid:
+            return
+        planes = self._prepare_add()
+        name = self._unique_plane_id(cid, planes)
+        planes[name] = {"type": "derived", "from": "", "component": cid}
+        self._selected_plane = name
+        self._doc_to_form()
+
+    def _add_measured_stage(self) -> None:
+        name, ok = QInputDialog.getText(self, "Add measured plane",
+                                        "Plane id (e.g. amplifier_output):")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        planes = self._prepare_add()
+        name = self._unique_plane_id(name, planes)
+        planes[name] = {"type": "measured"}
+        self._selected_plane = name
+        self._doc_to_form()
+
+    def _add_constant_stage(self) -> None:
+        name, ok = QInputDialog.getText(self, "Add constant Δ dB stage",
+                                        "Plane id (e.g. cable_loss):")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        planes = self._prepare_add()
+        name = self._unique_plane_id(name, planes)
+        planes[name] = {"type": "derived", "from": "", "delta_db": 0.0}
+        self._selected_plane = name
+        self._doc_to_form()
+
+    def _move_stage(self, row, delta: int) -> None:
+        """Swap a stage one place earlier/later. The source (index 0) is fixed and nothing
+        can move into its slot. `from`/operating are recomputed from the new order."""
+        try:
+            self._doc = self._read_form(strict=False)
+        except ValueError:
+            pass
+        planes = (self._doc or {}).get("chain", {}).get("planes") or {}
+        names = list(planes.keys())
+        name = row["name"].text().strip()
+        if name not in names:
+            return
+        i = names.index(name); j = i + delta
+        if i == 0 or j < 1 or j >= len(names):    # keep the source first; stay in range
+            return
+        names[i], names[j] = names[j], names[i]
+        self._doc["chain"]["planes"] = {nm: planes[nm] for nm in names}
+        self._selected_plane = name
+        self._doc_to_form()
 
     def _first_curve_points(self, plane: str):
         """The first signal's measured points on `plane`, for a stage minicurve."""
@@ -1358,11 +1438,12 @@ class CalibrationPanel(QWidget):
                     f"<span style='color:{Palette.TEXT};font-weight:600;'>Stage detail</span>"
                     f" <span style='color:{Palette.TEXT_FAINT};'>— pick a stage above</span>")
             else:
-                derived = row["type"].currentText() == "derived"
                 idx = rows.index(row)
-                knd = "Source" if idx == 0 else ("Passive" if derived else "Measured")
-                desc = ("loss evaluated at each signal's frequency" if derived
-                        else "measured gain→power on this box")
+                role = row.get("role", "measured")
+                knd = ("Source" if idx == 0 else
+                       "Measured" if role == "measured" else "Passive")
+                desc = ("measured gain→power on this box" if role == "measured"
+                        else "loss evaluated at each signal's frequency")
                 self._detail_hdr.setText(
                     f"<span style='color:{Palette.TEXT};font-weight:600;'>{knd} · {name}</span>"
                     f" <span style='color:{Palette.TEXT_FAINT};'>— {desc}</span>")
@@ -1371,45 +1452,58 @@ class CalibrationPanel(QWidget):
             ph.setStyleSheet(f"color:{Palette.TEXT_FAINT};font-size:12px;padding:16px 0;")
             self._detail_body.addWidget(ph)
             return
-        if row["type"].currentText() == "derived":
-            self._detail_passive(row)
-        else:
+        if row.get("role", "measured") == "measured":
             self._detail_measured(row)
+        else:
+            self._detail_passive(row)
         self._detail_body.addWidget(self._stage_advanced(row))
 
     def _detail_passive(self, row) -> None:
-        comp = row["comp"].currentData()
-        table = self._comp_table(comp)
-        markers = self._signal_markers()
-        if comp:
-            plot = _FreqResponsePlot()
-            plot.set_data(table, markers)
-            self._detail_body.addWidget(plot)
-            leg = QHBoxLayout(); leg.setSpacing(16)
-            sw = QLabel("● VNA sweep (measured points)")
-            sw.setStyleSheet(f"font-size:11px;color:{Palette.ACCENT};")
-            leg.addWidget(sw)
-            for label, freq, color in markers:
-                db = _interp_db(table, freq)
-                l = QLabel(f"{label} → {db:+.2f} dB")
-                l.setStyleSheet(f"font-size:11px;color:{color};")
-                leg.addWidget(l)
-            leg.addStretch(1)
-            self._detail_body.addLayout(leg)
-        pr = QHBoxLayout()
-        lab = QLabel("Component"); lab.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
-        pr.addWidget(lab)
-        row["comp"].setMinimumWidth(220)
-        pr.addWidget(row["comp"], 1)
-        self._detail_body.addLayout(pr)
-        if not comp:
+        """Detail for a passive stage. A component stage shows its library part read-only —
+        its Δ dB(f) sweep plotted, with an “edit in library” shortcut — because to change a
+        stage's part you add a new stage and drop the old one. A constant stage shows an
+        editable Δ dB field."""
+        if row.get("role") == "component":
+            comp = row.get("comp_id", "")
+            table = self._comp_table(comp)
+            markers = self._signal_markers()
+            if comp and table:
+                plot = _FreqResponsePlot()
+                plot.set_data(table, markers)
+                self._detail_body.addWidget(plot)
+                leg = QHBoxLayout(); leg.setSpacing(16)
+                sw = QLabel("● VNA sweep (measured points)")
+                sw.setStyleSheet(f"font-size:11px;color:{Palette.ACCENT};")
+                leg.addWidget(sw)
+                for label, freq, color in markers:
+                    db = _interp_db(table, freq)
+                    l = QLabel(f"{label} → {db:+.2f} dB")
+                    l.setStyleSheet(f"font-size:11px;color:{color};")
+                    leg.addWidget(l)
+                leg.addStretch(1)
+                self._detail_body.addLayout(leg)
+            pr = QHBoxLayout()
+            lab = QLabel("Component")
+            lab.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+            val = QLabel(comp or "(missing component)")
+            val.setStyleSheet(f"font-size:12px;font-weight:600;color:{Palette.TEXT};")
+            edit = QPushButton("Edit in library…")
+            edit.setStyleSheet("font-size:11px;")
+            edit.clicked.connect(lambda _=False, c=comp: self._open_components(c or None))
+            pr.addWidget(lab); pr.addWidget(val); pr.addStretch(1); pr.addWidget(edit)
+            self._detail_body.addLayout(pr)
+            note = QLabel("Characterized once in the Component library · shared across the "
+                          "fleet. To swap the part, add a new stage and remove this one — "
+                          "then drag it into place.")
+        else:                                          # constant Δ dB stage
             dr = QHBoxLayout()
-            dl = QLabel("Constant Δ dB"); dl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+            dl = QLabel("Constant Δ dB")
+            dl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
             dr.addWidget(dl); row["delta"].setFixedWidth(90); dr.addWidget(row["delta"])
             dr.addStretch(1)
             self._detail_body.addLayout(dr)
-        note = QLabel("Characterized in the Component library · shared across the fleet. "
-                      "Change it here to re-wire this unit — no numbers to retype.")
+            note = QLabel("A fixed, frequency-independent offset from the previous stage "
+                          "(negative = loss, positive = gain).")
         note.setWordWrap(True)
         note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
         self._detail_body.addWidget(note)
@@ -1453,8 +1547,10 @@ class CalibrationPanel(QWidget):
             self._detail_body.addWidget(box)
 
     def _stage_advanced(self, row) -> QWidget:
-        """Topology controls for the selected stage: id, type, parent, quantity, and the
-        set-operating / remove actions — the bits the chain flow doesn't show inline."""
+        """The bits the chain flow doesn't show inline: the stage's id (renaming it
+        re-points everything that references it) and a remove action. The stage's role,
+        parent and operating status are all implied by its position in the linear chain,
+        so there's nothing else to set here."""
         frame = QFrame(); frame.setObjectName("adv")
         frame.setStyleSheet(f"#adv {{ border-top:1px solid {Palette.BORDER}; }}")
         v = QVBoxLayout(frame); v.setContentsMargins(0, 8, 0, 0); v.setSpacing(6)
@@ -1464,23 +1560,13 @@ class CalibrationPanel(QWidget):
         v.addWidget(cap)
         form = QFormLayout(); form.setContentsMargins(0, 0, 0, 0)
         form.addRow("Plane id", row["name"])
-        form.addRow("Type", row["type"])
-        if row["type"].currentText() == "derived":
-            form.addRow(row["from_lbl"], row["from"])
-            row["from_lbl"].setText("Parent plane")
-        form.addRow("Quantity", row["quantity"])
         v.addLayout(form)
         actions = QHBoxLayout()
-        name = row["name"].text().strip()
-        setop = QPushButton("Set as operating plane")
-        setop.setToolTip("Make --power read at this plane (e.g. EIRP at the antenna).")
-        setop.clicked.connect(lambda: self._f["operating"].setCurrentText(name))
-        setop.setEnabled(bool(name) and name != self._f["operating"].currentText())
         rm = QPushButton("Remove stage")
         # NB: clicked emits a `checked` bool — absorb it with a leading throwaway
         # parameter, or it clobbers the r=row default (r would become False).
         rm.clicked.connect(lambda _=False, r=row: self._remove_plane(r))
-        actions.addWidget(setop); actions.addStretch(1); actions.addWidget(rm)
+        actions.addStretch(1); actions.addWidget(rm)
         v.addLayout(actions)
         return frame
 
@@ -1546,60 +1632,40 @@ class CalibrationPanel(QWidget):
         v.addLayout(foot)
         return card
 
-    def _fill_comp_combo(self, combo: QComboBox, selected: Optional[str]) -> None:
-        """Populate a plane row's component picker: a 'constant Δ dB' sentinel plus every
-        catalogued component, pre-selecting `selected`."""
-        combo.blockSignals(True)
-        combo.clear()
-        combo.addItem("— constant Δ dB —", "")
-        for cid in self._catalog.ids():
-            spec = self._catalog.get(cid) or {}
-            combo.addItem(f"{cid}  ·  {spec.get('kind', '')}", cid)
-        if selected:
-            idx = combo.findData(selected)
-            if idx < 0:                          # referenced but not in the local catalog
-                combo.addItem(f"{selected}  ·  (missing)", selected)
-                idx = combo.count() - 1
-            combo.setCurrentIndex(idx)
-        combo.blockSignals(False)
-
-    def _sync_plane_row(self, row) -> None:
-        """Show the right controls for a plane row: nothing extra for measured; for
-        derived, the parent + either a component picker or the constant Δ field."""
-        derived = row["type"].currentText() == "derived"
-        uses_comp = bool(row["comp"].currentData())
-        row["from_lbl"].setVisible(derived)
-        row["from"].setVisible(derived)
-        row["comp"].setVisible(derived)
-        row["delta"].setVisible(derived and not uses_comp)
-
     def _read_planes(self, strict: bool) -> dict:
+        """Build the planes dict from the ordered stage rows. The chain is LINEAR: each
+        derived stage's parent (`from`) is the stage immediately before it, so two stages
+        can never share a parent and there's no dangling reference. Preserves any stored
+        description/quantity (the editor no longer surfaces quantity, but doesn't drop
+        it either)."""
         prev = ((self._doc or {}).get("chain") or {}).get("planes") or {}
         planes: dict = {}
+        prev_name: Optional[str] = None
         for row in self._f.get("planes", []):
             name = row["name"].text().strip()
             if not name:
                 continue
-            if row["type"].currentText() == "measured":
+            role = row.get("role", "measured")
+            if role == "measured":
                 p = {"type": "measured"}
-            else:
-                p = {"type": "derived", "from": row["from"].currentText()}
-                comp = row["comp"].currentData()
-                if comp:
-                    p["component"] = comp             # a library component supplies Δ dB(f)
+            elif role == "component":
+                p = {"type": "derived", "from": prev_name or "", "component": row.get("comp_id", "")}
+            else:                                     # constant Δ dB
+                p = {"type": "derived", "from": prev_name or ""}
+                d = row["delta"].text().strip()
+                if d:
+                    p["delta_db"] = _to_float(d, f"stage '{name}' Δ dB")
+                elif strict:
+                    raise ValueError(f"stage '{name}' has no Δ dB")
                 else:
-                    d = row["delta"].text().strip()
-                    if d:
-                        p["delta_db"] = _to_float(d, f"plane '{name}' Δ dB")
-                    elif strict:
-                        raise ValueError(f"derived plane '{name}' has no Δ dB or component")
-                    else:
-                        p["delta_db"] = 0.0
-            if row["quantity"].text().strip():
-                p["quantity"] = row["quantity"].text().strip()
-            if isinstance(prev.get(name), dict) and prev[name].get("description"):
-                p["description"] = prev[name]["description"]
+                    p["delta_db"] = 0.0
+            old = prev.get(name)
+            if isinstance(old, dict):
+                for k in ("description", "quantity"):
+                    if old.get(k):
+                        p[k] = old[k]
             planes[name] = p
+            prev_name = name
         return planes
 
     def _remove_plane(self, row) -> None:
@@ -1742,9 +1808,12 @@ class CalibrationPanel(QWidget):
         gl = chain.setdefault("gain_limits", {})
         self._set_num(gl, "min_gain_db", self._f["min_gain"].text(), "min gain", strict)
         self._set_num(gl, "max_gain_db", self._f["max_gain"].text(), "max gain", strict)
-        if self._f["operating"].currentText():
-            chain["operating_plane"] = self._f["operating"].currentText()
         chain["planes"] = self._read_planes(strict)
+        # The operating plane is ALWAYS the last stage in the chain (that's where --power
+        # is delivered), so it's derived from the order, never set by hand.
+        names = list(chain["planes"].keys())
+        if names:
+            chain["operating_plane"] = names[-1]
 
         limits = []
         for row in self._f.get("limits", []):

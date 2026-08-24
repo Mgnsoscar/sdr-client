@@ -310,12 +310,13 @@ def test_add_and_remove_plane(monkeypatch):
 
 
 def test_derived_plane_without_delta_blocks_save():
+    # A constant Δ dB stage with no value entered can't be saved strictly.
     p = CalibrationPanel("u", FakeHub(FakeClient()))
-    p._set_doc(_doc())
-    row = p._f["planes"][0]
-    row["type"].setCurrentText("derived")               # sdr_output → derived, no Δ
-    # the type change triggers a rebuild; grab the (rebuilt) row and clear Δ
-    row = p._f["planes"][0]
+    doc = _doc()
+    doc["chain"]["planes"]["pad"] = {"type": "derived", "from": "sdr_output"}
+    p._set_doc(doc)
+    row = next(r for r in p._f["planes"] if r["name"].text() == "pad")
+    assert row["role"] == "constant"
     row["delta"].setText("")
     with pytest.raises(ValueError):
         p._read_form(strict=True)
@@ -625,7 +626,9 @@ def test_chain_renders_a_stage_per_plane():
     _seed_catalog(p)
     p._set_doc(_v2_doc())
     stages = [p._chain_row.itemAt(i).widget() for i in range(p._chain_row.count())]
-    cards = [w for w in stages if isinstance(w, _ClickCard)]
+    # every stage is a card; the trailing dashed "+ Add stage" tile is one too.
+    cards = [w for w in stages if isinstance(w, _ClickCard)
+             and w.objectName() != "addstage"]
     assert len(cards) == 4                       # one stage per plane
 
 
