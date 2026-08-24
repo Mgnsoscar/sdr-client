@@ -41,6 +41,10 @@ from .theme import Palette
 CAL_NAME = "calibration.json"
 CAL_CAPABILITY = "calibration"
 CAL_VALIDATE_CAPABILITY = "cal-validate"   # agent >= 1.1.9 dry-run endpoint
+CAL_COMPONENTS_CAPABILITY = "calibration-components"   # agent >= 1.2.0 (v2 component refs)
+_COMPONENTS_NEEDS_NEWER = (
+    "this unit's agent is too old for component-based calibration (needs 1.2.0+). "
+    "Update the agent, or use a constant Δ dB on the passive planes.")
 
 # When the unit is simply uncalibrated, the /calibration route answers 404 with this
 # detail. A generic "Not Found" 404 instead means the route itself is missing — i.e.
@@ -1335,7 +1339,23 @@ class CalibrationPanel(QWidget):
         if self._doc is None:
             self._set_status("nothing to save", kind="error")
             return
+        if self._blocks_on_components():
+            return
         self._send(json.dumps(self._doc).encode("utf-8"))
+
+    @staticmethod
+    def _doc_uses_components(doc) -> bool:
+        return any(isinstance(p, dict) and p.get("component")
+                   for p in (((doc or {}).get("chain") or {}).get("planes") or {}).values())
+
+    def _blocks_on_components(self) -> bool:
+        """Guard: don't push a component-referencing document to an agent that can't
+        resolve it (it would reject the derived plane confusingly). Returns True (and
+        shows why) when blocked."""
+        if self._doc_uses_components(self._doc) and not self._supports(CAL_COMPONENTS_CAPABILITY):
+            self._set_status(_COMPONENTS_NEEDS_NEWER, kind="error")
+            return True
+        return False
 
     def _supports(self, capability: str) -> bool:
         try:
@@ -1374,6 +1394,8 @@ class CalibrationPanel(QWidget):
                 f"{len(issues)} local issue(s) found — see above" if issues else
                 "no local issues found (agent too old to dry-run on the unit)",
                 kind="error" if issues else "warn")
+            return
+        if self._blocks_on_components():
             return
         self._set_status("validating (dry run — not saving)…")
         doc = self._doc

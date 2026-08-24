@@ -108,3 +108,23 @@ def test_missing_center_freq_is_omitted(tmp_path):
     p._set_doc(doc)
     p._tabs.setCurrentIndex(0)
     assert "center_freq_hz" not in p._read_form(strict=True)["signals"]["mock"]
+
+
+def test_save_blocked_when_agent_lacks_component_capability(tmp_path):
+    # FakeClient.supports() is False for everything → the agent can't resolve component
+    # refs, so Save must refuse with a clear "update the agent" message, not push a doc
+    # the unit would reject confusingly.
+    p = _panel(tmp_path)
+    p._set_doc(_doc({"type": "derived", "from": "amplifier_output", "component": "cable_a"}))
+    p._tabs.setCurrentIndex(0)
+    p._on_save()
+    assert "too old" in p._status.text().lower()
+
+
+def test_constant_delta_not_blocked_without_capability(tmp_path):
+    p = _panel(tmp_path)
+    doc = _doc({"type": "derived", "from": "amplifier_output", "delta_db": -1.8})
+    doc["chain"]["planes"]["antenna_eirp"] = {"type": "derived", "from": "cable_output",
+                                              "delta_db": 6.0, "quantity": "EIRP"}
+    p._set_doc(doc)
+    assert p._blocks_on_components() is False        # no component ref → never blocked
