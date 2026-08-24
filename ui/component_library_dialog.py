@@ -1,14 +1,20 @@
 """
-ComponentLibraryDialog — author the shared RF component catalog (calibration v2).
+Component library (calibration v2) — author the shared RF component catalog.
 
 Characterize a cable / antenna / pad once: an id, a kind, and a signed
-Δ dB-vs-frequency table (a VNA sweep — negative = loss, positive = gain). The
-catalog is the client's canonical library (state.ComponentCatalog); a unit's chain
-references a component by id, and the catalog is uploaded to each unit so the agent
-resolves it. See the agent's docs/calibration-v2.md.
+Δ dB-vs-frequency table (a VNA sweep — negative = loss, positive = gain). The catalog
+is the client's canonical library (state.ComponentCatalog); a unit's chain references a
+component by id, and the catalog is uploaded to each unit so the agent resolves it. See
+the agent's docs/calibration-v2.md.
 
-Reuses the calibration curve grid (paste, undo/redo, single in-focus cell) and the
-sparkline, so editing a component feels like editing a measured curve.
+Two hosts, one editor:
+  • ``ComponentLibraryPanel`` — the editing widget. It lives fleet-wide in the Library
+    tab, so parts can be characterized with NO unit connected (the catalog is a local
+    file). Reuses the calibration curve grid (paste, undo/redo, single in-focus cell)
+    and the Δ-dB sparkline, so editing a component feels like editing a measured curve.
+  • ``ComponentLibraryDialog`` — a thin dialog wrapper opened from a unit's Calibration
+    tab as a shortcut; it exposes ``renames`` so the caller can re-point that unit's
+    chain when a component is renamed in place.
 """
 from __future__ import annotations
 
@@ -29,14 +35,16 @@ from .theme import Palette
 _KIND_LABEL = {"cable": "Cable", "antenna": "Antenna", "pad": "Pad"}
 
 
-class ComponentLibraryDialog(QDialog):
-    def __init__(self, catalog: ComponentCatalog, parent=None, select: Optional[str] = None):
+class ComponentLibraryPanel(QWidget):
+    """The component-catalog editor: a list on the left, an id/kind/description + Δ dB
+    grid on the right. Edits persist straight to the local catalog file, so it works
+    with no unit connected."""
+    def __init__(self, catalog: ComponentCatalog, parent=None,
+                 select: Optional[str] = None):
         super().__init__(parent)
         self._cat = catalog
         self._current: Optional[str] = None       # id being edited (None = a new one)
-        self.renames: dict = {}                    # old id → new id, applied by the caller
-        self.setWindowTitle("Component library")
-        self.setMinimumSize(720, 460)
+        self.renames: dict = {}                    # old id → new id, read by the caller
         self._build()
         self._reload_list()
         if select and self._select_id(select):
@@ -46,15 +54,27 @@ class ComponentLibraryDialog(QDialog):
         else:
             self._new()
 
+    def on_shown(self) -> None:
+        """Re-read the catalog (another surface may have changed it) and refresh the
+        list, keeping the current selection when it still exists."""
+        self._cat.load()
+        keep = self._current
+        self._reload_list()
+        if not (keep and self._select_id(keep)):
+            if self._list.count():
+                self._list.setCurrentRow(0)
+            else:
+                self._new()
+
     # ── layout ────────────────────────────────────────────────────────────────
     def _build(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 14, 16, 12)
+        outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(10)
 
         intro = QLabel("Characterize a cable, antenna or pad once — as a signed "
                        "Δ dB vs frequency table (negative = loss). Every unit reuses it; "
-                       "pick it in the unit's hardware chain.")
+                       "pick it in the unit's hardware chain. No unit connection needed.")
         intro.setWordWrap(True)
         intro.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_MUTED};")
         outer.addWidget(intro)
@@ -70,8 +90,8 @@ class ComponentLibraryDialog(QDialog):
         newb = QPushButton("New"); newb.clicked.connect(self._new)
         delb = QPushButton("Delete"); delb.setStyleSheet(f"color: {Palette.CRASH};")
         delb.clicked.connect(self._delete)
-        # These must never become the dialog's Enter-default (that's Save, below), or
-        # pressing Enter in a field would fire them instead of saving.
+        # These must never become a hosting dialog's Enter-default (that's Save, below),
+        # or pressing Enter in a field would fire them instead of saving.
         newb.setAutoDefault(False); delb.setAutoDefault(False)
         row.addWidget(newb); row.addWidget(delb); row.addStretch(1)
         left.addLayout(row)
@@ -82,15 +102,15 @@ class ComponentLibraryDialog(QDialog):
         form = QFormLayout(); form.setSpacing(8)
         self._id = QLineEdit(); self._id.setPlaceholderText("e.g. cable_lmr240_3m_a")
         self._id.setToolTip("The component's stable id, referenced by units' chains. "
-                            "Renaming it here re-points this unit's chain automatically.")
+                            "Renaming it here re-points the chain of the unit you opened "
+                            "this from.")
         self._kind = QComboBox(); self._kind.setEditable(True)
         self._kind.addItems([_KIND_LABEL[k] for k in KINDS])
         self._kind.setToolTip("A free-text grouping label (cable / antenna / pad / "
                               "anything). It only groups the library — the maths ignores it.")
         self._desc = QLineEdit(); self._desc.setPlaceholderText("optional — e.g. 3 m LMR-240, VNA 2026-08")
-        # Enter in any of the header fields saves the component (rather than triggering
-        # the dialog's default button — which used to be "New", silently discarding the
-        # edit into a fresh blank component).
+        # Enter in any header field saves the component (rather than triggering a hosting
+        # dialog's default button — which used to be "New", silently discarding the edit).
         self._id.returnPressed.connect(self._save)
         self._desc.returnPressed.connect(self._save)
         if self._kind.lineEdit() is not None:
@@ -129,10 +149,6 @@ class ComponentLibraryDialog(QDialog):
         self._status = QLabel(""); self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         right.addWidget(self._status)
         body.addLayout(right, 1)
-
-        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        bb.rejected.connect(self.reject); bb.accepted.connect(self.accept)
-        outer.addWidget(bb)
 
     # ── list ────────────────────────────────────────────────────────────────
     def _reload_list(self) -> None:
@@ -255,3 +271,24 @@ class ComponentLibraryDialog(QDialog):
         self._status.setStyleSheet(
             f"font-size: 11px; color: {Palette.CRASH if error else Palette.TEXT_FAINT};")
         self._status.setText(text)
+
+
+class ComponentLibraryDialog(QDialog):
+    """A thin dialog wrapper around ComponentLibraryPanel, opened from a unit's
+    Calibration tab. ``renames`` (delegated to the panel) lets the caller re-point that
+    unit's chain when a component is renamed in place."""
+    def __init__(self, catalog: ComponentCatalog, parent=None, select: Optional[str] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Component library")
+        self.setMinimumSize(720, 460)
+        self._panel = ComponentLibraryPanel(catalog, select=select)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(16, 14, 16, 12)
+        v.addWidget(self._panel, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(self.reject); bb.accepted.connect(self.accept)
+        v.addWidget(bb)
+
+    @property
+    def renames(self) -> dict:
+        return self._panel.renames

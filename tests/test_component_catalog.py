@@ -135,3 +135,13 @@ def test_load_skips_a_broken_component(tmp_path):
                  ' "bad": {"kind":"cable","delta_db_by_freq":[]}}}', encoding="utf-8")
     c = ComponentCatalog(path=p)
     assert c.get("ok") is not None and c.get("bad") is None
+
+
+def test_fleet_shares_one_catalog():
+    # The fleet hands out ONE shared catalog instance (created lazily), so the Library
+    # tab and every unit's calibration panel read/write the same parts. No Qt, no unit.
+    from api.fleet import Fleet
+    f = Fleet()
+    a = f.component_catalog()
+    b = f.component_catalog()
+    assert a is b

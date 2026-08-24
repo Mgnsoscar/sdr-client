@@ -29,6 +29,7 @@ class Fleet:
     def __init__(self, max_workers: int = 16):
         self._units: Dict[str, AgentClient] = {}
         self._library = None          # a LibraryClient-shaped object, or None
+        self._component_catalog = None  # the one shared RF-component library (lazy)
         self._max_workers = max_workers
 
     # ── Registry ────────────────────────────────────────────────────────────────
@@ -45,6 +46,17 @@ class Fleet:
         The Library tab uses this so it, the reused panels (via the LibraryClient),
         and the fleet all read and write the same store instance."""
         return self._library.store if self._library is not None else None
+
+    def component_catalog(self):
+        """The one shared RF-component library (calibration v2), created on first use.
+        The Library tab's Components sub-tab and every unit's calibration panel read and
+        write THIS instance, so a part characterized in one place is immediately known
+        everywhere and edits are never split across stale copies. It is a local file, so
+        it needs no unit connection."""
+        if self._component_catalog is None:
+            from state import ComponentCatalog
+            self._component_catalog = ComponentCatalog()
+        return self._component_catalog
 
     def add(self, client: AgentClient) -> None:
         # Key by hostname, which is stable for the client's lifetime. unit_id is

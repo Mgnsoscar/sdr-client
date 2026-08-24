@@ -864,6 +864,38 @@ def test_remove_signal_from_stage_cascades_downstream(monkeypatch):
     assert set(curves) == {"sdr_output"}                 # amp1 AND downstream amp2 removed
 
 
+def test_calibration_panel_binds_fleet_shared_catalog():
+    # A calibration panel uses the fleet's ONE shared component catalog, so a part
+    # characterized in the Library tab is the same instance the chain pickers see.
+    from api.fleet import Fleet
+
+    class HubWithFleet(QObject):
+        task_done = pyqtSignal(str, object)
+
+        def __init__(self, fleet):
+            super().__init__()
+            self.fleet = fleet
+
+    fleet = Fleet()
+    p = CalibrationPanel("u", HubWithFleet(fleet))
+    assert p._catalog is fleet.component_catalog()
+
+
+def test_component_library_panel_characterizes_with_no_unit(tmp_path):
+    # The library editor is a standalone panel: characterizing a part needs no unit — it
+    # writes straight to the local catalog file.
+    from state import ComponentCatalog
+    from ui.component_library_dialog import ComponentLibraryPanel
+    cat = ComponentCatalog(path=tmp_path / "components.json")
+    panel = ComponentLibraryPanel(cat)
+    panel._new()
+    panel._id.setText("ant_x")
+    panel._kind.setCurrentText("Antenna")
+    panel._table.set_rows([[1.2e9, 5.0], [1.6e9, 6.0]])
+    panel._save()
+    assert "ant_x" in ComponentCatalog(path=tmp_path / "components.json").ids()  # persisted
+
+
 def test_delta_sparkline_colours_by_sign():
     # A component's Δ dB curve is coloured by net sign (gain=accent, loss=red), NOT by
     # monotonicity — an antenna/cable that rolls off with frequency is still fine.

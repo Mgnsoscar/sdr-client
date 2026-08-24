@@ -39,6 +39,7 @@ from state import (
     LibraryStore, PlanStore, ScheduleStore, pull_library, pull_everything,
     diff_state, UnitSnapshot,
 )
+from .component_library_dialog import ComponentLibraryPanel
 from .library_panels import LibraryTasksPanel
 from .plans_tab import PlansTab
 from .qt_adapter import DataHub
@@ -48,7 +49,7 @@ from .theme import Palette
 
 
 class LibraryTab(QWidget):
-    SUBTABS = ["Tasks", "Sequences", "Scripts", "Plans"]
+    SUBTABS = ["Tasks", "Sequences", "Scripts", "Plans", "Components"]
 
     def __init__(self, hub: DataHub, parent=None):
         super().__init__(parent)
@@ -179,10 +180,14 @@ class LibraryTab(QWidget):
                                                can_edit=True, can_run=False)
         self._scripts_panel = ScriptsPanel(LIBRARY_HOST, self.hub)
         self._plans_panel = PlansTab(self.hub.fleet, self.hub)
+        # The RF-component library is fleet-wide (one local catalog, deployed per unit on
+        # calibration save) — so it lives here, characterizable with no unit connected.
+        self._components_panel = ComponentLibraryPanel(self.hub.fleet.component_catalog())
         self._stack.addWidget(self._tasks_panel)        # 0 Tasks
         self._stack.addWidget(self._sequences_panel)    # 1 Sequences
         self._stack.addWidget(self._scripts_panel)      # 2 Scripts
         self._stack.addWidget(self._plans_panel)        # 3 Plans
+        self._stack.addWidget(self._components_panel)   # 4 Components
         outer.addWidget(self._stack, stretch=1)
         self._set_active_type(self._active_type)   # seed the type views + buttons
         self._select_subtab(0)
@@ -203,8 +208,9 @@ class LibraryTab(QWidget):
         self._stack.setCurrentIndex(idx)
         for i, b in enumerate(self._subtab_buttons):
             b.setChecked(i == idx)
-        # Plans are cross-unit; the type selector only applies to the definition tabs.
-        self._type_bar.setVisible(self.SUBTABS[idx] != "Plans")
+        # Plans are cross-unit and Components are fleet-wide; the unit-type selector only
+        # applies to the per-type definition tabs (Tasks / Sequences / Scripts).
+        self._type_bar.setVisible(self.SUBTABS[idx] not in ("Plans", "Components"))
         w = self._stack.currentWidget()
         if hasattr(w, "on_shown"):
             w.on_shown()

@@ -883,8 +883,16 @@ class CalibrationPanel(QWidget):
         # yet have data there (so the user can enter points). Reset on a fresh document.
         self._stage_extra: dict = {}
         self._drag: Optional[dict] = None       # in-flight chain drag state (see below)
-        from state import ComponentCatalog
-        self._catalog = ComponentCatalog()      # the client's canonical component library
+        # The one fleet-wide component library, shared with the Library tab's Components
+        # sub-tab so a part characterized anywhere is immediately available here. Falls
+        # back to a private catalog only when the fleet can't supply one (test fakes).
+        fleet = getattr(self.hub, "fleet", None)
+        getter = getattr(fleet, "component_catalog", None)
+        if callable(getter):
+            self._catalog = getter()
+        else:
+            from state import ComponentCatalog
+            self._catalog = ComponentCatalog()
         self._components_synced = False          # merged this unit's catalog on first load
         self._build()
         self.hub.task_done.connect(self._on_task_done)

@@ -125,18 +125,31 @@ def test_constant_delta_not_blocked_without_capability(tmp_path):
     assert p._blocks_on_components() is False        # no component ref → never blocked
 
 
-def test_component_dialog_enter_saves_not_new(tmp_path):
-    # Pressing Enter in a header field must SAVE the component being edited — not fire the
-    # dialog's default button (which used to be "New", discarding the edit into a fresh
-    # blank component).
+def test_component_panel_enter_saves_not_new(tmp_path):
+    # Pressing Enter in a header field must SAVE the component being edited — not fire a
+    # hosting dialog's default button (which used to be "New", discarding the edit into a
+    # fresh blank component).
+    from ui.component_library_dialog import ComponentLibraryPanel
+    cat = ComponentCatalog(path=tmp_path / "components.json")
+    panel = ComponentLibraryPanel(cat)
+    panel._new()
+    panel._id.setText("cable_x")
+    panel._table.set_rows([[1.0e9, -2.0]])
+    panel._desc.returnPressed.emit()                 # Enter in the description field
+    assert "cable_x" in cat.ids()                    # saved…
+    assert panel._current == "cable_x"               # …and still the current component
+    # the New/default button must not be the Enter-default that stole the keystroke
+    assert panel._save_btn.isDefault()
+
+
+def test_component_dialog_delegates_renames(tmp_path):
+    # The per-unit dialog still exposes the panel's renames so the caller can re-point
+    # that unit's chain.
     from ui.component_library_dialog import ComponentLibraryDialog
     cat = ComponentCatalog(path=tmp_path / "components.json")
-    dlg = ComponentLibraryDialog(cat)
-    dlg._new()
-    dlg._id.setText("cable_x")
-    dlg._table.set_rows([[1.0e9, -2.0]])
-    dlg._desc.returnPressed.emit()                   # Enter in the description field
-    assert "cable_x" in cat.ids()                    # saved…
-    assert dlg._current == "cable_x"                 # …and still the current component
-    # the New/default button must not be the Enter-default that stole the keystroke
-    assert dlg._save_btn.isDefault()
+    cat.put("cable_a", "cable", [[1e9, -2.0]])
+    dlg = ComponentLibraryDialog(cat, select="cable_a")
+    dlg._panel._id.setText("cable_b")
+    dlg._panel._save()
+    assert dlg.renames.get("cable_a") == "cable_b"
+    assert "cable_b" in cat.ids()
