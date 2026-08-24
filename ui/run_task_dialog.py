@@ -55,6 +55,7 @@ class RunTaskDialog(QDialog):
         # Per-unit power calibration: the task's opt-in signal (env) and the resolved
         # bounds for it, so the --power field shows this unit's real min/max.
         self._cal_signal_id: Optional[str] = None
+        self._script_cal_signal: Optional[str] = None   # the SCRIPT's declared signal
         self._cal_bounds = None
         self._params_ready = False
         self._cal_ready = False
@@ -180,6 +181,7 @@ class RunTaskDialog(QDialog):
             self._params_inflight = False
             self._params_ready = True
             self._param_specs = (result or {}).get("params", [])
+            self._script_cal_signal = (result or {}).get("calibration_signal")
             self._maybe_build()
 
     # ── Parse the task's command → interpreter + script + args ──────────────────
@@ -248,8 +250,10 @@ class RunTaskDialog(QDialog):
         # Open in the mode the deployed command used (relative if it set --gain).
         mode = "relative" if any(a in ("-Gain", "--gain") for a in self._current_args) else None
         from .param_form import calibration_caution
-        caution = calibration_caution(bool(self._cal_signal_id), targeted=True,
-                                      calibrated=self._cal_bounds is not None)
+        caution = calibration_caution(
+            bool(self._cal_signal_id), targeted=True,
+            calibrated=self._cal_bounds is not None,
+            script_calibratable=bool(self._script_cal_signal or self._cal_signal_id))
         self._form.set_params(self._param_specs, cal_bounds=self._cal_bounds,
                               absolute_allowed=True, default_power_mode=mode,
                               caution=caution)

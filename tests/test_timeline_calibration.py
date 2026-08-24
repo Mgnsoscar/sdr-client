@@ -88,3 +88,15 @@ def test_library_host_is_not_a_target_unit():
     assert t.cal_bounds_for_task("mocktask") is None
     assert t.has_cal_signal("mocktask") is True         # the task still opts into calibration
     assert t.has_cal_signal("plain") is False
+
+
+def test_script_calibratable_reflects_declared_signal():
+    # A task's SCRIPT declaring a calibration signal is what makes a missing task signal a
+    # real gap; a script that declares none takes raw power by design (no caution).
+    t = TimelineEditor()
+    t.set_task_commands({"tx": ["python3", "tx.py"]})
+    assert t.script_calibratable("tx") is True           # unknown (params unfetched) → assume yes
+    t._script_cal_signals["tx.py"] = "mock"
+    assert t.script_calibratable("tx") is True            # script declares a signal
+    t._script_cal_signals["tx.py"] = None
+    assert t.script_calibratable("tx") is False           # script declares none → raw by design

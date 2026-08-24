@@ -221,19 +221,28 @@ def apply_power_hint(spec: dict, agg) -> dict:
     return out
 
 
-def calibration_caution(has_signal: bool, targeted: bool, calibrated: bool):
-    """The 'no safeguards in place' caution for a power/gain form, or None when
-    calibration has it covered. Shown so an operator knows when a value is raw:
-      • ``has_signal`` — the task opts into calibration (sets SDR_CAL_SIGNAL_ID);
+def calibration_caution(has_signal: bool, targeted: bool, calibrated: bool,
+                        script_calibratable: bool = True):
+    """The 'no safeguards in place' caution for a power/gain form, or None when there's
+    nothing to warn about. Shown so an operator knows when a value goes out raw:
+      • ``script_calibratable`` — the SCRIPT declares a calibration signal, i.e. its
+        power/gain is meant to be calibrated. When it doesn't, power/gain are raw by
+        design (bounded only by the script's own schema) and there's no missing
+        safeguard, so no caution.
+      • ``has_signal`` — the TASK opts into calibration (sets SDR_CAL_SIGNAL_ID);
       • ``targeted``   — a specific unit is in play (a run/tune, or a plan/sequence
         pointed at a unit) as opposed to open Library authoring;
       • ``calibrated`` — that unit is calibrated for the signal (bounds available).
-    A task with no signal is always raw. A targeted-but-uncalibrated unit is raw too.
-    Open Library authoring with a signal is fine — limits apply once it hits a
-    calibrated unit (and a deploy will flag anything out of range)."""
+    A calibratable script whose task hasn't been assigned a signal is raw everywhere; a
+    targeted-but-uncalibrated unit is raw too. Open Library authoring with a signal is
+    fine — limits apply once it hits a calibrated unit (a deploy flags anything out of
+    range)."""
+    if not script_calibratable:
+        return None
     if not has_signal:
-        return ("This task has no calibration signal, so power/gain go out RAW — no "
-                "calibration limits protect the hardware. Set them carefully.")
+        return ("This task's script supports calibrated power, but no calibration signal "
+                "is assigned — power/gain go out RAW, with no limits protecting the "
+                "hardware. Assign the signal (edit the task) to enable the limits.")
     if targeted and not calibrated:
         return ("This unit isn't calibrated for this signal, so no calibration limits "
                 "apply — power/gain go out raw. Set them carefully.")

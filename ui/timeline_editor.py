@@ -1179,6 +1179,7 @@ class StepEditorDialog(QDialog):
                 self._params_status.setText(f"could not load parameters: {result}")
             return
         self._editor.param_cache()[script] = (result or {}).get("params", [])
+        self._editor._script_cal_signals[script] = (result or {}).get("calibration_signal")
         if script == self._current_script:
             self._build_form(script)
 
@@ -1195,7 +1196,8 @@ class StepEditorDialog(QDialog):
         # unit isn't calibrated for it — either way power/gain go out raw.
         from .param_form import calibration_caution
         caution = calibration_caution(self._editor.has_cal_signal(task),
-                                      targeted=abs_allowed, calibrated=bounds is not None)
+                                      targeted=abs_allowed, calibrated=bounds is not None,
+                                      script_calibratable=self._editor.script_calibratable(task))
         prefill = self._pending_prefill or self._src.args or []
         mode = "relative" if any(a in ("-Gain", "--gain") for a in prefill) else None
         if self._is_tune():
@@ -1317,6 +1319,7 @@ class TimelineEditor(QWidget):
         self._hostname = ""
         self._task_commands: Dict[str, List[str]] = {}
         self._param_specs: Dict[str, list] = {}
+        self._script_cal_signals: Dict[str, str] = {}   # script -> its declared CAL_SIGNAL_ID
         self._params_inflight: set = set()
         # Calibration context: params come from the library (same across units), but
         # absolute-power bounds are per-UNIT, so the calibration host is tracked
@@ -1470,6 +1473,16 @@ class TimelineEditor(QWidget):
         """Whether a task opts into calibration (sets SDR_CAL_SIGNAL_ID). When it doesn't,
         its power/gain are raw — no calibration limits apply on any unit."""
         return bool(self._task_signals.get(task))
+
+    def script_calibratable(self, task: str) -> bool:
+        """Whether a task's SCRIPT declares a calibration signal — i.e. its power/gain is
+        MEANT to be calibrated (so a missing task signal is a real gap worth flagging). A
+        script that declares none takes raw power/gain by design. Unknown (params not
+        fetched yet) is treated as calibratable, so we don't hide a real gap on a race."""
+        script, _ = self.script_for_task(task)
+        if script not in self._script_cal_signals:
+            return True
+        return bool(self._script_cal_signals.get(script))
 
     def script_for_task(self, task: str) -> Tuple[str, List[str]]:
         """(script_filename, default_args) for a task name — for the step editor."""

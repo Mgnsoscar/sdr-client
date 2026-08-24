@@ -316,9 +316,10 @@ class TaskEditorDialog(QDialog):
         if sid:
             from state.calibration_cache import get_calibration_cache
             hint = get_calibration_cache().aggregate_power_bounds(sid)
-        # Library authoring: warn only when the script opts into no calibration signal at
-        # all (then power/gain are raw on every unit); a signal is limited once deployed.
-        caution = calibration_caution(bool(sid), targeted=False, calibrated=False)
+        # Library authoring: a calibratable script auto-opts-in below (_ensure_cal_env), so
+        # there's nothing to flag; a non-calibratable script takes raw power by design.
+        caution = calibration_caution(bool(sid), targeted=False, calibrated=False,
+                                      script_calibratable=bool(sid))
         self._form.set_params(self._param_specs.get(script, []), hint_bounds=hint,
                               caution=caution)
         self._ensure_cal_env(script)

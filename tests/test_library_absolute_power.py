@@ -114,7 +114,7 @@ def test_form_run_uncalibrated_is_relative():
 # ── no-safeguard caution ────────────────────────────────────────────────────────
 
 def test_caution_text_cases():
-    # no signal → always raw
+    # calibratable script, no signal assigned → raw (actionable)
     assert "no calibration signal" in calibration_caution(False, targeted=True, calibrated=True)
     assert "no calibration signal" in calibration_caution(False, targeted=False, calibrated=False)
     # signal, targeted unit that isn't calibrated → raw
@@ -122,6 +122,17 @@ def test_caution_text_cases():
     # signal + calibrated unit → safe; signal + open Library authoring → safe (limited later)
     assert calibration_caution(True, targeted=True, calibrated=True) is None
     assert calibration_caution(True, targeted=False, calibrated=False) is None
+
+
+def test_caution_none_for_non_calibratable_script():
+    # A script that declares no calibration signal takes raw power/gain BY DESIGN — there
+    # is no missing safeguard, so no caution (this was the noisy false-positive).
+    assert calibration_caution(False, targeted=False, calibrated=False,
+                               script_calibratable=False) is None
+    assert calibration_caution(False, targeted=True, calibrated=False,
+                               script_calibratable=False) is None
+    assert calibration_caution(True, targeted=True, calibrated=False,
+                               script_calibratable=False) is None
 
 
 def _warning_labels(form):
