@@ -33,7 +33,7 @@ import copy
 import json
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QRect, Qt
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractItemDelegate, QAbstractItemView, QAbstractScrollArea, QApplication,
@@ -467,61 +467,40 @@ class _FreqResponsePlot(QWidget):
             qp.drawEllipse(int(X(freq)) - 4, int(Y(d)) - 4, 8, 8)
 
 
-_STAGE_MIME = "application/x-sdr-stage"
-
-
 class _ClickCard(QFrame):
     """A QFrame that runs a callback when clicked — used for the chain stages and the
-    component-library cards. Optionally a drop target: when `on_drop` is given it accepts
-    a dragged stage (see _DragHandle) and calls on_drop(src_name, self._drop_name)."""
-    def __init__(self, on_click=None, on_drop=None, drop_name=None):
+    component-library cards."""
+    def __init__(self, on_click=None):
         super().__init__()
         self._on_click = on_click
-        self._on_drop = on_drop
-        self._drop_name = drop_name
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        if on_drop is not None:
-            self.setAcceptDrops(True)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if self._on_click is not None and event.button() == Qt.MouseButton.LeftButton:
             self._on_click()
         super().mousePressEvent(event)
 
-    def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if self._on_drop is not None and event.mimeData().hasFormat(_STAGE_MIME):
-            event.acceptProposedAction()
-
-    def dragMoveEvent(self, event) -> None:  # noqa: N802
-        if self._on_drop is not None and event.mimeData().hasFormat(_STAGE_MIME):
-            event.acceptProposedAction()
-
-    def dropEvent(self, event) -> None:  # noqa: N802
-        if self._on_drop is not None and event.mimeData().hasFormat(_STAGE_MIME):
-            src = bytes(event.mimeData().data(_STAGE_MIME)).decode("utf-8")
-            event.acceptProposedAction()
-            if src and src != self._drop_name:
-                self._on_drop(src, self._drop_name)
-
 
 class _DragHandle(QLabel):
-    """The grip on a chain stage: dragging it reorders the stage (dropping onto another
-    stage card). Kept separate from the card's click-to-select so the two don't fight."""
-    def __init__(self, name: str):
+    """The grip on a chain stage. Dragging it runs a LIVE reorder: the real card follows
+    the cursor and its neighbours slide aside as it crosses them (via the panel's
+    ``on_start`` / ``on_move`` / ``on_end`` callbacks), so you see where it lands before
+    letting go. Releasing finalises. Kept separate from the card's click-to-select so the
+    two don't fight (accepting the press makes this widget the mouse grabber)."""
+    def __init__(self, name: str, on_start, on_move, on_end):
         super().__init__("⠿")
         self._name = name
+        self._on_start, self._on_move, self._on_end = on_start, on_move, on_end
         self._press = None                    # press-point, set once we own the press
+        self._dragging = False
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.setToolTip("Drag to reorder this stage")
         self.setStyleSheet(f"color:{Palette.TEXT_FAINT};font-size:13px;")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        # Accept the press so THIS widget becomes the mouse grabber and receives the
-        # move events — otherwise the press falls through to the parent stage card
-        # (which selects the stage) and the handle never sees a drag. Accepting here
-        # also stops the click from selecting the stage, so grip and body don't fight.
         if event.button() == Qt.MouseButton.LeftButton:
-            self._press = event.position().toPoint()
+            self._press = event.globalPosition().toPoint()
+            self._dragging = False
             event.accept()
             return
         super().mousePressEvent(event)
@@ -529,24 +508,25 @@ class _DragHandle(QLabel):
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         if self._press is None or not (event.buttons() & Qt.MouseButton.LeftButton):
             return
-        if ((event.position().toPoint() - self._press).manhattanLength()
-                < QApplication.startDragDistance()):
-            return                            # below the drag threshold — a click, not a drag
-        from PyQt6.QtCore import QMimeData
-        from PyQt6.QtGui import QDrag
-        drag = QDrag(self)
-        mime = QMimeData()
-        mime.setData(_STAGE_MIME, self._name.encode("utf-8"))
-        drag.setMimeData(mime)
-        card = self.parent()                  # drag a snapshot of the whole stage card
-        while card is not None and card.objectName() != "stage":
-            card = card.parent()
-        if card is not None:
-            pm = card.grab()
-            drag.setPixmap(pm)
-            drag.setHotSpot(self.mapTo(card, event.position().toPoint()))
+        gp = event.globalPosition().toPoint()
+        if not self._dragging:
+            if (gp - self._press).manhattanLength() < QApplication.startDragDistance():
+                return                        # below the threshold — a click, not a drag
+            self._dragging = True
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self._on_start(self._name, gp)
+        else:
+            self._on_move(gp)
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        was = self._dragging
         self._press = None
-        drag.exec(Qt.DropAction.MoveAction)
+        self._dragging = False
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        if was:
+            self._on_end()
+        event.accept()
 
 
 def _rename_plane_in_doc(doc: dict, old: str, new: str) -> dict:
@@ -902,6 +882,7 @@ class CalibrationPanel(QWidget):
         # plane id → set of signal ids opened on a NON-source measured stage that don't
         # yet have data there (so the user can enter points). Reset on a fresh document.
         self._stage_extra: dict = {}
+        self._drag: Optional[dict] = None       # in-flight chain drag state (see below)
         from state import ComponentCatalog
         self._catalog = ComponentCatalog()      # the client's canonical component library
         self._components_synced = False          # merged this unit's catalog on first load
@@ -1027,7 +1008,8 @@ class CalibrationPanel(QWidget):
         chain_scroll.setFrameShape(QFrame.Shape.NoFrame)
         chain_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         chain_scroll.setMinimumHeight(190)
-        holder = QWidget(); self._chain_row = QHBoxLayout(holder)
+        holder = QWidget(); self._chain_holder = holder
+        self._chain_row = QHBoxLayout(holder)
         self._chain_row.setContentsMargins(0, 2, 0, 2); self._chain_row.setSpacing(0)
         chain_scroll.setWidget(holder)
         chain_body.addWidget(chain_scroll)
@@ -1391,16 +1373,24 @@ class CalibrationPanel(QWidget):
     # ── chain flow (mockup section 2) ────────────────────────────────────────────
     def _render_chain(self) -> None:
         self._clear_layout(self._chain_row)
+        self._drag = None                        # any in-flight drag is stale after a rebuild
         rows = self._f.get("planes", [])
         rep = self._rep_freq()
         n = len(rows)
+        # Each stage is a "slot" = its card plus a trailing "→", so a live reorder moves
+        # the card and its arrow as one unit and the flow always reads left-to-right.
+        self._chain_slots = []                   # [(plane_name, slot_widget)], chain order
         for i, row in enumerate(rows):
-            self._chain_row.addWidget(self._stage_card(row, i, n, rep))
+            slot = QWidget()
+            sl = QHBoxLayout(slot); sl.setContentsMargins(0, 0, 0, 0); sl.setSpacing(0)
+            sl.addWidget(self._stage_card(row, i, n, rep))
             arrow = QLabel("→")
             arrow.setStyleSheet(f"color:{Palette.BORDER_STRONG};font-size:18px;")
             arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
             arrow.setFixedWidth(26)
-            self._chain_row.addWidget(arrow)
+            sl.addWidget(arrow)
+            self._chain_row.addWidget(slot)
+            self._chain_slots.append((row["name"].text().strip(), slot))
         self._chain_row.addWidget(self._add_stage_card())
         self._chain_row.addStretch(1)
 
@@ -1430,10 +1420,7 @@ class CalibrationPanel(QWidget):
         border = (Palette.ONLINE if operating else
                   Palette.ACCENT if selected else Palette.BORDER)
         bg = Palette.SURFACE if (operating or selected) else Palette.SURFACE_ALT
-        # Non-source stages are drop targets (drag another stage onto them to reorder).
-        card = _ClickCard(on_click=lambda n=name: self._select_plane(n),
-                          on_drop=(self._reorder_stage if index > 0 else None),
-                          drop_name=name)
+        card = _ClickCard(on_click=lambda n=name: self._select_plane(n))
         card.setObjectName("stage")
         card.setStyleSheet(f"#stage {{ background:{bg}; border:1px solid {border}; "
                            f"border-radius:10px; }}")
@@ -1443,7 +1430,8 @@ class CalibrationPanel(QWidget):
         # top row: drag grip + operating badge + move ◀▶ handles (none on the source)
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0)
         if index > 0:
-            top.addWidget(_DragHandle(name))
+            top.addWidget(_DragHandle(name, self._chain_drag_start,
+                                      self._chain_drag_move, self._chain_drag_end))
         if operating:
             opb = QLabel("--power reads here")
             opb.setStyleSheet(f"color:#fff;background:{Palette.ONLINE};font-size:10px;"
@@ -1606,6 +1594,111 @@ class CalibrationPanel(QWidget):
         self._doc["chain"]["planes"] = {nm: planes[nm] for nm in names}
         self._selected_plane = src
         self._doc_to_form()
+
+    def _reorder_planes_to(self, plane: str, index: int) -> None:
+        """Move ``plane`` so it lands at position ``index`` in the chain, clamped to keep
+        the source pinned first and stay in range. Commits to the model, then rebuilds."""
+        try:
+            self._doc = self._read_form(strict=False)
+        except ValueError:
+            pass
+        planes = (self._doc or {}).get("chain", {}).get("planes") or {}
+        names = list(planes.keys())
+        if plane not in names or names.index(plane) == 0:
+            return                                 # the source stays pinned first
+        names.remove(plane)
+        index = max(1, min(index, len(names)))     # never before the source, never off the end
+        names.insert(index, plane)
+        self._doc["chain"]["planes"] = {nm: planes[nm] for nm in names}
+        self._selected_plane = plane
+        self._doc_to_form()
+
+    # ── live drag-reorder of chain stages ────────────────────────────────────────
+    # The real stage card is lifted out of the flow and follows the cursor; a same-size
+    # placeholder holds its spot, and as the card crosses a neighbour the placeholder
+    # hops past it (the neighbours slide over with a short animation). Releasing drops the
+    # card where the placeholder sits and commits the new order. The source stays pinned.
+    def _stage_positions(self):
+        """(slot, centre_x) for every stage slot except the one being dragged, in the
+        holder's coordinates and current visual order."""
+        out = []
+        for name, slot in self._chain_slots:
+            if self._drag and name == self._drag["plane"]:
+                continue
+            out.append((slot, slot.x() + slot.width() / 2))
+        return out
+
+    def _chain_drag_start(self, plane: str, global_pos) -> None:
+        slot = next((s for n, s in self._chain_slots if n == plane), None)
+        if slot is None:
+            return
+        holder = self._chain_holder
+        idx = self._chain_row.indexOf(slot)
+        placeholder = QWidget(); placeholder.setFixedSize(slot.size())
+        self._chain_row.insertWidget(idx, placeholder)   # holds the gap at the live index
+        self._chain_row.removeWidget(slot)
+        geo = slot.geometry()
+        slot.setParent(holder)                            # float free of the layout
+        slot.setGeometry(geo); slot.show(); slot.raise_()
+        card = slot.findChild(QFrame, "stage")
+        if card is not None:                              # a lifted look while dragging
+            card.setStyleSheet(f"#stage {{ background:{Palette.SURFACE}; "
+                               f"border:1px solid {Palette.ACCENT}; border-radius:10px; }}")
+        local = holder.mapFromGlobal(global_pos)
+        self._drag = {"plane": plane, "slot": slot, "placeholder": placeholder,
+                      "holder": holder, "grab_dx": local.x() - geo.x(), "y": geo.y(),
+                      "anims": []}
+
+    def _chain_drag_move(self, global_pos) -> None:
+        d = self._drag
+        if not d:
+            return
+        holder, slot = d["holder"], d["slot"]
+        x = holder.mapFromGlobal(global_pos).x() - d["grab_dx"]
+        x = max(0, min(x, holder.width() - slot.width()))
+        slot.move(int(x), d["y"])
+        # The placeholder goes after every stage whose centre is left of the dragged card;
+        # clamp so the source (index 0) stays pinned and the index stays in range.
+        centre = x + slot.width() / 2
+        k = sum(1 for _, cx in self._stage_positions() if cx < centre)
+        target = max(1, min(k, len(self._chain_slots) - 1))
+        if self._chain_row.indexOf(d["placeholder"]) != target:
+            self._move_placeholder(target)
+
+    def _move_placeholder(self, target: int) -> None:
+        """Reposition the gap to ``target`` and slide the displaced stage slots over."""
+        d = self._drag
+        before = {s: s.geometry() for _, s in self._chain_slots if s is not d["slot"]}
+        self._chain_row.removeWidget(d["placeholder"])
+        self._chain_row.insertWidget(target, d["placeholder"])
+        self._chain_row.activate()                        # recompute the new geometry now
+        for anim in d["anims"]:
+            anim.stop()
+        d["anims"] = []
+        for _, s in self._chain_slots:
+            if s is d["slot"] or s not in before:
+                continue
+            new = s.geometry()
+            if new == before[s]:
+                continue
+            a = QPropertyAnimation(s, b"geometry", self)
+            a.setDuration(140); a.setEasingCurve(QEasingCurve.Type.OutCubic)
+            a.setStartValue(before[s]); a.setEndValue(new)
+            a.start()
+            d["anims"].append(a)
+
+    def _chain_drag_end(self) -> None:
+        d = self._drag
+        if not d:
+            return
+        target = self._chain_row.indexOf(d["placeholder"])
+        for anim in d["anims"]:
+            anim.stop()
+        d["slot"].setParent(None); d["slot"].deleteLater()
+        d["placeholder"].setParent(None); d["placeholder"].deleteLater()
+        plane = d["plane"]
+        self._drag = None
+        self._reorder_planes_to(plane, target)            # commit + full rebuild
 
     def _first_curve_points(self, plane: str):
         """The first signal's measured points on `plane`, for a stage minicurve."""

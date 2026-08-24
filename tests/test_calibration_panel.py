@@ -633,15 +633,14 @@ def test_component_derived_plane_passes_local_check():
 
 
 def test_chain_renders_a_stage_per_plane():
-    from ui.calibration_panel import _ClickCard
+    from PyQt6.QtWidgets import QFrame
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     _seed_catalog(p)
     p._set_doc(_v2_doc())
-    stages = [p._chain_row.itemAt(i).widget() for i in range(p._chain_row.count())]
-    # every stage is a card; the trailing dashed "+ Add stage" tile is one too.
-    cards = [w for w in stages if isinstance(w, _ClickCard)
-             and w.objectName() != "addstage"]
+    # each stage is a slot (card + trailing arrow); count the "stage" cards inside them.
+    cards = p._chain_holder.findChildren(QFrame, "stage")
     assert len(cards) == 4                       # one stage per plane
+    assert len(p._chain_slots) == 4
 
 
 def test_selecting_a_stage_updates_selection_and_survives_read():
@@ -984,6 +983,35 @@ def test_reorder_stage_moves_a_stage_and_pins_the_source():
     assert order()[0] == "sdr_output"
     p._reorder_stage("cable_output", "sdr_output")
     assert order()[0] == "sdr_output"
+
+
+def test_reorder_planes_to_lands_and_pins_source():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    order = lambda: list(p._read_form(strict=False)["chain"]["planes"])
+    p._reorder_planes_to("antenna_eirp", 1)              # move the last stage up to slot 1
+    assert order() == ["sdr_output", "antenna_eirp", "amplifier_output", "cable_output"]
+    p._reorder_planes_to("cable_output", 0)              # clamped: never before the source
+    assert order()[0] == "sdr_output"
+    src = order()[0]
+    p._reorder_planes_to(src, 3)                         # the source itself never moves
+    assert order()[0] == src
+
+
+def test_chain_drag_lifecycle_commits_order():
+    from PyQt6.QtCore import QPoint
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    p._chain_holder.resize(1200, 200); p._chain_row.activate()
+    p._chain_drag_start("antenna_eirp", p._chain_holder.mapToGlobal(QPoint(1000, 60)))
+    assert p._drag is not None and p._drag["plane"] == "antenna_eirp"
+    p._move_placeholder(1)                               # drop it into slot 1
+    p._chain_drag_end()
+    assert p._drag is None                               # drag state cleared
+    order = list(p._read_form(strict=False)["chain"]["planes"])
+    assert order == ["sdr_output", "antenna_eirp", "amplifier_output", "cable_output"]
 
 
 def test_freq_interp_endpoint_clamped():
