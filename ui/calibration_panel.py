@@ -882,6 +882,7 @@ class CalibrationPanel(QWidget):
         self._task_signal_ids: list = []       # signal ids this unit's tasks reference (hints)
         self._task_signals: dict = {}          # task name → SDR_CAL_SIGNAL_ID it references
         self._tasks_yaml: str = ""             # last-fetched tasks.yaml (for task renames)
+        self._saved_doc: Optional[dict] = None  # the unit's last-persisted calibration doc
         # plane id → set of signal ids opened on a NON-source measured stage that don't
         # yet have data there (so the user can enter points). Reset on a fresh document.
         self._stage_extra: dict = {}
@@ -2638,6 +2639,8 @@ class CalibrationPanel(QWidget):
             self._handle_tasks(result)
         elif parts[0] == "cal_taskrename":
             self._handle_task_rename(parts[2] if len(parts) > 2 else "", result)
+        elif parts[0] == "cal_rename_save":
+            self._handle_rename_save(result)
 
     def _handle_tasks(self, result) -> None:
         """Record which calibration signal each of this unit's tasks references (via its
@@ -2715,6 +2718,9 @@ class CalibrationPanel(QWidget):
             self._set_status("unexpected response", kind="error")
             return
         self._set_doc(result.get("document"))
+        # Remember the persisted document so a signal rename can be pushed on its own
+        # (without saving the working doc's other in-progress edits).
+        self._saved_doc = copy.deepcopy(result.get("document"))
         utype = result.get("unit_type") or "—"
         if result.get("valid"):
             from state.calibration_cache import get_calibration_cache
@@ -2862,8 +2868,39 @@ class CalibrationPanel(QWidget):
                 shown.add(new)
         self._set_status(f"renamed signal “{old}” → “{new}”", kind="ok")
         self._doc_to_form()
+        self._persist_signal_rename(old, new)         # persist just the rename (not a full save)
         if update_tasks:
             self._rename_tasks_signal(affected, new)
+
+    def _persist_signal_rename(self, old: str, new: str) -> None:
+        """Push ONLY the signal rename to the unit — not the working doc's other unsaved
+        edits. Renames the key in a copy of the last-persisted calibration and uploads
+        that, so the rename sticks (matching the tasks we just updated) without a full Save
+        and without discarding the user's in-progress edits on refresh. No-op until the
+        unit has a stored calibration that actually contains the old id."""
+        saved = self._saved_doc
+        if not isinstance(saved, dict) or old not in (saved.get("signals") or {}):
+            return
+        renamed = copy.deepcopy(saved)
+        renamed["signals"] = {(new if k == old else k): v
+                              for k, v in (renamed.get("signals") or {}).items()}
+        self._saved_doc = renamed                      # our view of what's now persisted
+        host = self.hostname
+        content = json.dumps(renamed).encode("utf-8")
+        wire = self._catalog.to_wire()
+
+        def _do():
+            client = self.hub.fleet.get(host)
+            client.upload_components(wire)             # keep component refs resolvable
+            return client.upload_file(CAL_NAME, content)
+        self.hub.run_async(f"cal_rename_save:{host}", _do)
+
+    def _handle_rename_save(self, result) -> None:
+        # Success is silent — the working doc already shows the rename and we must NOT
+        # refresh (that would replace it and drop the user's other unsaved edits). Only a
+        # failure is worth surfacing.
+        if isinstance(result, Exception):
+            self._set_status(f"couldn't persist the signal rename: {result}", kind="error")
 
     def _rename_tasks_signal(self, names: list, new: str) -> None:
         """Point each named task's SDR_CAL_SIGNAL_ID at `new`, preserving every other field

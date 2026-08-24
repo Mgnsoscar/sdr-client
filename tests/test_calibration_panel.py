@@ -866,6 +866,42 @@ def test_rename_without_referencing_tasks_does_not_prompt(monkeypatch):
     assert client.task_updates == []
 
 
+def test_rename_persists_only_the_rename_not_the_working_edits(monkeypatch):
+    # A rename must stick without a full Save (so it doesn't revert while the tasks stay
+    # renamed) — but it must NOT push the working doc's other unsaved edits.
+    import copy, json
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.No))
+    client = _TasksClient(_TASKS_YAML)
+    p = CalibrationPanel("u", FakeHub(client))
+    _seed_catalog(p)
+    saved = _v2_doc()                                # defaults.amplitude == 0.8
+    p._set_doc(saved)
+    p._saved_doc = copy.deepcopy(saved)              # as _handle_get would record
+    p._handle_tasks(_TASKS_YAML)
+    p._f["def_amp"].setText("0.33")                  # a pending, unsaved working-doc edit
+    p._rename_signal("mock", "gnss_l1")
+    saves = [c for (nm, c) in client.uploaded if nm == "calibration.json"]
+    assert saves, "the rename should be persisted on its own"
+    pushed = json.loads(saves[-1])
+    assert "gnss_l1" in pushed["signals"] and "mock" not in pushed["signals"]
+    # the unsaved amplitude edit must NOT have gone out with the rename
+    assert pushed.get("defaults", {}).get("amplitude") == 0.8
+
+
+def test_rename_of_an_unsaved_signal_does_not_push(monkeypatch):
+    # Nothing persisted yet for this signal → no rename-only upload (only a full Save would).
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.No))
+    client = _TasksClient(_TASKS_YAML)
+    p = CalibrationPanel("u", FakeHub(client))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())                            # no _saved_doc set (never fetched)
+    p._handle_tasks(_TASKS_YAML)
+    p._rename_signal("mock", "gnss_l1")
+    assert [c for (nm, c) in client.uploaded if nm == "calibration.json"] == []
+
+
 def test_cancel_aborts_the_whole_rename(monkeypatch):
     monkeypatch.setattr(QMessageBox, "question",
                         staticmethod(lambda *a, **k: QMessageBox.StandardButton.Cancel))
