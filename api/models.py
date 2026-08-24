@@ -493,6 +493,9 @@ class DeployLibraryResult(BaseModel):
     sequences_upserted: List[str] = []
     sequences_deleted: List[str] = []
     sequences_skipped: List[str] = []
+    # Set client-side after the deploy (not part of the agent's PUT /library response):
+    # the component-catalog outcome for this unit — see component_catalog.plan_unit_deploy.
+    components: dict = {}
 
 
 def scoped_library(library: "Library", unit_type: str) -> "Library":

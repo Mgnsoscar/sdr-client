@@ -197,3 +197,57 @@ class ComponentCatalog:
         if not isinstance(doc, dict):
             raise CatalogError("components file is not an object")
         return ComponentCatalog._ingest(doc.get("components"))
+
+
+# ── Fleet deploy planning (push the catalog to each unit) ──────────────────────────
+
+def dump_components(comps: Dict[str, dict]) -> str:
+    """Serialise a plain {id: spec} map to ``components.yaml`` wire text (what a unit
+    stores). Mirrors ``ComponentCatalog.to_wire`` for an ad-hoc dict."""
+    return yaml.safe_dump({"schema_version": 1, "components": comps},
+                          sort_keys=True, allow_unicode=True)
+
+
+def referenced_components(calibration_doc: Optional[dict]) -> set:
+    """The component ids a unit's calibration chain references (its derived planes'
+    ``component`` fields). These must never be stripped from a unit — the calibration
+    wouldn't resolve, and the unit would refuse to transmit."""
+    planes = ((calibration_doc or {}).get("chain") or {}).get("planes") or {}
+    return {p["component"] for p in planes.values()
+            if isinstance(p, dict) and p.get("component")}
+
+
+def plan_unit_deploy(library: Dict[str, dict], on_unit: Dict[str, dict],
+                     referenced: set, prune: bool) -> Tuple[Dict[str, dict], dict]:
+    """Work out the ``components.yaml`` a unit should hold after a deploy, plus a summary
+    of what changes — so the deploy can report it and nothing surprises the operator.
+
+    The shared library is the source of truth: its components are added/updated on the
+    unit. A component the library no longer has but the unit's calibration STILL
+    references is KEPT on the unit (so it keeps resolving) — even when pruning. Pruning
+    additionally drops unit components that are neither in the library nor referenced;
+    without pruning, everything already on the unit is left in place.
+
+    Returns ``(upload, info)`` where ``upload`` is the {id: spec} to send and ``info``
+    groups ids by outcome: added / updated / pruned / kept_referenced / dangling."""
+    library = dict(library or {})
+    on_unit = dict(on_unit or {})
+    if prune:
+        upload = dict(library)
+        for rid in referenced:                     # keep a referenced part the library dropped
+            if rid not in upload and rid in on_unit:
+                upload[rid] = on_unit[rid]
+    else:
+        upload = {**on_unit, **library}            # library wins on shared ids; keep the rest
+    info = {
+        "added": sorted(c for c in upload if c not in on_unit),
+        "updated": sorted(c for c in upload if c in on_unit and upload[c] != on_unit[c]),
+        "pruned": sorted(c for c in on_unit if c not in upload),
+        # kept only because a calibration still uses it (the library dropped it):
+        "kept_referenced": sorted(rid for rid in referenced
+                                  if rid in upload and rid not in library),
+        # referenced but resolvable nowhere (library and unit both lack it): broken chain.
+        "dangling": sorted(rid for rid in referenced if rid not in upload),
+        "count": len(upload),
+    }
+    return upload, info

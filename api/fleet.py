@@ -261,18 +261,51 @@ class Fleet:
 
     def deploy_state_all(self, library: "m.Library", plans: List["m.Plan"],
                          schedule: List["m.ScheduledPlan"], prune: bool = True,
-                         units: Optional[List[str]] = None) -> Dict[str, object]:
+                         units: Optional[List[str]] = None,
+                         components: Optional[Dict[str, dict]] = None) -> Dict[str, object]:
         """Replicate EVERYTHING to each unit in one pass: the library (definition-
-        only, safe on air), then the plan + schedule replicas (wholesale). Values
-        are the unit's DeployLibraryResult on success, or the Exception that stopped
-        it. Plans/schedule are pushed only after the library succeeds, so a unit
-        never ends up with plans referencing sequences it doesn't yet have."""
+        only, safe on air), the shared RF-component catalog, then the plan + schedule
+        replicas (wholesale). Values are the unit's DeployLibraryResult on success (with
+        its per-unit component outcome attached under ``.components``), or the Exception
+        that stopped it. Plans/schedule are pushed only after the library succeeds, so a
+        unit never ends up with plans referencing sequences it doesn't yet have.
+
+        ``components`` is the shared catalog as ``{id: spec}``; when given, each unit's
+        ``components.yaml`` is reconciled to it — but a component the unit's calibration
+        still references is never removed (see :func:`state.plan_unit_deploy`)."""
         def do(c):
             res = c.deploy_library(m.scoped_library(library, c.unit_type), prune)
+            if components is not None:
+                res.components = self._deploy_components_to(c, components, prune)
             c.put_plans(plans)
             c.put_schedule(schedule)
             return res
         return self._fan_out_reachable(do, units)
+
+    @staticmethod
+    def _deploy_components_to(c, library: Dict[str, dict], prune: bool) -> dict:
+        """Reconcile one unit's ``components.yaml`` to the shared library, keeping any
+        component the unit's calibration still references. Returns the change summary."""
+        from state import (ComponentCatalog, dump_components, plan_unit_deploy,
+                           referenced_components)
+        from .client import AgentHTTPError
+        try:                                          # what the unit's calibration uses
+            cal = c.get_calibration()
+        except AgentHTTPError as exc:
+            if exc.status_code != 404:
+                raise
+            cal = {}
+        referenced = referenced_components((cal or {}).get("document"))
+        try:
+            on_unit = ComponentCatalog.parse_wire(c.get_components() or "")
+        except Exception:                             # noqa: BLE001 — a broken unit file
+            on_unit = {}
+        upload, info = plan_unit_deploy(library, on_unit, referenced, prune)
+        # Only touch the unit when the reconciled catalog actually differs from what it
+        # holds — an unchanged deploy shouldn't rewrite the file.
+        if upload != on_unit:
+            c.upload_components(dump_components(upload))
+        return info
 
     def panic_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
         """

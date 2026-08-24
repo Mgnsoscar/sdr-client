@@ -22,7 +22,7 @@ from .unit_ledger import UnitLedger
 from .address_cache import AddressCache
 from .component_catalog import (
     ComponentCatalog, CatalogError, parse_sweep, validate_table,
-    COMPONENTS_WIRE_NAME,
+    COMPONENTS_WIRE_NAME, dump_components, referenced_components, plan_unit_deploy,
 )
 
 __all__ = ["Poller", "FastSnapshot", "SlowSnapshot", "LogTailer", "local_ip",
@@ -32,4 +32,5 @@ __all__ = ["Poller", "FastSnapshot", "SlowSnapshot", "LogTailer", "local_ip",
            "UnitSnapshot", "LibraryClient", "LibraryError",
            "Discovery", "DiscoveredUnit", "UnitLedger", "AddressCache",
            "ComponentCatalog", "CatalogError", "parse_sweep", "validate_table",
-           "COMPONENTS_WIRE_NAME"]
+           "COMPONENTS_WIRE_NAME", "dump_components", "referenced_components",
+           "plan_unit_deploy"]

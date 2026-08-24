@@ -340,7 +340,8 @@ class LibraryTab(QWidget):
         self._sched_store.load()
         plans = self._plan_store.plans()
         schedule = self._sched_store.entries()
-        if not (lib.scripts or lib.tasks or lib.sequences or plans or schedule):
+        comps = self.hub.fleet.component_catalog().components()
+        if not (lib.scripts or lib.tasks or lib.sequences or plans or schedule or comps):
             QMessageBox.information(self, "Deploy", "Nothing to deploy yet.")
             return
         hosts = self.hub.fleet.hostnames()
@@ -355,10 +356,14 @@ class LibraryTab(QWidget):
         box.setInformativeText(
             f"{len(lib.scripts)} script(s) · {len(lib.tasks)} task(s) · "
             f"{len(lib.sequences)} sequence(s) · {len(plans)} plan(s) · "
-            f"{len(schedule)} scheduled.\n\n"
+            f"{len(schedule)} scheduled · {len(comps)} component(s).\n\n"
             "Library definitions are updated in place — running tasks and active "
             "runs are never interrupted; plans and schedule are stored on each unit "
-            "for recovery. Unreachable units are reported and can be redeployed later.")
+            "for recovery. Unreachable units are reported and can be redeployed later.\n\n"
+            "RF components are reconciled to this library on each unit. A component a "
+            "unit's calibration still uses is always kept, even when pruning; pruning "
+            "removes only the components a unit no longer uses. The exact per-unit "
+            "changes are reported afterwards.")
         blank_scripts = [s.name for s in lib.scripts if not (s.content or "").strip()]
         if blank_scripts:
             box.setInformativeText(
@@ -398,8 +403,8 @@ class LibraryTab(QWidget):
                   "will receive 0 tasks: " + "; ".join(zero) + ".\nFix by setting the "
                   "unit's Type (Units tab → edit the unit) to match, or by marking the "
                   "tasks Shared / authoring them in that type's Library tab.")
-        prune = QCheckBox("Prune — remove library definitions the library omits "
-                          "(make each unit identical)")
+        prune = QCheckBox("Prune — remove library definitions (and unused components) "
+                          "the library omits (make each unit identical)")
         prune.setChecked(True)
         box.setCheckBox(prune)
         box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
@@ -412,7 +417,8 @@ class LibraryTab(QWidget):
         self._set_status(f"deploying to {len(hosts)} unit(s)…")
         self.hub.run_async(
             "lib_deploy",
-            lambda: self.hub.fleet.deploy_state_all(lib, plans, schedule, do_prune))
+            lambda: self.hub.fleet.deploy_state_all(lib, plans, schedule, do_prune,
+                                                    components=comps))
 
     def _report_deploy(self, result) -> None:
         if not isinstance(result, dict):
@@ -444,13 +450,45 @@ class LibraryTab(QWidget):
                 parts.append(f"sequences with active runs kept: {', '.join(r.sequences_skipped)}")
             if parts:
                 notes.append(f"{self._label(h)}: " + "; ".join(parts))
+        # RF-component outcomes per unit (see fleet._deploy_components_to). Kept/pruned/
+        # dangling are the ones worth surfacing so a component change never surprises.
+        comp_kept, comp_pruned, comp_dangling = [], [], []
+        comp_added = comp_updated = 0
+        for h, r in ok.items():
+            ci = getattr(r, "components", None) or {}
+            comp_added += len(ci.get("added", []))
+            comp_updated += len(ci.get("updated", []))
+            if ci.get("kept_referenced"):
+                comp_kept.append(f"{self._label(h)}: {', '.join(ci['kept_referenced'])}")
+            if ci.get("pruned"):
+                comp_pruned.append(f"{self._label(h)}: {', '.join(ci['pruned'])}")
+            if ci.get("dangling"):
+                comp_dangling.append(f"{self._label(h)}: {', '.join(ci['dangling'])}")
+        comp_lines = []
+        if comp_kept:
+            comp_lines.append("Components kept — a unit's calibration still uses them "
+                              "(gone from the library, preserved on the unit):")
+            comp_lines += [f"• {n}" for n in comp_kept]
+        if comp_pruned:
+            if comp_lines:
+                comp_lines.append("")
+            comp_lines.append("Components pruned — the library omits them and the unit "
+                              "doesn't use them:")
+            comp_lines += [f"• {n}" for n in comp_pruned]
+        if comp_dangling:
+            if comp_lines:
+                comp_lines.append("")
+            comp_lines.append("⚠ Components referenced by a calibration but found nowhere "
+                              "(missing from the library AND the unit — that calibration "
+                              "won't resolve until you re-add the part or re-point the chain):")
+            comp_lines += [f"• {n}" for n in comp_dangling]
         status = f"deployed to {len(ok)} unit(s)"
         if offline:
             status += f" · {len(offline)} offline"
         if failed:
             status += f" · {len(failed)} failed"
         self._set_status(status, error=bool(failed))
-        if failed or notes or zero_task_units:
+        if failed or notes or zero_task_units or comp_lines:
             lines = []
             if failed:
                 lines.append("Failed (redeploy when reachable):")
@@ -471,6 +509,10 @@ class LibraryTab(QWidget):
                     lines.append("")
                 lines.append("Left in place because in use (nothing on air was touched):")
                 lines += [f"• {n}" for n in notes]
+            if comp_lines:
+                if lines:
+                    lines.append("")
+                lines += comp_lines
             QMessageBox.warning(self, "Deploy — details", "\n".join(lines))
         elif offline:
             # No real failures — just some units offline. Benign, so inform (not warn).
