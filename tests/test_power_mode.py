@@ -1,6 +1,7 @@
-"""ParamForm power mode: relative (raw --gain) vs absolute (calibrated --power).
-Library / uncalibrated → relative only; a calibrated unit → a toggle. values() emits
-only the active field's flag."""
+"""ParamForm power mode: relative (raw --gain) vs absolute (--power, dBm).
+Library (no unit) → absolute is offered free-form and is the default (portable, plan-
+faithful); a targeted-but-uncalibrated unit → relative only; a calibrated unit → a
+bounded toggle. values() emits only the active field's flag."""
 import os
 
 import pytest
@@ -33,8 +34,9 @@ def _bounds():
 
 # ── mode computation ─────────────────────────────────────────────────────────────
 
-def test_modes_library_relative_only():
-    assert _compute_power_modes(_specs(), None, False) == ["relative"]
+def test_modes_library_offers_absolute_default():
+    # Library (no unit): absolute is offered free-form AND first (the default).
+    assert _compute_power_modes(_specs(), None, False) == ["absolute", "relative"]
 
 
 def test_modes_uncalibrated_unit_relative_only():
@@ -56,10 +58,13 @@ def _dests(form):
     return set(form._widgets.keys())
 
 
-def test_library_shows_gain_hides_power():
+def test_library_defaults_to_absolute_free_form():
     f = ParamForm()
     f.set_params(_specs())                      # library: no unit context
-    assert "gain" in _dests(f) and "power" not in _dests(f)
+    assert f.power_mode() == "absolute"
+    assert "power" in _dests(f) and "gain" not in _dests(f)
+    # free-form: the --power field keeps its schema bounds (no unit's range clamped in)
+    assert f._widgets["power"][1]["max"] == 60.0
 
 
 def test_calibrated_defaults_to_absolute_with_bounds():

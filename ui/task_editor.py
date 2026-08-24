@@ -307,7 +307,15 @@ class TaskEditorDialog(QDialog):
     # ── Dynamic form ─────────────────────────────────────────────────────────
 
     def _build_param_form(self, script: str) -> None:
-        self._form.set_params(self._param_specs.get(script, []))
+        # A task is authored in the Library (no unit), so absolute power is free-form; if
+        # we've seen units calibrated for this script's signal, show their achievable
+        # range as a soft hint.
+        hint = None
+        sid = self._cal_signals.get(script)
+        if sid:
+            from state.calibration_cache import get_calibration_cache
+            hint = get_calibration_cache().aggregate_power_bounds(sid)
+        self._form.set_params(self._param_specs.get(script, []), hint_bounds=hint)
         self._ensure_cal_env(script)
         self._set_status("")
         # Prefill values on edit. Keyed to the edit script and deliberately NOT

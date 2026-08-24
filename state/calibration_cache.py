@@ -69,6 +69,36 @@ class CalibrationCache:
         entry = self._data.get(hostname)
         return entry.get("fetched_at") if entry else None
 
+    def aggregate_power_bounds(self, signal_id: str) -> Optional[dict]:
+        """Combine every cached unit's resolved ``--power`` range for ``signal_id`` into a
+        hint for offline (Library) authoring, where no single unit is targeted. Returns
+        None when no cached unit is calibrated for the signal. Keys:
+
+          ``n_units``            how many cached units resolve this signal
+          ``any_min``/``any_max``  the UNION range — reachable on at least one unit
+          ``all_min``/``all_max``  the INTERSECTION — reachable on every one
+                                 (``all_min > all_max`` ⇒ the ranges don't overlap, so no
+                                 single dBm works on all of them)"""
+        if not signal_id:
+            return None
+        los, his = [], []
+        for entry in self._data.values():
+            cal = (entry or {}).get("calibration") or {}
+            sig = (cal.get("signals") or {}).get(signal_id) or {}
+            lo, hi = sig.get("min_power_dbm"), sig.get("max_power_dbm")
+            if lo is None or hi is None:
+                continue
+            try:
+                los.append(float(lo))
+                his.append(float(hi))
+            except (TypeError, ValueError):
+                continue
+        if not los:
+            return None
+        return {"n_units": len(los),
+                "any_min": min(los), "any_max": max(his),
+                "all_min": max(los), "all_max": min(his)}
+
 
 _CACHE: Optional[CalibrationCache] = None
 

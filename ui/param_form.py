@@ -174,20 +174,51 @@ def find_gain_index(specs: List[dict]):
 
 
 def _compute_power_modes(specs, cal_bounds, absolute_allowed) -> List[str]:
-    """Which power modes to offer. Absolute (calibrated dBm) needs a known unit
-    (`absolute_allowed`) that is calibrated for the signal (`cal_bounds`); Relative
-    (raw gain) needs a --gain param. In the Library (no unit) only Relative is
-    offered; a script with only --power keeps Absolute (its schema range)."""
+    """Which power modes to offer, absolute first (so it's the default). Absolute (dBm)
+    is offered when:
+      • a specific unit is targeted (``absolute_allowed``) AND it's calibrated for the
+        signal (``cal_bounds``) — the field is bounded to that unit's range; or
+      • NO unit is targeted (the Library) — absolute power is the portable, plan-faithful
+        quantity, entered free-form (each unit converts + clips it at transmit).
+    A targeted-but-uncalibrated unit gets no absolute (nothing to convert against).
+    Relative (raw gain) is offered whenever a --gain param exists."""
     has_power = find_power_index(specs) is not None
     has_gain = find_gain_index(specs) is not None
     modes: List[str] = []
-    if has_power and absolute_allowed and cal_bounds:
+    if has_power and (cal_bounds or not absolute_allowed):
         modes.append("absolute")
     if has_gain:
         modes.append("relative")
     if not modes and has_power:
         modes.append("absolute")
     return modes
+
+
+def apply_power_hint(spec: dict, agg) -> dict:
+    """Attach a soft, achievable-range HINT (from cached units) to an absolute --power
+    field WITHOUT bounding it — the Library holds the plan's intended dBm level, and
+    per-unit clipping happens at deploy/run. Returns a copy with an ``_hint`` caption and
+    an appended help note. No-op when `agg` is falsy."""
+    if not agg:
+        return spec
+    out = dict(spec)
+    n = agg.get("n_units", 0)
+    unit_word = "unit" if n == 1 else "units"
+    any_lo, any_hi = agg.get("any_min"), agg.get("any_max")
+    all_lo, all_hi = agg.get("all_min"), agg.get("all_max")
+    if all_lo is not None and all_hi is not None and all_lo <= all_hi:
+        hint = (f"Seen {n} {unit_word}: all reach {all_lo:g}…{all_hi:g} dBm · "
+                f"at least one reaches {any_lo:g}…{any_hi:g} dBm")
+    else:
+        hint = (f"Seen {n} {unit_word}: their ranges don't overlap — no single dBm works "
+                f"on all · at least one reaches {any_lo:g}…{any_hi:g} dBm")
+    out["_hint"] = hint
+    note = ("Absolute power from your plan — stored as-is; each unit converts it and "
+            "clips to its own range at transmit. " + hint)
+    base = (out.get("help") or "").strip()
+    out["help"] = f"{base}\n\n{note}" if base else note
+    out.setdefault("unit", "dBm")
+    return out
 
 
 def apply_power_bounds(specs: List[dict], bounds) -> List[dict]:
@@ -286,6 +317,7 @@ class ParamForm(QWidget):
         # Power mode (relative gain vs absolute dBm) — see _compute_power_modes.
         self._base_specs: List[dict] = []
         self._cal_bounds = None
+        self._hint_bounds = None
         self._absolute_allowed = False
         self._power_modes: List[str] = []
         self._power_mode = None
@@ -297,7 +329,7 @@ class ParamForm(QWidget):
 
     def set_params(self, specs: List[dict], selectable: bool = False,
                    cal_bounds=None, absolute_allowed: bool = False,
-                   default_power_mode=None) -> None:
+                   default_power_mode=None, hint_bounds=None) -> None:
         """Rebuild the form for a parameter schema (clears existing widgets).
 
         selectable=True prefixes each row with an include checkbox: values() then
@@ -312,6 +344,7 @@ class ParamForm(QWidget):
         self._base_specs = list(specs)
         self._selectable = selectable
         self._cal_bounds = cal_bounds
+        self._hint_bounds = hint_bounds
         self._absolute_allowed = absolute_allowed
         self._power_modes = _compute_power_modes(specs, cal_bounds, absolute_allowed)
         if default_power_mode in self._power_modes:
@@ -346,6 +379,10 @@ class ParamForm(QWidget):
                 self._form.addRow(chk, widget)
             else:
                 self._form.addRow(self._label_for(spec), widget)
+            if spec.get("_hint"):                        # soft achievable-range caption
+                cap = QLabel(spec["_hint"]); cap.setWordWrap(True)
+                cap.setStyleSheet(f"font-size: 10px; color: {Palette.TEXT_FAINT};")
+                self._form.addRow("", cap)
         self.changed.emit()
 
     # ── Power mode ─────────────────────────────────────────────────────────────
@@ -361,8 +398,12 @@ class ParamForm(QWidget):
         for i, s in enumerate(self._base_specs):
             if i == pidx:
                 if self._power_mode == "absolute":
-                    out.append(apply_power_bounds([s], self._cal_bounds)[0]
-                               if self._cal_bounds else s)
+                    if self._cal_bounds:                 # a targeted unit → hard bounds
+                        out.append(apply_power_bounds([s], self._cal_bounds)[0])
+                    elif self._hint_bounds:              # Library → free-form + soft hint
+                        out.append(apply_power_hint(s, self._hint_bounds))
+                    else:
+                        out.append(s)
             elif i == gidx:
                 if self._power_mode == "relative":
                     # Relative selects raw gain. If the schema gives no default, an
@@ -383,7 +424,8 @@ class ParamForm(QWidget):
 
     def _mode_toggle(self) -> QComboBox:
         combo = QComboBox()
-        names = {"absolute": "Absolute (dBm, calibrated)", "relative": "Relative (raw gain, dB)"}
+        abs_label = "Absolute (dBm, this unit)" if self._cal_bounds else "Absolute (dBm)"
+        names = {"absolute": abs_label, "relative": "Relative (raw gain, dB)"}
         for m in self._power_modes:
             combo.addItem(names.get(m, m), m)
         combo.setCurrentIndex(self._power_modes.index(self._power_mode))

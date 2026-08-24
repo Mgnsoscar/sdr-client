@@ -1188,6 +1188,7 @@ class StepEditorDialog(QDialog):
         # the mode the step's args used (relative if they set --gain).
         task = self._task.currentText().strip()
         bounds = self._editor.cal_bounds_for_task(task)
+        hint = self._editor.power_hint_for_task(task)     # aggregate range for Library authoring
         abs_allowed = self._editor.absolute_allowed()
         prefill = self._pending_prefill or self._src.args or []
         mode = "relative" if any(a in ("-Gain", "--gain") for a in prefill) else None
@@ -1196,14 +1197,16 @@ class StepEditorDialog(QDialog):
             # you pick exactly which ones this step sets.
             specs = [s for s in specs if s.get("live")]
             self._form.set_params(specs, selectable=True, cal_bounds=bounds,
-                                  absolute_allowed=abs_allowed, default_power_mode=mode)
+                                  absolute_allowed=abs_allowed, default_power_mode=mode,
+                                  hint_bounds=hint)
             self._params_status.setText(
                 "tick the parameters to set at this offset" if specs
                 else "this task's script declares no live parameters")
             self._seed_from_params()
         else:
             self._form.set_params(specs, cal_bounds=bounds,
-                                  absolute_allowed=abs_allowed, default_power_mode=mode)
+                                  absolute_allowed=abs_allowed, default_power_mode=mode,
+                                  hint_bounds=hint)
             self._params_status.setText(
                 "" if specs else "this script declares no parameters — use extra args")
             self._apply_prefill()
@@ -1442,6 +1445,16 @@ class TimelineEditor(QWidget):
         if not sid:
             return None
         return (self._calibration.get("signals") or {}).get(sid)
+
+    def power_hint_for_task(self, task: str):
+        """A soft achievable-range hint for a task's signal, aggregated across every unit
+        seen before — used when authoring absolute power in the Library, where no single
+        unit is targeted. None when no cached unit resolves the signal."""
+        sid = self._task_signals.get(task)
+        if not sid:
+            return None
+        from state.calibration_cache import get_calibration_cache
+        return get_calibration_cache().aggregate_power_bounds(sid)
 
     def script_for_task(self, task: str) -> Tuple[str, List[str]]:
         """(script_filename, default_args) for a task name — for the step editor."""
