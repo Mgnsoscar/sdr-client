@@ -140,7 +140,6 @@ def test_outdated_agent_on_save_is_flagged(monkeypatch):
     client = FakeClient(upload=AgentHTTPError("u", 404, "Not Found"))
     p = CalibrationPanel("u", FakeHub(client))
     p._set_doc(_doc())
-    p._tabs.setCurrentIndex(0)
     p._on_save()
     assert "out of date" in p._status.text()
     assert "msg" in seen                                # a dialog explained the update
@@ -156,35 +155,35 @@ def test_invalid_stored_document():
 
 # ── save paths ───────────────────────────────────────────────────────────────────
 
-def test_save_from_json_rejection_surfaces_reason(monkeypatch):
+def test_save_after_json_rejection_surfaces_reason(monkeypatch):
     seen = {}
     monkeypatch.setattr(QMessageBox, "warning",
                         staticmethod(lambda *a, **k: seen.setdefault("msg", a)))
     client = FakeClient(upload=AgentHTTPError("u", 400, "curve not invertible"))
     p = CalibrationPanel("u", FakeHub(client))
-    p._tabs.setCurrentIndex(1)                          # JSON tab authoritative
-    p._view.setPlainText('{"schema_version": 1}')
+    import json
+    assert p._apply_json_text(json.dumps(_doc())) is None   # applied into the form
     p._on_save()
     assert "rejected" in p._status.text()
     assert client.uploaded == []
     assert "curve not invertible" in seen["msg"][2]
 
 
-def test_save_invalid_json_is_local_guard():
+def test_apply_invalid_json_is_local_guard():
+    # Invalid JSON pasted into the JSON dialog is rejected without touching the model.
     client = FakeClient()
     p = CalibrationPanel("u", FakeHub(client))
-    p._tabs.setCurrentIndex(1)
-    p._view.setPlainText("{ not json ")
-    p._on_save()
-    assert "cannot save" in p._status.text()
-    assert client.uploaded == []
+    p._set_doc(_doc())
+    before = p._read_form(strict=False)
+    msg = p._apply_json_text("{ not json ")
+    assert msg and "not valid JSON" in msg
+    assert p._read_form(strict=False) == before             # model untouched
 
 
 def test_save_from_form_serializes_document():
     client = FakeClient()
     p = CalibrationPanel("u", FakeHub(client))
     p._set_doc(_doc())                                  # populates the form
-    p._tabs.setCurrentIndex(0)                          # Editor authoritative
     p._on_save()
     assert len(client.uploaded) == 1
     import json
@@ -400,16 +399,16 @@ def test_removing_plane_purges_its_references(monkeypatch):
     assert "sdr_output" not in p._doc["signals"]["mock"]["curves"]
 
 
-# ── invalid JSON must not be silently discarded when leaving the JSON tab ──────────
+# ── the JSON escape hatch applies valid documents and rejects bad ones ─────────────
 
-def test_leaving_json_tab_with_bad_json_is_blocked():
+def test_apply_json_replaces_document_and_rebuilds_form():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(_doc())
-    p._tabs.setCurrentIndex(1)                       # go to JSON
-    p._view.setPlainText("{ not valid json")
-    p._tabs.setCurrentIndex(0)                       # try to leave → should be blocked
-    assert p._tabs.currentIndex() == 1               # kept on JSON
-    assert "JSON has an error" in p._status.text()
+    import json
+    doc = _doc(); doc["signals"]["mock"]["amplitude"] = 0.42
+    assert p._apply_json_text(json.dumps(doc)) is None
+    out = p._read_form(strict=False)
+    assert out["signals"]["mock"]["amplitude"] == 0.42   # editor rebuilt from the JSON
 
 
 # ── B: local structural checks ────────────────────────────────────────────────────
@@ -514,7 +513,6 @@ def test_validate_rejects_non_numeric_curve_cell():
                         validate={"valid": True, "signals": {}})
     p = CalibrationPanel("u", FakeHub(client))
     p._set_doc(_doc())
-    p._tabs.setCurrentIndex(0)                            # Editor tab
     tbl = p._f["signals"]["mock"]["curves"]["sdr_output"]
     tbl.add_blank_row()
     r = tbl.rowCount() - 1
@@ -526,14 +524,14 @@ def test_validate_rejects_non_numeric_curve_cell():
     assert client.validated == []                         # never dry-ran a bad doc
 
 
-def test_validate_rejects_bad_json_tab():
+def test_apply_bad_json_leaves_document_and_reports():
     client = FakeClient(caps=("cal-validate",))
     p = CalibrationPanel("u", FakeHub(client))
-    p._tabs.setCurrentIndex(1)                            # JSON tab is authoritative
-    p._view.setPlainText("{ not valid json")
-    p._on_validate()
-    assert "invalid" in p._status.text().lower()
-    assert client.validated == []
+    p._set_doc(_doc())
+    msg = p._apply_json_text("{ not valid json")
+    assert msg and "not valid JSON" in msg
+    p._on_validate()                                     # form is still the clean doc
+    assert client.validated                              # dry-ran the (unchanged) doc
 
 
 def test_validate_still_passes_a_clean_doc():
@@ -544,7 +542,6 @@ def test_validate_still_passes_a_clean_doc():
         "min_power_dbm": -36.0, "max_power_dbm": -2.5}}})
     p = CalibrationPanel("u", FakeHub(client))
     p._set_doc(_doc())
-    p._tabs.setCurrentIndex(0)
     p._on_validate()
     assert client.validated                               # dry-ran the clean doc
     assert "dry run" in p._status.text()

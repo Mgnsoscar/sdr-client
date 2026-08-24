@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemDelegate, QAbstractItemView, QAbstractScrollArea, QApplication,
     QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
     QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
-    QPushButton, QScrollArea, QSizePolicy, QTableWidget, QTableWidgetItem, QTabWidget,
+    QPushButton, QScrollArea, QSizePolicy, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -802,7 +802,6 @@ class CalibrationPanel(QWidget):
         self.hub = hub
         self._doc: Optional[dict] = None       # the working document model
         self._f: dict = {}                      # references to editor widgets
-        self._prev_tab = 0
         from state import ComponentCatalog
         self._catalog = ComponentCatalog()      # the client's canonical component library
         self._components_synced = False          # merged this unit's catalog on first load
@@ -827,6 +826,10 @@ class CalibrationPanel(QWidget):
         self._save_btn = QPushButton("Save"); self._save_btn.clicked.connect(self._on_save)
         self._download_btn = QPushButton("Download…"); self._download_btn.setEnabled(False)
         self._download_btn.clicked.connect(self._on_download)
+        self._json_btn = QPushButton("JSON…")
+        self._json_btn.setToolTip("View or edit the raw calibration document — for anything "
+                                  "the form doesn't cover. Applying it reloads the editor.")
+        self._json_btn.clicked.connect(self._open_json)
         self._components_btn = QPushButton("Components…")
         self._components_btn.setToolTip("Open the component library — characterize cables "
                                         "and antennas once, then pick them in the chain.")
@@ -835,6 +838,7 @@ class CalibrationPanel(QWidget):
                   self._save_btn, self._download_btn):
             row.addWidget(b)
         row.addStretch(1)
+        row.addWidget(self._json_btn)
         row.addWidget(self._components_btn)
         outer.addLayout(row)
 
@@ -853,11 +857,7 @@ class CalibrationPanel(QWidget):
         # The resolved per-signal summary table now lives inside the editor's Signals
         # card (built in _build_editor_tab); _populate_table fills it after a get/validate.
 
-        self._tabs = QTabWidget()
-        self._tabs.addTab(self._build_editor_tab(), "Editor")
-        self._tabs.addTab(self._build_json_tab(), "JSON (advanced)")
-        self._tabs.currentChanged.connect(self._on_tab_changed)
-        outer.addWidget(self._tabs, stretch=1)
+        outer.addWidget(self._build_editor_tab(), stretch=1)
 
     # ── card scaffolding (matches the mockup's .card + header) ───────────────────
     def _make_card(self, *, number=None, title=None, desc=None, lbl=None, sub=None,
@@ -1014,21 +1014,66 @@ class CalibrationPanel(QWidget):
         scroll.setWidget(inner)
         return scroll
 
-    def _build_json_tab(self) -> QWidget:
-        self._view = QPlainTextEdit()
-        self._view.setFont(QFont("monospace"))
-        self._view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        return self._view
+    def _open_json(self) -> None:
+        """View / edit the raw calibration document in a dialog. The editor form is the
+        primary surface; this is the escape hatch for anything the form doesn't cover.
+        Applying valid JSON replaces the working document and rebuilds the editor."""
+        try:                                     # fold current form edits in first
+            self._doc = self._read_form(strict=False)
+        except ValueError:
+            pass
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox
+        dlg = QDialog(self.window())
+        dlg.setWindowTitle("Calibration document · JSON")
+        dlg.setMinimumSize(700, 560)
+        v = QVBoxLayout(dlg); v.setSpacing(8)
+        intro = QLabel("The raw calibration document. Edit here for anything the form "
+                       "doesn't surface — “Apply” parses it back into the editor.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+        v.addWidget(intro)
+        view = QPlainTextEdit(); view.setFont(QFont("monospace"))
+        view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        view.setPlainText(json.dumps(self._doc, indent=2) if self._doc is not None else "")
+        v.addWidget(view, 1)
+        err = QLabel(""); err.setWordWrap(True)
+        err.setStyleSheet(f"font-size:11px;color:{Palette.CRASH};")
+        v.addWidget(err)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                              QDialogButtonBox.StandardButton.Cancel)
+        bb.button(QDialogButtonBox.StandardButton.Ok).setText("Apply")
+        v.addWidget(bb)
+
+        def _apply():
+            msg = self._apply_json_text(view.toPlainText())
+            if msg:
+                err.setText(msg)
+            else:
+                dlg.accept()
+        bb.accepted.connect(_apply)
+        bb.rejected.connect(dlg.reject)
+        dlg.exec()
+
+    def _apply_json_text(self, text: str) -> Optional[str]:
+        """Parse raw JSON into the working document and rebuild the editor. Returns an
+        error message on failure (document left unchanged), or None on success."""
+        text = (text or "").strip()
+        if not text:
+            return "the document is empty"
+        try:
+            doc = json.loads(text)
+        except ValueError as exc:
+            return f"not valid JSON: {exc}"
+        self._doc = doc
+        self._download_btn.setEnabled(doc is not None)
+        self._doc_to_form()
+        return None
 
     # ── model → views ────────────────────────────────────────────────────────────
     def _set_doc(self, doc: Optional[dict]) -> None:
         self._doc = doc
         self._download_btn.setEnabled(doc is not None)
-        self._doc_to_json()
         self._doc_to_form()
-
-    def _doc_to_json(self) -> None:
-        self._view.setPlainText(json.dumps(self._doc, indent=2) if self._doc is not None else "")
 
     def _plane_names(self):
         planes = ((self._doc or {}).get("chain") or {}).get("planes") or {}
@@ -1173,7 +1218,7 @@ class CalibrationPanel(QWidget):
 
     def _on_add_plane(self) -> None:
         try:
-            self._sync_from(self._tabs.currentIndex(), strict=False)
+            self._sync_from(strict=False)
         except ValueError:
             pass
         if self._doc is None:
@@ -1182,10 +1227,9 @@ class CalibrationPanel(QWidget):
         nm, i = "plane", 1
         while nm in planes:
             i += 1; nm = f"plane{i}"
-        planes[nm] = {"type": "measured", "quantity": ""}
+        planes[nm] = {"type": "measured"}
         self._download_btn.setEnabled(True)
         self._doc_to_form()
-        self._tabs.setCurrentIndex(0)
 
     def _make_plane_row(self, name: str = "", spec: Optional[dict] = None) -> dict:
         """Create (but do not place) the editable widgets for one chain stage, returning
@@ -1670,7 +1714,7 @@ class CalibrationPanel(QWidget):
 
     def _remove_plane(self, row) -> None:
         try:
-            self._sync_from(0, strict=False)
+            self._sync_from(strict=False)
         except ValueError:
             pass
         name = row["name"].text().strip()
@@ -1873,53 +1917,10 @@ class CalibrationPanel(QWidget):
             if strict:
                 raise
 
-    def _json_to_doc(self, strict: bool) -> None:
-        text = self._view.toPlainText().strip()
-        if not text:
-            if strict:
-                raise ValueError("document is empty")
-            return
-        try:
-            self._doc = json.loads(text)
-        except ValueError:
-            if strict:
-                raise
-
-    def _sync_from(self, tab_index: int, strict: bool) -> None:
-        """Pull the given tab's contents into self._doc."""
-        if tab_index == 0:                       # Editor
-            self._doc = self._read_form(strict)
-        else:                                     # JSON
-            self._json_to_doc(strict)
-
-    def _on_tab_changed(self, idx: int) -> None:
-        # Leaving the JSON tab with unparseable text would silently discard those edits
-        # (best-effort sync swallows the error and the Editor repaints from the stale
-        # model). Keep the user on JSON with a clear error instead of losing their work.
-        if self._prev_tab == 1 and idx != 1:
-            text = self._view.toPlainText().strip()
-            if text:
-                try:
-                    json.loads(text)
-                except ValueError as exc:
-                    self._set_status(
-                        f"JSON has an error — fix it or clear it before leaving this tab: {exc}",
-                        kind="error")
-                    self._tabs.blockSignals(True)
-                    self._tabs.setCurrentIndex(1)
-                    self._tabs.blockSignals(False)
-                    return
-        # Sync the tab we're leaving into the model (best-effort), then repaint the
-        # tab we're entering from the model.
-        try:
-            self._sync_from(self._prev_tab, strict=False)
-        except ValueError:
-            pass
-        if idx == 0:
-            self._doc_to_form()
-        else:
-            self._doc_to_json()
-        self._prev_tab = idx
+    def _sync_from(self, strict: bool) -> None:
+        """Pull the editor form's contents into self._doc. (The JSON view is a separate
+        apply-on-close dialog — see _open_json — so the form is always the live model.)"""
+        self._doc = self._read_form(strict)
 
     # ── refresh / load ──────────────────────────────────────────────────────────
     def on_shown(self) -> None:
@@ -1979,7 +1980,7 @@ class CalibrationPanel(QWidget):
 
     def _on_save(self) -> None:
         try:
-            self._sync_from(self._tabs.currentIndex(), strict=True)
+            self._sync_from(strict=True)
         except ValueError as exc:
             self._set_status(f"cannot save: {exc}", kind="error")
             return
@@ -2026,7 +2027,7 @@ class CalibrationPanel(QWidget):
         # would validate "clean" and then fail on Save. Surface those errors here
         # instead, before any dry-run against the unit.
         try:
-            self._sync_from(self._tabs.currentIndex(), strict=True)
+            self._sync_from(strict=True)
         except ValueError as exc:
             self._update_issues()          # reflect what local checks can see too
             self._set_status(f"invalid — would fail to save: {exc}", kind="error")
@@ -2072,7 +2073,7 @@ class CalibrationPanel(QWidget):
         rename inside the dialog is applied to this unit's chain references too, so a
         renamed part doesn't dangle. Refresh the chain afterward."""
         try:
-            self._sync_from(self._tabs.currentIndex(), strict=False)
+            self._sync_from(strict=False)
         except ValueError:
             pass
         from .component_library_dialog import ComponentLibraryDialog
@@ -2087,7 +2088,7 @@ class CalibrationPanel(QWidget):
 
     def _on_download(self) -> None:
         try:
-            self._sync_from(self._tabs.currentIndex(), strict=False)
+            self._sync_from(strict=False)
         except ValueError:
             pass
         if self._doc is None:
@@ -2129,7 +2130,7 @@ class CalibrationPanel(QWidget):
             added = self._catalog.merge(ComponentCatalog.parse_wire(result))
         except Exception:  # noqa: BLE001 — a broken unit catalog shouldn't break the panel
             return
-        if added and self._tabs.currentIndex() == 0:
+        if added:
             self._doc_to_form()                  # so the new components appear in pickers
 
     def _handle_validate(self, result) -> None:
@@ -2222,7 +2223,7 @@ class CalibrationPanel(QWidget):
             return
         # sync current edits, then add an empty signal for each measured plane
         try:
-            self._sync_from(self._tabs.currentIndex(), strict=False)
+            self._sync_from(strict=False)
         except ValueError:
             pass
         if self._doc is None:
@@ -2230,11 +2231,10 @@ class CalibrationPanel(QWidget):
         self._doc.setdefault("signals", {})[sid] = {"curves": {}}
         self._download_btn.setEnabled(True)
         self._doc_to_form()
-        self._tabs.setCurrentIndex(0)
 
     def _remove_signal(self, sid: str) -> None:
         try:
-            self._sync_from(0, strict=False)
+            self._sync_from(strict=False)
         except ValueError:
             pass
         if self._doc and sid in (self._doc.get("signals") or {}):
