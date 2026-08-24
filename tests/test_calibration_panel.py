@@ -866,6 +866,37 @@ def test_rename_without_referencing_tasks_does_not_prompt(monkeypatch):
     assert client.task_updates == []
 
 
+def test_cancel_aborts_the_whole_rename(monkeypatch):
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Cancel))
+    client = _TasksClient(_TASKS_YAML)
+    p = CalibrationPanel("u", FakeHub(client))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    p._handle_tasks(_TASKS_YAML)
+    p._rename_signal("mock", "gnss_l1")
+    out = p._read_form(strict=False)["signals"]
+    assert "mock" in out and "gnss_l1" not in out    # signal left untouched
+    assert client.task_updates == []                 # and no task changed
+
+
+def test_rename_signal_from_the_table_cell(monkeypatch):
+    # Double-clicking the Signal cell and committing a new name renames the signal.
+    from PyQt6.QtCore import Qt as _Qt
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    # find the "mock" row's Signal cell and edit it, as an in-cell edit would
+    row = next(r for r in range(p._table.rowCount()) if p._table.item(r, 0).text() == "mock")
+    item = p._table.item(row, 0)
+    assert item.data(_Qt.ItemDataRole.UserRole) == "mock"          # stores the old id
+    assert bool(item.flags() & _Qt.ItemFlag.ItemIsEditable)        # editable
+    assert not (p._table.item(row, 1).flags() & _Qt.ItemFlag.ItemIsEditable)  # others aren't
+    item.setText("gnss_l1")                                        # commit the edit
+    out = p._read_form(strict=False)["signals"]
+    assert "gnss_l1" in out and "mock" not in out
+
+
 def test_remove_signal_from_measured_detail(monkeypatch):
     # The expanded signal section carries a "Remove signal" action; confirming it drops
     # the signal (and all its curves) from the document.

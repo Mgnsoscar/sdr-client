@@ -1043,7 +1043,11 @@ class CalibrationPanel(QWidget):
         self._table = QTableWidget(0, 4)
         self._table.setHorizontalHeaderLabels(["Signal", "Freq MHz", "Ampl.", "--power dBm"])
         self._table.verticalHeader().setVisible(False)
-        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        # Only the Signal cell is editable — double-click it to rename the signal id (the
+        # other columns are read-outs). See _populate_table for the per-cell flags.
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked |
+                                    QAbstractItemView.EditTrigger.EditKeyPressed)
+        self._table.itemChanged.connect(self._on_signal_item_changed)
         # No built-in (blue, persistent) selection: clicking a row still fires
         # cellClicked, but the highlight is painted by hand in _populate_table — with the
         # app's accent tint, and only while that signal's editor is actually open (see
@@ -1051,7 +1055,8 @@ class CalibrationPanel(QWidget):
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table.setMaximumHeight(180)
-        self._table.setToolTip("Click a signal to open its measured curve for editing.")
+        self._table.setToolTip("Click a signal to open its measured curve for editing; "
+                               "double-click its name to rename it.")
         self._table.cellClicked.connect(self._on_signal_row_clicked)
         sig_body.addWidget(self._table)
         rcol.addWidget(sig_card)
@@ -1979,16 +1984,6 @@ class CalibrationPanel(QWidget):
             note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
             bv.addWidget(note)
         sub = QHBoxLayout()
-        if is_source:
-            # Rename the signal id in place (keeps its curves/amplitude/label), so a task
-            # rename can be mirrored here without deleting and re-entering everything.
-            id_edit = QLineEdit(sid); id_edit.setFixedWidth(150)
-            id_edit.setToolTip("Rename this signal id — updates it throughout this "
-                               "calibration. Keep it matching the task's SDR_CAL_SIGNAL_ID.")
-            id_edit.editingFinished.connect(
-                lambda s=sid, e=id_edit: self._rename_signal(s, e.text()))
-            sub.addWidget(QLabel("id")); sub.addWidget(id_edit)
-            sub.addSpacing(12)
         sub.addWidget(QLabel("plot label")); entry["plabel"].setFixedWidth(90)
         sub.addWidget(entry["plabel"])
         sub.addStretch(1)
@@ -2836,6 +2831,27 @@ class CalibrationPanel(QWidget):
                                 f"A signal named “{new}” already exists — pick another id.")
             self._doc_to_form()                       # repaint the field back to the old id
             return
+        # If tasks reference the old id, ask up front — Yes also updates them, No renames the
+        # signal only, Cancel aborts the whole rename (so the signal stays as it was).
+        affected = sorted(n for n, s in self._task_signals.items() if s == old)
+        update_tasks = False
+        if affected:
+            word = "task" if len(affected) == 1 else "tasks"
+            listed = ", ".join(affected)
+            resp = QMessageBox.question(
+                self, "Rename signal",
+                f"{len(affected)} {word} reference the calibration signal “{old}” "
+                f"(via SDR_CAL_SIGNAL_ID):\n\n{listed}\n\n"
+                f"• Yes — rename the signal and update {'that task' if len(affected) == 1 else 'those tasks'} to “{new}”\n"
+                f"• No — rename the signal only\n"
+                f"• Cancel — don’t rename",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No |
+                QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes)
+            if resp == QMessageBox.StandardButton.Cancel:
+                self._doc_to_form()                   # abort — repaint the name back
+                return
+            update_tasks = (resp == QMessageBox.StandardButton.Yes)
         self._doc["signals"] = {(new if k == old else k): v for k, v in signals.items()}
         if old in self._expanded_signals:             # keep it expanded under the new id
             self._expanded_signals.discard(old)
@@ -2846,26 +2862,8 @@ class CalibrationPanel(QWidget):
                 shown.add(new)
         self._set_status(f"renamed signal “{old}” → “{new}”", kind="ok")
         self._doc_to_form()
-        self._offer_task_rename(old, new)
-
-    def _offer_task_rename(self, old: str, new: str) -> None:
-        """After a signal is renamed here, any of this unit's tasks that referenced the old
-        id (via SDR_CAL_SIGNAL_ID) now point at a signal that no longer exists. Offer to
-        update them so the two stay in sync."""
-        affected = sorted(n for n, s in self._task_signals.items() if s == old)
-        if not affected:
-            return
-        word = "task" if len(affected) == 1 else "tasks"
-        listed = ", ".join(affected)
-        if QMessageBox.question(
-                self, "Update tasks too?",
-                f"{len(affected)} {word} still reference the old calibration signal "
-                f"“{old}” (via SDR_CAL_SIGNAL_ID):\n\n{listed}\n\n"
-                f"Update {'it' if len(affected) == 1 else 'them'} to “{new}” as well?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
-            return
-        self._rename_tasks_signal(affected, new)
+        if update_tasks:
+            self._rename_tasks_signal(affected, new)
 
     def _rename_tasks_signal(self, names: list, new: str) -> None:
         """Point each named task's SDR_CAL_SIGNAL_ID at `new`, preserving every other field
@@ -2980,6 +2978,8 @@ class CalibrationPanel(QWidget):
         def_amp = ((self._doc or {}).get("defaults") or {}).get("amplitude")
         active = self._active_signal_ids()               # rows to tint (editor on screen)
         hi = QColor(Palette.ACCENT_SOFT)
+        # Programmatic (re)fill fires itemChanged; mute it so it isn't mistaken for a rename.
+        self._table.blockSignals(True)
         self._table.setRowCount(len(signals))
         for r, (sid, info) in enumerate(sorted(signals.items())):
             dsig = doc_sigs.get(sid) or {}
@@ -2997,11 +2997,28 @@ class CalibrationPanel(QWidget):
                 rng = "per frequency"
             for c, text in enumerate([sid, freq, ampl, rng or "—"]):
                 item = QTableWidgetItem(str(text))
-                if c == 0:
-                    item.setToolTip("Click to edit this signal's measured curve.")
+                if c == 0:                               # the Signal cell: editable → rename
+                    item.setData(Qt.ItemDataRole.UserRole, sid)   # its current id, for rename
+                    item.setToolTip("Click to edit this signal's measured curve; "
+                                    "double-click to rename it.")
+                else:                                    # read-out columns aren't editable
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if sid in active:                        # accent tint while its editor is open
                     item.setBackground(hi)
                 self._table.setItem(r, c, item)
+        self._table.blockSignals(False)
+
+    def _on_signal_item_changed(self, item) -> None:
+        """The Signal cell was edited in place → rename the signal. The item's stored id is
+        the old name; its new text is the target. Other columns are read-only, so this only
+        fires for a rename."""
+        if item.column() != 0:
+            return
+        old = item.data(Qt.ItemDataRole.UserRole)
+        new = (item.text() or "").strip()
+        if not old or new == old:
+            return
+        self._rename_signal(old, new)
 
     def _set_status(self, text: str, kind: str = "muted") -> None:
         color = {"ok": Palette.ONLINE, "warn": Palette.ARMED, "error": Palette.CRASH,
