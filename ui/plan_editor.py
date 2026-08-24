@@ -48,7 +48,7 @@ from .duration_spin import DurationSpinBox
 from .param_form import fmt_duration
 from .qt_adapter import DataHub
 from .theme import Palette
-from .timeline_editor import _TimelineCanvas, TimelineEditor, DRAG_THRESHOLD, LANES_TOP
+from .timeline_editor import _TimelineCanvas, TimelineEditor, DRAG_THRESHOLD, LANES_TOP, task_signals_from_yaml
 
 
 def _parse_task_commands(yaml_text) -> Dict[str, List[str]]:
@@ -230,11 +230,16 @@ class PlanItemDialog(QDialog):
         can be authored with no unit connected. The selected unit only decides
         which unit this parameterized copy will be armed on later."""
         self._timeline.set_context(self._hub, LIBRARY_HOST)
+        # Params come from the library, but absolute-power bounds are the SELECTED
+        # unit's — so a plan's tune steps can set absolute (calibrated) power for the
+        # unit they'll arm on.
+        self._timeline.set_calibration(self._hub, hostname)
         try:
             lib = self._hub.fleet.get(LIBRARY_HOST)
         except KeyError:
             self._timeline.set_tasks([])
             self._timeline.set_task_commands({})
+            self._timeline.set_task_signals({})
             return
         try:
             names = [t.name for t in lib.list_tasks()]
@@ -242,10 +247,11 @@ class PlanItemDialog(QDialog):
             names = []
         self._timeline.set_tasks(names)
         try:
-            cmds = _parse_task_commands(lib.get_tasks_yaml())
+            yaml_text = lib.get_tasks_yaml()
         except Exception:  # noqa: BLE001
-            cmds = {}
-        self._timeline.set_task_commands(cmds)
+            yaml_text = ""
+        self._timeline.set_task_commands(_parse_task_commands(yaml_text))
+        self._timeline.set_task_signals(task_signals_from_yaml(yaml_text))
 
     def _seed_from_source(self, legacy_overrides: Optional[List[m.StepOverride]] = None) -> None:
         """Load the timeline with a fresh COPY of the selected source sequence's

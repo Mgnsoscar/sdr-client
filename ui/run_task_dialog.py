@@ -19,7 +19,7 @@ the script's parameters once the command names the script.
 from __future__ import annotations
 
 import shlex
-from typing import List
+from typing import List, Optional
 
 import yaml
 
@@ -52,6 +52,12 @@ class RunTaskDialog(QDialog):
         self._current_args: List[str] = []
         self._params_inflight = False
         self._starting = False
+        # Per-unit power calibration: the task's opt-in signal (env) and the resolved
+        # bounds for it, so the --power field shows this unit's real min/max.
+        self._cal_signal_id: Optional[str] = None
+        self._cal_bounds = None
+        self._params_ready = False
+        self._cal_ready = False
 
         self.setWindowTitle(f"Run '{task_name}' with parameters")
         self.setMinimumWidth(560)
@@ -147,6 +153,23 @@ class RunTaskDialog(QDialog):
                 self.accept()
             return
 
+        if op == "runtask_cal":
+            # 404 (uncalibrated) → schema range; offline → last-known cached bounds.
+            from api.client import AgentConnectionError
+            from state.calibration_cache import get_calibration_cache
+            cache = get_calibration_cache()
+            self._cal_bounds = None
+            if isinstance(result, dict) and result.get("valid"):
+                cache.put(self.hostname, result)
+                self._cal_bounds = (result.get("signals") or {}).get(self._cal_signal_id)
+            elif isinstance(result, AgentConnectionError):
+                cached = cache.get(self.hostname)
+                if cached:
+                    self._cal_bounds = (cached.get("signals") or {}).get(self._cal_signal_id)
+            self._cal_ready = True
+            self._maybe_build()
+            return
+
         if isinstance(result, Exception):
             self._set_status(f"error: {result}", error=True)
             return
@@ -155,8 +178,9 @@ class RunTaskDialog(QDialog):
             self._parse_command(result if isinstance(result, str) else "")
         elif op == "runtask_params":
             self._params_inflight = False
+            self._params_ready = True
             self._param_specs = (result or {}).get("params", [])
-            self._build_form()
+            self._maybe_build()
 
     # ── Parse the task's command → interpreter + script + args ──────────────────
 
@@ -171,6 +195,9 @@ class RunTaskDialog(QDialog):
             self._set_status(
                 "Couldn't read this task's definition from the unit.", error=True)
             return
+
+        # The task opts into calibration by setting this env to the script's signal id.
+        self._cal_signal_id = (entry.get("env") or {}).get("SDR_CAL_SIGNAL_ID")
 
         command = list(entry.get("command", []))
         if command:
@@ -189,6 +216,7 @@ class RunTaskDialog(QDialog):
         self._script_name = self._script_path.rsplit("/", 1)[-1]
         self._current_args = command[script_idx + 1:]
         self._fetch_params()
+        self._fetch_calibration()
 
     def _fetch_params(self) -> None:
         if not self._script_name or self._params_inflight:
@@ -200,8 +228,27 @@ class RunTaskDialog(QDialog):
             lambda: self.hub.fleet.get(self.hostname).get_script_params(self._script_name),
         )
 
+    def _fetch_calibration(self) -> None:
+        # If this task opts into calibration, fetch the unit's resolved bounds so the
+        # --power field reflects the real range. Uncalibrated (404) → no bounds.
+        if not self._cal_signal_id:
+            self._cal_ready = True
+            self._maybe_build()
+            return
+        self.hub.run_async(
+            f"runtask_cal:{self.hostname}",
+            lambda: self.hub.fleet.get(self.hostname).get_calibration(),
+        )
+
+    def _maybe_build(self) -> None:
+        if self._params_ready and self._cal_ready:
+            self._build_form()
+
     def _build_form(self) -> None:
-        self._form.set_params(self._param_specs)
+        # Open in the mode the deployed command used (relative if it set --gain).
+        mode = "relative" if any(a in ("-Gain", "--gain") for a in self._current_args) else None
+        self._form.set_params(self._param_specs, cal_bounds=self._cal_bounds,
+                              absolute_allowed=True, default_power_mode=mode)
         # Prefill from the deployed args; anything the form doesn't recognise
         # (positional args, flags not in the schema) drops into "Additional args".
         extra = self._form.set_values(self._current_args)

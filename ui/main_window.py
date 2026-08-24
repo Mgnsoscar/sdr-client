@@ -305,14 +305,24 @@ class MainWindow(QMainWindow):
         self.hub.run_async("sync_clocks", lambda: self._sync_clocks(hosts))
 
     def _sync_clocks(self, hosts: list) -> list:
-        """Worker thread: push this PC's time to each unit. Returns per-unit ok."""
-        out = []
-        for h in hosts:
+        """Worker thread: push this PC's time to each unit CONCURRENTLY. Returns
+        per-unit ok. Running the units in parallel means an offline unit costs one
+        connect-timeout for the whole batch, not one per unit in series."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _one(h):
             try:
                 res = self.hub.fleet.get(h).set_time()
-                out.append((h, bool(res.get("ok")), res.get("detail", "")))
+                return (h, bool(res.get("ok")), res.get("detail", ""))
             except Exception as exc:  # noqa: BLE001 — reported per unit
-                out.append((h, False, str(exc)))
+                return (h, False, str(exc))
+
+        if not hosts:
+            return []
+        out = []
+        with ThreadPoolExecutor(max_workers=min(8, len(hosts))) as pool:
+            for fut in as_completed([pool.submit(_one, h) for h in hosts]):
+                out.append(fut.result())
         return out
 
     # ── Panic ────────────────────────────────────────────────────────────────────

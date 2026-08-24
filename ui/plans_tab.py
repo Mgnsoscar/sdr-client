@@ -32,7 +32,7 @@ import yaml
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox,
+    QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -46,7 +46,7 @@ from .plan_editor import PlanEditorDialog
 from .plan_log_dialog import PlanLogDialog
 from .qt_adapter import DataHub
 from .theme import Palette
-from .widgets import StatusPill
+from .widgets import StatusPill, natural_key
 
 ARM_MARGIN_S = 5.0
 CLOCK_WARN_SKEW_S = 1.0
@@ -125,8 +125,18 @@ def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
     otherwise it's open-ended and runs until stopped. Worker thread.
     Returns [(item, SequenceRun|None, error|None), ...]."""
     out = []
+    _offsets: dict = {}   # per-unit clock skew, fetched once per host
+
+    def _off(host: str) -> float:
+        if host not in _offsets:
+            _offsets[host] = fleet.get(host).clock_offset_s()
+        return _offsets[host]
+
     for item in plan.items:
-        on_air_at_iso = (t0 + timedelta(seconds=item.on_air_offset_s)).isoformat()
+        # Translate the laptop-UTC anchor to THIS unit's clock (as single-sequence arm
+        # does), so a skewed unit still goes on air at the intended wall-clock time.
+        on_air_at_iso = (t0 + timedelta(seconds=item.on_air_offset_s + _off(item.hostname))
+                         ).isoformat()
         req = m.ArmSequenceRequest(
             on_air_at=on_air_at_iso,
             open_ended=(duration_s is None),
@@ -248,9 +258,14 @@ class PlansTab(QWidget):
         self._plans: List[m.Plan] = []
         self._runs_by_host: Dict[str, List[m.SequenceRun]] = {}
         self._runs_pending = False
+        self._runs_sig: object = None   # last-rendered active-run signature
         self._build()
         self.hub.task_done.connect(self._on_task_done)
         self.hub.event_received.connect(self._on_event)
+        # Safety net: fold the poller's periodic run snapshot in, so a finished run
+        # stops showing "running" even if its 'sequence_stopped' webhook was missed
+        # (an SSE blip). Webhooks are the fast path; this is the guaranteed backstop.
+        self.hub.fast_update.connect(self._on_fast_update)
 
     def _build(self) -> None:
         outer = QVBoxLayout(self)
@@ -277,6 +292,12 @@ class PlansTab(QWidget):
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         row.addWidget(self._status)
         row.addStretch(1)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search plans…")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFixedWidth(200)
+        self._search.textChanged.connect(lambda _=0: self._rebuild())
+        row.addWidget(self._search)
         outer.addLayout(row)
 
         scroll = QScrollArea()
@@ -456,12 +477,15 @@ class PlansTab(QWidget):
     # ── Arm (shared on-air, clock-skew pre-flight) ─────────────────────────────
 
     def _on_arm(self, plan: m.Plan) -> None:
+        if getattr(self, "_arm_busy", False):
+            return                       # a preflight is already in flight — no double-arm
         missing = [i for i in plan.items if i.hostname not in self.fleet]
         if missing:
             names = ", ".join(i.unit_label or i.hostname for i in missing)
             QMessageBox.warning(self, "Cannot arm plan",
                                 f"These units are not in the fleet: {names}")
             return
+        self._arm_busy = True
         self._set_status(f"pre-flight for {plan.name or plan.id}…")
         hostnames = sorted({i.hostname for i in plan.items})
         self.hub.run_async(
@@ -557,6 +581,24 @@ class PlansTab(QWidget):
         if isinstance(ev, m.SequenceWebhook):
             self._refresh_runs()
 
+    def _runs_signature(self) -> frozenset:
+        """A cheap fingerprint of the active-run picture — used to rebuild the plan
+        rows only when run state actually changes, not on every poll tick."""
+        return frozenset(
+            (host, r.id, r.state, bool(getattr(r, "on_air_actual", None)))
+            for host, rs in self._runs_by_host.items() for r in rs)
+
+    def _on_fast_update(self, snap) -> None:
+        runs = getattr(snap, "runs", None)
+        if not isinstance(runs, dict) or not runs:
+            return
+        # Merge per host — a scoped refresh carries only one unit's runs, so we must
+        # not wipe the others.
+        for host, val in runs.items():
+            self._runs_by_host[host] = val if isinstance(val, list) else []
+        if self._runs_signature() != self._runs_sig and self.isVisible():
+            self._rebuild()   # recomputes and stores the signature
+
     # ── Result routing ─────────────────────────────────────────────────────────
 
     def _on_task_done(self, label: str, result) -> None:
@@ -575,6 +617,7 @@ class PlansTab(QWidget):
         plan = self._store.get(plan_id)
 
         if op == "plan_preflight":
+            self._arm_busy = False       # preflight done; the modal dialog guards the rest
             if plan is None:
                 return
             self._finish_arm_preflight(plan, result)
@@ -633,21 +676,39 @@ class PlansTab(QWidget):
             empty.setWordWrap(True)
             self._list.addWidget(empty)
             self._set_status("")
+            self._runs_sig = self._runs_signature()
             return
 
+        query = self._search.text().strip().lower()
+        # Stable alphanumeric order — so editing a plan never reorders the list.
+        plans = sorted(self._plans, key=lambda p: natural_key(p.name or p.id))
         active_total = 0
-        for plan in self._plans:
+        shown = 0
+        for plan in plans:
+            if query and query not in (plan.name or "").lower() \
+                    and query not in (plan.description or "").lower():
+                continue
             runs = self._active_run_objs(plan)
             on_air_n = sum(1 for r in runs if _is_on_air(r))
             pending_n = len(runs) - on_air_n
             if runs:
                 active_total += 1
+            shown += 1
             self._list.addWidget(_PlanRow(
                 plan, runs, on_air_n, pending_n,
                 on_arm=self._on_arm, on_stop=self._on_stop,
                 on_edit=self._on_edit, on_delete=self._on_delete, on_log=self._on_log))
+        if shown == 0 and query:
+            empty = QLabel(f"No plans match “{query}”.")
+            empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
+            empty.setWordWrap(True)
+            self._list.addWidget(empty)
         suffix = f" · {active_total} active" if active_total else ""
-        self._set_status(f"{len(self._plans)} plan(s){suffix}")
+        if query:
+            self._set_status(f"{shown} plan(s) match · {len(self._plans)} total{suffix}")
+        else:
+            self._set_status(f"{len(self._plans)} plan(s){suffix}")
+        self._runs_sig = self._runs_signature()   # rows now match this run picture
 
     def _set_status(self, text: str, error: bool = False) -> None:
         color = Palette.CRASH if error else Palette.TEXT_FAINT

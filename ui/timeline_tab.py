@@ -79,9 +79,19 @@ def _arm_scheduled(fleet: Fleet, plan: m.Plan, start_utc: datetime,
     open-ended): on-air = start + the item's on-air offset, off-air = stop + its
     off-air offset. Worker thread. Returns [(item, SequenceRun|None, error|None)]."""
     out = []
+    _offsets: dict = {}   # per-unit clock skew, fetched once per host
+
+    def _off(host: str) -> float:
+        if host not in _offsets:
+            _offsets[host] = fleet.get(host).clock_offset_s()
+        return _offsets[host]
+
     for item in plan.items:
-        on_air = (start_utc + timedelta(seconds=item.on_air_offset_s)).isoformat()
-        off_air = (stop_utc + timedelta(seconds=item.off_air_offset_s)).isoformat()
+        # Translate to the unit's clock so a skewed unit still fires at the intended
+        # wall-clock window (matches single-sequence and manual-plan arming).
+        skew = _off(item.hostname)
+        on_air = (start_utc + timedelta(seconds=item.on_air_offset_s + skew)).isoformat()
+        off_air = (stop_utc + timedelta(seconds=item.off_air_offset_s + skew)).isoformat()
         req = m.ArmSequenceRequest(
             on_air_at=on_air,
             on_air_end=off_air,
@@ -544,10 +554,15 @@ class TimelineTab(QWidget):
         self._marked: List[QDate] = []
         self._runs_by_host: Dict[str, List[m.SequenceRun]] = {}
         self._runs_pending = False
+        self._runs_sig: object = None   # last-rendered active-run signature
         self._build()
         if self.hub is not None:
             self.hub.task_done.connect(self._on_task_done)
             self.hub.event_received.connect(self._on_event)
+            # Safety net for a missed sequence webhook: fold the poller's periodic
+            # run snapshot in so a finished run clears within a poll cycle (~3s)
+            # rather than waiting on the 30s timer or a manual action.
+            self.hub.fast_update.connect(self._on_fast_update)
         # Time marches on: re-evaluate 'armable' (start passing) and the now-line,
         # and re-poll run state, on a slow tick.
         self._timer = QTimer(self)
@@ -701,6 +716,7 @@ class TimelineTab(QWidget):
         self._status.setText(
             f"{len(blocks)} plan(s) on this day · {total} scheduled in total" if total
             else "No plans scheduled yet. Click “Add plan…” to place one.")
+        self._runs_sig = self._runs_signature()   # view now matches this run picture
 
     def _on_date_changed(self) -> None:
         self._refresh_day()
@@ -787,6 +803,8 @@ class TimelineTab(QWidget):
     # ── Arm / stop ──────────────────────────────────────────────────────────────
 
     def _on_arm(self, entry_id: str) -> None:
+        if getattr(self, "_arm_busy", False):
+            return                       # a preflight is already in flight — no double-arm
         entry = self._store.get(entry_id)
         if entry is None or self.hub is None:
             return
@@ -805,6 +823,7 @@ class TimelineTab(QWidget):
             QMessageBox.warning(self, "Cannot arm", f"These units are not in the fleet: {names}")
             return
         hostnames = sorted({i.hostname for i in plan.items})
+        self._arm_busy = True
         self._status.setText(f"pre-flight for {plan.name}…")
         self.hub.run_async(f"tl_preflight:{entry.id}",
                            lambda: self.hub.fleet.clock_skew(hostnames))
@@ -855,6 +874,23 @@ class TimelineTab(QWidget):
         if isinstance(ev, m.SequenceWebhook):
             self._refresh_runs()
 
+    def _runs_signature(self) -> frozenset:
+        """A cheap fingerprint of the active-run picture — redraw the day only when
+        run state actually changes, not on every poll tick."""
+        return frozenset(
+            (host, r.id, r.state, bool(getattr(r, "on_air_actual", None)))
+            for host, rs in self._runs_by_host.items() for r in rs)
+
+    def _on_fast_update(self, snap) -> None:
+        runs = getattr(snap, "runs", None)
+        if not isinstance(runs, dict) or not runs:
+            return
+        # Merge per host — a scoped refresh carries only one unit's runs.
+        for host, val in runs.items():
+            self._runs_by_host[host] = val if isinstance(val, list) else []
+        if self._runs_signature() != self._runs_sig and self.isVisible():
+            self._refresh_day()   # recomputes and stores the signature
+
     def _on_task_done(self, label: str, result) -> None:
         if label == "tl_runs":
             self._runs_pending = False
@@ -870,6 +906,7 @@ class TimelineTab(QWidget):
         op, entry_id = label.split(":", 1)
         entry = self._store.get(entry_id)
         if op == "tl_preflight":
+            self._arm_busy = False       # preflight done; the modal dialog guards the rest
             if entry is not None:
                 self._finish_preflight(entry, result)
         elif op == "tl_arm":

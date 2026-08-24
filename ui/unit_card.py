@@ -11,6 +11,7 @@ when any source updates.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -18,6 +19,11 @@ from PyQt6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QVBoxLayou
 
 from api import models as m
 from .theme import Palette
+
+# A unit whose clock is within this many seconds of the PC's (measured against the
+# poll's capture time, so poll/render lag isn't counted) counts as "matches the PC
+# clock" — the same threshold the status-bar clock indicator warns past.
+PC_CLOCK_MATCH_S = 3.0
 
 
 class _Dot(QLabel):
@@ -47,15 +53,6 @@ class UnitCard(QFrame):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._online: Optional[bool] = None
         self._build()
-
-    def set_connection(self, connected: Optional[bool]) -> None:
-        """Connection/stream status: True online, False offline, None unknown."""
-        self._online = connected
-        if connected is True:
-            ...
-        else:
-            self._dot.set_color(Palette.IDLE)
-            self._conn.setText("—")
 
     def is_online(self) -> bool:
         """True only if the latest connection/stream update said online."""
@@ -118,6 +115,7 @@ class UnitCard(QFrame):
 
     def set_connection(self, connected: Optional[bool]) -> None:
         """Connection/stream status: True online, False offline, None unknown."""
+        self._online = connected
         if connected is True:
             self._dot.set_color(Palette.ONLINE)
             self._conn.setText("online")
@@ -128,7 +126,7 @@ class UnitCard(QFrame):
             self._dot.set_color(Palette.IDLE)
             self._conn.setText("—")
 
-    def update_system(self, sys: m.SystemHealth) -> None:
+    def update_system(self, sys: m.SystemHealth, captured_at: Optional[float] = None) -> None:
         # Temperature, with color hint if hot
         if sys.cpu_temp_c is not None:
             temp = f"{sys.cpu_temp_c:.0f}°C"
@@ -140,18 +138,58 @@ class UnitCard(QFrame):
         else:
             self._temp.setText("—")
 
-        # Clock sync
+        # Clock sync — distinguish real NTP/internet time from a PC-clock match. The
+        # agent reports clock_source="manual" when the clock was hand-set to the PC;
+        # even without that, a clock that isn't NTP-disciplined but currently reads
+        # within a few seconds of THIS PC is effectively "PC clock" too. On a direct
+        # no-internet cable that's the expected healthy state, not an error — only a
+        # clock that's neither disciplined nor close to the PC is "unsynced".
+        source = (sys.clock_source or "").lower()
         if sys.clock_synced is True:
-            self._clock.setText("synced")
+            self._clock.setText("internet time")
             self._clock.setStyleSheet(f"font-size: 12px; color: {Palette.ONLINE};")
+            self._clock.setToolTip(
+                f"NTP-synchronized{f' via {sys.clock_source}' if sys.clock_source else ''}")
+        elif source == "manual":
+            self._clock.setText("PC clock")
+            self._clock.setStyleSheet(f"font-size: 12px; color: {Palette.ONLINE};")
+            self._clock.setToolTip(
+                "Set to the PC clock (not NTP-disciplined). Will switch to internet "
+                "time automatically once this unit is back online.")
+        elif sys.clock_synced is False and self._matches_pc(sys, captured_at):
+            self._clock.setText("PC clock")
+            self._clock.setStyleSheet(f"font-size: 12px; color: {Palette.ONLINE};")
+            self._clock.setToolTip(
+                "Not NTP-synced, but the clock currently matches this PC (within "
+                f"{PC_CLOCK_MATCH_S:g}s). Good enough for coordinated on-air on an "
+                "isolated link.")
         elif sys.clock_synced is False:
             self._clock.setText("unsynced")
             self._clock.setStyleSheet(f"font-size: 12px; color: {Palette.CRASH};")
+            self._clock.setToolTip("Clock is not NTP-synced and doesn't match the PC "
+                                   "clock — sync it from the status bar.")
         else:
             self._clock.setText("—")
+            self._clock.setToolTip("")
 
         # Connection implied online if we got a snapshot
         self.set_connection(True)
+
+    @staticmethod
+    def _matches_pc(sys: m.SystemHealth, captured_at: Optional[float]) -> bool:
+        """True when the unit's clock reads within PC_CLOCK_MATCH_S of THIS PC.
+        Measured against the poll's capture time (captured_at), so poll/render lag
+        isn't mistaken for skew. False when we can't tell (no capture time or an
+        unparseable unit clock) — the card then stays 'unsynced' rather than guess."""
+        if not captured_at or not sys.utc_now:   # 0.0 = never polled → no reference
+            return False
+        try:
+            dt = datetime.fromisoformat(sys.utc_now)
+        except ValueError:
+            return False
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return abs(dt.timestamp() - captured_at) <= PC_CLOCK_MATCH_S
 
     def update_sdr(self, sdr: m.SdrStatus) -> None:
         if sdr.detected and sdr.device_count > 0:
@@ -174,5 +212,10 @@ class UnitCard(QFrame):
             self._tasks.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_MUTED};")
 
     def set_offline(self) -> None:
-        """Mark the card offline (e.g. a poll/stream failure for this unit)."""
+        """Mark the card offline and clear its live stats — an unreachable unit's
+        last temp / clock / SDR / task counts are stale and no longer valid, so we
+        drop them to '—' rather than leave misleading values on the card."""
         self.set_connection(False)
+        for stat in (self._temp, self._clock, self._sdr, self._tasks):
+            stat.setText("—")
+            stat.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_MUTED};")

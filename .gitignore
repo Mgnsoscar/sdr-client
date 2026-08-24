@@ -220,3 +220,6 @@ __marimo__/
 # SDR client runtime state (per-PC; never committed)
 unit_ledger.json
 unit_ledger.json.tmp
+
+# runtime caches
+calibration_cache.json

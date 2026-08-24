@@ -14,10 +14,33 @@ Search order:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tarfile
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
+
+
+def parse_version(v: Optional[str]) -> Tuple[int, ...]:
+    """A numeric, order-correct key for a dotted version string.
+
+    "1.0.10" → (1, 0, 10), which correctly sorts ABOVE "1.0.9" → (1, 0, 9) —
+    unlike a plain string compare, where "1.0.10" < "1.0.9". Non-numeric input
+    sorts lowest. Trailing non-numeric parts (e.g. a "-rc1" suffix) are ignored
+    for ordering, which is fine for our simple MAJOR.MINOR.PATCH scheme."""
+    nums = re.findall(r"\d+", v or "")
+    return tuple(int(n) for n in nums) if nums else (-1,)
+
+
+def is_newer(candidate: Optional[str], current: Optional[str]) -> bool:
+    """True if `candidate` is a strictly newer version than `current` (numeric
+    compare). A missing candidate is never newer; a missing current is always
+    older than any real candidate."""
+    if not candidate:
+        return False
+    if not current:
+        return True
+    return parse_version(candidate) > parse_version(current)
 
 
 def bundle_dir() -> Path:
@@ -37,8 +60,23 @@ def find_bundle() -> Optional[Path]:
     d = bundle_dir()
     if not d.is_dir():
         return None
-    cands = sorted(d.glob("sdr-agent-*.tar.gz"))
-    return cands[-1] if cands else None
+    cands = list(d.glob("sdr-agent-*.tar.gz"))
+    if not cands:
+        return None
+    # Pick the NEWEST by numeric version (from the sdr-agent-<version>.tar.gz name),
+    # not the alphabetically-last filename — otherwise 1.0.9 beats 1.0.10.
+    return max(cands, key=lambda p: (parse_version(_version_from_name(p)), p.name))
+
+
+def _version_from_name(path: Path) -> str:
+    """The <version> in sdr-agent-<version>.tar.gz (else the bare stem)."""
+    name = path.name
+    if name.startswith("sdr-agent-"):
+        name = name[len("sdr-agent-"):]
+    for suffix in (".tar.gz", ".tgz"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
 
 
 def bundle_version(path: Optional[Path] = None) -> Optional[str]:

@@ -32,7 +32,9 @@ from PyQt6.QtWidgets import (
 )
 
 from api import models as m
+from api.client import AgentConnectionError
 from api.fleet import LIBRARY_HOST
+from config import UNIT_TYPES, UNIT_TYPE_LABELS, DEFAULT_UNIT_TYPE
 from state import (
     LibraryStore, PlanStore, ScheduleStore, pull_library, pull_everything,
     diff_state, UnitSnapshot,
@@ -66,6 +68,10 @@ class LibraryTab(QWidget):
         self._restore_mode = "replace"   # "merge" | "replace", chosen per Restore
         self._drift = {}          # hostname -> LibraryDiff (last check)
         self._drift_err = {}      # hostname -> error string (unreachable / failed)
+        # The library is one store presented as a per-unit-type view: the Tasks /
+        # Sequences / Scripts sub-tabs show the slice for the selected type (its own
+        # items + shared ones), and new items are scoped to it automatically.
+        self._active_type = DEFAULT_UNIT_TYPE
         self._build()
         self.hub.task_done.connect(self._on_task_done)
         # Re-check a unit's definitions against the canonical library whenever it
@@ -129,6 +135,29 @@ class LibraryTab(QWidget):
         self._units_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         outer.addWidget(self._units_status)
 
+        # Unit-type selector — the library is viewed one unit kind at a time. Drives
+        # the Tasks / Sequences / Scripts sub-tabs (Plans are cross-unit, so it's
+        # hidden there). New items in a type view are scoped to that type by default.
+        self._type_bar = QWidget()
+        typerow = QHBoxLayout(self._type_bar)
+        typerow.setContentsMargins(0, 0, 0, 0)
+        typerow.setSpacing(6)
+        lbl = QLabel("Library for")
+        lbl.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
+        typerow.addWidget(lbl)
+        self._type_buttons: List[QPushButton] = []
+        for t in UNIT_TYPES:
+            b = QPushButton(UNIT_TYPE_LABELS.get(t, t))
+            b.setObjectName("tab")
+            b.setCheckable(True)
+            b.setToolTip(f"Show and manage the {UNIT_TYPE_LABELS.get(t, t)} library "
+                         "(its own items + shared ones).")
+            b.clicked.connect(lambda _c, ut=t: self._set_active_type(ut))
+            typerow.addWidget(b)
+            self._type_buttons.append(b)
+        typerow.addStretch(1)
+        outer.addWidget(self._type_bar)
+
         # Sub-tab bar
         subbar = QHBoxLayout()
         subbar.setSpacing(6)
@@ -155,12 +184,27 @@ class LibraryTab(QWidget):
         self._stack.addWidget(self._scripts_panel)      # 2 Scripts
         self._stack.addWidget(self._plans_panel)        # 3 Plans
         outer.addWidget(self._stack, stretch=1)
+        self._set_active_type(self._active_type)   # seed the type views + buttons
         self._select_subtab(0)
+
+    # ── Unit-type view ───────────────────────────────────────────────────────────
+
+    def _set_active_type(self, unit_type: str) -> None:
+        """Point the type-scoped sub-tabs (Tasks / Sequences / Scripts) at one unit
+        kind: they show that type's slice and default new items to it."""
+        self._active_type = unit_type
+        for b, t in zip(self._type_buttons, UNIT_TYPES):
+            b.setChecked(t == unit_type)
+        for panel in (self._tasks_panel, self._sequences_panel, self._scripts_panel):
+            if hasattr(panel, "set_active_type"):
+                panel.set_active_type(unit_type)
 
     def _select_subtab(self, idx: int) -> None:
         self._stack.setCurrentIndex(idx)
         for i, b in enumerate(self._subtab_buttons):
             b.setChecked(i == idx)
+        # Plans are cross-unit; the type selector only applies to the definition tabs.
+        self._type_bar.setVisible(self.SUBTABS[idx] != "Plans")
         w = self._stack.currentWidget()
         if hasattr(w, "on_shown"):
             w.on_shown()
@@ -174,6 +218,9 @@ class LibraryTab(QWidget):
     def on_shown(self) -> None:
         self._store.load()
         self._set_status()
+        # Re-render the units line off the current fleet, so a stale drift entry for
+        # a removed/re-identified unit is pruned on view (not only after a re-check).
+        self._update_units_status()
         w = self._stack.currentWidget()
         if hasattr(w, "on_shown"):
             w.on_shown()
@@ -322,6 +369,29 @@ class LibraryTab(QWidget):
                 + f"\n\n⚠ These units hold plans/schedule not on this PC and a deploy "
                   f"will overwrite them: {', '.join(extra_hosts)}. Restore from one "
                   f"first if you want to keep them.")
+        # Each unit only receives the slice of the library scoped to its Type (shared
+        # items + its own kind). Flag any connected unit whose Type would receive
+        # NONE of the library's tasks — the silent case where the deploy "succeeds"
+        # but that unit gets nothing to run (its Type doesn't match your tasks' scope).
+        type_of = {}
+        for h in hosts:
+            try:
+                type_of[h] = self.hub.fleet.get(h).unit_type
+            except KeyError:
+                type_of[h] = DEFAULT_UNIT_TYPE
+        zero = []
+        for utype in sorted(set(type_of.values())):
+            if lib.tasks and not any(m.applies_to_type(t.types, utype) for t in lib.tasks):
+                names = ", ".join(self._label(h) for h in hosts if type_of[h] == utype)
+                zero.append(f"{UNIT_TYPE_LABELS.get(utype, utype)} ({names})")
+        if zero:
+            box.setInformativeText(
+                box.informativeText()
+                + "\n\n⚠ None of your "
+                + f"{len(lib.tasks)} task(s) are scoped to these unit types, so they "
+                  "will receive 0 tasks: " + "; ".join(zero) + ".\nFix by setting the "
+                  "unit's Type (Units tab → edit the unit) to match, or by marking the "
+                  "tasks Shared / authoring them in that type's Library tab.")
         prune = QCheckBox("Prune — remove library definitions the library omits "
                           "(make each unit identical)")
         prune.setChecked(True)
@@ -344,9 +414,23 @@ class LibraryTab(QWidget):
             QMessageBox.warning(self, "Deploy failed", f"{result}")
             return
         ok = {h: r for h, r in result.items() if not isinstance(r, Exception)}
-        bad = {h: r for h, r in result.items() if isinstance(r, Exception)}
+        # Offline units were skipped by the reachability gate — that's expected, not
+        # a failure. Only *other* exceptions are real deploy failures.
+        offline = {h: r for h, r in result.items()
+                   if isinstance(r, AgentConnectionError)}
+        failed = {h: r for h, r in result.items()
+                  if isinstance(r, Exception) and not isinstance(r, AgentConnectionError)}
+        lib_has_tasks = bool(self._store.library().tasks)
         notes = []
+        zero_task_units = []
         for h, r in ok.items():
+            # Tasks the unit now holds = added + unchanged + skipped (the skipped ones
+            # were left running, so they ARE present — don't count them as zero).
+            reload = getattr(r, "tasks_reload", None) or {}
+            n_tasks = (len(reload.get("added", [])) + len(reload.get("unchanged", []))
+                       + len(getattr(r, "tasks_skipped", None) or []))
+            if lib_has_tasks and n_tasks == 0:
+                zero_task_units.append(self._label(h))
             parts = []
             if getattr(r, "tasks_skipped", None):
                 parts.append(f"tasks kept running: {', '.join(r.tasks_skipped)}")
@@ -354,20 +438,42 @@ class LibraryTab(QWidget):
                 parts.append(f"sequences with active runs kept: {', '.join(r.sequences_skipped)}")
             if parts:
                 notes.append(f"{self._label(h)}: " + "; ".join(parts))
-        self._set_status(
-            f"deployed to {len(ok)} unit(s)" + (f" · {len(bad)} failed" if bad else ""),
-            error=bool(bad))
-        if bad or notes:
+        status = f"deployed to {len(ok)} unit(s)"
+        if offline:
+            status += f" · {len(offline)} offline"
+        if failed:
+            status += f" · {len(failed)} failed"
+        self._set_status(status, error=bool(failed))
+        if failed or notes or zero_task_units:
             lines = []
-            if bad:
+            if failed:
                 lines.append("Failed (redeploy when reachable):")
-                lines += [f"• {self._label(h)}: {e}" for h, e in bad.items()]
+                lines += [f"• {self._label(h)}: {e}" for h, e in failed.items()]
+            if zero_task_units:
+                if lines:
+                    lines.append("")
+                lines.append("⚠ Received 0 tasks (their Type doesn't match your tasks' "
+                             "scope — set the unit's Type, or mark tasks Shared):")
+                lines += [f"• {h}" for h in zero_task_units]
+            if offline:
+                if lines:
+                    lines.append("")
+                lines.append("Skipped — offline (redeploy when back online):")
+                lines += [f"• {self._label(h)}" for h in offline]
             if notes:
                 if lines:
                     lines.append("")
                 lines.append("Left in place because in use (nothing on air was touched):")
                 lines += [f"• {n}" for n in notes]
             QMessageBox.warning(self, "Deploy — details", "\n".join(lines))
+        elif offline:
+            # No real failures — just some units offline. Benign, so inform (not warn).
+            skipped = "\n".join(f"• {self._label(h)}" for h in offline)
+            QMessageBox.information(
+                self, "Deploy complete",
+                f"Deployed to {len(ok)} unit(s).\n\n"
+                f"{len(offline)} unit(s) skipped — offline (redeploy when back "
+                f"online):\n{skipped}")
         else:
             QMessageBox.information(self, "Deploy complete", f"Deployed to {len(ok)} unit(s).")
 
@@ -422,6 +528,15 @@ class LibraryTab(QWidget):
         return drifted
 
     def _update_units_status(self) -> None:
+        # Drop drift entries for hosts no longer in the fleet — a unit that was
+        # removed or re-identified (new uid key) is never in a fresh check result,
+        # so its old entry would otherwise linger forever as a phantom "drifted"
+        # unit (shown by its raw uid) that no re-check can clear.
+        live = set(self.hub.fleet.hostnames())
+        for stale in [h for h in self._drift if h not in live]:
+            self._drift.pop(stale, None)
+        for stale in [h for h in self._drift_err if h not in live]:
+            self._drift_err.pop(stale, None)
         checked = set(self._drift) | set(self._drift_err)
         if not checked:
             self._units_status.setText("")

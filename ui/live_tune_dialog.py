@@ -41,6 +41,11 @@ class LiveTuneDialog(QDialog):
         self._loading = True          # suppress the dirty marker while we seed
         self._applying = False
         self._dirty = False
+        # Per-unit power calibration: reflect the real --power range while retuning.
+        self._cal_signal_id = None
+        self._cal_bounds = None
+        self._params_ready = False
+        self._cal_ready = False
 
         self.setWindowTitle(f"Tune '{task_name}' (live)")
         self.setMinimumWidth(520)
@@ -115,6 +120,23 @@ class LiveTuneDialog(QDialog):
             self._show_set_result(result)
             return
 
+        if op == "livetune_cal":
+            # 404 (uncalibrated) → schema range; offline → last-known cached bounds.
+            from api.client import AgentConnectionError
+            from state.calibration_cache import get_calibration_cache
+            cache = get_calibration_cache()
+            self._cal_bounds = None
+            if isinstance(result, dict) and result.get("valid"):
+                cache.put(self.hostname, result)
+                self._cal_bounds = (result.get("signals") or {}).get(self._cal_signal_id)
+            elif isinstance(result, AgentConnectionError):
+                cached = cache.get(self.hostname)
+                if cached:
+                    self._cal_bounds = (cached.get("signals") or {}).get(self._cal_signal_id)
+            self._cal_ready = True
+            self._maybe_build()
+            return
+
         if isinstance(result, Exception):
             self._set_result(f"error: {result}", error=True)
             return
@@ -124,12 +146,8 @@ class LiveTuneDialog(QDialog):
         elif op == "livetune_params":
             specs = (result or {}).get("params", [])
             self._live_specs = [s for s in specs if s.get("live")]
-            self._form.set_params(self._live_specs)
-            if not self._live_specs:
-                self._set_result("This task declares no live parameters.")
-                self._form.setEnabled(False)
-                return
-            self._fetch_current()
+            self._params_ready = True
+            self._maybe_build()
         elif op == "livetune_get":
             self._seed_values(result if isinstance(result, dict) else {})
 
@@ -140,7 +158,13 @@ class LiveTuneDialog(QDialog):
             doc = {}
         entry = next((t for t in doc.get("tasks", [])
                       if t.get("name") == self.task_name), None)
+        self._cal_signal_id = (entry.get("env") or {}).get("SDR_CAL_SIGNAL_ID") if entry else None
         command = list(entry.get("command", [])) if entry else []
+        # Open in the mode the deployed command used (relative if it set --gain), so a
+        # task running in relative gain doesn't open showing the absolute dBm control.
+        self._default_power_mode = ("relative"
+                                    if any(a in ("-Gain", "--gain") for a in command)
+                                    else None)
         script_idx = next((i for i, a in enumerate(command)
                            if isinstance(a, str) and a.endswith(".py")), None)
         if script_idx is None:
@@ -152,6 +176,29 @@ class LiveTuneDialog(QDialog):
             f"livetune_params:{self.hostname}:{self._script_name}",
             lambda: self.hub.fleet.get(self.hostname).get_script_params(self._script_name),
         )
+        self._fetch_calibration()
+
+    def _fetch_calibration(self) -> None:
+        if not self._cal_signal_id:
+            self._cal_ready = True
+            self._maybe_build()
+            return
+        self.hub.run_async(
+            f"livetune_cal:{self.hostname}",
+            lambda: self.hub.fleet.get(self.hostname).get_calibration(),
+        )
+
+    def _maybe_build(self) -> None:
+        if not (self._params_ready and self._cal_ready):
+            return
+        self._form.set_params(self._live_specs, cal_bounds=self._cal_bounds,
+                              absolute_allowed=True,
+                              default_power_mode=getattr(self, "_default_power_mode", None))
+        if not self._live_specs:
+            self._set_result("This task declares no live parameters.")
+            self._form.setEnabled(False)
+            return
+        self._fetch_current()
 
     def _fetch_current(self) -> None:
         self.hub.run_async(

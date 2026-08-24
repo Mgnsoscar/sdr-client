@@ -18,20 +18,19 @@ import yaml
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QPushButton,
+    QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import models as m
 from api.fleet import LIBRARY_HOST
-from config import UNIT_TYPES, UNIT_TYPE_LABELS
+from config import UNIT_TYPE_LABELS, DEFAULT_UNIT_TYPE
 from state import LibraryError
 from .qt_adapter import DataHub
-from .scope_selector import scope_chip
+from .scope_selector import scope_chip, confirm_delete
 from .task_editor import TaskEditorDialog
 from .theme import Palette
-
-_FILTER_ALL = "__all__"
+from .widgets import natural_key
 
 
 class _LibTaskRow(QFrame):
@@ -71,7 +70,12 @@ class LibraryTasksPanel(QWidget):
         super().__init__(parent)
         self.hub = hub
         self.hostname = LIBRARY_HOST
+        self._active_type = DEFAULT_UNIT_TYPE   # set by the tab's unit-type selector
         self._build()
+
+    def set_active_type(self, unit_type: str) -> None:
+        self._active_type = unit_type
+        self._refresh()
 
     def _client(self):
         return self.hub.fleet.get(LIBRARY_HOST)
@@ -98,17 +102,12 @@ class LibraryTasksPanel(QWidget):
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         row.addWidget(self._status)
         row.addStretch(1)
-
-        # Filter by which unit type would receive a task (shared items always show).
-        row.addWidget(QLabel("Show"))
-        self._filter = QComboBox()
-        self._filter.addItem("All units", _FILTER_ALL)
-        for t in UNIT_TYPES:
-            self._filter.addItem(UNIT_TYPE_LABELS.get(t, t), t)
-        self._filter.setToolTip("Show only the tasks a unit of the chosen type would "
-                                "receive (shared tasks always shown).")
-        self._filter.currentIndexChanged.connect(lambda _=0: self._refresh())
-        row.addWidget(self._filter)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search tasks…")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFixedWidth(200)
+        self._search.textChanged.connect(lambda _=0: self._refresh())
+        row.addWidget(self._search)
         outer.addLayout(row)
 
         scroll = QScrollArea()
@@ -144,20 +143,32 @@ class LibraryTasksPanel(QWidget):
             self._list.addWidget(empty)
             self._set_status("")
             return
-        want = self._filter.currentData()
+        want = self._active_type
+        query = self._search.text().strip().lower()
+        # Stable alphanumeric order — so editing a task never reorders the list.
+        tasks = sorted(tasks, key=lambda t: natural_key(t.name))
         shown = 0
         for t in tasks:
             types = self._types_for(t.name)
-            if want != _FILTER_ALL and not m.applies_to_type(types, want):
+            if not m.applies_to_type(types, want):
+                continue
+            if query and query not in t.name.lower() and query not in (t.description or "").lower():
                 continue
             self._list.addWidget(_LibTaskRow(t, types, self._on_edit, self._on_delete))
             shown += 1
         if shown == 0:
-            empty = QLabel("No tasks match this filter.")
+            if query:
+                text = f"No {UNIT_TYPE_LABELS.get(want, want)} tasks match “{query}”."
+            else:
+                text = (f"No {UNIT_TYPE_LABELS.get(want, want)} tasks yet. Click "
+                        "“New task” to add one (shared with all units via the scope "
+                        "in the editor).")
+            empty = QLabel(text)
             empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
+            empty.setWordWrap(True)
             self._list.addWidget(empty)
-        suffix = "" if want == _FILTER_ALL else f" shown for {UNIT_TYPE_LABELS.get(want, want)}"
-        self._set_status(f"{shown} of {len(tasks)} task(s){suffix}")
+        self._set_status(
+            f"{shown} task(s) for {UNIT_TYPE_LABELS.get(want, want)} · {len(tasks)} total")
 
     def _types_for(self, name: str) -> list:
         """A task's unit-type scope, read from the shared library store (list_tasks
@@ -171,7 +182,10 @@ class LibraryTasksPanel(QWidget):
     # ── Actions ──────────────────────────────────────────────────────────────
 
     def _on_new(self) -> None:
-        if TaskEditorDialog(self.hub, LIBRARY_HOST, parent=self.window()).exec():
+        # New tasks default to the active unit type; the editor's scope picker can
+        # widen them to Shared (or the other type).
+        if TaskEditorDialog(self.hub, LIBRARY_HOST, default_types=[self._active_type],
+                            parent=self.window()).exec():
             self._refresh()
 
     def _on_edit(self, task: m.ProcessStatus) -> None:
@@ -180,13 +194,24 @@ class LibraryTasksPanel(QWidget):
             self._refresh()
 
     def _on_delete(self, task: m.ProcessStatus) -> None:
-        resp = QMessageBox.question(
-            self, "Delete task",
-            f"Delete task '{task.name}' from the library?\nThis cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if resp != QMessageBox.StandardButton.Yes:
+        # Pre-delete warning: a task a sequence still references can't be deleted (the
+        # delete is rejected), and even a successful delete would dangle those steps.
+        # Tell the operator up front which sequences use it, before the confirm.
+        used = self._sequences_using(task.name)
+        if used:
+            QMessageBox.warning(
+                self, "Task is in use",
+                f"'{task.name}' is used by {len(used)} sequence(s):\n\n"
+                f"  • " + "\n  • ".join(used) + "\n\n"
+                "Remove it from those sequences before deleting it.")
+            return
+        types = self._types_for(task.name)
+        action = confirm_delete(self, "task", task.name, types, self._active_type,
+                                self._unshare_task)
+        if action == "cancel":
+            return
+        if action == "unshared":
+            self._refresh()
             return
         try:
             self._client().delete_task(task.name)
@@ -197,6 +222,26 @@ class LibraryTasksPanel(QWidget):
             QMessageBox.warning(self, "Delete failed", str(exc))
             return
         self._refresh()
+
+    def _sequences_using(self, name: str) -> list:
+        """Names of library sequences whose steps reference this task (empty if the
+        store is unavailable — the delete path still hard-blocks as a backstop)."""
+        store = self.hub.fleet.library_store()
+        if store is None:
+            return []
+        try:
+            return store.sequences_using_task(name)
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _unshare_task(self, name: str, new_types: list) -> None:
+        """Re-scope a shared task to `new_types` (remove it from the active type) via
+        a read-modify-write, so 'Remove from this type only' keeps it on the others."""
+        store = self.hub.fleet.library_store()
+        t = store.get_task(name) if store is not None else None
+        spec = t.model_dump() if t is not None else {"name": name}
+        spec["types"] = list(new_types)
+        self._client().update_task(name, spec)
 
     # ── Import / export ──────────────────────────────────────────────────────
 

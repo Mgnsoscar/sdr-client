@@ -96,7 +96,8 @@ class DataHub(QObject):
         self.poller.stop()
         self.streams.stop()
         self.discovery.stop()
-        self.log_tailer.stop()
+        # Note: there is no shared hub log tailer to stop — the log dialogs each
+        # own (and stop) their own LogTailer; see sequence/task/plan_log_dialog.
         self._executor.shutdown(wait=False, cancel_futures=True)
         logger.info("DataHub stopped")
 
@@ -122,6 +123,12 @@ class DataHub(QObject):
         task_done(label, result_or_exception) on the GUI thread. Use for panic,
         arm, start/stop, deploy, etc. — anything that hits the network.
         """
+        # Tearing down the streams on close fires stream_status callbacks, whose
+        # slots (e.g. LibraryTab._on_stream_status) call back in here — after the
+        # executor is shut down. Drop late submits instead of raising "cannot
+        # schedule new futures after shutdown". (refresh_now guards the same way.)
+        if self._stopped:
+            return
         def _wrapped():
             try:
                 result = fn()

@@ -24,15 +24,15 @@ from typing import List, Optional
 
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel,
-    QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import ramp as _ramp
 
 from . import timeline_model as tlm
 from .duration_spin import DurationSpinBox
-from .param_form import ParamForm, fmt_duration, fmt_value
+from .param_form import ParamForm, apply_power_bounds, fmt_duration, fmt_value, range_hint
 from .theme import Palette
 
 
@@ -103,6 +103,31 @@ def _sequence_tasks(editor) -> list:
     current sequence. Falls back to all tasks for an editor that can't report them."""
     getter = getattr(editor, "sequence_task_names", None)
     return getter() if getter is not None else editor.available_tasks()
+
+
+def _ramp_range_error(spec: Optional[dict], start, stop) -> Optional[str]:
+    """If From/To fall outside the ramped parameter's declared min/max, describe it
+    — else None. A ramp is monotonic between its endpoints, so every intermediate
+    level lies within [From, To]; checking the two endpoints covers the whole sweep.
+    Mirrors ParamForm.validate()'s out-of-range wording so the two feel the same."""
+    if not spec:
+        return None
+    lo, hi = spec.get("min"), spec.get("max")
+    if lo is None and hi is None:
+        return None
+    unit = spec.get("unit") or ""
+    u = f" {unit}" if unit else ""
+    bad = []
+    for label, val in (("From", start), ("To", stop)):
+        if val is None:
+            continue
+        if (lo is not None and val < lo) or (hi is not None and val > hi):
+            bad.append(f"{label} {fmt_value(val)}{u}")
+    if not bad:
+        return None
+    name = spec.get("name") or spec.get("dest") or "parameter"
+    joined = " and ".join(bad)
+    return f"{joined} outside allowed range {range_hint(spec)}{u} for {name}"
 
 
 def _clean(x: float) -> float:
@@ -212,6 +237,27 @@ class RampEditorDialog(QDialog):
         if r.get("duration_s") is not None:
             self._duration.setText(_fmt(r.get("duration_s")))
 
+        # Which end levels to emit. Every emitted level is held for the dwell time
+        # (the ramp's duration counts all of them), so dropping an end trims one
+        # whole (level + hold) — the knob for chaining ramps without a doubled seam.
+        # Single-anchor only; a window-filling ramp always spans both edges.
+        self._inc_first = QCheckBox("Include first step")
+        self._inc_last = QCheckBox("Include last step")
+        self._inc_first.setChecked(bool(r.get("include_first", True)))
+        self._inc_last.setChecked(bool(r.get("include_last", True)))
+        self._inc_first.setToolTip("Emit and hold the start value. Uncheck to begin at "
+                                   "the next level (e.g. to follow another ramp cleanly).")
+        self._inc_last.setToolTip("Emit and hold the stop value. Uncheck to end before it "
+                                  "(e.g. so the next ramp supplies that value).")
+        inc_row = QHBoxLayout()
+        inc_row.setContentsMargins(0, 0, 0, 0)
+        inc_row.addWidget(self._inc_first)
+        inc_row.addWidget(self._inc_last)
+        inc_row.addStretch(1)
+        self._inc_container = QWidget()
+        self._inc_container.setLayout(inc_row)
+        self._inc_row_lbl = _row(form, "Include", self._inc_container)
+
         outer.addLayout(form)
 
         # Run mode: fixed values for the task's OTHER parameters (the ramped one is
@@ -273,6 +319,8 @@ class RampEditorDialog(QDialog):
         self._param.currentTextChanged.connect(lambda _t: self._on_param_changed())
         for w in (self._start, self._stop, self._steps, self._step, self._hold, self._duration):
             w.textChanged.connect(self._update_preview)
+        self._inc_first.toggled.connect(self._update_preview)
+        self._inc_last.toggled.connect(self._update_preview)
         self._offset.valueChanged.connect(self._update_preview)
         self._offset_end.valueChanged.connect(self._update_preview)
         self._anchor.currentIndexChanged.connect(self._sync_anchor)
@@ -322,8 +370,20 @@ class RampEditorDialog(QDialog):
         name = self._param.currentText().strip()
         for s in self._active_params():
             if self._pname(s) == name:
-                return s
+                return self._with_cal_bounds(s)
         return None
+
+    def _with_cal_bounds(self, spec: dict) -> dict:
+        """If the ramped parameter is the calibrated --power field, narrow its min/max
+        to the target unit's resolved dBm range (the task's calibration signal), so
+        the range check, preview and unit conform to calibration rather than the
+        script's wider declared bounds. Non-power params, no unit, or an uncalibrated
+        unit pass through unchanged — exactly as apply_power_bounds does for the forms."""
+        getter = getattr(self._editor, "cal_bounds_for_task", None)
+        if getter is None:
+            return spec
+        bounds = getter(self._task.currentText().strip())
+        return apply_power_bounds([spec], bounds)[0] if bounds else spec
 
     def _rebuild_run_form(self) -> None:
         if not self._run_mode:
@@ -361,6 +421,10 @@ class RampEditorDialog(QDialog):
         self._off_lbl.setText("Start offset from on-air" if both else "Offset from anchor")
         self._offend_lbl.setVisible(both)
         self._offset_end.setVisible(both)
+        # Include first/last applies to single-anchor ramps; a window-filling ramp
+        # always spans both edges, so hide the checkboxes there.
+        self._inc_row_lbl.setVisible(not both)
+        self._inc_container.setVisible(not both)
         # First populate uses the saved ramp's authored mode; later anchor switches
         # keep whatever the user had selected.
         want = self._mode.currentData() or getattr(self, "_init_mode", None)
@@ -446,6 +510,11 @@ class RampEditorDialog(QDialog):
             spec["hold_s"] = _num(self._hold.text())
         if "duration" in fields:
             spec["duration_s"] = _num(self._duration.text())
+        # First/last-level toggles are meaningful only for a single-anchor ramp; a
+        # window-filling ramp always spans both edges, so don't store them there.
+        if not self._is_both():
+            spec["include_first"] = self._inc_first.isChecked()
+            spec["include_last"] = self._inc_last.isChecked()
         if self._run_mode:
             rs = self._ramped_spec() or {}
             flags = rs.get("flags") or []
@@ -457,6 +526,11 @@ class RampEditorDialog(QDialog):
     def _param_unit(self) -> str:
         s = self._ramped_spec()
         return (s.get("unit") or "") if s else ""
+
+    def _range_error(self) -> Optional[str]:
+        """From/To against the ramped parameter's allowed range (or None)."""
+        return _ramp_range_error(self._ramped_spec(),
+                                 _num(self._start.text()), _num(self._stop.text()))
 
     def _update_preview(self, *_) -> None:
         if not self._ready:
@@ -472,6 +546,7 @@ class RampEditorDialog(QDialog):
             self._set_preview("Enter numeric From/To values.")
             return
 
+        range_err = self._range_error()   # From/To vs the parameter's allowed range
         unit = self._param_unit()
         u = f" {unit}" if unit else ""
         lines = [f"Ramp {spec['param'] or '(param)'}:  "
@@ -488,7 +563,9 @@ class RampEditorDialog(QDialog):
             else:
                 given, val = "hold", self._hold.text().strip()
             lines.append(f"{given} = {val or '—'} · duration set by the schedule")
-            self._set_preview("\n".join(lines))
+            if range_err:
+                lines.append("⚠ " + range_err)
+            self._set_preview("\n".join(lines), error=bool(range_err))
             self._refresh_steps_view(spec, both=True)
             return
 
@@ -497,17 +574,24 @@ class RampEditorDialog(QDialog):
         try:
             res = _ramp.resolve_ramp(spec["start"], spec["stop"], steps=spec.get("steps"),
                                      step=spec.get("step"), hold_s=spec.get("hold_s"),
-                                     duration_s=spec.get("duration_s"))
+                                     duration_s=spec.get("duration_s"),
+                                     include_first=spec.get("include_first", True),
+                                     include_last=spec.get("include_last", True))
         except (ValueError, TypeError) as exc:
             lines.append("⚠ " + str(exc))
             self._set_preview("\n".join(lines), error=True)
             self._steps_view.setPlainText("")
             return
         step = abs(res.values[1] - res.values[0]) if len(res.values) > 1 else 0
-        lines.append(f"{len(res.values)} points · {res.n_intervals} steps · "
+        dropped = [w for w, on in (("first", self._inc_first.isChecked()),
+                                   ("last", self._inc_last.isChecked())) if not on]
+        excl = f" · {'/'.join(dropped)} excluded" if dropped else ""
+        lines.append(f"{len(res.values)} levels · {res.n_intervals} steps · "
                      f"step size {fmt_value(_clean(step))}{u} · hold {fmt_duration(res.hold_s)} · "
-                     f"duration {fmt_duration(res.duration_s)}")
-        self._set_preview("\n".join(lines))
+                     f"duration {fmt_duration(res.duration_s)}{excl}")
+        if range_err:
+            lines.append("⚠ " + range_err)
+        self._set_preview("\n".join(lines), error=bool(range_err))
         self._refresh_steps_view(spec, both=False)
 
     def _set_preview(self, text: str, error: bool = False) -> None:
@@ -552,7 +636,9 @@ class RampEditorDialog(QDialog):
                 return
             res = _ramp.resolve_ramp(spec["start"], spec["stop"], steps=spec.get("steps"),
                                      step=spec.get("step"), hold_s=spec.get("hold_s"),
-                                     duration_s=spec.get("duration_s"))
+                                     duration_s=spec.get("duration_s"),
+                                     include_first=spec.get("include_first", True),
+                                     include_last=spec.get("include_last", True))
         except (ValueError, TypeError) as exc:
             self._steps_view.setPlainText(str(exc))
             return
@@ -578,6 +664,9 @@ class RampEditorDialog(QDialog):
         spec = self._spec_from_form()
         if spec["start"] is None or spec["stop"] is None:
             return self._set_preview("enter numeric From/To values", error=True)
+        range_err = self._range_error()
+        if range_err:
+            return self._set_preview(range_err, error=True)
         anchor = self._anchor.currentData()
         err = tlm._ramp_spec_error(spec, anchor)
         if err:

@@ -3,10 +3,20 @@ Small shared widgets used across tabs.
 """
 from __future__ import annotations
 
+import re
+
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QLabel
 
 from .theme import status_color
+
+
+def natural_key(text: str):
+    """A case-insensitive, digit-aware sort key so lists order the way people expect
+    — 'task2' before 'task10', 'A' next to 'a'. Use as `sorted(items, key=...)`."""
+    s = text or ""
+    return [int(p) if p.isdigit() else p.lower()
+            for p in re.split(r"(\d+)", s)]
 
 
 class StatusPill(QLabel):

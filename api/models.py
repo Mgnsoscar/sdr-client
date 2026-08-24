@@ -84,8 +84,12 @@ class RampSpec(BaseModel):
     stop: float
     steps: Optional[int] = None          # number of equal increments (divides evenly)
     step: Optional[float] = None         # OR a fixed value increment
-    hold_s: Optional[float] = None
-    duration_s: Optional[float] = None
+    hold_s: Optional[float] = None       # dwell each level is held
+    duration_s: Optional[float] = None   # total held time = levels × hold (single-anchor)
+    # Every emitted level is held for `hold`, incl. the last; drop the start/stop
+    # level (and its hold) to chain ramps without a doubled seam. Single-anchor only.
+    include_first: bool = True
+    include_last: bool = True
     mode: str = "tune"                   # "tune" (live set_params) | "run" (task per point)
     flag: Optional[str] = None           # run mode: CLI flag for the ramped param
     integer: bool = False                # run mode: round each value to an int
@@ -155,6 +159,9 @@ class AgentInfo(BaseModel):
     python_version: str
     tasks: List[str]
     previous_version: Optional[str] = None   # OTA rollback target, if any
+    # Feature flags the agent advertises. Defaulted so an agent predating this field
+    # (which simply omits it) parses fine and reads as "no advertised capabilities".
+    capabilities: List[str] = []
     # Where this unit keeps scripts + the interpreter its tasks launch with — used
     # to default a new task's fields per unit (X410 differs from the Pi layout).
     scripts_dir: str = ""
@@ -189,8 +196,9 @@ class SystemHealth(BaseModel):
     uptime_s: float
     load_avg: List[float]
     utc_now: str = ""
-    clock_synced: Optional[bool] = None
-    clock_source: str = ""
+    clock_synced: Optional[bool] = None   # True if NTP-synchronized (real internet time)
+    clock_source: str = ""                # "chrony"/"systemd-timesyncd" (NTP), "manual"
+                                          # (hand-set to the PC clock), or "" if unknown
 
 
 class SdrDevice(BaseModel):

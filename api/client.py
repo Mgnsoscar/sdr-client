@@ -97,6 +97,8 @@ class AgentClient:
         self.unit_type = unit_type or m.DEFAULT_UNIT_TYPE   # unit kind → library scope
         self.unit_id = unit_id or self.label        # agent's reported id (from /info)
         self.machine_id = ""                        # physical Pi fingerprint (from /info)
+        self.agent_version = ""                     # reported by /info (warmup/info)
+        self.capabilities: List[str] = []           # feature flags the agent advertises
         self.api_key = api_key
         self.port = port
         self.timeout = timeout
@@ -399,6 +401,8 @@ class AgentClient:
                 self.unit_id = info.unit_id
                 if info.machine_id:
                     self.machine_id = info.machine_id
+                self.agent_version = info.agent_version
+                self.capabilities = list(info.capabilities or [])
                 self.state = ConnectionState.ONLINE
                 self.last_error = ""
                 self.last_latency_s = time.perf_counter() - t0
@@ -421,8 +425,16 @@ class AgentClient:
         self.last_latency_s = None
         return self.state
 
-    def health(self) -> bool:
-        """True if the agent answers /health. Never raises on HTTP — only on connect."""
+    def health(self, recover: bool = True) -> bool:
+        """True if the agent answers /health. Never raises on HTTP — only on connect.
+
+        `recover=True` (default) self-heals an address change: if the active address
+        stopped answering and the unit has other known addresses, re-probe them via
+        warmup(). That recovery is worth its cost in the background poller, but it turns
+        one offline unit into several sequential connect-timeouts — so a bulk
+        reachability gate (deploy / health fan-out) passes `recover=False` to fail fast
+        on the active address in a single connect-timeout. A moved unit is still
+        recovered on the poller's own cadence, so the next action sees it correctly."""
         t0 = time.perf_counter()
         try:
             data = self._request("GET", "/health")
@@ -436,8 +448,10 @@ class AgentClient:
         except AgentConnectionError as exc:
             # The active address stopped answering. If the unit has other known
             # addresses (e.g. it moved from wifi to ethernet), re-probe them so it
-            # recovers on its own without a manual address change.
-            if len(self._addresses) > 1:
+            # recovers on its own without a manual address change — unless the caller
+            # wants a fast gate (recover=False), where that multi-address probe is the
+            # very stall we're avoiding.
+            if recover and len(self._addresses) > 1:
                 return self.warmup() == ConnectionState.ONLINE
             self.state = ConnectionState.OFFLINE
             self.last_error = str(exc)
@@ -450,14 +464,40 @@ class AgentClient:
     def info(self) -> m.AgentInfo:
         data = self._request("GET", "/info")
         info = m.AgentInfo(**data)
-        # Adopt the real unit_id + machine-id fingerprint once we know them
+        # Adopt the real unit_id + machine-id fingerprint + advertised capabilities.
         self.unit_id = info.unit_id
         if info.machine_id:
             self.machine_id = info.machine_id
+        self.agent_version = info.agent_version
+        self.capabilities = list(info.capabilities or [])
         return info
+
+    def supports(self, capability: str) -> bool:
+        """True if the unit's agent advertised this feature flag in /info. False when
+        it didn't (an older agent that predates the flag), so callers can feature-gate
+        explicitly instead of probing an endpoint and inferring support from a 404."""
+        return capability in self.capabilities
 
     def system(self) -> m.SystemHealth:
         return m.SystemHealth(**self._request("GET", "/system"))
+
+    def clock_offset_s(self) -> float:
+        """(unit clock − this PC's clock) in seconds. Add this to a laptop-UTC arm time
+        so RF goes live at the intended wall-clock instant even when the unit's clock is
+        skewed (a Pi with no NTP). 0.0 if /system is unavailable — best-effort, falls
+        back to the laptop clock. Network latency biases this by a few ms on a LAN,
+        which is negligible next to the skew it corrects."""
+        try:
+            health = self.system()
+            if health.utc_now:
+                import datetime as _dt
+                unit = _dt.datetime.fromisoformat(health.utc_now)
+                if unit.tzinfo is None:
+                    unit = unit.replace(tzinfo=_dt.timezone.utc)
+                return (unit - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+        except Exception:  # noqa: BLE001 — best-effort
+            pass
+        return 0.0
 
     def set_time(self, epoch: Optional[float] = None) -> dict:
         """Set the unit's system clock to `epoch` (UTC seconds; defaults to this
@@ -491,6 +531,13 @@ class AgentClient:
     def agent_releases(self) -> List[m.AgentRelease]:
         return [m.AgentRelease(**r) for r in self._request("GET", "/admin/releases")]
 
+    def update_status(self) -> dict:
+        """The unit's OTA lifecycle state (current/previous/pending version + whether a
+        pending release has confirmed healthy), so the client can show real update
+        progress and detect an auto-rollback. Requires the agent's 'ota-status'
+        capability; older agents 404 this route."""
+        return self._request("GET", "/admin/update-status") or {}
+
     # ══════════════════════════════════════════════════════════════════════════
     # Tasks
     # ══════════════════════════════════════════════════════════════════════════
@@ -499,34 +546,36 @@ class AgentClient:
         return [m.ProcessStatus(**t) for t in self._request("GET", "/tasks")]
 
     def task_status(self, name: str) -> m.ProcessStatus:
-        return m.ProcessStatus(**self._request("GET", f"/tasks/{name}"))
+        return m.ProcessStatus(**self._request("GET", f"/tasks/{quote(name, safe='/')}"))
 
     def start_task(self, name: str, request: Optional[m.StartRequest] = None) -> m.ProcessStatus:
         body = request.model_dump() if request else None
-        return m.ProcessStatus(**self._request("POST", f"/tasks/{name}/start", json=body))
+        return m.ProcessStatus(**self._request("POST", f"/tasks/{quote(name, safe='/')}/start", json=body))
 
     def stop_task(self, name: str) -> m.ProcessStatus:
-        return m.ProcessStatus(**self._request("POST", f"/tasks/{name}/stop"))
+        return m.ProcessStatus(**self._request("POST", f"/tasks/{quote(name, safe='/')}/stop"))
 
     def restart_task(self, name: str, request: Optional[m.StartRequest] = None) -> m.ProcessStatus:
         body = request.model_dump() if request else None
-        return m.ProcessStatus(**self._request("POST", f"/tasks/{name}/restart", json=body))
+        return m.ProcessStatus(**self._request("POST", f"/tasks/{quote(name, safe='/')}/restart", json=body))
 
     def set_task_params(self, name: str, values: dict, wait: float = 1.0) -> dict:
         """Retune a running task's live parameters. Returns the agent's
         {ok, accepted, rejected, applied, pending}."""
-        return self._request("POST", f"/tasks/{name}/params",
+        return self._request("POST", f"/tasks/{quote(name, safe='/')}/params",
                              json={"values": values, "wait": wait})
 
     def get_task_params(self, name: str) -> dict:
         """Current + applied live-parameter values of a running task."""
-        return self._request("GET", f"/tasks/{name}/params/live")
+        # Read-only sub-resources live under /task-* prefixes (name as the terminal
+        # segment) so a '/'-containing name can't be misrouted (agent ≥ 1.1.8).
+        return self._request("GET", f"/task-live-params/{quote(name, safe='/')}")
 
     def task_logs(self, name: str, lines: int = 100) -> List[str]:
-        return self._request("GET", f"/tasks/{name}/logs", params={"lines": lines})
+        return self._request("GET", f"/task-logs/{quote(name, safe='/')}", params={"lines": lines})
 
     def task_history(self, name: str) -> List[m.ExitRecord]:
-        return [m.ExitRecord(**r) for r in self._request("GET", f"/tasks/{name}/history")]
+        return [m.ExitRecord(**r) for r in self._request("GET", f"/task-history/{quote(name, safe='/')}")]
 
     def _stream_base(self) -> str:
         """Base 'scheme://host:port' for streaming connections (WebSocket logs, SSE
@@ -551,7 +600,7 @@ class AgentClient:
         if self.api_key:
             params["api_key"] = self.api_key
         return (f"{ws_scheme}://{host_port}"
-                f"/tasks/{quote(name, safe='')}/logs/stream?{urlencode(params)}")
+                f"/task-log-stream/{quote(name, safe='')}?{urlencode(params)}")
 
     def sequence_log_stream_url(self, seq_id: str, lines: int = 200) -> str:
         """WebSocket URL for a sequence run's log (whole-run timeline + output)."""
@@ -587,16 +636,66 @@ class AgentClient:
         """Statically-extracted argparse parameters for a script (for building a form)."""
         return self._request("GET", f"/scripts/{name}/params")
 
+    # ── Per-unit data store / calibration (agent docs/calibration.md §9.2) ──────
+    def list_files(self) -> List[dict]:
+        """Files in the unit's data store: [{name, size, modified}]."""
+        return self._request("GET", "/files")
+
+    def upload_file(self, filename: str, content: bytes) -> dict:
+        """Upload a data file. calibration.json is validated agent-side before it is
+        stored; the response carries the per-signal resolved summary under
+        'calibration'. A rejected file raises AgentError with the reason."""
+        files = {"file": (filename, content, "application/octet-stream")}
+        return self._request("POST", "/files", files=files)
+
+    def get_file(self, name: str) -> str:
+        """Return a data file's text content."""
+        data = self._request("GET", f"/files/{name}")
+        return data.get("content", "")
+
+    def delete_file(self, name: str) -> dict:
+        return self._request("DELETE", f"/files/{name}")
+
+    def upload_components(self, content: str) -> dict:
+        """Upload the shared component catalog (components.yaml) to this unit's store.
+        Validated agent-side before it's stored; a bad table raises AgentError. Deploy
+        this before a calibration.json that references a component, so the reference
+        resolves (calibration v2)."""
+        from state.component_catalog import COMPONENTS_WIRE_NAME
+        return self.upload_file(COMPONENTS_WIRE_NAME, content.encode("utf-8"))
+
+    def get_components(self) -> str:
+        """This unit's stored component catalog as text ('' if it has none yet)."""
+        from api.client import AgentHTTPError  # local import to avoid a cycle at module load
+        from state.component_catalog import COMPONENTS_WIRE_NAME
+        try:
+            return self.get_file(COMPONENTS_WIRE_NAME)
+        except AgentHTTPError as exc:
+            if exc.status_code == 404:
+                return ""
+            raise
+
+    def get_calibration(self) -> dict:
+        """This unit's calibration view: {unit_type, document, valid, signals|error}.
+        Raises AgentError(404) if the unit has no calibration document."""
+        return self._request("GET", "/calibration")
+
+    def validate_calibration(self, document: dict) -> dict:
+        """Dry-run a calibration document against this unit WITHOUT storing it (agent
+        >= 1.1.9, capability 'cal-validate'). Returns {valid: bool, signals|error} —
+        the same verdict Save would produce, for a pre-Save preview."""
+        return self._request("POST", "/calibration/validate", json=document)
+
     def create_task(self, spec: dict) -> dict:
         """Create a task from a spec (name, command, working_dir, env, autostart,
         restart_on_crash) — the agent appends it to tasks.yaml and reloads live."""
         return self._request("POST", "/tasks", json=spec)
 
     def update_task(self, name: str, spec: dict) -> dict:
-        return self._request("PUT", f"/tasks/{name}", json=spec)
+        return self._request("PUT", f"/tasks/{quote(name, safe='/')}", json=spec)
 
     def delete_task(self, name: str) -> dict:
-        return self._request("DELETE", f"/tasks/{name}")
+        return self._request("DELETE", f"/tasks/{quote(name, safe='/')}")
 
     def get_tasks_yaml(self) -> str:
         data = self._request("GET", "/config/tasks-yaml")

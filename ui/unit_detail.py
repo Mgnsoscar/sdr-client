@@ -21,20 +21,21 @@ from typing import Dict, Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPushButton,
+    QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from api import Fleet
 from api import models as m
 from .agent_update_dialog import AgentUpdateDialog
+from .calibration_panel import CalibrationPanel
 from .live_tune_dialog import LiveTuneDialog
 from .qt_adapter import DataHub
 from .run_task_dialog import RunTaskDialog
 from .sequences_panel import SequencesPanel
 from .task_log_dialog import TaskLogDialog
 from .theme import Palette
-from .widgets import StatusPill
+from .widgets import StatusPill, natural_key
 
 
 # ── A single task row ────────────────────────────────────────────────────────
@@ -173,14 +174,18 @@ class _TaskRow(QFrame):
 # ── Tasks panel ──────────────────────────────────────────────────────────────
 
 class _TasksPanel(QWidget):
-    """Scrollable list of task rows for one unit."""
+    """Scrollable list of task rows for one unit, with a search box and stable
+    alphanumeric ordering — the same affordances the Library's task / sequence
+    panels offer, so a unit with many deployed tasks stays navigable."""
 
     def __init__(self, hostname: str, hub: DataHub):
         super().__init__()
         self.hostname = hostname
         self.hub = hub
         self._rows: Dict[str, _TaskRow] = {}
-        self._known: list = []   # [(name, description), ...] of the built rows
+        self._tasks: list[m.ProcessStatus] = []   # latest full list from the poller
+        self._laid_out: Optional[list] = None     # [(name, description), ...] in layout order
+        self._loaded = False
         # Update a row the instant its start/stop/restart returns, instead of
         # waiting for the next poll tick.
         self.hub.task_done.connect(self._on_task_action_done)
@@ -190,7 +195,21 @@ class _TasksPanel(QWidget):
         lay.setSpacing(8)
 
         # No authoring controls: task definitions are managed in the Library and
-        # deployed to units. The unit card only runs what's deployed here.
+        # deployed to units (the unit card only runs what's deployed). But, like the
+        # Library, the list is searchable and alphanumerically sorted.
+        row = QHBoxLayout()
+        self._status = QLabel("")
+        self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+        row.addWidget(self._status)
+        row.addStretch(1)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search tasks…")
+        self._search.setClearButtonEnabled(True)
+        self._search.setFixedWidth(200)
+        self._search.textChanged.connect(lambda _=0: self._render())
+        row.addWidget(self._search)
+        lay.addLayout(row)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -202,41 +221,73 @@ class _TasksPanel(QWidget):
         scroll.setWidget(host)
         lay.addWidget(scroll)
 
-        self._empty = QLabel("No tasks, or unit not yet reached.")
-        self._empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
-        self._list.addWidget(self._empty)
+        self._render()
 
     def update_tasks(self, tasks: list[m.ProcessStatus]) -> None:
+        self._tasks = list(tasks)
+        self._loaded = True
+        self._render()
+
+    def _visible_tasks(self) -> list[m.ProcessStatus]:
+        # Stable alphanumeric order — so a state change (or an edit) never reorders
+        # the list — then narrowed by the search box (name or description).
+        tasks = sorted(self._tasks, key=lambda t: natural_key(t.name))
+        query = self._search.text().strip().lower()
+        if not query:
+            return tasks
+        return [t for t in tasks
+                if query in t.name.lower() or query in (t.description or "").lower()]
+
+    def _render(self) -> None:
+        visible = self._visible_tasks()
         # Track (name, description) — not just names — so an edit that changes a
-        # task's description (or the task set) triggers a rebuild, while a mere
-        # state change just updates the existing rows in place.
-        names = [(t.name, t.description) for t in tasks]
-        # Build rows on first sight / when the set changes
-        if names != self._known:
-            # Clear and rebuild (task sets rarely change, so this is cheap)
+        # task's description (or the task set, or the search filter) triggers a
+        # rebuild, while a mere state change leaves the layout identical and takes
+        # the in-place path below (no flicker, no reset of a transient "starting…").
+        desired = [(t.name, t.description) for t in visible]
+        if desired != self._laid_out:
             while self._list.count():
                 item = self._list.takeAt(0)
                 w = item.widget()
                 if w is not None:
                     w.deleteLater()
             self._rows.clear()
-            if not tasks:
-                self._empty = QLabel("No tasks deployed to this unit. "
-                                     "Add them in the Library and deploy.")
-                self._empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
-                self._empty.setWordWrap(True)
-                self._list.addWidget(self._empty)
-            for t in tasks:
-                row = _TaskRow(self.hostname, t, self.hub)
-                self._rows[t.name] = row
-                self._list.addWidget(row)
-            self._known = names
+            for t in visible:
+                r = _TaskRow(self.hostname, t, self.hub)
+                self._rows[t.name] = r
+                self._list.addWidget(r)
+            if not visible:
+                self._list.addWidget(self._empty_label())
+            self._laid_out = desired
         else:
-            # Same set — just update each row's state
-            for t in tasks:
-                row = self._rows.get(t.name)
-                if row is not None:
-                    row.update_status(t)
+            for t in visible:
+                r = self._rows.get(t.name)
+                if r is not None:
+                    r.update_status(t)
+        self._update_status(len(visible))
+
+    def _empty_label(self) -> QLabel:
+        query = self._search.text().strip()
+        if query:
+            text = f"No tasks match “{query}”."
+        elif self._loaded:
+            text = "No tasks deployed to this unit. Add them in the Library and deploy."
+        else:
+            text = "No tasks, or unit not yet reached."
+        lbl = QLabel(text)
+        lbl.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
+        lbl.setWordWrap(True)
+        return lbl
+
+    def _update_status(self, shown: int) -> None:
+        total = len(self._tasks)
+        query = self._search.text().strip()
+        if not total:
+            self._status.setText("")
+        elif query:
+            self._status.setText(f"{shown} task(s) match · {total} total")
+        else:
+            self._status.setText(f"{total} task(s)")
 
     def _on_task_action_done(self, label: str, result) -> None:
         """Reflect a start/stop/restart result on its row immediately, rather than
@@ -262,7 +313,7 @@ class _TasksPanel(QWidget):
 class UnitDetail(QWidget):
     """Header + sub-tabs for one unit. Tasks panel built; others placeholder."""
 
-    SUBTABS = ["Tasks", "Sequences"]
+    SUBTABS = ["Tasks", "Sequences", "Calibration"]
 
     def __init__(self, fleet: Fleet, hub: DataHub, on_back,
                  on_edit=None, on_remove=None, parent=None):
@@ -329,6 +380,7 @@ class UnitDetail(QWidget):
         self._sub_stack = QStackedWidget()
         self._tasks_panel: Optional[_TasksPanel] = None  # built per-unit in set_unit
         self._sequences_panel: Optional["SequencesPanel"] = None  # built per-unit in set_unit
+        self._calibration_panel: Optional[CalibrationPanel] = None  # built per-unit in set_unit
         self._placeholders: Dict[str, QWidget] = {}
         outer.addWidget(self._sub_stack, stretch=1)
 
@@ -347,6 +399,9 @@ class UnitDetail(QWidget):
         self.hostname = hostname
         client = self.fleet.get(hostname)
         self._title.setText(client.label)
+        # Reset the status to neutral so this unit never inherits the previously
+        # viewed unit's "online" pill — the refresh below settles it from reality.
+        self._status.set_status("checking…", "unknown")
 
         # Rebuild the sub-stack for this unit
         while self._sub_stack.count():
@@ -360,8 +415,10 @@ class UnitDetail(QWidget):
         # window from each task row (see _TaskRow.Logs).
         self._sequences_panel = SequencesPanel(hostname, self.hub,
                                                can_edit=False, can_run=True)
+        self._calibration_panel = CalibrationPanel(hostname, self.hub)
         self._sub_stack.addWidget(self._tasks_panel)                       # 0 Tasks
         self._sub_stack.addWidget(self._sequences_panel)                   # 1 Sequences
+        self._sub_stack.addWidget(self._calibration_panel)                 # 2 Calibration
         self._select_subtab(0)
 
         # Pull fresh data now so the task list / status appear immediately, rather
@@ -397,12 +454,21 @@ class UnitDetail(QWidget):
         tasksv = snap.tasks.get(self.hostname)
         if isinstance(tasksv, list) and self._tasks_panel is not None:
             self._tasks_panel.update_tasks(tasksv)
-        # Header status from system reachability
-        sysv = snap.system.get(self.hostname)
-        if isinstance(sysv, m.SystemHealth):
-            self._status.set_status("online", "online")
-        elif isinstance(sysv, Exception):
+        # Header status: reachability is authoritative (health() never raises), so a
+        # unit that's gone offline flips to "offline" instead of showing a stale
+        # "online". Fall back to system presence only when health is absent from the
+        # snapshot (e.g. a scoped refresh of a different unit leaves this one as-is).
+        reachable = snap.health.get(self.hostname)
+        if reachable is False:
             self._status.set_status("offline", "offline")
+        elif reachable is True:
+            self._status.set_status("online", "online")
+        else:
+            sysv = snap.system.get(self.hostname)
+            if isinstance(sysv, m.SystemHealth):
+                self._status.set_status("online", "online")
+            elif isinstance(sysv, Exception):
+                self._status.set_status("offline", "offline")
 
     def on_stream_status(self, hostname: str, connected: bool) -> None:
         if hostname == self.hostname:

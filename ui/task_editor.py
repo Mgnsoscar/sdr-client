@@ -39,18 +39,24 @@ from .qt_adapter import DataHub
 from .scope_selector import ScopeSelector
 from .theme import Palette
 
+# Every unit kind presents its scripts at /opt/sdr-agent/scripts (the X410 symlinks
+# it onto /data — see sdr-agent deploy/x410), so this default is portable across
+# unit types and a shared task runs everywhere. A live unit still overrides it from
+# /info, and editing derives it from the existing command.
 DEFAULT_SCRIPTS_DIR = "/opt/sdr-agent/scripts"
 DEFAULT_INTERPRETER = "python3"
 
 
 class TaskEditorDialog(QDialog):
     def __init__(self, hub: DataHub, hostname: str,
-                 existing_name: Optional[str] = None, parent=None):
+                 existing_name: Optional[str] = None, default_types=None, parent=None):
         super().__init__(parent)
         self.hub = hub
         self.hostname = hostname
         self.existing_name = existing_name        # None -> create, else edit
+        self._default_types = list(default_types) if default_types else None
         self._param_specs: Dict[str, list] = {}   # script -> [param dict, ...]
+        self._cal_signals: Dict[str, Optional[str]] = {}  # script -> CAL_SIGNAL_ID or None
         self._pending_prefill: Optional[List[str]] = None  # edit-mode command args to prefill
         self._edit_script: Optional[str] = None            # script to select once loaded
         self._params_inflight: set = set()         # scripts whose params fetch is in flight
@@ -96,6 +102,10 @@ class TaskEditorDialog(QDialog):
         self._scope: Optional[ScopeSelector] = None
         if self.hostname == LIBRARY_HOST:
             self._scope = ScopeSelector()
+            # A new task opened from a unit-type view defaults to that type; editing
+            # loads the task's own scope (see _load).
+            if self.existing_name is None and self._default_types is not None:
+                self._scope.set_from_types(self._default_types)
             form.addRow("Applies to", self._scope)
         outer.addLayout(form)
 
@@ -184,9 +194,10 @@ class TaskEditorDialog(QDialog):
             lambda: self.hub.fleet.get(self.hostname).list_scripts(),
         )
         # Ask the unit where it keeps scripts and which interpreter its tasks use, so
-        # a NEW task's defaults match this unit (an X410 uses /data/... + system
-        # python3, not the Pi's /opt/... ) instead of the operator re-typing them.
-        # Skipped in library mode (no live unit to ask).
+        # a NEW task's defaults match this unit instead of the operator re-typing
+        # them. Both kinds report /opt/sdr-agent/scripts (the X410 symlinks it onto
+        # /data), so this mostly confirms the default; a unit with a custom layout
+        # still wins. Skipped in library mode (no live unit to ask).
         if self.hostname != LIBRARY_HOST:
             self.hub.run_async(
                 f"taskdlg_info:{self.hostname}",
@@ -287,6 +298,7 @@ class TaskEditorDialog(QDialog):
         elif op == "taskdlg_params":
             script = ":".join(parts[2:])
             self._param_specs[script] = (result or {}).get("params", [])
+            self._cal_signals[script] = (result or {}).get("calibration_signal")
             if script == self._script.currentText():
                 self._build_param_form(script)
         elif op == "taskdlg_yaml":
@@ -296,6 +308,7 @@ class TaskEditorDialog(QDialog):
 
     def _build_param_form(self, script: str) -> None:
         self._form.set_params(self._param_specs.get(script, []))
+        self._ensure_cal_env(script)
         self._set_status("")
         # Prefill values on edit. Keyed to the edit script and deliberately NOT
         # consumed: the form for one script can be (re)built several times (a
@@ -324,6 +337,10 @@ class TaskEditorDialog(QDialog):
                 break
         if not entry:
             return
+        # Keep the full stored entry so _on_save can preserve fields the form doesn't
+        # model (max_restarts, restart_window_s/delay_s, resumable + resume config) —
+        # otherwise editing a task would silently reset those to their defaults.
+        self._orig_entry = dict(entry)
         self._name.setText(entry.get("name", ""))
         self._desc.setText(entry.get("description", ""))
         if self._scope is not None:
@@ -355,6 +372,22 @@ class TaskEditorDialog(QDialog):
             # scripts-list handler selects it when the list arrives.
             if self._script.count() > 0:
                 self._select_script(script_name)
+
+    def _ensure_cal_env(self, script: str) -> None:
+        """If the selected script declares a calibration signal, make sure the task's
+        env opts in via SDR_CAL_SIGNAL_ID — otherwise no editor can offer absolute
+        (calibrated) power for this task. Only adds it when missing; never clobbers a
+        value the operator set. Idempotent, so it's safe to call on every rebuild."""
+        sig = self._cal_signals.get(script)
+        if not sig:
+            return
+        env = self._parse_env()
+        if env is None:                        # env box has a malformed line; leave it
+            return
+        if env.get("SDR_CAL_SIGNAL_ID"):       # already opted in (or operator-set)
+            return
+        env["SDR_CAL_SIGNAL_ID"] = sig
+        self._env.setPlainText("\n".join(f"{k}={v}" for k, v in env.items()))
 
     # ── Command building / preview / save ────────────────────────────────────
 
@@ -409,7 +442,7 @@ class TaskEditorDialog(QDialog):
             self._set_status("environment lines must be KEY=value", error=True)
             return
 
-        spec = {
+        edited = {
             "name": name,
             "description": self._desc.text().strip(),
             "command": self._build_command(),
@@ -419,7 +452,11 @@ class TaskEditorDialog(QDialog):
             "restart_on_crash": self._restart.isChecked(),
         }
         if self._scope is not None:
-            spec["types"] = self._scope.types()
+            edited["types"] = self._scope.types()
+        # Preserve any stored fields the form doesn't edit (restart tuning, resume
+        # config) by overlaying the edits onto the original entry; a new task starts
+        # from just the edited fields (the agent fills the rest with defaults).
+        spec = {**getattr(self, "_orig_entry", {}), **edited}
 
         self._saving = True
         self._buttons.setEnabled(False)
