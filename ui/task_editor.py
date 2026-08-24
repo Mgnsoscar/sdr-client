@@ -310,12 +310,17 @@ class TaskEditorDialog(QDialog):
         # A task is authored in the Library (no unit), so absolute power is free-form; if
         # we've seen units calibrated for this script's signal, show their achievable
         # range as a soft hint.
+        from .param_form import calibration_caution
         hint = None
         sid = self._cal_signals.get(script)
         if sid:
             from state.calibration_cache import get_calibration_cache
             hint = get_calibration_cache().aggregate_power_bounds(sid)
-        self._form.set_params(self._param_specs.get(script, []), hint_bounds=hint)
+        # Library authoring: warn only when the script opts into no calibration signal at
+        # all (then power/gain are raw on every unit); a signal is limited once deployed.
+        caution = calibration_caution(bool(sid), targeted=False, calibrated=False)
+        self._form.set_params(self._param_specs.get(script, []), hint_bounds=hint,
+                              caution=caution)
         self._ensure_cal_env(script)
         self._set_status("")
         # Prefill values on edit. Keyed to the edit script and deliberately NOT

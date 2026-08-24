@@ -247,8 +247,12 @@ class RunTaskDialog(QDialog):
     def _build_form(self) -> None:
         # Open in the mode the deployed command used (relative if it set --gain).
         mode = "relative" if any(a in ("-Gain", "--gain") for a in self._current_args) else None
+        from .param_form import calibration_caution
+        caution = calibration_caution(bool(self._cal_signal_id), targeted=True,
+                                      calibrated=self._cal_bounds is not None)
         self._form.set_params(self._param_specs, cal_bounds=self._cal_bounds,
-                              absolute_allowed=True, default_power_mode=mode)
+                              absolute_allowed=True, default_power_mode=mode,
+                              caution=caution)
         # Prefill from the deployed args; anything the form doesn't recognise
         # (positional args, flags not in the schema) drops into "Additional args".
         extra = self._form.set_values(self._current_args)

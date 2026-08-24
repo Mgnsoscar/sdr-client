@@ -1190,6 +1190,11 @@ class StepEditorDialog(QDialog):
         bounds = self._editor.cal_bounds_for_task(task)
         hint = self._editor.power_hint_for_task(task)     # aggregate range for Library authoring
         abs_allowed = self._editor.absolute_allowed()
+        # No-safeguard caution: the task opts into no calibration signal, or a targeted
+        # unit isn't calibrated for it — either way power/gain go out raw.
+        from .param_form import calibration_caution
+        caution = calibration_caution(self._editor.has_cal_signal(task),
+                                      targeted=abs_allowed, calibrated=bounds is not None)
         prefill = self._pending_prefill or self._src.args or []
         mode = "relative" if any(a in ("-Gain", "--gain") for a in prefill) else None
         if self._is_tune():
@@ -1198,7 +1203,7 @@ class StepEditorDialog(QDialog):
             specs = [s for s in specs if s.get("live")]
             self._form.set_params(specs, selectable=True, cal_bounds=bounds,
                                   absolute_allowed=abs_allowed, default_power_mode=mode,
-                                  hint_bounds=hint)
+                                  hint_bounds=hint, caution=caution)
             self._params_status.setText(
                 "tick the parameters to set at this offset" if specs
                 else "this task's script declares no live parameters")
@@ -1206,7 +1211,7 @@ class StepEditorDialog(QDialog):
         else:
             self._form.set_params(specs, cal_bounds=bounds,
                                   absolute_allowed=abs_allowed, default_power_mode=mode,
-                                  hint_bounds=hint)
+                                  hint_bounds=hint, caution=caution)
             self._params_status.setText(
                 "" if specs else "this script declares no parameters — use extra args")
             self._apply_prefill()
@@ -1455,6 +1460,11 @@ class TimelineEditor(QWidget):
             return None
         from state.calibration_cache import get_calibration_cache
         return get_calibration_cache().aggregate_power_bounds(sid)
+
+    def has_cal_signal(self, task: str) -> bool:
+        """Whether a task opts into calibration (sets SDR_CAL_SIGNAL_ID). When it doesn't,
+        its power/gain are raw — no calibration limits apply on any unit."""
+        return bool(self._task_signals.get(task))
 
     def script_for_task(self, task: str) -> Tuple[str, List[str]]:
         """(script_filename, default_args) for a task name — for the step editor."""

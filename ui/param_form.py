@@ -221,6 +221,25 @@ def apply_power_hint(spec: dict, agg) -> dict:
     return out
 
 
+def calibration_caution(has_signal: bool, targeted: bool, calibrated: bool):
+    """The 'no safeguards in place' caution for a power/gain form, or None when
+    calibration has it covered. Shown so an operator knows when a value is raw:
+      • ``has_signal`` — the task opts into calibration (sets SDR_CAL_SIGNAL_ID);
+      • ``targeted``   — a specific unit is in play (a run/tune, or a plan/sequence
+        pointed at a unit) as opposed to open Library authoring;
+      • ``calibrated`` — that unit is calibrated for the signal (bounds available).
+    A task with no signal is always raw. A targeted-but-uncalibrated unit is raw too.
+    Open Library authoring with a signal is fine — limits apply once it hits a
+    calibrated unit (and a deploy will flag anything out of range)."""
+    if not has_signal:
+        return ("This task has no calibration signal, so power/gain go out RAW — no "
+                "calibration limits protect the hardware. Set them carefully.")
+    if targeted and not calibrated:
+        return ("This unit isn't calibrated for this signal, so no calibration limits "
+                "apply — power/gain go out raw. Set them carefully.")
+    return None
+
+
 def apply_power_bounds(specs: List[dict], bounds) -> List[dict]:
     """Return a copy of `specs` with the --power param bounded to a unit's resolved
     calibration range and relabelled with its operating plane/quantity. No-op when
@@ -346,6 +365,7 @@ class ParamForm(QWidget):
         self._base_specs: List[dict] = []
         self._cal_bounds = None
         self._hint_bounds = None
+        self._caution = None
         self._absolute_allowed = False
         self._power_modes: List[str] = []
         self._power_mode = None
@@ -357,7 +377,7 @@ class ParamForm(QWidget):
 
     def set_params(self, specs: List[dict], selectable: bool = False,
                    cal_bounds=None, absolute_allowed: bool = False,
-                   default_power_mode=None, hint_bounds=None) -> None:
+                   default_power_mode=None, hint_bounds=None, caution=None) -> None:
         """Rebuild the form for a parameter schema (clears existing widgets).
 
         selectable=True prefixes each row with an include checkbox: values() then
@@ -373,6 +393,7 @@ class ParamForm(QWidget):
         self._selectable = selectable
         self._cal_bounds = cal_bounds
         self._hint_bounds = hint_bounds
+        self._caution = caution
         self._absolute_allowed = absolute_allowed
         self._power_modes = _compute_power_modes(specs, cal_bounds, absolute_allowed)
         if default_power_mode in self._power_modes:
@@ -389,6 +410,20 @@ class ParamForm(QWidget):
                 w.deleteLater()
         self._widgets.clear()
         self._checks.clear()
+
+        # No-safeguard caution: raw power/gain with no calibration behind it (an
+        # uncalibrated unit, or a task with no calibration signal). Only shown when there
+        # IS a power/gain field to be careful about.
+        has_power_or_gain = (find_power_index(self._base_specs) is not None
+                             or find_gain_index(self._base_specs) is not None)
+        if self._caution and has_power_or_gain:
+            warn = QLabel("⚠ " + self._caution)
+            warn.setWordWrap(True)
+            warn.setStyleSheet(
+                f"font-size: 11px; color: {Palette.ARMED}; font-weight: 600; "
+                f"background: {Palette.ARMED_SOFT}; border: 1px solid {Palette.ARMED}; "
+                f"border-radius: 6px; padding: 6px 8px;")
+            self._form.addRow(warn)
 
         if len(self._power_modes) > 1:                 # relative/absolute chooser
             self._form.addRow(self._mode_label(), self._mode_toggle())

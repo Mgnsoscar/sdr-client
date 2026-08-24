@@ -14,8 +14,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtWidgets import QApplication
 
 from state.calibration_cache import CalibrationCache
+from PyQt6.QtWidgets import QLabel
+
 from ui.param_form import (
-    ParamForm, _compute_power_modes, apply_power_hint, find_power_index,
+    ParamForm, _compute_power_modes, apply_power_hint, calibration_caution,
+    find_power_index,
 )
 
 _app = QApplication.instance() or QApplication([])
@@ -106,3 +109,39 @@ def test_form_run_uncalibrated_is_relative():
     form = ParamForm()
     form.set_params([_POWER, _GAIN], absolute_allowed=True, cal_bounds=None)
     assert form.power_mode() == "relative"
+
+
+# ── no-safeguard caution ────────────────────────────────────────────────────────
+
+def test_caution_text_cases():
+    # no signal → always raw
+    assert "no calibration signal" in calibration_caution(False, targeted=True, calibrated=True)
+    assert "no calibration signal" in calibration_caution(False, targeted=False, calibrated=False)
+    # signal, targeted unit that isn't calibrated → raw
+    assert "isn't calibrated" in calibration_caution(True, targeted=True, calibrated=False)
+    # signal + calibrated unit → safe; signal + open Library authoring → safe (limited later)
+    assert calibration_caution(True, targeted=True, calibrated=True) is None
+    assert calibration_caution(True, targeted=False, calibrated=False) is None
+
+
+def _warning_labels(form):
+    out = []
+    for i in range(form._form.count()):
+        w = form._form.itemAt(i).widget()
+        if isinstance(w, QLabel) and w.text().startswith("⚠"):
+            out.append(w.text())
+    return out
+
+
+def test_form_shows_caution_when_raw():
+    form = ParamForm()
+    form.set_params([_POWER, _GAIN], absolute_allowed=True, cal_bounds=None,
+                    caution="This unit isn't calibrated — power/gain go out raw.")
+    assert any("raw" in t for t in _warning_labels(form))
+
+
+def test_no_caution_without_a_power_or_gain_field():
+    # A task with no power/gain param has nothing to be careful about → no banner.
+    form = ParamForm()
+    form.set_params([_OTHER], caution="ignored — no power field here")
+    assert _warning_labels(form) == []
