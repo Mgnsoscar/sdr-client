@@ -1958,6 +1958,16 @@ class CalibrationPanel(QWidget):
             note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
             bv.addWidget(note)
         sub = QHBoxLayout()
+        if is_source:
+            # Rename the signal id in place (keeps its curves/amplitude/label), so a task
+            # rename can be mirrored here without deleting and re-entering everything.
+            id_edit = QLineEdit(sid); id_edit.setFixedWidth(150)
+            id_edit.setToolTip("Rename this signal id — updates it throughout this "
+                               "calibration. Keep it matching the task's SDR_CAL_SIGNAL_ID.")
+            id_edit.editingFinished.connect(
+                lambda s=sid, e=id_edit: self._rename_signal(s, e.text()))
+            sub.addWidget(QLabel("id")); sub.addWidget(id_edit)
+            sub.addSpacing(12)
         sub.addWidget(QLabel("plot label")); entry["plabel"].setFixedWidth(90)
         sub.addWidget(entry["plabel"])
         sub.addStretch(1)
@@ -2777,6 +2787,38 @@ class CalibrationPanel(QWidget):
             del self._doc["signals"][sid]
         for shown in self._stage_extra.values():
             shown.discard(sid)
+        self._doc_to_form()
+
+    def _rename_signal(self, old: str, new: str) -> None:
+        """Rename a signal id in place, keeping its curves/amplitude/plot label — so a task
+        rename can be mirrored here without deleting and re-entering the signal. The id is
+        only a dict key in the calibration document (curves nest under it), so a key rename
+        that preserves order is enough."""
+        new = (new or "").strip()
+        if not new or new == old:
+            return
+        # Fold current widget edits into the model first, so nothing typed is lost.
+        try:
+            self._sync_from(strict=False)
+        except ValueError:
+            pass
+        signals = (self._doc or {}).get("signals") or {}
+        if old not in signals:
+            return                                    # already renamed (re-entrant blur)
+        if new in signals:
+            QMessageBox.warning(self, "Rename signal",
+                                f"A signal named “{new}” already exists — pick another id.")
+            self._doc_to_form()                       # repaint the field back to the old id
+            return
+        self._doc["signals"] = {(new if k == old else k): v for k, v in signals.items()}
+        if old in self._expanded_signals:             # keep it expanded under the new id
+            self._expanded_signals.discard(old)
+            self._expanded_signals.add(new)
+        for shown in self._stage_extra.values():      # keep it shown on any downstream stage
+            if old in shown:
+                shown.discard(old)
+                shown.add(new)
+        self._set_status(f"renamed signal “{old}” → “{new}”", kind="ok")
         self._doc_to_form()
 
     def _on_remove_signal_from_stage(self, sid: str, plane: str) -> None:

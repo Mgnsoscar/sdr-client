@@ -726,6 +726,45 @@ def test_signals_are_collapsible_in_measured_detail():
     assert "mock" not in p._expanded_signals
 
 
+def test_rename_signal_preserves_its_curves_and_order():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    d = _v2_doc()
+    d["signals"]["other"] = {"amplitude": 0.5, "curves": {}}   # a second signal, after mock
+    p._set_doc(d)
+    before = p._read_form(strict=False)["signals"]["mock"]
+    p._rename_signal("mock", "gnss_l1")
+    out = p._read_form(strict=False)["signals"]
+    assert "mock" not in out and "gnss_l1" in out
+    assert out["gnss_l1"]["curves"] == before["curves"]        # curves carried over intact
+    assert out["gnss_l1"]["amplitude"] == before["amplitude"]
+    assert list(out.keys()) == ["gnss_l1", "other"]            # insertion order preserved
+
+
+def test_rename_signal_rejects_a_collision(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(QMessageBox, "warning",
+                        staticmethod(lambda *a, **k: seen.setdefault("msg", a)))
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    d = _v2_doc()
+    d["signals"]["taken"] = {"amplitude": 0.5, "curves": {}}
+    p._set_doc(d)
+    p._rename_signal("mock", "taken")                          # collides with an existing id
+    out = p._read_form(strict=False)["signals"]
+    assert "mock" in out and "taken" in out                    # unchanged
+    assert "msg" in seen                                       # and the user was warned
+
+
+def test_rename_signal_keeps_it_expanded():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    p._expanded_signals = {"mock"}
+    p._rename_signal("mock", "gnss_l1")
+    assert p._expanded_signals == {"gnss_l1"}
+
+
 def test_remove_signal_from_measured_detail(monkeypatch):
     # The expanded signal section carries a "Remove signal" action; confirming it drops
     # the signal (and all its curves) from the document.
