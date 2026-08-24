@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QLabel, QScrollArea, QVBoxLayout,
 )
 
-from .param_form import ParamForm, fmt_value
+from .param_form import ParamForm, fmt_value, power_mode_of_args
 from .qt_adapter import DataHub
 from .theme import Palette
 
@@ -160,11 +160,9 @@ class LiveTuneDialog(QDialog):
                       if t.get("name") == self.task_name), None)
         self._cal_signal_id = (entry.get("env") or {}).get("SDR_CAL_SIGNAL_ID") if entry else None
         command = list(entry.get("command", [])) if entry else []
-        # Open in the mode the deployed command used (relative if it set --gain), so a
-        # task running in relative gain doesn't open showing the absolute dBm control.
-        self._default_power_mode = ("relative"
-                                    if any(a in ("-Gain", "--gain") for a in command)
-                                    else None)
+        # Open in the mode the deployed command used (absolute if it set --power, relative
+        # if --gain), so a task running in one mode doesn't open showing the other's control.
+        self._default_power_mode = power_mode_of_args(command)
         script_idx = next((i for i, a in enumerate(command)
                            if isinstance(a, str) and a.endswith(".py")), None)
         if script_idx is None:

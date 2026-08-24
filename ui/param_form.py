@@ -156,6 +156,22 @@ def range_hint(spec: dict) -> str:
 POWER_DEST = "power"
 GAIN_DEST = "gain"
 
+_POWER_FLAGS = ("--power", "-Power")
+_GAIN_FLAGS = ("--gain", "-Gain")
+
+
+def power_mode_of_args(args) -> Optional[str]:
+    """The power mode a saved arg list was authored in: 'absolute' if it sets --power,
+    'relative' if it sets --gain, else None (let the form pick its default). Absolute
+    wins if somehow both are present. Used so fetching a task preserves the mode it was
+    saved with instead of falling back to the form's default."""
+    have = list(args or [])
+    if any(a in _POWER_FLAGS for a in have):
+        return "absolute"
+    if any(a in _GAIN_FLAGS for a in have):
+        return "relative"
+    return None
+
 
 def find_power_index(specs: List[dict]):
     """Index of the absolute --power parameter in a spec list, or None."""

@@ -11,9 +11,38 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
-from ui.param_form import ParamForm, _compute_power_modes
+from ui.param_form import ParamForm, _compute_power_modes, power_mode_of_args
 
 _app = QApplication.instance() or QApplication([])
+
+
+# ── mode inferred from saved args (so a fetched task keeps its mode) ────────────────
+
+def test_power_mode_of_args():
+    assert power_mode_of_args(["--power", "-20"]) == "absolute"
+    assert power_mode_of_args(["-Power", "-20"]) == "absolute"
+    assert power_mode_of_args(["--gain", "30"]) == "relative"
+    assert power_mode_of_args(["-Gain", "30"]) == "relative"
+    assert power_mode_of_args(["--freq", "1e9"]) is None
+    assert power_mode_of_args([]) is None
+    assert power_mode_of_args(None) is None
+    # both present (shouldn't happen) → absolute wins
+    assert power_mode_of_args(["--power", "-5", "--gain", "10"]) == "absolute"
+
+
+def test_saved_absolute_survives_a_stale_relative_mode():
+    # Reproduces the sequence bug: a form that was left in relative mode (e.g. from a
+    # previously-selected task) must still open a saved-absolute task in absolute — the
+    # inferred default_power_mode overrides the stale, still-valid relative mode.
+    f = ParamForm()
+    f.set_params(_specs(), cal_bounds=_bounds(), absolute_allowed=True,
+                 default_power_mode="relative")
+    assert f.power_mode() == "relative"                 # form is now "stuck" in relative
+    saved = ["--power", "-12"]                           # a task saved as absolute
+    f.set_params(_specs(), cal_bounds=_bounds(), absolute_allowed=True,
+                 default_power_mode=power_mode_of_args(saved))
+    assert f.power_mode() == "absolute"
+    assert "power" in _dests(f) and "gain" not in _dests(f)
 
 
 def _specs():

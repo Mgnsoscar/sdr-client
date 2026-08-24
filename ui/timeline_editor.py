@@ -56,7 +56,7 @@ from api import ramp as _ramp
 from api.fleet import LIBRARY_HOST
 
 from .duration_spin import DurationSpinBox
-from .param_form import ParamForm, fmt_duration, fmt_value
+from .param_form import ParamForm, fmt_duration, fmt_value, power_mode_of_args
 from .ramp_editor import RampEditorDialog
 from .theme import Palette
 
@@ -1199,7 +1199,10 @@ class StepEditorDialog(QDialog):
                                       targeted=abs_allowed, calibrated=bounds is not None,
                                       script_calibratable=self._editor.script_calibratable(task))
         prefill = self._pending_prefill or self._src.args or []
-        mode = "relative" if any(a in ("-Gain", "--gain") for a in prefill) else None
+        # Open in the mode the task was saved with (absolute if it sets --power, relative
+        # if --gain) — otherwise a saved-absolute task could fall back to the form's
+        # default (or a mode left over from a previously-selected task).
+        mode = power_mode_of_args(prefill)
         if self._is_tune():
             # Only live-tunable params can be changed mid-run; the checkboxes let
             # you pick exactly which ones this step sets.

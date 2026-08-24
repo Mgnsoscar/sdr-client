@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 
 from api import models as m
 
-from .param_form import ParamForm
+from .param_form import ParamForm, power_mode_of_args
 from .qt_adapter import DataHub
 from .theme import Palette
 
@@ -247,8 +247,9 @@ class RunTaskDialog(QDialog):
             self._build_form()
 
     def _build_form(self) -> None:
-        # Open in the mode the deployed command used (relative if it set --gain).
-        mode = "relative" if any(a in ("-Gain", "--gain") for a in self._current_args) else None
+        # Open in the mode the deployed command used (absolute if it set --power, relative
+        # if --gain) so it's preserved rather than snapping to the form's default.
+        mode = power_mode_of_args(self._current_args)
         from .param_form import calibration_caution
         caution = calibration_caution(
             bool(self._cal_signal_id), targeted=True,
