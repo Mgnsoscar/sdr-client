@@ -70,6 +70,9 @@ class ComponentLibraryDialog(QDialog):
         newb = QPushButton("New"); newb.clicked.connect(self._new)
         delb = QPushButton("Delete"); delb.setStyleSheet(f"color: {Palette.CRASH};")
         delb.clicked.connect(self._delete)
+        # These must never become the dialog's Enter-default (that's Save, below), or
+        # pressing Enter in a field would fire them instead of saving.
+        newb.setAutoDefault(False); delb.setAutoDefault(False)
         row.addWidget(newb); row.addWidget(delb); row.addStretch(1)
         left.addLayout(row)
         body.addLayout(left)
@@ -85,6 +88,13 @@ class ComponentLibraryDialog(QDialog):
         self._kind.setToolTip("A free-text grouping label (cable / antenna / pad / "
                               "anything). It only groups the library — the maths ignores it.")
         self._desc = QLineEdit(); self._desc.setPlaceholderText("optional — e.g. 3 m LMR-240, VNA 2026-08")
+        # Enter in any of the header fields saves the component (rather than triggering
+        # the dialog's default button — which used to be "New", silently discarding the
+        # edit into a fresh blank component).
+        self._id.returnPressed.connect(self._save)
+        self._desc.returnPressed.connect(self._save)
+        if self._kind.lineEdit() is not None:
+            self._kind.lineEdit().returnPressed.connect(self._save)
         form.addRow("Id", self._id)
         form.addRow("Kind", self._kind)
         form.addRow("Description", self._desc)
@@ -107,9 +117,12 @@ class ComponentLibraryDialog(QDialog):
         rmp = QPushButton("− point"); rmp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         rmp.clicked.connect(self._table.remove_selected)
         paste = QPushButton("Paste VNA sweep…"); paste.clicked.connect(self._paste_sweep)
+        paste.setAutoDefault(False)
+        addp.setAutoDefault(False); rmp.setAutoDefault(False)
         btns.addWidget(addp); btns.addWidget(rmp); btns.addWidget(paste); btns.addStretch(1)
         self._save_btn = QPushButton("Save component"); self._save_btn.setObjectName("primary")
         self._save_btn.clicked.connect(self._save)
+        self._save_btn.setAutoDefault(True); self._save_btn.setDefault(True)
         btns.addWidget(self._save_btn)
         right.addLayout(btns)
 

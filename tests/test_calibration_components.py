@@ -77,7 +77,6 @@ def _panel(tmp_path):
 def test_component_reference_round_trips(tmp_path):
     p = _panel(tmp_path)
     p._set_doc(_doc({"type": "derived", "from": "amplifier_output", "component": "cable_a"}))
-    p._tabs.setCurrentIndex(0)                       # Editor tab
     planes = p._read_form(strict=True)["chain"]["planes"]
     assert planes["cable_output"]["component"] == "cable_a"
     assert "delta_db" not in planes["cable_output"]  # component supplies Δ dB, not a constant
@@ -87,7 +86,6 @@ def test_component_reference_round_trips(tmp_path):
 def test_center_freq_round_trips(tmp_path):
     p = _panel(tmp_path)
     p._set_doc(_doc({"type": "derived", "from": "amplifier_output", "component": "cable_a"}))
-    p._tabs.setCurrentIndex(0)
     out = p._read_form(strict=True)
     assert out["signals"]["mock"]["center_freq_hz"] == 1.575e9
 
@@ -95,7 +93,6 @@ def test_center_freq_round_trips(tmp_path):
 def test_constant_delta_still_supported(tmp_path):
     p = _panel(tmp_path)
     p._set_doc(_doc({"type": "derived", "from": "amplifier_output", "delta_db": -1.8}))
-    p._tabs.setCurrentIndex(0)
     planes = p._read_form(strict=True)["chain"]["planes"]
     assert planes["cable_output"]["delta_db"] == -1.8
     assert "component" not in planes["cable_output"]
@@ -106,7 +103,6 @@ def test_missing_center_freq_is_omitted(tmp_path):
     doc = _doc({"type": "derived", "from": "amplifier_output", "component": "cable_a"})
     doc["signals"]["mock"].pop("center_freq_hz")
     p._set_doc(doc)
-    p._tabs.setCurrentIndex(0)
     assert "center_freq_hz" not in p._read_form(strict=True)["signals"]["mock"]
 
 
@@ -116,7 +112,6 @@ def test_save_blocked_when_agent_lacks_component_capability(tmp_path):
     # the unit would reject confusingly.
     p = _panel(tmp_path)
     p._set_doc(_doc({"type": "derived", "from": "amplifier_output", "component": "cable_a"}))
-    p._tabs.setCurrentIndex(0)
     p._on_save()
     assert "too old" in p._status.text().lower()
 
@@ -128,3 +123,20 @@ def test_constant_delta_not_blocked_without_capability(tmp_path):
                                               "delta_db": 6.0, "quantity": "EIRP"}
     p._set_doc(doc)
     assert p._blocks_on_components() is False        # no component ref → never blocked
+
+
+def test_component_dialog_enter_saves_not_new(tmp_path):
+    # Pressing Enter in a header field must SAVE the component being edited — not fire the
+    # dialog's default button (which used to be "New", discarding the edit into a fresh
+    # blank component).
+    from ui.component_library_dialog import ComponentLibraryDialog
+    cat = ComponentCatalog(path=tmp_path / "components.json")
+    dlg = ComponentLibraryDialog(cat)
+    dlg._new()
+    dlg._id.setText("cable_x")
+    dlg._table.set_rows([[1.0e9, -2.0]])
+    dlg._desc.returnPressed.emit()                   # Enter in the description field
+    assert "cable_x" in cat.ids()                    # saved…
+    assert dlg._current == "cable_x"                 # …and still the current component
+    # the New/default button must not be the Enter-default that stole the keystroke
+    assert dlg._save_btn.isDefault()

@@ -388,15 +388,29 @@ def test_removing_plane_purges_its_references(monkeypatch):
     monkeypatch.setattr(QMessageBox, "question",
                         staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
     d = _full_doc()
+    # give amplifier_output a limit too, so we can check the limit purge on removal
+    d["chain"]["limits"].append({"plane": "amplifier_output", "max_dbm": 24.0})
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(d)
-    # remove sdr_output (which carries a limit + a curve + is not the operating plane)
-    row = next(r for r in p._f["planes"] if r["name"].text() == "sdr_output")
+    # remove amplifier_output (a non-source measured plane that carries a limit + a curve)
+    row = next(r for r in p._f["planes"] if r["name"].text() == "amplifier_output")
     p._remove_plane(row)
     chain = p._doc["chain"]
-    assert "sdr_output" not in chain["planes"]
-    assert all(l["plane"] != "sdr_output" for l in chain["limits"])
-    assert "sdr_output" not in p._doc["signals"]["mock"]["curves"]
+    assert "amplifier_output" not in chain["planes"]
+    assert all(l["plane"] != "amplifier_output" for l in chain["limits"])
+    assert "amplifier_output" not in p._doc["signals"]["mock"]["curves"]
+
+
+def test_source_stage_cannot_be_removed(monkeypatch):
+    # The first (source) stage is the chain's measured origin and can't be rebuilt from
+    # the editor, so removing it is refused — the plane and its curve stay put.
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_full_doc())
+    row = next(r for r in p._f["planes"] if r["name"].text() == "sdr_output")
+    p._remove_plane(row)
+    assert "sdr_output" in p._read_form(strict=False)["chain"]["planes"]
 
 
 # ── the JSON escape hatch applies valid documents and rejects bad ones ─────────────
@@ -697,6 +711,62 @@ def test_signals_are_collapsible_in_measured_detail():
     assert p._expanded_signals == {"mock"}
     p._toggle_signal("mock")
     assert "mock" not in p._expanded_signals
+
+
+def test_remove_signal_from_measured_detail(monkeypatch):
+    # The expanded signal section carries a "Remove signal" action; confirming it drops
+    # the signal (and all its curves) from the document.
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    assert "mock" in p._f["signals"]
+    p._on_remove_signal("mock")
+    assert "mock" not in p._f["signals"]
+    assert "mock" not in (p._read_form(strict=False)["signals"])
+
+
+def test_remove_signal_can_be_cancelled(monkeypatch):
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Cancel))
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    p._on_remove_signal("mock")
+    assert "mock" in p._f["signals"]                     # cancelled → still there
+
+
+def test_active_signal_highlight_tracks_the_open_editor():
+    # A signal is "active" (row-highlighted) only while its editor is on screen: a
+    # MEASURED stage is selected and the signal is expanded. It clears on a passive stage.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    p._select_signal("mock")                             # opens on a measured stage
+    assert p._active_signal_ids() == {"mock"}
+    p._select_plane("cable_output")                      # passive stage → editor not shown
+    assert p._active_signal_ids() == set()
+
+
+def test_signal_without_points_inherits_previous_stage():
+    # A signal measured only at the source has no points on a later measured stage; the
+    # editor names that inheritance rather than treating it as an error (see the agent's
+    # partial measured-stage fallback).
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    d = _doc()
+    d["chain"]["operating_plane"] = "amplifier_output"
+    d["chain"]["planes"] = {
+        "sdr_output": {"type": "measured", "quantity": "tp"},
+        "amplifier_output": {"type": "measured", "quantity": "mlp"},
+    }
+    # mock has a curve only on sdr_output (from _doc); none on amplifier_output.
+    p._set_doc(d)
+    out = p._read_form(strict=False)
+    assert "amplifier_output" not in out["signals"]["mock"]["curves"]
+    # no local-check error for the missing downstream curve
+    from ui.calibration_panel import local_calibration_issues
+    assert not any("amplifier_output" in i for i in local_calibration_issues(out))
 
 
 def test_library_grid_has_a_card_per_component_plus_add():

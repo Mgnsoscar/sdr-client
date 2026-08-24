@@ -485,19 +485,42 @@ class _DragHandle(QLabel):
     def __init__(self, name: str):
         super().__init__("⠿")
         self._name = name
+        self._press = None                    # press-point, set once we own the press
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.setToolTip("Drag to reorder this stage")
         self.setStyleSheet(f"color:{Palette.TEXT_FAINT};font-size:13px;")
 
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if not (event.buttons() & Qt.MouseButton.LeftButton):
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        # Accept the press so THIS widget becomes the mouse grabber and receives the
+        # move events — otherwise the press falls through to the parent stage card
+        # (which selects the stage) and the handle never sees a drag. Accepting here
+        # also stops the click from selecting the stage, so grip and body don't fight.
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press = event.position().toPoint()
+            event.accept()
             return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._press is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        if ((event.position().toPoint() - self._press).manhattanLength()
+                < QApplication.startDragDistance()):
+            return                            # below the drag threshold — a click, not a drag
         from PyQt6.QtCore import QMimeData
         from PyQt6.QtGui import QDrag
         drag = QDrag(self)
         mime = QMimeData()
         mime.setData(_STAGE_MIME, self._name.encode("utf-8"))
         drag.setMimeData(mime)
+        card = self.parent()                  # drag a snapshot of the whole stage card
+        while card is not None and card.objectName() != "stage":
+            card = card.parent()
+        if card is not None:
+            pm = card.grab()
+            drag.setPixmap(pm)
+            drag.setHotSpot(self.mapTo(card, event.position().toPoint()))
+        self._press = None
         drag.exec(Qt.DropAction.MoveAction)
 
 
@@ -1000,8 +1023,11 @@ class CalibrationPanel(QWidget):
         self._table.setHorizontalHeaderLabels(["Signal", "Freq MHz", "Ampl.", "--power dBm"])
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        # No built-in (blue, persistent) selection: clicking a row still fires
+        # cellClicked, but the highlight is painted by hand in _populate_table — with the
+        # app's accent tint, and only while that signal's editor is actually open (see
+        # _active_signal_ids). So nothing stays highlighted after you leave it.
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table.setMaximumHeight(180)
         self._table.setToolTip("Click a signal to open its measured curve for editing.")
@@ -1575,6 +1601,18 @@ class CalibrationPanel(QWidget):
         if item is not None:
             self._select_signal(item.text().strip())
 
+    def _active_signal_ids(self) -> set:
+        """Signals whose editor is currently on screen: a MEASURED stage is selected and
+        the signal is expanded in its detail. These get the accent row-highlight in the
+        Signals table — and only these, so the highlight tracks the visible editor and
+        clears when you collapse it or move to a passive stage."""
+        rows = self._f.get("planes", [])
+        sel = next((r for r in rows
+                    if r["name"].text().strip() == self._selected_plane), None)
+        if sel is None or sel.get("role", "measured") != "measured":
+            return set()
+        return set(self._expanded_signals) & set(self._f.get("signals", {}))
+
     def _select_signal(self, sid: str) -> None:
         """Clicking a signal opens its measured curve: select the measured stage that
         carries it (the source, or the first measured plane) and expand just that signal
@@ -1711,6 +1749,13 @@ class CalibrationPanel(QWidget):
         and (when expanded) its amplitude/frequency + the gain→power grid."""
         tbl = entry["curves"][plane]
         expanded = sid in self._expanded_signals
+        npts = len(tbl.numeric_points())
+        # A non-source measured stage with no points for THIS signal isn't broken — the
+        # unit inherits the previous stage's curve (see the agent resolver's partial
+        # measured-stage fallback). Name that behaviour instead of just "no points".
+        names = [r["name"].text().strip() for r in self._f.get("planes", [])]
+        prev_stage = names[names.index(plane) - 1] if plane in names and names.index(plane) > 0 else None
+        inherits = npts == 0 and prev_stage is not None
         box = QFrame(); box.setObjectName("sigbox")
         box.setStyleSheet(f"#sigbox {{ border:1px solid "
                           f"{Palette.ACCENT if expanded else Palette.BORDER}; border-radius:8px; }}")
@@ -1723,13 +1768,19 @@ class CalibrationPanel(QWidget):
         nm = QLabel(sid); nm.setStyleSheet(f"font-weight:600;color:{Palette.TEXT};")
         hh.addWidget(chev); hh.addWidget(nm); hh.addStretch(1)
         if not expanded:                                 # a compact summary while collapsed
-            npts = len(tbl.numeric_points())
-            summ = QLabel(f"{npts} point(s)" if npts else "no points yet")
+            summ = QLabel(f"{npts} point(s)" if npts else
+                          (f"inherits “{prev_stage}”" if inherits else "no points yet"))
             summ.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
             hh.addWidget(summ)
         bv.addWidget(header)
         if not expanded:
             return box
+        if inherits:
+            note = QLabel(f"No points here — this signal inherits the “{prev_stage}” "
+                          f"curve. Add points only if you measured this stage for it.")
+            note.setWordWrap(True)
+            note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+            bv.addWidget(note)
         sub = QHBoxLayout()
         sub.addWidget(QLabel("plot label")); entry["plabel"].setFixedWidth(90)
         sub.addWidget(entry["plabel"])
@@ -1745,7 +1796,12 @@ class CalibrationPanel(QWidget):
         addp.clicked.connect(tbl.add_blank_row)
         rmp = QPushButton("− point"); rmp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         rmp.clicked.connect(tbl.remove_selected)
-        btns.addWidget(addp); btns.addWidget(rmp); btns.addStretch(1)
+        rmsig = QPushButton("Remove signal"); rmsig.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        rmsig.setStyleSheet(f"color:{Palette.CRASH};font-size:11px;")
+        rmsig.setToolTip("Delete this signal and all its measured curves from the "
+                         "calibration (every stage).")
+        rmsig.clicked.connect(lambda _=False, s=sid: self._on_remove_signal(s))
+        btns.addWidget(addp); btns.addWidget(rmp); btns.addStretch(1); btns.addWidget(rmsig)
         bv.addLayout(btns)
         return box
 
@@ -1775,12 +1831,22 @@ class CalibrationPanel(QWidget):
         form = QFormLayout(); form.setContentsMargins(0, 0, 0, 0)
         form.addRow("Plane id", row["name"])
         v.addLayout(form)
-        actions = QHBoxLayout()
-        rm = QPushButton("Remove stage")
-        # NB: clicked emits a `checked` bool — absorb it with a leading throwaway
-        # parameter, or it clobbers the r=row default (r would become False).
-        rm.clicked.connect(lambda _=False, r=row: self._remove_plane(r))
-        actions.addStretch(1); actions.addWidget(rm)
+        actions = QHBoxLayout(); actions.addStretch(1)
+        rows = self._f.get("planes", [])
+        is_source = bool(rows) and rows[0] is row
+        if is_source:
+            # The source is the chain's measured origin — everything derives from it and
+            # there's no way to re-create it once gone, so it can't be removed. Say so
+            # instead of offering a button that would strand the chain.
+            note = QLabel("The source stage can't be removed — it's the chain's origin.")
+            note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+            actions.insertWidget(0, note)
+        else:
+            rm = QPushButton("Remove stage")
+            # NB: clicked emits a `checked` bool — absorb it with a leading throwaway
+            # parameter, or it clobbers the r=row default (r would become False).
+            rm.clicked.connect(lambda _=False, r=row: self._remove_plane(r))
+            actions.addWidget(rm)
         v.addLayout(actions)
         return frame
 
@@ -1883,6 +1949,13 @@ class CalibrationPanel(QWidget):
         return planes
 
     def _remove_plane(self, row) -> None:
+        rows = self._f.get("planes", [])
+        if rows and rows[0] is row:
+            # The source (first) stage is the chain's measured origin and can't be
+            # rebuilt from the editor, so removing it would strand the unit. Refuse.
+            self._set_status("the source stage can't be removed — it's the chain's origin",
+                             kind="warn")
+            return
         try:
             self._sync_from(strict=False)
         except ValueError:
@@ -2411,6 +2484,19 @@ class CalibrationPanel(QWidget):
         self._download_btn.setEnabled(True)
         self._doc_to_form()
 
+    def _on_remove_signal(self, sid: str) -> None:
+        """Confirm, then delete a signal (it drops all its measured curves), and drop it
+        from the expanded set so nothing dangles on the rebuild."""
+        if QMessageBox.question(
+                self, "Remove signal",
+                f"Remove signal '{sid}' and all its measured curves from this "
+                f"calibration?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        self._expanded_signals.discard(sid)
+        self._remove_signal(sid)
+
     def _remove_signal(self, sid: str) -> None:
         try:
             self._sync_from(strict=False)
@@ -2446,6 +2532,8 @@ class CalibrationPanel(QWidget):
         "validate to resolve" placeholder for the --power column instead."""
         doc_sigs = (self._doc or {}).get("signals") or {}
         def_amp = ((self._doc or {}).get("defaults") or {}).get("amplitude")
+        active = self._active_signal_ids()               # rows to tint (editor on screen)
+        hi = QColor(Palette.ACCENT_SOFT)
         self._table.setRowCount(len(signals))
         for r, (sid, info) in enumerate(sorted(signals.items())):
             dsig = doc_sigs.get(sid) or {}
@@ -2465,6 +2553,8 @@ class CalibrationPanel(QWidget):
                 item = QTableWidgetItem(str(text))
                 if c == 0:
                     item.setToolTip("Click to edit this signal's measured curve.")
+                if sid in active:                        # accent tint while its editor is open
+                    item.setBackground(hi)
                 self._table.setItem(r, c, item)
 
     def _set_status(self, text: str, kind: str = "muted") -> None:
