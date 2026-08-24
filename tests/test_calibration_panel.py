@@ -742,6 +742,24 @@ def test_plot_label_round_trips_through_the_form():
     assert out["signals"]["mock"]["plot_label"] == "L1/E1"
 
 
+def test_reorder_stage_moves_a_stage_and_pins_the_source():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    order = lambda: list(p._read_form(strict=False)["chain"]["planes"])
+    assert order() == ["sdr_output", "amplifier_output", "cable_output", "antenna_eirp"]
+    # drag antenna_eirp onto amplifier_output → it lands just before it
+    p._reorder_stage("antenna_eirp", "amplifier_output")
+    assert order() == ["sdr_output", "antenna_eirp", "amplifier_output", "cable_output"]
+    # the operating plane always follows the last stage
+    assert p._read_form(strict=False)["chain"]["operating_plane"] == "cable_output"
+    # the source is pinned: it can't move and nothing can take slot 0
+    p._reorder_stage("sdr_output", "cable_output")
+    assert order()[0] == "sdr_output"
+    p._reorder_stage("cable_output", "sdr_output")
+    assert order()[0] == "sdr_output"
+
+
 def test_freq_interp_endpoint_clamped():
     from ui.calibration_panel import _interp_db
     table = [[1.1e9, -2.30], [1.6e9, -2.81]]

@@ -442,18 +442,63 @@ class _FreqResponsePlot(QWidget):
             qp.drawEllipse(int(X(freq)) - 4, int(Y(d)) - 4, 8, 8)
 
 
+_STAGE_MIME = "application/x-sdr-stage"
+
+
 class _ClickCard(QFrame):
     """A QFrame that runs a callback when clicked — used for the chain stages and the
-    component-library cards."""
-    def __init__(self, on_click=None):
+    component-library cards. Optionally a drop target: when `on_drop` is given it accepts
+    a dragged stage (see _DragHandle) and calls on_drop(src_name, self._drop_name)."""
+    def __init__(self, on_click=None, on_drop=None, drop_name=None):
         super().__init__()
         self._on_click = on_click
+        self._on_drop = on_drop
+        self._drop_name = drop_name
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        if on_drop is not None:
+            self.setAcceptDrops(True)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if self._on_click is not None and event.button() == Qt.MouseButton.LeftButton:
             self._on_click()
         super().mousePressEvent(event)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if self._on_drop is not None and event.mimeData().hasFormat(_STAGE_MIME):
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        if self._on_drop is not None and event.mimeData().hasFormat(_STAGE_MIME):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        if self._on_drop is not None and event.mimeData().hasFormat(_STAGE_MIME):
+            src = bytes(event.mimeData().data(_STAGE_MIME)).decode("utf-8")
+            event.acceptProposedAction()
+            if src and src != self._drop_name:
+                self._on_drop(src, self._drop_name)
+
+
+class _DragHandle(QLabel):
+    """The grip on a chain stage: dragging it reorders the stage (dropping onto another
+    stage card). Kept separate from the card's click-to-select so the two don't fight."""
+    def __init__(self, name: str):
+        super().__init__("⠿")
+        self._name = name
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setToolTip("Drag to reorder this stage")
+        self.setStyleSheet(f"color:{Palette.TEXT_FAINT};font-size:13px;")
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        from PyQt6.QtCore import QMimeData
+        from PyQt6.QtGui import QDrag
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(_STAGE_MIME, self._name.encode("utf-8"))
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.MoveAction)
 
 
 def _rename_plane_in_doc(doc: dict, old: str, new: str) -> dict:
@@ -1330,15 +1375,20 @@ class CalibrationPanel(QWidget):
         border = (Palette.ONLINE if operating else
                   Palette.ACCENT if selected else Palette.BORDER)
         bg = Palette.SURFACE if (operating or selected) else Palette.SURFACE_ALT
-        card = _ClickCard(on_click=lambda n=name: self._select_plane(n))
+        # Non-source stages are drop targets (drag another stage onto them to reorder).
+        card = _ClickCard(on_click=lambda n=name: self._select_plane(n),
+                          on_drop=(self._reorder_stage if index > 0 else None),
+                          drop_name=name)
         card.setObjectName("stage")
         card.setStyleSheet(f"#stage {{ background:{bg}; border:1px solid {border}; "
                            f"border-radius:10px; }}")
         card.setMinimumWidth(178); card.setMaximumWidth(230)
         v = QVBoxLayout(card); v.setContentsMargins(12, 10, 12, 12); v.setSpacing(7)
 
-        # top row: operating badge (or spacer) + move ◀▶ handles (not on the source)
+        # top row: drag grip + operating badge + move ◀▶ handles (none on the source)
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0)
+        if index > 0:
+            top.addWidget(_DragHandle(name))
         if operating:
             opb = QLabel("--power reads here")
             opb.setStyleSheet(f"color:#fff;background:{Palette.ONLINE};font-size:10px;"
@@ -1478,6 +1528,28 @@ class CalibrationPanel(QWidget):
         names[i], names[j] = names[j], names[i]
         self._doc["chain"]["planes"] = {nm: planes[nm] for nm in names}
         self._selected_plane = name
+        self._doc_to_form()
+
+    def _reorder_stage(self, src: str, dst: str) -> None:
+        """Drag-and-drop reorder: move stage `src` to `dst`'s slot. The source stage
+        (index 0) is pinned and nothing may take slot 0, so the linear chain always keeps
+        its measured source first; the operating plane stays the last stage."""
+        try:
+            self._doc = self._read_form(strict=False)
+        except ValueError:
+            pass
+        planes = (self._doc or {}).get("chain", {}).get("planes") or {}
+        names = list(planes.keys())
+        if src not in names or dst not in names or src == dst:
+            return
+        i, j = names.index(src), names.index(dst)
+        if i == 0 or j == 0:                       # never move the source, never displace it
+            return
+        names.pop(i)
+        j = names.index(dst)                       # dst's index after removing src
+        names.insert(j if i > j else j + 1, src)   # before dst moving left, after moving right
+        self._doc["chain"]["planes"] = {nm: planes[nm] for nm in names}
+        self._selected_plane = src
         self._doc_to_form()
 
     def _first_curve_points(self, plane: str):
