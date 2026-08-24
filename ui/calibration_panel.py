@@ -417,7 +417,10 @@ class _FreqResponsePlot(QWidget):
             qp.setPen(pen)
             qp.drawLine(xx, y0, xx, y1)
             qp.setPen(QColor(color))
-            qp.drawText(xx - 20, y0 - 2, 40, 12,
+            fm = qp.fontMetrics()
+            tw = min(fm.horizontalAdvance(label) + 6, x1 - x0)
+            tx = max(x0, min(xx - tw // 2, x1 - tw))     # keep the label inside the axes
+            qp.drawText(tx, y0 - 2, tw, 12,
                         int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom),
                         label)
         # the measured Δ(f) curve
@@ -1169,18 +1172,34 @@ class CalibrationPanel(QWidget):
         return 1.5e9
 
     def _signal_markers(self):
-        """Band markers for the frequency plot: (short label, freq_hz, colour) for each
-        signal with a centre frequency, cycling accent/green so they read apart."""
+        """Band markers for the frequency plot: (label, freq_hz, colour), one per distinct
+        centre frequency. Signals that share a frequency are merged into a single dashed
+        line with their labels combined, so overlapping signals don't stack invisibly.
+        Each signal's label is its chosen plot_label, else a short form of its id."""
         cols = [Palette.ACCENT, Palette.ONLINE, Palette.ARMED, Palette.TEXT_MUTED]
-        out = []
-        for i, (sid, sig) in enumerate(sorted(((self._doc or {}).get("signals") or {}).items())):
+        groups: dict = {}                         # rounded freq → {"freq", "labels"}
+        order: list = []
+        for sid, sig in sorted(((self._doc or {}).get("signals") or {}).items()):
             f = (sig or {}).get("center_freq_hz")
             if not f:
                 continue
             try:
-                out.append((sid.split("_")[-1][:4] or sid[:4], float(f), cols[i % len(cols)]))
+                fval = float(f)
             except (TypeError, ValueError):
                 continue
+            label = ((sig or {}).get("plot_label") or "").strip() \
+                or (sid.split("_")[-1][:6] or sid[:6])
+            key = round(fval, 3)                   # merge near-identical frequencies
+            if key not in groups:
+                groups[key] = {"freq": fval, "labels": []}
+                order.append(key)
+            groups[key]["labels"].append(label)
+        out = []
+        for i, key in enumerate(order):
+            g = groups[key]
+            labels = g["labels"]
+            lab = " · ".join(labels) if len(labels) <= 2 else f"{labels[0]} +{len(labels) - 1}"
+            out.append((lab, g["freq"], cols[i % len(cols)]))
         return out
 
     def _comp_table(self, comp_id: str):
@@ -1640,6 +1659,8 @@ class CalibrationPanel(QWidget):
         if not expanded:
             return box
         sub = QHBoxLayout()
+        sub.addWidget(QLabel("plot label")); entry["plabel"].setFixedWidth(90)
+        sub.addWidget(entry["plabel"])
         sub.addStretch(1)
         sub.addWidget(QLabel("ampl.")); entry["amp"].setFixedWidth(64); sub.addWidget(entry["amp"])
         sub.addWidget(QLabel("freq Hz")); entry["cfreq"].setFixedWidth(104); sub.addWidget(entry["cfreq"])
@@ -1884,6 +1905,11 @@ class CalibrationPanel(QWidget):
                          "frequency-dependent; blank for a chirp (many frequencies) or a "
                          "flat chain.")
         cfreq.editingFinished.connect(self._refresh_form_from_widgets)
+        plabel = QLineEdit(sig.get("plot_label", ""))
+        plabel.setPlaceholderText(sid)
+        plabel.setToolTip("The label drawn on the frequency-response plot's dashed line "
+                          "for this signal. Blank = a short form of the signal id.")
+        plabel.editingFinished.connect(self._refresh_form_from_widgets)
 
         curves = {}; sparks = {}
         for plane in measured:
@@ -1894,7 +1920,7 @@ class CalibrationPanel(QWidget):
             self._spark_src[spark] = tbl
             curves[plane] = tbl; sparks[plane] = spark
         self._f["signals"][sid] = {"amp": amp, "bw": bw, "cfreq": cfreq,
-                                   "curves": curves, "sparks": sparks}
+                                   "plabel": plabel, "curves": curves, "sparks": sparks}
 
     def _on_curve_changed(self, spark: "_Sparkline") -> None:
         """A curve grid was edited: repaint its sparkline from its source table and
@@ -1969,6 +1995,10 @@ class CalibrationPanel(QWidget):
                 sig["center_freq_hz"] = _to_float(w["cfreq"].text(), f"{sid} centre freq")
             else:
                 sig.pop("center_freq_hz", None)
+            if w["plabel"].text().strip():
+                sig["plot_label"] = w["plabel"].text().strip()
+            else:
+                sig.pop("plot_label", None)
             curves = {}
             for plane, tbl in w["curves"].items():
                 pts = tbl.points(strict)

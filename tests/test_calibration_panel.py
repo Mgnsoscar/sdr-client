@@ -711,6 +711,37 @@ def test_library_grid_has_a_card_per_component_plus_add():
     assert len(p._catalog.ids()) >= 2            # our two seeded parts are present
 
 
+def test_plot_markers_use_chosen_label_and_merge_shared_frequencies():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    import copy
+    d = _v2_doc()
+    base = copy.deepcopy(d["signals"]["mock"])
+    d["signals"] = {}
+    # two signals on the very same frequency, one with a chosen label
+    a = copy.deepcopy(base); a["center_freq_hz"] = 1575.42e6; a["plot_label"] = "L1"
+    b = copy.deepcopy(base); b["center_freq_hz"] = 1575.42e6            # id-derived label
+    c = copy.deepcopy(base); c["center_freq_hz"] = 1227.6e6; c["plot_label"] = "L2"
+    d["signals"] = {"gps_l1": a, "galileo_e1": b, "gps_l2": c}
+    p._set_doc(d)
+    markers = p._signal_markers()
+    freqs = sorted(m[1] for m in markers)
+    assert freqs == [1227.6e6, 1575.42e6]            # one marker per distinct frequency
+    merged = next(m for m in markers if m[1] == 1575.42e6)
+    assert "L1" in merged[0] and "e1" in merged[0]   # both labels combined on one line
+    lone = next(m for m in markers if m[1] == 1227.6e6)
+    assert lone[0] == "L2"                           # the chosen label is used
+
+
+def test_plot_label_round_trips_through_the_form():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    p._f["signals"]["mock"]["plabel"].setText("L1/E1")
+    out = p._read_form(strict=False)
+    assert out["signals"]["mock"]["plot_label"] == "L1/E1"
+
+
 def test_freq_interp_endpoint_clamped():
     from ui.calibration_panel import _interp_db
     table = [[1.1e9, -2.30], [1.6e9, -2.81]]
