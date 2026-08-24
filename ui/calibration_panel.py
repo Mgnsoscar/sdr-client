@@ -802,6 +802,7 @@ class CalibrationPanel(QWidget):
         self.hub = hub
         self._doc: Optional[dict] = None       # the working document model
         self._f: dict = {}                      # references to editor widgets
+        self._expanded_signals: set = set()    # measured-detail signals shown expanded
         from state import ComponentCatalog
         self._catalog = ComponentCatalog()      # the client's canonical component library
         self._components_synced = False          # merged this unit's catalog on first load
@@ -951,9 +952,12 @@ class CalibrationPanel(QWidget):
         self._table.setHorizontalHeaderLabels(["Signal", "Freq MHz", "Ampl.", "--power dBm"])
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table.setMaximumHeight(180)
+        self._table.setToolTip("Click a signal to open its measured curve for editing.")
+        self._table.cellClicked.connect(self._on_signal_row_clicked)
         sig_body.addWidget(self._table)
         rcol.addWidget(sig_card)
 
@@ -1139,6 +1143,11 @@ class CalibrationPanel(QWidget):
         # keep the current selection if the plane still exists, else operating / first
         if self._selected_plane not in names:
             self._selected_plane = op if op in names else (names[0] if names else None)
+
+        # Show the document's signals so they're always clickable (the resolved --power
+        # column fills in after a Validate/Save; until then it reads "validate to resolve").
+        self._populate_table({sid: {} for sid in ((doc or {}).get("signals") or {})},
+                             resolved=False)
 
         self._render_chain()
         self._render_detail()
@@ -1470,6 +1479,32 @@ class CalibrationPanel(QWidget):
         self._selected_plane = name or None
         self._doc_to_form()
 
+    def _on_signal_row_clicked(self, r: int, _c: int) -> None:
+        item = self._table.item(r, 0)
+        if item is not None:
+            self._select_signal(item.text().strip())
+
+    def _select_signal(self, sid: str) -> None:
+        """Clicking a signal opens its measured curve: select the measured stage that
+        carries it (the source, or the first measured plane) and expand just that signal
+        in the stage detail so it's ready to edit."""
+        try:
+            self._doc = self._read_form(strict=False)
+        except ValueError:
+            pass
+        plane = None
+        measured = []
+        for row in self._f.get("planes", []):
+            if row.get("role") == "measured":
+                nm = row["name"].text().strip()
+                measured.append(nm)
+                entry = self._f.get("signals", {}).get(sid)
+                if plane is None and entry and nm in (entry.get("curves") or {}):
+                    plane = nm
+        self._selected_plane = plane or (measured[0] if measured else self._selected_plane)
+        self._expanded_signals = {sid}
+        self._doc_to_form()
+
     # ── stage detail (mockup section 3) ──────────────────────────────────────────
     def _render_detail(self) -> None:
         self._clear_layout(self._detail_body)
@@ -1554,41 +1589,83 @@ class CalibrationPanel(QWidget):
 
     def _detail_measured(self, row) -> None:
         plane = row["name"].text().strip()
-        sigs = self._f.get("signals", {})
+        sigs = {sid: e for sid, e in self._f.get("signals", {}).items()
+                if e["curves"].get(plane) is not None}
         if not sigs:
             l = QLabel("No signals yet — “+ Add signal…” (right), then enter its measured "
                        "gain→power points here.")
             l.setWordWrap(True); l.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_FAINT};")
             self._detail_body.addWidget(l)
             return
+        head = QHBoxLayout()
         intro = QLabel("Enter the gain→power points you measured on this plane, per signal. "
-                       "Two or more, gain AND power both strictly increasing.")
+                       "Click a signal to expand it.")
         intro.setWordWrap(True); intro.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
-        self._detail_body.addWidget(intro)
+        head.addWidget(intro, 1)
+        # expand/collapse-all when there are enough signals to be worth it
+        if len(sigs) > 1:
+            all_open = self._expanded_signals.issuperset(sigs)
+            toggle_all = QPushButton("Collapse all" if all_open else "Expand all")
+            toggle_all.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            toggle_all.setStyleSheet("font-size:11px;")
+            toggle_all.clicked.connect(
+                lambda _=False, s=set(sigs), o=all_open: self._toggle_all_signals(s, o))
+            head.addWidget(toggle_all)
+        self._detail_body.addLayout(head)
         for sid, entry in sigs.items():
-            tbl = entry["curves"].get(plane)
-            if tbl is None:
-                continue
-            box = QFrame(); box.setObjectName("sigbox")
-            box.setStyleSheet(f"#sigbox {{ border:1px solid {Palette.BORDER}; border-radius:8px; }}")
-            bv = QVBoxLayout(box); bv.setContentsMargins(10, 8, 10, 8); bv.setSpacing(6)
-            head = QHBoxLayout()
-            nm = QLabel(sid); nm.setStyleSheet(f"font-weight:600;color:{Palette.TEXT};")
-            head.addWidget(nm); head.addStretch(1)
-            head.addWidget(QLabel("ampl.")); entry["amp"].setFixedWidth(64); head.addWidget(entry["amp"])
-            head.addWidget(QLabel("freq Hz")); entry["cfreq"].setFixedWidth(104); head.addWidget(entry["cfreq"])
-            bv.addLayout(head)
-            grid = QHBoxLayout()
-            grid.addWidget(tbl, 3); grid.addWidget(entry["sparks"][plane], 2)
-            bv.addLayout(grid)
-            btns = QHBoxLayout()
-            addp = QPushButton("+ point"); addp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            addp.clicked.connect(tbl.add_blank_row)
-            rmp = QPushButton("− point"); rmp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            rmp.clicked.connect(tbl.remove_selected)
-            btns.addWidget(addp); btns.addWidget(rmp); btns.addStretch(1)
-            bv.addLayout(btns)
-            self._detail_body.addWidget(box)
+            self._detail_body.addWidget(self._signal_section(sid, entry, plane))
+
+    def _signal_section(self, sid: str, entry: dict, plane: str) -> QWidget:
+        """One collapsible signal in the measured-stage detail: a header that toggles,
+        and (when expanded) its amplitude/frequency + the gain→power grid."""
+        tbl = entry["curves"][plane]
+        expanded = sid in self._expanded_signals
+        box = QFrame(); box.setObjectName("sigbox")
+        box.setStyleSheet(f"#sigbox {{ border:1px solid "
+                          f"{Palette.ACCENT if expanded else Palette.BORDER}; border-radius:8px; }}")
+        bv = QVBoxLayout(box); bv.setContentsMargins(10, 8, 10, 8); bv.setSpacing(6)
+        header = _ClickCard(on_click=lambda s=sid: self._toggle_signal(s))
+        header.setCursor(Qt.CursorShape.PointingHandCursor)
+        hh = QHBoxLayout(header); hh.setContentsMargins(0, 0, 0, 0)
+        chev = QLabel("▾" if expanded else "▸")
+        chev.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+        nm = QLabel(sid); nm.setStyleSheet(f"font-weight:600;color:{Palette.TEXT};")
+        hh.addWidget(chev); hh.addWidget(nm); hh.addStretch(1)
+        if not expanded:                                 # a compact summary while collapsed
+            npts = len(tbl.numeric_points())
+            summ = QLabel(f"{npts} point(s)" if npts else "no points yet")
+            summ.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+            hh.addWidget(summ)
+        bv.addWidget(header)
+        if not expanded:
+            return box
+        sub = QHBoxLayout()
+        sub.addStretch(1)
+        sub.addWidget(QLabel("ampl.")); entry["amp"].setFixedWidth(64); sub.addWidget(entry["amp"])
+        sub.addWidget(QLabel("freq Hz")); entry["cfreq"].setFixedWidth(104); sub.addWidget(entry["cfreq"])
+        bv.addLayout(sub)
+        grid = QHBoxLayout()
+        grid.addWidget(tbl, 3); grid.addWidget(entry["sparks"][plane], 2)
+        bv.addLayout(grid)
+        btns = QHBoxLayout()
+        addp = QPushButton("+ point"); addp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        addp.clicked.connect(tbl.add_blank_row)
+        rmp = QPushButton("− point"); rmp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        rmp.clicked.connect(tbl.remove_selected)
+        btns.addWidget(addp); btns.addWidget(rmp); btns.addStretch(1)
+        bv.addLayout(btns)
+        return box
+
+    def _toggle_signal(self, sid: str) -> None:
+        self._expanded_signals ^= {sid}          # flip membership
+        self._refresh_form_from_widgets()        # rebuild, preserving committed edits
+
+    def _toggle_all_signals(self, sids: set, currently_all_open: bool) -> None:
+        if currently_all_open:
+            self._expanded_signals -= sids
+        else:
+            self._expanded_signals |= sids
+        self._refresh_form_from_widgets()
 
     def _stage_advanced(self, row) -> QWidget:
         """The bits the chain flow doesn't show inline: the stage's id (renaming it
@@ -2260,9 +2337,11 @@ class CalibrationPanel(QWidget):
                 if child is not None:
                     CalibrationPanel._clear_layout(child)
 
-    def _populate_table(self, signals: dict) -> None:
+    def _populate_table(self, signals: dict, resolved: bool = True) -> None:
         """Fill the resolved Signals table (Signal | Freq | Ampl. | --power range). Freq
-        and amplitude come from the document; the --power range from the resolver."""
+        and amplitude come from the document; the --power range from the resolver.
+        `resolved=False` (the plain editor view, before a Validate/Save) shows a
+        "validate to resolve" placeholder for the --power column instead."""
         doc_sigs = (self._doc or {}).get("signals") or {}
         def_amp = ((self._doc or {}).get("defaults") or {}).get("amplitude")
         self._table.setRowCount(len(signals))
@@ -2276,10 +2355,15 @@ class CalibrationPanel(QWidget):
             amp = dsig.get("amplitude", def_amp)
             ampl = _numstr(amp) if amp is not None else "—"
             rng = _fmt_range(info.get("min_power_dbm"), info.get("max_power_dbm"), "").strip()
-            if rng in ("—", "") and not f:
+            if not resolved:                             # plain editor view, pre-validate
+                rng = "validate to resolve"
+            elif rng in ("—", "") and not f:
                 rng = "per frequency"
             for c, text in enumerate([sid, freq, ampl, rng or "—"]):
-                self._table.setItem(r, c, QTableWidgetItem(str(text)))
+                item = QTableWidgetItem(str(text))
+                if c == 0:
+                    item.setToolTip("Click to edit this signal's measured curve.")
+                self._table.setItem(r, c, item)
 
     def _set_status(self, text: str, kind: str = "muted") -> None:
         color = {"ok": Palette.ONLINE, "warn": Palette.ARMED, "error": Palette.CRASH,

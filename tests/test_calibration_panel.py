@@ -664,6 +664,41 @@ def test_multifreq_signal_shows_at_run():
     assert p._table.item(0, 3).text() == "per frequency"
 
 
+def test_editor_table_lists_signals_before_validate():
+    # The signals table is populated straight from the document so signals are
+    # clickable without a Validate first; --power reads a placeholder until then.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    assert p._table.rowCount() == 1
+    assert p._table.item(0, 0).text() == "mock"
+    assert p._table.item(0, 3).text() == "validate to resolve"
+
+
+def test_clicking_a_signal_opens_its_measured_curve():
+    # Clicking a signal selects the measured stage carrying it and expands just that
+    # signal in the stage detail (the others stay collapsed).
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    p._select_plane("cable_output")                      # start on a passive stage
+    p._on_signal_row_clicked(0, 0)                       # click the "mock" signal row
+    assert p._selected_plane == "sdr_output"             # jumped to a measured stage
+    assert p._expanded_signals == {"mock"}
+
+
+def test_signals_are_collapsible_in_measured_detail():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    p._select_plane("sdr_output")                        # measured stage
+    assert "mock" not in p._expanded_signals             # collapsed by default
+    p._toggle_signal("mock")
+    assert p._expanded_signals == {"mock"}
+    p._toggle_signal("mock")
+    assert "mock" not in p._expanded_signals
+
+
 def test_library_grid_has_a_card_per_component_plus_add():
     from ui.calibration_panel import _ClickCard
     p = CalibrationPanel("u", FakeHub(FakeClient()))
