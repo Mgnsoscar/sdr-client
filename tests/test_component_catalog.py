@@ -68,12 +68,34 @@ def test_ids_filtered_by_kind(tmp_path):
     assert c.ids("antenna") == ["ant"]
 
 
-def test_put_rejects_bad_kind_and_empty_id(tmp_path):
+def test_kind_is_free_text(tmp_path):
+    # kind is a free-text grouping label — any non-empty string is accepted (the maths
+    # never interprets it); it's only lowercased/stripped.
     c = _cat(tmp_path)
-    with pytest.raises(CatalogError, match="unknown kind"):
-        c.put("x", "widget", [[0, -1.0]])
+    c.put("x", "Feedline", [[0, -1.0]])
+    assert c.get("x")["kind"] == "feedline"
+    c.put("y", "", [[0, -1.0]])                      # blank → defaults to 'cable'
+    assert c.get("y")["kind"] == "cable"
+
+
+def test_put_rejects_empty_id(tmp_path):
+    c = _cat(tmp_path)
     with pytest.raises(CatalogError, match="needs an id"):
         c.put("  ", "cable", [[0, -1.0]])
+
+
+def test_rename_moves_entry_and_guards(tmp_path):
+    c = _cat(tmp_path)
+    c.put("old", "cable", [[1e9, -2.0]], description="d")
+    c.put("other", "antenna", [[1e9, 6.0]])
+    c.rename("old", "new")
+    assert "old" not in c.ids() and "new" in c.ids()
+    assert c.get("new")["description"] == "d"
+    c.rename("missing", "whatever")                  # no-op, no raise
+    with pytest.raises(CatalogError, match="already exists"):
+        c.rename("new", "other")                     # collision
+    with pytest.raises(CatalogError, match="needs an id"):
+        c.rename("new", "  ")
 
 
 def test_get_and_components_return_copies(tmp_path):

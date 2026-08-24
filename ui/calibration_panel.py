@@ -1477,7 +1477,9 @@ class CalibrationPanel(QWidget):
         setop.clicked.connect(lambda: self._f["operating"].setCurrentText(name))
         setop.setEnabled(bool(name) and name != self._f["operating"].currentText())
         rm = QPushButton("Remove stage")
-        rm.clicked.connect(lambda r=row: self._remove_plane(r))
+        # NB: clicked emits a `checked` bool — absorb it with a leading throwaway
+        # parameter, or it clobbers the r=row default (r would become False).
+        rm.clicked.connect(lambda _=False, r=row: self._remove_plane(r))
         actions.addWidget(setop); actions.addStretch(1); actions.addWidget(rm)
         v.addLayout(actions)
         return frame
@@ -1516,7 +1518,7 @@ class CalibrationPanel(QWidget):
         kind = (spec.get("kind") or "cable").lower()
         table = spec.get("delta_db_by_freq") or []
         desc = spec.get("description") or ""
-        card = _ClickCard(on_click=self._open_components)
+        card = _ClickCard(on_click=lambda c=cid: self._open_components(c))
         card.setObjectName("comp")
         card.setStyleSheet(f"#comp {{ background:{Palette.SURFACE_ALT}; "
                            f"border:1px solid {Palette.BORDER}; border-radius:9px; }}")
@@ -1996,17 +1998,23 @@ class CalibrationPanel(QWidget):
         self.hub.run_async(f"cal_save:{host}", _do)
 
     # ── Component library ────────────────────────────────────────────────────────
-    def _open_components(self) -> None:
-        """Open the shared component library; refresh the chain's pickers afterward so a
-        newly-characterized cable/antenna is immediately selectable."""
+    def _open_components(self, select: Optional[str] = None) -> None:
+        """Open the shared component library, optionally on a specific component. A
+        rename inside the dialog is applied to this unit's chain references too, so a
+        renamed part doesn't dangle. Refresh the chain afterward."""
         try:
             self._sync_from(self._tabs.currentIndex(), strict=False)
         except ValueError:
             pass
         from .component_library_dialog import ComponentLibraryDialog
-        ComponentLibraryDialog(self._catalog, parent=self.window()).exec()
-        if self._tabs.currentIndex() == 0:
-            self._doc_to_form()                  # rebuild plane rows with the updated catalog
+        dlg = ComponentLibraryDialog(self._catalog, parent=self.window(),
+                                     select=select if isinstance(select, str) else None)
+        dlg.exec()
+        for old, new in dlg.renames.items():          # re-point chain references
+            for p in (((self._doc or {}).get("chain") or {}).get("planes") or {}).values():
+                if isinstance(p, dict) and p.get("component") == old:
+                    p["component"] = new
+        self._doc_to_form()                  # rebuild the chain with the updated catalog
 
     def _on_download(self) -> None:
         try:

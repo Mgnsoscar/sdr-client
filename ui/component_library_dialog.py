@@ -30,15 +30,18 @@ _KIND_LABEL = {"cable": "Cable", "antenna": "Antenna", "pad": "Pad"}
 
 
 class ComponentLibraryDialog(QDialog):
-    def __init__(self, catalog: ComponentCatalog, parent=None):
+    def __init__(self, catalog: ComponentCatalog, parent=None, select: Optional[str] = None):
         super().__init__(parent)
         self._cat = catalog
         self._current: Optional[str] = None       # id being edited (None = a new one)
+        self.renames: dict = {}                    # old id → new id, applied by the caller
         self.setWindowTitle("Component library")
         self.setMinimumSize(720, 460)
         self._build()
         self._reload_list()
-        if self._list.count():
+        if select and self._select_id(select):
+            pass
+        elif self._list.count():
             self._list.setCurrentRow(0)
         else:
             self._new()
@@ -75,7 +78,12 @@ class ComponentLibraryDialog(QDialog):
         right = QVBoxLayout(); right.setSpacing(8)
         form = QFormLayout(); form.setSpacing(8)
         self._id = QLineEdit(); self._id.setPlaceholderText("e.g. cable_lmr240_3m_a")
-        self._kind = QComboBox(); self._kind.addItems([_KIND_LABEL[k] for k in KINDS])
+        self._id.setToolTip("The component's stable id, referenced by units' chains. "
+                            "Renaming it here re-points this unit's chain automatically.")
+        self._kind = QComboBox(); self._kind.setEditable(True)
+        self._kind.addItems([_KIND_LABEL[k] for k in KINDS])
+        self._kind.setToolTip("A free-text grouping label (cable / antenna / pad / "
+                              "anything). It only groups the library — the maths ignores it.")
         self._desc = QLineEdit(); self._desc.setPlaceholderText("optional — e.g. 3 m LMR-240, VNA 2026-08")
         form.addRow("Id", self._id)
         form.addRow("Kind", self._kind)
@@ -137,8 +145,8 @@ class ComponentLibraryDialog(QDialog):
         if spec is None:
             return
         self._current = cid
-        self._id.setText(cid); self._id.setEnabled(False)   # id is the key; rename = new
-        self._kind.setCurrentText(_KIND_LABEL.get(spec.get("kind"), "Cable"))
+        self._id.setText(cid); self._id.setEnabled(True)    # editable → rename in place
+        self._kind.setCurrentText(_KIND_LABEL.get(spec.get("kind"), spec.get("kind", "")))
         self._desc.setText(spec.get("description", ""))
         self._table.set_rows(spec.get("delta_db_by_freq") or [])
         self._refresh_spark()
@@ -158,7 +166,13 @@ class ComponentLibraryDialog(QDialog):
 
     # ── actions ──────────────────────────────────────────────────────────────
     def _kind_key(self) -> str:
-        return KINDS[self._kind.currentIndex()]
+        """The kind as a free-text label — the typed/selected text, lowercased. A known
+        label ('Cable') maps back to its key; anything else is used verbatim."""
+        text = self._kind.currentText().strip()
+        for k, lbl in _KIND_LABEL.items():
+            if text.lower() == lbl.lower():
+                return k
+        return text.lower() or "cable"
 
     def _paste_sweep(self) -> None:
         from PyQt6.QtWidgets import QApplication
@@ -177,15 +191,23 @@ class ComponentLibraryDialog(QDialog):
         cid = self._id.text().strip()
         if not cid:
             self._set_status("enter an id", error=True); return
+        old = self._current
+        renaming = bool(old) and cid != old
         try:
             table = self._table.rows(strict=True)
+            if renaming:
+                self._cat.rename(old, cid)          # move the entry (keeps chain order)
             self._cat.put(cid, self._kind_key(), table, description=self._desc.text().strip())
         except (CatalogError, ValueError) as exc:
             self._set_status(f"can't save: {exc}", error=True); return
+        if renaming:
+            # Collapse rename chains (a→b then b→c ⇒ a→c) so the caller re-points once.
+            src = next((k for k, v in self.renames.items() if v == old), old)
+            self.renames[src] = cid
         self._current = cid
         self._reload_list()
         self._select_id(cid)
-        self._set_status(f"saved “{cid}”")
+        self._set_status(f"renamed to “{cid}”" if renaming else f"saved “{cid}”")
 
     def _delete(self) -> None:
         it = self._list.currentItem()
@@ -206,10 +228,11 @@ class ComponentLibraryDialog(QDialog):
         else:
             self._new()
 
-    def _select_id(self, cid: str) -> None:
+    def _select_id(self, cid: str) -> bool:
         for i in range(self._list.count()):
             if self._list.item(i).data(Qt.ItemDataRole.UserRole) == cid:
-                self._list.setCurrentRow(i); return
+                self._list.setCurrentRow(i); return True
+        return False
 
     # ── helpers ──────────────────────────────────────────────────────────────
     def _refresh_spark(self) -> None:

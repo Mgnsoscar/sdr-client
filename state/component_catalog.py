@@ -75,10 +75,10 @@ def parse_sweep(text: str) -> List[List[float]]:
 
 
 def _norm(cid: str, spec: dict) -> dict:
-    """Validate + normalize one component spec."""
-    kind = (spec.get("kind") or "cable").strip().lower()
-    if kind not in KINDS:
-        raise CatalogError(f"{cid!r}: unknown kind {kind!r} (expected {', '.join(KINDS)})")
+    """Validate + normalize one component spec. ``kind`` is a free-text label (grouping
+    only — the resolver never interprets it), so any non-empty string is accepted;
+    KINDS are just the suggested defaults the editor offers."""
+    kind = (spec.get("kind") or "cable").strip().lower() or "cable"
     out = {"kind": kind, "delta_db_by_freq": validate_table(spec.get("delta_db_by_freq"))}
     if (spec.get("description") or "").strip():
         out["description"] = spec["description"].strip()
@@ -151,6 +151,21 @@ class ComponentCatalog:
     def remove(self, cid: str) -> None:
         if self._comps.pop(cid, None) is not None:
             self._save()
+
+    def rename(self, old: str, new: str) -> None:
+        """Rename a component id, preserving insertion order. No-op if `old` is absent;
+        raises if `new` is empty or already taken (by a different component)."""
+        new = (new or "").strip()
+        if old == new:
+            return
+        if not new:
+            raise CatalogError("a component needs an id")
+        if old not in self._comps:
+            return
+        if new in self._comps:
+            raise CatalogError(f"a component named {new!r} already exists")
+        self._comps = {(new if k == old else k): v for k, v in self._comps.items()}
+        self._save()
 
     def replace_all(self, comps: Dict[str, dict]) -> None:
         self._comps = self._ingest(comps)
