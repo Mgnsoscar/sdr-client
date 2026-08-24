@@ -10,6 +10,7 @@ pytest.importorskip("PyQt6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QApplication, QInputDialog, QMessageBox
 
 from api.client import AgentHTTPError
@@ -767,6 +768,122 @@ def test_signal_without_points_inherits_previous_stage():
     # no local-check error for the missing downstream curve
     from ui.calibration_panel import local_calibration_issues
     assert not any("amplifier_output" in i for i in local_calibration_issues(out))
+
+
+def _v2_doc_measured_both():
+    d = _v2_doc()                                        # mock is measured only on the source
+    d["signals"]["mock"]["curves"]["amplifier_output"] = {
+        "points": [{"gain_db": 40, "power_dbm": -6}, {"gain_db": 74, "power_dbm": 24}]}
+    return d
+
+
+def test_non_source_stage_shows_only_measured_signals():
+    # mock is measured only on the source → it must NOT appear on a downstream measured
+    # stage (that stage lists overrides, not the whole signal set).
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    assert p._signal_shown_on("mock", "sdr_output") is True
+    assert p._signal_shown_on("mock", "amplifier_output") is False
+    # once it's measured there, it shows
+    p._set_doc(_v2_doc_measured_both())
+    assert p._signal_shown_on("mock", "amplifier_output") is True
+
+
+def test_clicking_signal_keeps_open_measured_stage():
+    # A signal measured on the currently-open downstream stage stays there on click —
+    # the view doesn't jump back to Source.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc_measured_both())
+    p._select_plane("amplifier_output")
+    p._on_signal_row_clicked(0, 0)                       # click the mock row
+    assert p._selected_plane == "amplifier_output"
+    assert p._expanded_signals == {"mock"}
+
+
+def test_clicking_signal_falls_back_to_source_when_not_on_stage():
+    # If the open stage doesn't carry the signal, clicking it drops to Source (which
+    # always shows every signal).
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())                                # mock only on source
+    p._select_plane("amplifier_output")
+    p._on_signal_row_clicked(0, 0)
+    assert p._selected_plane == "sdr_output"
+
+
+def test_add_signal_to_downstream_stage(monkeypatch):
+    from PyQt6.QtWidgets import QInputDialog
+    monkeypatch.setattr(QInputDialog, "getItem",
+                        staticmethod(lambda *a, **k: ("mock", True)))
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())                                # mock only on source
+    p._select_plane("amplifier_output")
+    p._add_signal_to_stage("amplifier_output")
+    assert "mock" in p._stage_extra.get("amplifier_output", set())
+    assert p._signal_shown_on("mock", "amplifier_output") is True
+
+
+def test_remove_signal_from_stage_keeps_signal(monkeypatch):
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc_measured_both())
+    p._on_remove_signal_from_stage("mock", "amplifier_output")
+    out = p._read_form(strict=False)
+    assert "mock" in out["signals"]                      # the signal itself stays
+    curves = out["signals"]["mock"]["curves"]
+    assert "amplifier_output" not in curves              # only its data on this stage went
+    assert "sdr_output" in curves                        # upstream measurement is intact
+
+
+def _three_measured_doc():
+    d = _doc()
+    d["chain"]["operating_plane"] = "amp2"
+    d["chain"]["planes"] = {
+        "sdr_output": {"type": "measured", "quantity": "tp"},
+        "amp1": {"type": "measured", "quantity": "m1"},
+        "amp2": {"type": "measured", "quantity": "m2"},
+    }
+    pts = lambda a, b: {"points": [{"gain_db": 40, "power_dbm": a},
+                                   {"gain_db": 74, "power_dbm": b}]}
+    d["signals"]["mock"]["curves"] = {
+        "sdr_output": pts(-36, -2.5), "amp1": pts(-6, 24), "amp2": pts(-4, 26)}
+    return d
+
+
+def test_remove_signal_from_stage_cascades_downstream(monkeypatch):
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_three_measured_doc())
+    p._on_remove_signal_from_stage("mock", "amp1")       # remove at a middle stage
+    curves = p._read_form(strict=False)["signals"]["mock"]["curves"]
+    assert set(curves) == {"sdr_output"}                 # amp1 AND downstream amp2 removed
+
+
+def test_delta_sparkline_colours_by_sign():
+    # A component's Δ dB curve is coloured by net sign (gain=accent, loss=red), NOT by
+    # monotonicity — an antenna/cable that rolls off with frequency is still fine.
+    from ui.calibration_panel import _Sparkline
+    from ui.theme import Palette
+    loss = _Sparkline(mode="delta"); loss.set_points([(1e9, -2.0), (2e9, -3.0)])
+    assert loss._line_color().name() == QColor(Palette.CRASH).name()
+    gain = _Sparkline(mode="delta"); gain.set_points([(1e9, 6.0), (2e9, 5.0)])   # rolls off
+    assert gain._line_color().name() == QColor(Palette.ACCENT).name()            # still gain
+
+
+def test_curve_sparkline_flags_non_invertible():
+    # The gain→power sparkline (default mode) still reddens a non-increasing power run.
+    from ui.calibration_panel import _Sparkline
+    from ui.theme import Palette
+    ok = _Sparkline(); ok.set_points([(40, -36), (74, -2.5)])
+    assert ok._line_color().name() == QColor(Palette.ACCENT).name()
+    bad = _Sparkline(); bad.set_points([(40, -20), (50, -20)])                    # flat power
+    assert bad._line_color().name() == QColor(Palette.CRASH).name()
 
 
 def _two_measured_doc(measure_second: bool):

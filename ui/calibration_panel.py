@@ -193,14 +193,25 @@ def local_calibration_issues(doc) -> list:
 
 
 class _Sparkline(QWidget):
-    """A tiny gain→power plot of a curve's points, so a fat-fingered point (a dip, a
-    duplicate) is obvious at a glance next to the grid."""
-    def __init__(self):
+    """A tiny plot of a curve's points, so a fat-fingered point (a dip, a duplicate) is
+    obvious at a glance next to the grid.
+
+    ``mode`` sets both the axes hint and how the line is COLOURED:
+      • "curve" (default) — a measured gain→power curve. It MUST be invertible (power
+        strictly increasing with gain), so a non-monotonic sequence is drawn red as a
+        warning.
+      • "delta" — a component's Δ dB vs frequency. Monotonicity is meaningless here (an
+        antenna/cable can roll off with frequency), so it's coloured by SIGN instead:
+        accent for a net gain (positive dB), red for a net loss (negative) — matching
+        the gain=blue / loss=red intuition."""
+    def __init__(self, mode: str = "curve"):
         super().__init__()
         self._pts: list = []
+        self._mode = mode
         self.setFixedHeight(46)
         self.setMinimumWidth(120)
-        self.setToolTip("gain (x) → power (y) for the points above")
+        self.setToolTip("Δ dB (y) across frequency (x)" if mode == "delta"
+                        else "gain (x) → power (y) for the points above")
 
     def set_points(self, pts) -> None:
         vals = []
@@ -212,6 +223,18 @@ class _Sparkline(QWidget):
         vals.sort(key=lambda gp: gp[0])
         self._pts = vals
         self.update()
+
+    def _line_color(self) -> QColor:
+        """The plot colour. In "delta" mode: accent for a net gain, red for a net loss.
+        In "curve" mode: red when the power sequence isn't strictly increasing (a
+        non-invertible measured curve), else accent."""
+        ps = [p for _, p in self._pts]
+        if not ps:
+            return QColor(Palette.ACCENT)
+        if self._mode == "delta":
+            return QColor(Palette.ACCENT if sum(ps) >= 0 else Palette.CRASH)
+        bad = any(ps[i] <= ps[i - 1] for i in range(1, len(ps)))
+        return QColor(Palette.CRASH if bad else Palette.ACCENT)
 
     def paintEvent(self, _evt) -> None:
         qp = QPainter(self)
@@ -230,9 +253,7 @@ class _Sparkline(QWidget):
             y = h - pad - (p - p0) / pspan * (h - 2 * pad)   # y grows downward
             return x, y
 
-        # detect a non-monotonic (non-invertible) power sequence → draw the line red
-        bad = any(ps[i] <= ps[i - 1] for i in range(1, len(ps)))
-        line = QColor(Palette.CRASH if bad else Palette.ACCENT)
+        line = self._line_color()
         qp.setPen(QPen(line, 1.5))
         for i in range(1, len(self._pts)):
             x0, y0 = xy(*self._pts[i - 1]); x1, y1 = xy(*self._pts[i])
@@ -878,6 +899,9 @@ class CalibrationPanel(QWidget):
         self._doc: Optional[dict] = None       # the working document model
         self._f: dict = {}                      # references to editor widgets
         self._expanded_signals: set = set()    # measured-detail signals shown expanded
+        # plane id → set of signal ids opened on a NON-source measured stage that don't
+        # yet have data there (so the user can enter points). Reset on a fresh document.
+        self._stage_extra: dict = {}
         from state import ComponentCatalog
         self._catalog = ComponentCatalog()      # the client's canonical component library
         self._components_synced = False          # merged this unit's catalog on first load
@@ -1154,6 +1178,7 @@ class CalibrationPanel(QWidget):
     # ── model → views ────────────────────────────────────────────────────────────
     def _set_doc(self, doc: Optional[dict]) -> None:
         self._doc = doc
+        self._stage_extra = {}                  # a fresh document → forget transient adds
         self._download_btn.setEnabled(doc is not None)
         self._doc_to_form()
 
@@ -1607,34 +1632,60 @@ class CalibrationPanel(QWidget):
 
     def _active_signal_ids(self) -> set:
         """Signals whose editor is currently on screen: a MEASURED stage is selected and
-        the signal is expanded in its detail. These get the accent row-highlight in the
-        Signals table — and only these, so the highlight tracks the visible editor and
-        clears when you collapse it or move to a passive stage."""
-        rows = self._f.get("planes", [])
-        sel = next((r for r in rows
-                    if r["name"].text().strip() == self._selected_plane), None)
-        if sel is None or sel.get("role", "measured") != "measured":
+        the signal is both shown there and expanded. These get the accent row-highlight in
+        the Signals table — and only these, so the highlight tracks the visible editor and
+        clears when you collapse it or move to a passive/other stage."""
+        sel = self._selected_plane
+        if not self._is_measured_plane(sel):
             return set()
-        return set(self._expanded_signals) & set(self._f.get("signals", {}))
+        return {sid for sid in self._expanded_signals
+                if sid in self._f.get("signals", {}) and self._signal_shown_on(sid, sel)}
+
+    # ── stage / signal membership helpers ────────────────────────────────────────
+    def _ordered_plane_names(self) -> list:
+        return [r["name"].text().strip() for r in self._f.get("planes", [])]
+
+    def _measured_plane_names(self) -> list:
+        return [r["name"].text().strip() for r in self._f.get("planes", [])
+                if r.get("role", "measured") == "measured"]
+
+    def _source_plane(self) -> Optional[str]:
+        """The chain's first stage — always the measured origin every signal is shown on."""
+        names = self._ordered_plane_names()
+        return names[0] if names else None
+
+    def _is_measured_plane(self, name: Optional[str]) -> bool:
+        row = next((r for r in self._f.get("planes", [])
+                    if r["name"].text().strip() == name), None)
+        return row is not None and row.get("role", "measured") == "measured"
+
+    def _signal_has_data_on(self, sid: str, plane: str) -> bool:
+        """True when this signal's grid on ``plane`` holds at least one numeric point."""
+        entry = self._f.get("signals", {}).get(sid)
+        tbl = entry and entry["curves"].get(plane)
+        return bool(tbl and tbl.numeric_points())
+
+    def _signal_shown_on(self, sid: str, plane: str) -> bool:
+        """Whether ``sid`` appears in ``plane``'s measured detail. The SOURCE shows every
+        signal; a downstream measured stage shows only those measured there (or just
+        opened for measuring via '+ Measure a signal here')."""
+        if plane == self._source_plane():
+            return True
+        return (self._signal_has_data_on(sid, plane)
+                or sid in self._stage_extra.get(plane, set()))
 
     def _select_signal(self, sid: str) -> None:
-        """Clicking a signal opens its measured curve: select the measured stage that
-        carries it (the source, or the first measured plane) and expand just that signal
-        in the stage detail so it's ready to edit."""
+        """Clicking a signal opens its measured curve and expands just that signal. Stay
+        on the currently-open measured stage when it already shows this signal (don't yank
+        the view back to Source); otherwise fall back to the Source, where every signal is
+        shown."""
         try:
             self._doc = self._read_form(strict=False)
         except ValueError:
             pass
-        plane = None
-        measured = []
-        for row in self._f.get("planes", []):
-            if row.get("role") == "measured":
-                nm = row["name"].text().strip()
-                measured.append(nm)
-                entry = self._f.get("signals", {}).get(sid)
-                if plane is None and entry and nm in (entry.get("curves") or {}):
-                    plane = nm
-        self._selected_plane = plane or (measured[0] if measured else self._selected_plane)
+        cur = self._selected_plane
+        if not (self._is_measured_plane(cur) and self._signal_shown_on(sid, cur)):
+            self._selected_plane = self._source_plane() or cur
         self._expanded_signals = {sid}
         self._doc_to_form()
 
@@ -1722,19 +1773,27 @@ class CalibrationPanel(QWidget):
 
     def _detail_measured(self, row) -> None:
         plane = row["name"].text().strip()
-        sigs = {sid: e for sid, e in self._f.get("signals", {}).items()
-                if e["curves"].get(plane) is not None}
-        if not sigs:
-            l = QLabel("No signals yet — “+ Add signal…” (right), then enter its measured "
-                       "gain→power points here.")
-            l.setWordWrap(True); l.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_FAINT};")
-            self._detail_body.addWidget(l)
-            return
+        is_source = (plane == self._source_plane())
+        all_sigs = self._f.get("signals", {})
+        # The source shows every signal; a downstream measured stage shows only the ones
+        # actually measured there (or just opened for measuring) — so it reads as an
+        # override list, not a duplicate of the whole signal set.
+        sigs = (dict(all_sigs) if is_source else
+                {sid: e for sid, e in all_sigs.items() if self._signal_shown_on(sid, plane)})
+
         head = QHBoxLayout()
-        intro = QLabel("Enter the gain→power points you measured on this plane, per signal. "
-                       "Click a signal to expand it.")
+        intro = QLabel(
+            "Enter the gain→power points you measured on this plane, per signal. "
+            "Click a signal to expand it." if is_source else
+            "Only signals you measured on this stage are shown — each overrides the "
+            "upstream curve here. Add one to measure it on this stage.")
         intro.setWordWrap(True); intro.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
         head.addWidget(intro, 1)
+        if not is_source:
+            addb = QPushButton("+ Measure a signal here")
+            addb.setFocusPolicy(Qt.FocusPolicy.NoFocus); addb.setStyleSheet("font-size:11px;")
+            addb.clicked.connect(lambda _=False, p=plane: self._add_signal_to_stage(p))
+            head.addWidget(addb)
         # expand/collapse-all when there are enough signals to be worth it
         if len(sigs) > 1:
             all_open = self._expanded_signals.issuperset(sigs)
@@ -1745,12 +1804,23 @@ class CalibrationPanel(QWidget):
                 lambda _=False, s=set(sigs), o=all_open: self._toggle_all_signals(s, o))
             head.addWidget(toggle_all)
         self._detail_body.addLayout(head)
+        if not sigs:
+            l = QLabel("No signals yet — “+ Add signal…” (right), then enter its measured "
+                       "gain→power points here." if is_source else
+                       "No signals measured on this stage yet — use “+ Measure a signal "
+                       "here”. Signals you don't measure here inherit the upstream curve.")
+            l.setWordWrap(True); l.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_FAINT};")
+            self._detail_body.addWidget(l)
+            return
         for sid, entry in sigs.items():
-            self._detail_body.addWidget(self._signal_section(sid, entry, plane))
+            self._detail_body.addWidget(self._signal_section(sid, entry, plane, is_source))
 
-    def _signal_section(self, sid: str, entry: dict, plane: str) -> QWidget:
+    def _signal_section(self, sid: str, entry: dict, plane: str,
+                        is_source: bool = True) -> QWidget:
         """One collapsible signal in the measured-stage detail: a header that toggles,
-        and (when expanded) its amplitude/frequency + the gain→power grid."""
+        and (when expanded) its amplitude/frequency + the gain→power grid. On the source
+        the remove action deletes the whole signal; on a downstream stage it only clears
+        the signal's measurement here (and downstream)."""
         tbl = entry["curves"][plane]
         expanded = sid in self._expanded_signals
         npts = len(tbl.numeric_points())
@@ -1800,11 +1870,19 @@ class CalibrationPanel(QWidget):
         addp.clicked.connect(tbl.add_blank_row)
         rmp = QPushButton("− point"); rmp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         rmp.clicked.connect(tbl.remove_selected)
-        rmsig = QPushButton("Remove signal"); rmsig.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        rmsig = QPushButton("Remove signal" if is_source else "Remove from this stage")
+        rmsig.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         rmsig.setStyleSheet(f"color:{Palette.CRASH};font-size:11px;")
-        rmsig.setToolTip("Delete this signal and all its measured curves from the "
-                         "calibration (every stage).")
-        rmsig.clicked.connect(lambda _=False, s=sid: self._on_remove_signal(s))
+        if is_source:
+            rmsig.setToolTip("Delete this signal and all its measured curves from the "
+                             "calibration (every stage).")
+            rmsig.clicked.connect(lambda _=False, s=sid: self._on_remove_signal(s))
+        else:
+            rmsig.setToolTip("Remove this signal's measured points from this stage (and "
+                             "any downstream measured stage). It stays measured upstream "
+                             "and inherits that curve here.")
+            rmsig.clicked.connect(
+                lambda _=False, s=sid, p=plane: self._on_remove_signal_from_stage(s, p))
         btns.addWidget(addp); btns.addWidget(rmp); btns.addStretch(1); btns.addWidget(rmsig)
         bv.addLayout(btns)
         return box
@@ -1819,6 +1897,28 @@ class CalibrationPanel(QWidget):
         else:
             self._expanded_signals |= sids
         self._refresh_form_from_widgets()
+
+    def _add_signal_to_stage(self, plane: str) -> None:
+        """On a downstream measured stage, pick an existing signal to ALSO measure here.
+        It's shown (empty, ready for points) until you enter data; a signal you never
+        measure here just inherits the upstream curve."""
+        candidates = [sid for sid in self._f.get("signals", {})
+                      if not self._signal_shown_on(sid, plane)]
+        if not candidates:
+            QMessageBox.information(
+                self, "Measure a signal here",
+                "Every signal is already shown on this stage. Add a brand-new signal with "
+                "“+ Add signal…” first.")
+            return
+        sid, ok = QInputDialog.getItem(
+            self, "Measure a signal here",
+            f"Which signal did you measure on “{plane}”?", candidates, 0, False)
+        sid = (sid or "").strip()
+        if not ok or not sid:
+            return
+        self._stage_extra.setdefault(plane, set()).add(sid)
+        self._expanded_signals = {sid}
+        self._refresh_form_from_widgets()        # keeps the current stage selected
 
     def _stage_advanced(self, row) -> QWidget:
         """The bits the chain flow doesn't show inline: the stage's id (renaming it
@@ -2534,6 +2634,50 @@ class CalibrationPanel(QWidget):
             pass
         if self._doc and sid in (self._doc.get("signals") or {}):
             del self._doc["signals"][sid]
+        for shown in self._stage_extra.values():
+            shown.discard(sid)
+        self._doc_to_form()
+
+    def _on_remove_signal_from_stage(self, sid: str, plane: str) -> None:
+        """Downstream-stage remove: clear this signal's measured points from ``plane`` and
+        every measured stage after it (data flows downstream, so a later stage that was
+        measured for it goes too). The signal stays measured upstream and keeps
+        transmitting — it just inherits the upstream curve here. The user is told exactly
+        which stages are affected before it happens."""
+        measured = self._measured_plane_names()
+        if plane not in measured:
+            return
+        downstream = measured[measured.index(plane):]        # this stage + all later ones
+        affected = [p for p in downstream if self._signal_has_data_on(sid, p)]
+        if not affected:
+            # nothing measured here yet (a just-opened, empty row) — just stop showing it
+            self._stage_extra.get(plane, set()).discard(sid)
+            self._expanded_signals.discard(sid)
+            self._refresh_form_from_widgets()
+            return
+        later = [p for p in affected if p != plane]
+        detail = (f"\n\nThis also removes its points from the downstream measured "
+                  f"stage(s): {', '.join(later)}." if later else "")
+        if QMessageBox.question(
+                self, "Remove signal from stage",
+                f"Remove signal '{sid}'’s measured points from stage '{plane}'?{detail}"
+                f"\n\nThe signal stays measured upstream and keeps transmitting — it "
+                f"inherits the upstream curve on {'these stages' if later else 'this stage'}.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._doc = self._read_form(strict=False)
+        except ValueError:
+            pass
+        sig = ((self._doc or {}).get("signals") or {}).get(sid)
+        if isinstance(sig, dict):
+            curves = sig.get("curves")
+            if isinstance(curves, dict):
+                for p in affected:
+                    curves.pop(p, None)
+        for p in affected:
+            self._stage_extra.get(p, set()).discard(sid)
         self._doc_to_form()
 
     def _remove_row(self, layout, registry: list, row: dict) -> None:

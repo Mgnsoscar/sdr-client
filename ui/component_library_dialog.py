@@ -107,7 +107,7 @@ class ComponentLibraryDialog(QDialog):
                                "Negative = loss (cable), positive = gain (antenna). One row "
                                "= a constant, frequency-independent value. Paste a VNA sweep "
                                "of \"freq, dB\" rows (Ctrl+V).")
-        self._spark = _Sparkline()
+        self._spark = _Sparkline(mode="delta")   # Δ dB vs freq: colour by sign, not slope
         gridrow.addWidget(self._table, 3); gridrow.addWidget(self._spark, 2)
         right.addLayout(gridrow, 1)
 
