@@ -2641,6 +2641,8 @@ class CalibrationPanel(QWidget):
             self._handle_task_rename(parts[2] if len(parts) > 2 else "", result)
         elif parts[0] == "cal_rename_save":
             self._handle_rename_save(result)
+        elif parts[0] == "cal_fleetrename":
+            self._handle_fleet_rename(result)
 
     def _handle_tasks(self, result) -> None:
         """Record which calibration signal each of this unit's tasks references (via its
@@ -2837,27 +2839,31 @@ class CalibrationPanel(QWidget):
                                 f"A signal named “{new}” already exists — pick another id.")
             self._doc_to_form()                       # repaint the field back to the old id
             return
-        # If tasks reference the old id, ask up front — Yes also updates them, No renames the
-        # signal only, Cancel aborts the whole rename (so the signal stays as it was).
-        affected = sorted(n for n, s in self._task_signals.items() if s == old)
-        update_tasks = False
-        if affected:
-            word = "task" if len(affected) == 1 else "tasks"
-            listed = ", ".join(affected)
+        # A calibration signal id is a fleet-wide contract name: the shared task library
+        # carries one SDR_CAL_SIGNAL_ID deployed to every unit. So if any task references
+        # the old id (here or in the library), renaming is a fleet-wide change — confirm it
+        # up front. Yes propagates everywhere; Cancel aborts (the signal stays as it was).
+        local_tasks = sorted(n for n, s in self._task_signals.items() if s == old)
+        lib_tasks = self._library_tasks_referencing(old)
+        go_fleet = False
+        if local_tasks or lib_tasks:
+            others = self._other_unit_hosts()
+            scope = ["the shared task library", "this unit’s calibration and tasks"]
+            if others:
+                scope.append(f"{len(others)} other unit(s) — online ones now, "
+                             f"offline ones reported so you can finish them later")
             resp = QMessageBox.question(
-                self, "Rename signal",
-                f"{len(affected)} {word} reference the calibration signal “{old}” "
-                f"(via SDR_CAL_SIGNAL_ID):\n\n{listed}\n\n"
-                f"• Yes — rename the signal and update {'that task' if len(affected) == 1 else 'those tasks'} to “{new}”\n"
-                f"• No — rename the signal only\n"
-                f"• Cancel — don’t rename",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No |
-                QMessageBox.StandardButton.Cancel,
+                self, "Rename signal across the fleet",
+                f"Calibration signal ids are shared across the fleet, and “{old}” is used "
+                f"by task(s). Renaming it to “{new}” is a fleet-wide change.\n\n"
+                f"This updates:\n• " + "\n• ".join(scope) + f"\n\n"
+                f"Rename “{old}” → “{new}” across the fleet?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Yes)
-            if resp == QMessageBox.StandardButton.Cancel:
+            if resp != QMessageBox.StandardButton.Yes:
                 self._doc_to_form()                   # abort — repaint the name back
                 return
-            update_tasks = (resp == QMessageBox.StandardButton.Yes)
+            go_fleet = True
         self._doc["signals"] = {(new if k == old else k): v for k, v in signals.items()}
         if old in self._expanded_signals:             # keep it expanded under the new id
             self._expanded_signals.discard(old)
@@ -2869,8 +2875,11 @@ class CalibrationPanel(QWidget):
         self._set_status(f"renamed signal “{old}” → “{new}”", kind="ok")
         self._doc_to_form()
         self._persist_signal_rename(old, new)         # persist just the rename (not a full save)
-        if update_tasks:
-            self._rename_tasks_signal(affected, new)
+        if go_fleet:
+            self._rename_library_tasks(old, new)      # the deploy source
+            if local_tasks:
+                self._rename_tasks_signal(local_tasks, new)   # this unit's live tasks
+            self._rename_across_fleet(old, new)       # every other unit's cal + tasks
 
     def _persist_signal_rename(self, old: str, new: str) -> None:
         """Push ONLY the signal rename to the unit — not the working doc's other unsaved
@@ -2901,6 +2910,110 @@ class CalibrationPanel(QWidget):
         # failure is worth surfacing.
         if isinstance(result, Exception):
             self._set_status(f"couldn't persist the signal rename: {result}", kind="error")
+
+    # ── Fleet-wide signal rename (library + every other unit) ─────────────────────
+    def _library_store(self):
+        getter = getattr(getattr(self.hub, "fleet", None), "library_store", None)
+        return getter() if callable(getter) else None
+
+    def _other_unit_hosts(self) -> list:
+        fleet = getattr(self.hub, "fleet", None)
+        names = getattr(fleet, "hostnames", None)
+        if not callable(names):
+            return []
+        return [h for h in names() if h != self.hostname]
+
+    def _library_tasks_referencing(self, sid: str) -> list:
+        """Names of canonical-library tasks whose SDR_CAL_SIGNAL_ID is `sid`."""
+        store = self._library_store()
+        if store is None:
+            return []
+        return [t.name for t in store.tasks()
+                if (getattr(t, "env", None) or {}).get("SDR_CAL_SIGNAL_ID") == sid]
+
+    def _rename_library_tasks(self, old: str, new: str) -> int:
+        """Repoint the shared library's task(s) at the new id — the deploy source, so a
+        later library→unit deploy carries the rename instead of reinstating the old id."""
+        store = self._library_store()
+        if store is None:
+            return 0
+        n = 0
+        for t in store.tasks():
+            if (getattr(t, "env", None) or {}).get("SDR_CAL_SIGNAL_ID") == old:
+                t.env["SDR_CAL_SIGNAL_ID"] = new
+                store.upsert_task(t)
+                n += 1
+        return n
+
+    def _rename_across_fleet(self, old: str, new: str) -> None:
+        """Rename the signal on every OTHER unit — its calibration and its tasks — off the
+        GUI thread. Units we can't reach (offline) are reported, not silently skipped."""
+        hosts = self._other_unit_hosts()
+        if not hosts:
+            return
+        wire = self._catalog.to_wire()
+
+        def _do():
+            fleet = self.hub.fleet
+            renamed, no_signal, unreachable = [], [], []
+            for h in hosts:
+                try:
+                    client = fleet.get(h)
+                    touched = self._rename_signal_on_client(client, old, new, wire)
+                except Exception:  # noqa: BLE001 — offline / transport error → report it
+                    unreachable.append(h)
+                    continue
+                (renamed if touched else no_signal).append(h)
+            return {"renamed": renamed, "no_signal": no_signal, "unreachable": unreachable}
+        self._set_status(f"renaming “{old}” → “{new}” across the fleet…")
+        self.hub.run_async(f"cal_fleetrename:{self.hostname}", _do)
+
+    def _rename_signal_on_client(self, client, old: str, new: str, wire: str) -> bool:
+        """Rename the signal on ONE unit: the key in its calibration.json (if present) and
+        any task env that references it. Runs on the worker thread (agent I/O). Returns
+        True if anything was changed. A 404 calibration (unit not calibrated) is not an
+        error — its tasks may still reference the id."""
+        touched = False
+        try:
+            res = client.get_calibration()
+            doc = res.get("document") if isinstance(res, dict) else None
+            if isinstance(doc, dict) and old in (doc.get("signals") or {}):
+                doc = copy.deepcopy(doc)
+                doc["signals"] = {(new if k == old else k): v
+                                  for k, v in doc["signals"].items()}
+                client.upload_components(wire)
+                client.upload_file(CAL_NAME, json.dumps(doc).encode("utf-8"))
+                touched = True
+        except AgentHTTPError as exc:
+            if exc.status_code != 404:                # 404 = not calibrated (fine); else real
+                raise
+        import yaml as _yaml
+        tdoc = _yaml.safe_load(client.get_tasks_yaml()) or {}
+        for entry in (tdoc.get("tasks") or []):
+            if isinstance(entry, dict) and (entry.get("env") or {}).get("SDR_CAL_SIGNAL_ID") == old:
+                spec = dict(entry)
+                spec["env"] = {**(spec.get("env") or {}), "SDR_CAL_SIGNAL_ID": new}
+                client.update_task(entry.get("name"), spec)
+                touched = True
+        return touched
+
+    def _handle_fleet_rename(self, result) -> None:
+        if isinstance(result, Exception):
+            self._set_status(f"fleet rename error: {result}", kind="error")
+            return
+        renamed = result.get("renamed", [])
+        unreachable = result.get("unreachable", [])
+        if unreachable:
+            QMessageBox.warning(
+                self, "Some units weren’t updated",
+                f"Renamed the signal on {len(renamed)} other unit(s).\n\n"
+                f"These units are offline / unreachable and still use the old id — reopen "
+                f"their calibration when they’re back to finish the rename:\n\n"
+                f"{', '.join(unreachable)}")
+            self._set_status(f"fleet rename: {len(renamed)} updated · "
+                             f"{len(unreachable)} offline", kind="warn")
+        else:
+            self._set_status(f"fleet rename applied on {len(renamed)} other unit(s)", kind="ok")
 
     def _rename_tasks_signal(self, names: list, new: str) -> None:
         """Point each named task's SDR_CAL_SIGNAL_ID at `new`, preserving every other field

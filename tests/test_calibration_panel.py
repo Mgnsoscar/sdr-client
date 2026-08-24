@@ -839,19 +839,6 @@ def test_renaming_a_signal_offers_to_update_referencing_tasks(monkeypatch):
     assert spec["command"] == ["python3", "tx.py"]   # rest of the entry preserved
 
 
-def test_declining_task_update_still_renames_the_signal(monkeypatch):
-    monkeypatch.setattr(QMessageBox, "question",
-                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.No))
-    client = _TasksClient(_TASKS_YAML)
-    p = CalibrationPanel("u", FakeHub(client))
-    _seed_catalog(p)
-    p._set_doc(_v2_doc())
-    p._handle_tasks(_TASKS_YAML)
-    p._rename_signal("mock", "gnss_l1")
-    assert client.task_updates == []                 # tasks left alone
-    assert "gnss_l1" in p._read_form(strict=False)["signals"]   # local rename still applied
-
-
 def test_rename_without_referencing_tasks_does_not_prompt(monkeypatch):
     asked = {}
     monkeypatch.setattr(QMessageBox, "question", staticmethod(
@@ -871,7 +858,7 @@ def test_rename_persists_only_the_rename_not_the_working_edits(monkeypatch):
     # renamed) — but it must NOT push the working doc's other unsaved edits.
     import copy, json
     monkeypatch.setattr(QMessageBox, "question",
-                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.No))
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
     client = _TasksClient(_TASKS_YAML)
     p = CalibrationPanel("u", FakeHub(client))
     _seed_catalog(p)
@@ -892,7 +879,7 @@ def test_rename_persists_only_the_rename_not_the_working_edits(monkeypatch):
 def test_rename_of_an_unsaved_signal_does_not_push(monkeypatch):
     # Nothing persisted yet for this signal → no rename-only upload (only a full Save would).
     monkeypatch.setattr(QMessageBox, "question",
-                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.No))
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
     client = _TasksClient(_TASKS_YAML)
     p = CalibrationPanel("u", FakeHub(client))
     _seed_catalog(p)
@@ -900,6 +887,98 @@ def test_rename_of_an_unsaved_signal_does_not_push(monkeypatch):
     p._handle_tasks(_TASKS_YAML)
     p._rename_signal("mock", "gnss_l1")
     assert [c for (nm, c) in client.uploaded if nm == "calibration.json"] == []
+
+
+class _LibTask:
+    def __init__(self, name, sid):
+        self.name = name
+        self.env = {"SDR_CAL_SIGNAL_ID": sid} if sid else {}
+
+
+class _FakeLibStore:
+    def __init__(self, tasks):
+        self._tasks = tasks
+        self.upserts = []
+    def tasks(self):
+        return list(self._tasks)
+    def upsert_task(self, t):
+        self.upserts.append((t.name, dict(t.env)))
+
+
+class _UnitClient(_TasksClient):
+    """A fleet unit with its own calibration + tasks (offline units raise)."""
+    def __init__(self, tasks_yaml, cal_doc=None, offline=False):
+        cal = {"unit_type": "broadcaster", "valid": True, "document": cal_doc} if cal_doc else None
+        super().__init__(tasks_yaml, cal=cal)
+        self._offline = offline
+    def get_calibration(self):
+        if self._offline:
+            raise RuntimeError("offline")
+        return self._cal
+    def get_tasks_yaml(self):
+        if self._offline:
+            raise RuntimeError("offline")
+        return self._tasks_yaml
+
+
+class _FleetFleet:
+    def __init__(self, clients, store):
+        self._clients = clients
+        self._store = store
+    def get(self, host):
+        return self._clients[host]
+    def hostnames(self):
+        return list(self._clients.keys())
+    def library_store(self):
+        return self._store
+
+
+class _FleetHub(QObject):
+    task_done = pyqtSignal(str, object)
+    def __init__(self, fleet):
+        super().__init__()
+        self.fleet = fleet
+    def run_async(self, label, fn):
+        try:
+            res = fn()
+        except Exception as exc:            # noqa: BLE001
+            res = exc
+        self.task_done.emit(label, res)
+
+
+def test_rename_propagates_across_the_fleet(monkeypatch):
+    import copy, json
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    warned = {}
+    monkeypatch.setattr(QMessageBox, "warning",
+                        staticmethod(lambda *a, **k: warned.setdefault("msg", a)))
+    cur = _UnitClient(_TASKS_YAML)                                   # this unit
+    unitB = _UnitClient(
+        "tasks:\n  - name: b_tx\n    command: [python3, tx.py]\n"
+        "    env: { SDR_CAL_SIGNAL_ID: mock }\n",
+        cal_doc={"schema_version": 1, "signals": {"mock": {"curves": {}}, "keep": {}}})
+    unitC = _UnitClient(_TASKS_YAML, offline=True)                   # unreachable
+    store = _FakeLibStore([_LibTask("l1_tx", "mock"), _LibTask("noop", "other")])
+    p = CalibrationPanel("u", _FleetHub(_FleetFleet(
+        {"u": cur, "unitB": unitB, "unitC": unitC}, store)))
+    _seed_catalog(p)
+    saved = _v2_doc()
+    p._set_doc(saved); p._saved_doc = copy.deepcopy(saved)
+    p._handle_tasks(_TASKS_YAML)
+    p._rename_signal("mock", "gnss_l1")
+
+    # the shared library task is repointed (the deploy source)
+    assert ("l1_tx", {"SDR_CAL_SIGNAL_ID": "gnss_l1"}) in store.upserts
+    assert all(name != "noop" for name, _ in store.upserts)         # unrelated task untouched
+    # this unit's own task updated
+    assert cur.task_updates[0][1]["env"]["SDR_CAL_SIGNAL_ID"] == "gnss_l1"
+    # the other ONLINE unit: calibration renamed + its task updated
+    b_cal = [json.loads(c) for (nm, c) in unitB.uploaded if nm == "calibration.json"]
+    assert b_cal and "gnss_l1" in b_cal[-1]["signals"] and "mock" not in b_cal[-1]["signals"]
+    assert unitB.task_updates[0][1]["env"]["SDR_CAL_SIGNAL_ID"] == "gnss_l1"
+    # the offline unit is reported, not silently skipped
+    assert "msg" in warned and "unitC" in warned["msg"][2]
 
 
 def test_cancel_aborts_the_whole_rename(monkeypatch):
