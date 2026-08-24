@@ -254,6 +254,34 @@ def apply_power_bounds(specs: List[dict], bounds) -> List[dict]:
     return out
 
 
+def apply_gain_bounds(specs: List[dict], bounds) -> List[dict]:
+    """Return a copy of `specs` with the relative --gain param bounded to a unit's
+    resolved calibration gain range [min_gain_db, max_gain_db], so a gain that would
+    breach a calibration limit can't be dialled in. No-op when `bounds` is falsy, there's
+    no --gain param, or the gain range is incomplete."""
+    i = find_gain_index(specs)
+    if i is None or not bounds:
+        return specs
+    lo, hi = bounds.get("min_gain_db"), bounds.get("max_gain_db")
+    if lo is None or hi is None:
+        return specs
+    lo, hi = round(float(lo), 2), round(float(hi), 2)
+    out = [dict(s) for s in specs]
+    sp = out[i]
+    sp["min"], sp["max"] = lo, hi
+    sp["type"] = "float"
+    sp.setdefault("step", 0.25)                # bounded spinbox → can't breach the limit
+    d = sp.get("default")
+    if isinstance(d, (int, float)) and not isinstance(d, bool):
+        sp["default"] = min(max(float(d), lo), hi)
+    sp.setdefault("unit", "dB")
+    note = (f"This unit (calibrated): usable gain {lo}…{hi} dB — beyond this range would "
+            f"break a calibration limit.")
+    base = (sp.get("help") or "").strip()
+    sp["help"] = f"{base}\n\n{note}" if base else note
+    return out
+
+
 _INT32 = 2_000_000_000
 
 
@@ -412,6 +440,8 @@ class ParamForm(QWidget):
                     g = dict(s)
                     if g.get("default") is None:
                         g["required"] = True
+                    if self._cal_bounds:       # a calibrated unit → bound to its limits
+                        g = apply_gain_bounds([g], self._cal_bounds)[0]
                     out.append(g)
             else:
                 out.append(s)

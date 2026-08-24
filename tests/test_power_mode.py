@@ -86,6 +86,23 @@ def test_default_power_mode_relative():
     assert f._widgets["gain"][1].get("required") is True   # must be filled
 
 
+def test_apply_gain_bounds_limits_the_field():
+    from ui.param_form import apply_gain_bounds
+    specs = [{"dest": "gain", "flags": ["--gain"], "type": "float"}]
+    out = apply_gain_bounds(specs, {"min_gain_db": 0.0, "max_gain_db": 74.0})
+    assert out[0]["min"] == 0.0 and out[0]["max"] == 74.0 and out[0]["type"] == "float"
+
+
+def test_relative_mode_bounds_gain_to_calibration():
+    # On a calibrated unit, relative gain is clamped to the usable [min,max] gain range,
+    # so you can't dial a gain that breaks a limit.
+    f = ParamForm()
+    b = dict(_bounds()); b["min_gain_db"] = 0.0; b["max_gain_db"] = 74.0
+    f.set_params(_specs(), cal_bounds=b, absolute_allowed=True, default_power_mode="relative")
+    assert f.power_mode() == "relative"
+    assert f._widgets["gain"][1]["max"] == 74.0 and f._widgets["gain"][1]["min"] == 0.0
+
+
 def test_toggle_switches_field_and_keeps_other_params():
     f = ParamForm()
     f.set_params(_specs(), cal_bounds=_bounds(), absolute_allowed=True)
