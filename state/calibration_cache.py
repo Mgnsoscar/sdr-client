@@ -18,7 +18,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,16 @@ class CalibrationCache:
     def fetched_at(self, hostname: str) -> Optional[str]:
         entry = self._data.get(hostname)
         return entry.get("fetched_at") if entry else None
+
+    def known_signal_ids(self) -> List[str]:
+        """Every calibration signal id seen across all cached units' documents, sorted.
+        Used to suggest signal ids when authoring a task's calibration signal or adding a
+        signal to a calibration document, so you pick a real id instead of typing blind."""
+        ids = set()
+        for entry in self._data.values():
+            cal = (entry or {}).get("calibration") or {}
+            ids.update((cal.get("signals") or {}).keys())
+        return sorted(ids)
 
     def aggregate_power_bounds(self, signal_id: str) -> Optional[dict]:
         """Combine every cached unit's resolved ``--power`` range for ``signal_id`` into a

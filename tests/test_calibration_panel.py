@@ -701,6 +701,19 @@ def test_clicking_a_signal_opens_its_measured_curve():
     assert p._expanded_signals == {"mock"}
 
 
+def test_add_signal_suggestions_prefer_tasks_then_cache_and_exclude_existing(cal_cache):
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_v2_doc())                                 # already defines "mock"
+    p._task_signal_ids = ["gnss_l1", "mock"]             # a task references mock (defined)
+    cal_cache.put("other-unit", {"unit_type": "broadcaster", "valid": True,
+                                 "signals": {"gnss_l5": {}, "gnss_l1": {}}})
+    sugg = p._suggested_signal_ids()
+    assert "mock" not in sugg                             # already in the document → dropped
+    assert sugg[0] == "gnss_l1"                           # task-referenced ids come first
+    assert "gnss_l5" in sugg                              # cache-only id still offered
+    assert sugg.count("gnss_l1") == 1                     # de-duplicated across sources
+
+
 def test_signals_are_collapsible_in_measured_detail():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     _seed_catalog(p)

@@ -879,6 +879,7 @@ class CalibrationPanel(QWidget):
         self._doc: Optional[dict] = None       # the working document model
         self._f: dict = {}                      # references to editor widgets
         self._expanded_signals: set = set()    # measured-detail signals shown expanded
+        self._task_signal_ids: list = []       # signal ids this unit's tasks reference (hints)
         # plane id → set of signal ids opened on a NON-source measured stage that don't
         # yet have data there (so the user can enter points). Reset on a fresh document.
         self._stage_extra: dict = {}
@@ -2396,6 +2397,11 @@ class CalibrationPanel(QWidget):
             self.hub.run_async(
                 f"cal_components:{self.hostname}",
                 lambda: self.hub.fleet.get(self.hostname).get_components())
+        # Learn which calibration signals this unit's tasks reference, to suggest them
+        # when adding a signal (best-effort — the picker still works without them).
+        self.hub.run_async(
+            f"cal_tasks:{self.hostname}",
+            lambda: self.hub.fleet.get(self.hostname).get_tasks_yaml())
 
     def _unit_meta(self) -> tuple[str, str]:
         """This unit's type + id, read from its client, to seed a new document with
@@ -2602,6 +2608,19 @@ class CalibrationPanel(QWidget):
             self._handle_validate(result)
         elif parts[0] == "cal_components":
             self._handle_components(result)
+        elif parts[0] == "cal_tasks":
+            self._handle_tasks(result)
+
+    def _handle_tasks(self, result) -> None:
+        """Record the calibration signal ids this unit's tasks reference (via each task's
+        SDR_CAL_SIGNAL_ID), used to suggest ids when adding a signal. Best-effort."""
+        if isinstance(result, Exception) or not isinstance(result, str) or not result.strip():
+            return
+        try:
+            from .timeline_editor import task_signals_from_yaml
+            self._task_signal_ids = sorted(set(task_signals_from_yaml(result).values()))
+        except Exception:  # noqa: BLE001 — a broken tasks file shouldn't break the panel
+            return
 
     def _handle_components(self, result) -> None:
         """Merge the unit's stored catalog into the local one (additive — never clobbers
@@ -2699,8 +2718,29 @@ class CalibrationPanel(QWidget):
         self._refresh()
 
     # ── helpers ─────────────────────────────────────────────────────────────────
+    def _suggested_signal_ids(self) -> list:
+        """Signal ids to offer when adding a signal: those this unit's tasks reference plus
+        any the fleet's calibration cache has seen, minus ids already in this document
+        (no point re-adding). Task-referenced ids come first — those are the ones a task
+        actually expects this document to define."""
+        from state.calibration_cache import get_calibration_cache
+        have = set(((self._doc or {}).get("signals") or {}).keys())
+        out: list = []
+        for sid in list(self._task_signal_ids) + get_calibration_cache().known_signal_ids():
+            if sid and sid not in have and sid not in out:
+                out.append(sid)
+        return out
+
     def _on_add_signal(self) -> None:
-        sid, ok = QInputDialog.getText(self, "Add signal", "Signal id (e.g. gps_l1_mcode):")
+        suggestions = self._suggested_signal_ids()
+        if suggestions:
+            # Editable combo: pick an id a task/the fleet already uses, or type a new one.
+            sid, ok = QInputDialog.getItem(
+                self, "Add signal", "Signal id (pick one your tasks use, or type a new one):",
+                suggestions, 0, True)
+        else:
+            sid, ok = QInputDialog.getText(
+                self, "Add signal", "Signal id (e.g. gps_l1_mcode):")
         sid = (sid or "").strip()
         if not ok or not sid:
             return

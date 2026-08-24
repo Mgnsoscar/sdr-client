@@ -46,6 +46,12 @@ from .theme import Palette
 DEFAULT_SCRIPTS_DIR = "/opt/sdr-agent/scripts"
 DEFAULT_INTERPRETER = "python3"
 
+# The env var a task sets to opt into power calibration for a signal. The dialog's
+# "Calibration signal" field owns it (for calibration-capable scripts) so it isn't
+# hand-typed into the Environment box.
+CAL_SIGNAL_ENV = "SDR_CAL_SIGNAL_ID"
+_CAL_OFF_LABEL = "Off — raw power (no calibration)"
+
 
 class TaskEditorDialog(QDialog):
     def __init__(self, hub: DataHub, hostname: str,
@@ -57,6 +63,7 @@ class TaskEditorDialog(QDialog):
         self._default_types = list(default_types) if default_types else None
         self._param_specs: Dict[str, list] = {}   # script -> [param dict, ...]
         self._cal_signals: Dict[str, Optional[str]] = {}  # script -> CAL_SIGNAL_ID or None
+        self._cal_field_script: Optional[str] = None       # script the cal-signal field is bound to
         self._pending_prefill: Optional[List[str]] = None  # edit-mode command args to prefill
         self._edit_script: Optional[str] = None            # script to select once loaded
         self._params_inflight: set = set()         # scripts whose params fetch is in flight
@@ -122,6 +129,27 @@ class TaskEditorDialog(QDialog):
         scroll.setWidget(self._form)
         pb.addWidget(scroll)
         outer.addWidget(params_box, stretch=1)
+
+        # Calibration signal — shown only for calibration-capable scripts (those that
+        # declare CAL_SIGNAL_ID). It's a friendlier front-end for the SDR_CAL_SIGNAL_ID
+        # env var, which it owns: prefilled from the script, choose another id the fleet
+        # already knows, type one, or turn calibration off.
+        self._cal_wrap = QWidget()
+        cal_form = QFormLayout(self._cal_wrap)
+        cal_form.setContentsMargins(0, 0, 0, 6); cal_form.setSpacing(4)
+        self._cal_combo = QComboBox(); self._cal_combo.setEditable(True)
+        self._cal_combo.setToolTip(
+            "Which calibrated signal this task transmits — its power/gain is resolved "
+            "against this signal's calibration. Defaults to the script's declared signal; "
+            "pick another the fleet knows, type one, or choose “Off” to send raw power.")
+        self._cal_combo.currentTextChanged.connect(lambda *_: self._update_preview())
+        cal_form.addRow("Calibration signal", self._cal_combo)
+        self._cal_hint = QLabel("")
+        self._cal_hint.setWordWrap(True)
+        self._cal_hint.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+        cal_form.addRow("", self._cal_hint)
+        self._cal_wrap.setVisible(False)
+        outer.addWidget(self._cal_wrap)
 
         # Extra args + toggles
         extra_form = QFormLayout()
@@ -316,13 +344,14 @@ class TaskEditorDialog(QDialog):
         if sid:
             from state.calibration_cache import get_calibration_cache
             hint = get_calibration_cache().aggregate_power_bounds(sid)
-        # Library authoring: a calibratable script auto-opts-in below (_ensure_cal_env), so
-        # there's nothing to flag; a non-calibratable script takes raw power by design.
+        # Library authoring: a calibratable script defaults to its signal in the field
+        # below, so there's nothing to flag; a non-calibratable script takes raw power by
+        # design.
         caution = calibration_caution(bool(sid), targeted=False, calibrated=False,
                                       script_calibratable=bool(sid))
         self._form.set_params(self._param_specs.get(script, []), hint_bounds=hint,
                               caution=caution)
-        self._ensure_cal_env(script)
+        self._refresh_cal_field(script)
         self._set_status("")
         # Prefill values on edit. Keyed to the edit script and deliberately NOT
         # consumed: the form for one script can be (re)built several times (a
@@ -387,21 +416,90 @@ class TaskEditorDialog(QDialog):
             if self._script.count() > 0:
                 self._select_script(script_name)
 
-    def _ensure_cal_env(self, script: str) -> None:
-        """If the selected script declares a calibration signal, make sure the task's
-        env opts in via SDR_CAL_SIGNAL_ID — otherwise no editor can offer absolute
-        (calibrated) power for this task. Only adds it when missing; never clobbers a
-        value the operator set. Idempotent, so it's safe to call on every rebuild."""
-        sig = self._cal_signals.get(script)
-        if not sig:
+    # ── Calibration signal field (owns SDR_CAL_SIGNAL_ID) ─────────────────────
+
+    def _refresh_cal_field(self, script: str) -> None:
+        """Show/refresh the calibration-signal field for `script`. Only calibration-capable
+        scripts (those declaring CAL_SIGNAL_ID) get it; for others it's hidden and the
+        env box is left untouched (a hand-typed SDR_CAL_SIGNAL_ID stays a plain env line).
+        The field owns the var, so it's stripped from the Environment box while shown."""
+        declared = self._cal_signals.get(script)
+        if not declared:
+            self._cal_field_script = None
+            self._cal_wrap.setVisible(False)
             return
+        # Seeding priority: an SDR_CAL_SIGNAL_ID sitting in the env box is authoritative —
+        # an edit prefills it there and it honors a value the operator typed by hand
+        # (''=Off). Otherwise, a redundant rebuild of the SAME script keeps the current
+        # selection; a fresh bind opens on Off for an edit that didn't set it, else the
+        # script's declared signal (opt in).
+        env = self._parse_env() or {}
+        if CAL_SIGNAL_ENV in env:
+            value = (env.get(CAL_SIGNAL_ENV) or "").strip()
+        elif self._cal_field_script == script:
+            value = self._current_cal_value()
+        else:
+            value = "" if self.existing_name is not None else declared
+        self._cal_field_script = script
+        self._populate_cal_combo(declared, value)
+        self._strip_cal_env()                  # the field owns it — keep it out of the box
+        self._cal_wrap.setVisible(True)
+
+    def _populate_cal_combo(self, declared: str, value: str) -> None:
+        from state.calibration_cache import get_calibration_cache
+        combo = self._cal_combo
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(_CAL_OFF_LABEL, "")           # userData "" ⇒ calibration off
+        ids: List[str] = [declared]
+        for sid in get_calibration_cache().known_signal_ids():
+            if sid not in ids:
+                ids.append(sid)
+        if value and value not in ids:              # a saved id the fleet hasn't seen
+            ids.append(value)
+        for sid in ids:
+            combo.addItem(sid, sid)
+        if not value:                               # Off
+            combo.setCurrentIndex(0)
+        else:
+            i = combo.findData(value)
+            combo.setCurrentIndex(i if i >= 0 else 0)
+            if i < 0:
+                combo.setEditText(value)
+        combo.blockSignals(False)
+        self._cal_hint.setText(
+            "Sends raw power — no calibration applied." if not self._current_cal_value()
+            else f"Script’s signal: {declared}" if self._current_cal_value() == declared
+            else f"Overriding the script’s signal ({declared}).")
+
+    def _current_cal_value(self) -> str:
+        """The chosen signal id, or '' for Off. A free-typed value has no item data, so
+        fall back to the text."""
+        data = self._cal_combo.currentData()
+        if data is None:
+            return self._cal_combo.currentText().strip()
+        return data
+
+    def _strip_cal_env(self) -> None:
         env = self._parse_env()
-        if env is None:                        # env box has a malformed line; leave it
+        if env is None or CAL_SIGNAL_ENV not in env:
             return
-        if env.get("SDR_CAL_SIGNAL_ID"):       # already opted in (or operator-set)
-            return
-        env["SDR_CAL_SIGNAL_ID"] = sig
+        env.pop(CAL_SIGNAL_ENV, None)
         self._env.setPlainText("\n".join(f"{k}={v}" for k, v in env.items()))
+
+    def _apply_cal_signal(self, env: Dict[str, str]) -> Dict[str, str]:
+        """Fold the calibration-signal field back into the env dict at save time. When the
+        field is hidden (non-calibratable script) the env is returned unchanged, so a
+        hand-set SDR_CAL_SIGNAL_ID is preserved."""
+        if self._cal_field_script is None:     # no field active for this script
+            return env
+        out = dict(env)
+        sid = self._current_cal_value()
+        if sid:
+            out[CAL_SIGNAL_ENV] = sid
+        else:
+            out.pop(CAL_SIGNAL_ENV, None)
+        return out
 
     # ── Command building / preview / save ────────────────────────────────────
 
@@ -455,6 +553,7 @@ class TaskEditorDialog(QDialog):
         if env is None:
             self._set_status("environment lines must be KEY=value", error=True)
             return
+        env = self._apply_cal_signal(env)      # fold the calibration-signal field back in
 
         edited = {
             "name": name,
