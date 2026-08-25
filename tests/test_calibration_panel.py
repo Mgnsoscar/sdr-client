@@ -1287,6 +1287,64 @@ def test_no_signals_save_allowed_on_capable_agent():
     assert client.uploaded                                # the onboarding chain was pushed
 
 
+# ── limit side: input/output stage boundary ────────────────────────────────────────
+
+def _side_doc(side):
+    d = _two_measured_doc(measure_second=True)
+    d["chain"]["limits"] = [{"plane": "amplifier_output", "side": side, "max_dbm": -2.5}]
+    return d
+
+
+def test_limit_side_round_trips_through_form():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_side_doc("input"))
+    out = p._read_form(strict=True)
+    assert out["chain"]["limits"][0]["side"] == "input"
+    assert out["chain"]["limits"][0]["plane"] == "amplifier_output"
+
+
+def test_limit_side_output_is_omitted_from_document():
+    # 'output' is the default, so it is not written — keeps existing docs byte-identical.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_side_doc("output"))
+    lim = p._read_form(strict=True)["chain"]["limits"][0]
+    assert "side" not in lim
+
+
+def test_local_issues_input_side_on_first_plane_flagged():
+    from ui.calibration_panel import local_calibration_issues
+    d = _two_measured_doc(measure_second=True)
+    d["chain"]["limits"] = [{"plane": "sdr_output", "side": "input", "max_dbm": -2.5}]
+    assert any("nothing upstream" in i for i in local_calibration_issues(d))
+    # the same limit input-side on the 2nd stage is fine (sdr_output is upstream)
+    d["chain"]["limits"] = [{"plane": "amplifier_output", "side": "input", "max_dbm": -2.5}]
+    assert local_calibration_issues(d) == []
+
+
+def test_limit_side_detection():
+    assert CalibrationPanel._doc_uses_limit_side(_side_doc("input")) is True
+    assert CalibrationPanel._doc_uses_limit_side(_side_doc("output")) is False
+
+
+def test_input_side_save_blocked_on_old_agent():
+    # A ≤1.4.0 agent ignores 'side' and would cap the amp's OUTPUT instead of its input —
+    # a different, unsafe limit. Save must refuse rather than silently mis-protect.
+    client = FakeClient(caps=["calibration"])
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(_side_doc("input"))
+    p._on_save()
+    assert "1.5.0" in p._status.text()
+    assert client.uploaded == []                         # nothing was pushed
+
+
+def test_input_side_save_allowed_on_capable_agent():
+    client = FakeClient(caps=["calibration", "calibration-limit-side"])
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(_side_doc("input"))
+    p._on_save()
+    assert client.uploaded                                # the side-using doc was pushed
+
+
 def test_library_grid_has_a_card_per_component_plus_add():
     from ui.calibration_panel import _ClickCard
     p = CalibrationPanel("u", FakeHub(FakeClient()))

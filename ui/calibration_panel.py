@@ -62,6 +62,11 @@ CAL_NO_SIGNALS_CAPABILITY = "calibration-no-signals"  # agent >= 1.4.0
 _NO_SIGNALS_NEEDS_NEWER = (
     "this unit's agent is too old to save a calibration with no signals yet (needs 1.4.0+). "
     "Update the agent, or add at least one measured signal before saving.")
+CAL_LIMIT_SIDE_CAPABILITY = "calibration-limit-side"  # agent >= 1.5.0
+_LIMIT_SIDE_NEEDS_NEWER = (
+    "this unit's agent is too old for input/output-side limits (needs 1.5.0+). It would "
+    "ignore 'side' and apply the cap at the plane's output — a different, unsafe limit. "
+    "Update the agent, or set every limit's side to Output (the plane itself).")
 
 # When the unit is simply uncalibrated, the /calibration route answers 404 with this
 # detail. A generic "Not Found" 404 instead means the route itself is missing — i.e.
@@ -125,6 +130,19 @@ def _curve_issues(sid: str, plane: str, pts) -> list:
     return out
 
 
+def _upstream_plane_name(planes: dict, name: str):
+    """The plane feeding INTO ``name``'s stage — one hop upstream in the cascade, mirroring
+    the agent (agent/calibration.py:_upstream_plane): a derived plane's parent is its
+    ``from``; a measured plane's is the plane before it in cascade (dict) order. Returns
+    None when ``name`` is the first plane (nothing upstream)."""
+    p = planes.get(name)
+    if isinstance(p, dict) and p.get("type") == "derived":
+        return p.get("from")
+    keys = list(planes)
+    i = keys.index(name) if name in keys else -1
+    return keys[i - 1] if i > 0 else None
+
+
 def local_calibration_issues(doc) -> list:
     """A fast, best-effort structural check of a working document, for instant editor
     feedback BEFORE the authoritative agent validate/save. Catches the common mistakes
@@ -180,8 +198,17 @@ def local_calibration_issues(doc) -> list:
     if gl.get("max_gain_db") is None and not chain.get("limits"):
         issues.append("no safety ceiling — set a max gain or add at least one limit")
     for lim in (chain.get("limits") or []):
-        if isinstance(lim, dict) and lim.get("plane") not in planes:
+        if not isinstance(lim, dict):
+            continue
+        if lim.get("plane") not in planes:
             issues.append(f"limit references unknown plane '{lim.get('plane')}'")
+            continue
+        side = lim.get("side", "output")
+        if side not in ("input", "output"):
+            issues.append(f"limit on '{lim.get('plane')}': side must be input or output")
+        elif side == "input" and _upstream_plane_name(planes, lim["plane"]) is None:
+            issues.append(f"limit on '{lim.get('plane')}' is input-side but that stage "
+                          "is first in the chain — nothing upstream to cap")
 
     # An empty signal set is a valid onboarding state — the chain + ceiling can be
     # saved before any signal is measured (the agent accepts a signal-less document;
@@ -1331,19 +1358,28 @@ class CalibrationPanel(QWidget):
         lim = lim or {}
         w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
         plane = QComboBox(); plane.addItems(self._plane_names())
-        plane.setToolTip("The plane this ceiling is measured at.")
+        plane.setToolTip("The stage this ceiling protects.")
         if lim.get("plane") in self._plane_names():
             plane.setCurrentText(lim["plane"])
+        side = QComboBox(); side.addItems(["output", "input"])
+        side.setToolTip(
+            "Which boundary of that stage the cap applies at.\n"
+            "• output — the plane itself (e.g. a licence EIRP cap on the antenna).\n"
+            "• input — the plane feeding the stage (e.g. an amp's max input power). An\n"
+            "  input limit follows its stage: insert a component upstream and it stays put,\n"
+            "  no need to restate it on the new part.")
+        side.setCurrentText(lim.get("side", "output") if lim.get("side") in ("input", "output")
+                            else "output")
         max_dbm = QLineEdit(_numstr(lim.get("max_dbm"))); max_dbm.setPlaceholderText("max dBm")
-        max_dbm.setToolTip("Maximum power (dBm) permitted at that plane.")
+        max_dbm.setToolTip("Maximum power (dBm) permitted at that stage boundary.")
         reason = QLineEdit(lim.get("reason", "")); reason.setPlaceholderText("reason (optional)")
         reason.setToolTip("Why this ceiling exists — e.g. “amp P1dB input”, "
                           "“licence EIRP cap”. Shown for context only.")
         rm = QPushButton("✕"); rm.setFixedWidth(28)
-        for wdg, s in ((plane, 2), (max_dbm, 1), (reason, 3)):
+        for wdg, s in ((plane, 2), (side, 1), (max_dbm, 1), (reason, 3)):
             h.addWidget(wdg, s)
         h.addWidget(rm)
-        row = {"w": w, "plane": plane, "max": max_dbm, "reason": reason}
+        row = {"w": w, "plane": plane, "side": side, "max": max_dbm, "reason": reason}
         rm.clicked.connect(lambda: self._remove_row(self._limits_box, self._f["limits"], row))
         self._limits_box.addWidget(w)
         self._f["limits"].append(row)
@@ -2354,6 +2390,9 @@ class CalibrationPanel(QWidget):
                 continue
             lim = {"plane": row["plane"].currentText(),
                    "max_dbm": _to_float(mx, "limit max dBm")}
+            side = row["side"].currentText()
+            if side == "input":                 # omit the default 'output' to keep docs clean
+                lim["side"] = side
             if row["reason"].text().strip():
                 lim["reason"] = row["reason"].text().strip()
             limits.append(lim)
@@ -2483,7 +2522,7 @@ class CalibrationPanel(QWidget):
             self._set_status("nothing to save", kind="error")
             return
         if (self._blocks_on_components() or self._blocks_on_partial_stages()
-                or self._blocks_on_no_signals()):
+                or self._blocks_on_no_signals() or self._blocks_on_limit_side()):
             return
         self._send(json.dumps(self._doc).encode("utf-8"))
 
@@ -2536,6 +2575,24 @@ class CalibrationPanel(QWidget):
             return True
         return False
 
+    @staticmethod
+    def _doc_uses_limit_side(doc) -> bool:
+        """True when a limit sets side: input. (An explicit 'output' is identical to the
+        default, so an older agent resolves it correctly — only 'input' needs the newer
+        agent.)"""
+        return any(isinstance(l, dict) and l.get("side") == "input"
+                   for l in (((doc or {}).get("chain") or {}).get("limits") or []))
+
+    def _blocks_on_limit_side(self) -> bool:
+        """Guard: an agent older than 1.5.0 IGNORES a limit's side and would apply an
+        input-side cap at the plane's output — a different, unsafe limit — so refuse to
+        push rather than silently mis-protect the hardware."""
+        if self._doc_uses_limit_side(self._doc) and not self._supports(
+                CAL_LIMIT_SIDE_CAPABILITY):
+            self._set_status(_LIMIT_SIDE_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
     def _supports(self, capability: str) -> bool:
         try:
             client = self.hub.fleet.get(self.hostname)
@@ -2575,7 +2632,7 @@ class CalibrationPanel(QWidget):
                 kind="error" if issues else "warn")
             return
         if (self._blocks_on_components() or self._blocks_on_partial_stages()
-                or self._blocks_on_no_signals()):
+                or self._blocks_on_no_signals() or self._blocks_on_limit_side()):
             return
         self._set_status("validating (dry run — not saving)…")
         doc = self._doc
