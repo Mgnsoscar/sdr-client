@@ -158,10 +158,21 @@ class _TaskRow(QFrame):
 
     def _on_start(self) -> None:
         self._busy("starting…")
-        self.hub.run_async(
-            f"task_start:{self.hostname}:{self.task_name}",
-            lambda: self.hub.fleet.get(self.hostname).start_task(self.task_name),
-        )
+        # The play button starts with the task's saved defaults — but an uncalibrated
+        # absolute-power task can't just run its authored --power (the script refuses it).
+        # Route through RunTaskDialog in headless "quick" mode: it loads the task's
+        # calibration state and, only for that case, prompts for a stop-gap relative gain
+        # (persisting it) exactly like Run…; everything else starts from the stored command.
+        dlg = RunTaskDialog(self.hub, self.hostname, self.task_name,
+                            running=False, parent=self.window(), quick=True)
+        self._quick_dlg = dlg                     # keep alive across the async loads
+        dlg.finished.connect(self._on_quick_finished)
+
+    def _on_quick_finished(self, _result: int = 0) -> None:
+        self._quick_dlg = None
+        # Re-enable the buttons; the next poll settles the exact running/idle state.
+        for b in (self._start, self._stop):
+            b.setEnabled(True)
 
     def _on_stop(self) -> None:
         self._busy("stopping…")

@@ -67,12 +67,17 @@ def _without_flag(args: List[str], flags) -> List[str]:
 
 class RunTaskDialog(QDialog):
     def __init__(self, hub: DataHub, hostname: str, task_name: str,
-                 running: bool = False, parent=None):
+                 running: bool = False, parent=None, quick: bool = False):
         super().__init__(parent)
         self.hub = hub
         self.hostname = hostname
         self.task_name = task_name
         self._running = running
+        # Quick mode: the dialog is driven headlessly by the unit's play button. It loads
+        # the task exactly like the visible dialog, but instead of showing the form it
+        # decides on its own — an uncalibrated absolute-power task fires the relative-gain
+        # prompt (and persists it), everything else starts from the stored command.
+        self._quick = quick
 
         self._interp = "python3"           # from the task's command
         self._script_path = ""             # full path as configured on the unit
@@ -204,6 +209,8 @@ class RunTaskDialog(QDialog):
 
         if isinstance(result, Exception):
             self._set_status(f"error: {result}", error=True)
+            if self._quick:
+                self._quick_plain_start()                # couldn't load state — start as-is
             return
 
         if op == "runtask_yaml":
@@ -227,6 +234,8 @@ class RunTaskDialog(QDialog):
         if not entry:
             self._set_status(
                 "Couldn't read this task's definition from the unit.", error=True)
+            if self._quick:
+                self._quick_plain_start()                # can't inspect it — start as-is
             return
         self._task_entry = dict(entry)                   # kept for persisting a gain default
 
@@ -245,6 +254,8 @@ class RunTaskDialog(QDialog):
                 "Use “Additional args” to pass options, then Start.", error=False)
             self._current_args = command[1:] if len(command) > 1 else []
             self._extra.setText(" ".join(shlex.quote(a) for a in self._current_args))
+            if self._quick:
+                self._quick_plain_start()                # no calibration form — start as-is
             return
 
         self._script_path = command[script_idx]
@@ -305,6 +316,32 @@ class RunTaskDialog(QDialog):
                 self._form.set_values([_GAIN_FLAGS[0], self._fallback_gain])
         if extra:
             self._extra.setText(" ".join(shlex.quote(e) for e in extra))
+        if self._quick:
+            self._quick_dispatch()
+
+    def _quick_dispatch(self) -> None:
+        """Headless decision for the unit's play button. An uncalibrated absolute-power task
+        needs a relative gain, so run the same first-Start flow as the visible dialog (prompt +
+        persist); a cancelled prompt closes without starting. Anything else starts from the
+        task's stored command/env untouched."""
+        if self._uncalibrated_absolute():
+            self._on_run()
+            if not self._starting:
+                self.reject()                            # gain prompt cancelled — don't start
+        else:
+            self._quick_plain_start()
+
+    def _quick_plain_start(self) -> None:
+        """Start the task from its stored command/env (no arg replacement), exactly like the
+        old play button. Routed through the dialog only so quick mode shares one code path."""
+        if self._starting:
+            return
+        self._starting = True
+        self._set_status("starting…")
+        self.hub.run_async(
+            f"runtask_start:{self.hostname}",
+            lambda: self.hub.fleet.get(self.hostname).start_task(self.task_name),
+        )
 
     def _uncalibrated_absolute(self) -> bool:
         """True when this task opts into calibration, the unit has NO resolved bounds for

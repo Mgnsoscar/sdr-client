@@ -185,3 +185,68 @@ def test_start_uncalibrated_cancel_does_not_run(monkeypatch):
                         staticmethod(lambda *a, **k: (0.0, False)))   # cancelled
     dlg._on_run()
     assert client.started == [] and client.updated == []
+
+
+# ── quick-start (the unit's play button, headless RunTaskDialog) ─────────────────────
+# The play button must behave like Run…: an uncalibrated absolute-power task can't run its
+# authored --power (the script refuses it), so quick mode prompts + persists a stop-gap gain.
+# FakeHub.run_async is synchronous, so constructing with quick=True drives the whole flow.
+
+def test_quick_start_uncalibrated_prompts_and_persists(monkeypatch):
+    from PyQt6.QtWidgets import QInputDialog
+    monkeypatch.setattr(QInputDialog, "getDouble",
+                        staticmethod(lambda *a, **k: (55.0, True)))
+    client = FakeClient(yaml=YAML_ABS40, params=PARAMS_PG,
+                        cal=AgentHTTPError("u", 404, "none"))
+    RunTaskDialog(FakeHub(client), "u", "mocktask", quick=True)
+    assert client.started, "quick-start should have started the task"
+    _, req = client.started[-1]
+    assert req is not None and any(f in req.args for f in ("--gain", "-Gain")) and "55" in req.args
+    assert not any(f in req.args for f in ("--power", "-Power"))   # absolute never sent
+    _, spec = client.updated[-1]
+    assert spec["env"]["SDR_CAL_FALLBACK_GAIN"] == "55"
+    assert any(f in spec["command"] for f in ("--power", "-Power"))   # authored power retained
+
+
+def test_quick_start_uncalibrated_cancel_does_not_start(monkeypatch):
+    from PyQt6.QtWidgets import QInputDialog
+    monkeypatch.setattr(QInputDialog, "getDouble",
+                        staticmethod(lambda *a, **k: (0.0, False)))   # cancelled
+    client = FakeClient(yaml=YAML_ABS40, params=PARAMS_PG,
+                        cal=AgentHTTPError("u", 404, "none"))
+    RunTaskDialog(FakeHub(client), "u", "mocktask", quick=True)
+    assert client.started == [] and client.updated == []
+
+
+def test_quick_start_persisted_fallback_starts_without_prompt(monkeypatch):
+    from PyQt6.QtWidgets import QInputDialog
+    called = {"n": 0}
+    monkeypatch.setattr(QInputDialog, "getDouble", staticmethod(
+        lambda *a, **k: (called.__setitem__("n", called["n"] + 1), (0.0, False))[1]))
+    yaml = (
+        "tasks:\n"
+        "  - name: mocktask\n"
+        "    command: [python3, mock_tx.py, --power, \"40\"]\n"
+        "    env: { SDR_CAL_SIGNAL_ID: mock, SDR_CAL_FALLBACK_GAIN: \"42\" }\n")
+    client = FakeClient(yaml=yaml, params=PARAMS_PG, cal=AgentHTTPError("u", 404, "none"))
+    RunTaskDialog(FakeHub(client), "u", "mocktask", quick=True)
+    assert called["n"] == 0, "a persisted fallback should not re-prompt on quick-start"
+    assert client.started
+    _, req = client.started[-1]
+    assert "42" in req.args and any(f in req.args for f in ("--gain", "-Gain"))
+
+
+def test_quick_start_calibrated_starts_stored_command():
+    # Calibrated (or any non-uncalibrated-absolute) task: quick-start runs the stored
+    # command/env untouched — start_task called with no StartRequest.
+    client = FakeClient(yaml=YAML, params=PARAMS_PG, cal=CAL)
+    RunTaskDialog(FakeHub(client), "u", "mocktask", quick=True)
+    assert client.started == [("mocktask", None)]
+    assert client.updated == []
+
+
+def test_quick_start_no_optin_starts_stored_command():
+    # A task that doesn't opt into calibration starts from its stored command as before.
+    client = FakeClient(yaml=YAML_NO_OPTIN, params=PARAMS_PG, cal=CAL)
+    RunTaskDialog(FakeHub(client), "u", "mocktask", quick=True)
+    assert client.started == [("mocktask", None)]
