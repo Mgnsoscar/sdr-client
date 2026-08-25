@@ -179,9 +179,10 @@ def local_calibration_issues(doc) -> list:
         if isinstance(lim, dict) and lim.get("plane") not in planes:
             issues.append(f"limit references unknown plane '{lim.get('plane')}'")
 
+    # An empty signal set is a valid onboarding state — the chain + ceiling can be
+    # saved before any signal is measured (the agent accepts a signal-less document;
+    # nothing can transmit until a signal is added). So it is not flagged as an issue.
     signals = doc.get("signals") or {}
-    if not signals:
-        issues.append("no signals — add at least one")
     for sid, sig in signals.items():
         for pname, curve in ((sig or {}).get("curves") or {}).items():
             if pname not in planes:

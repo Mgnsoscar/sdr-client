@@ -433,6 +433,15 @@ def test_local_issues_clean_doc_has_none():
     assert local_calibration_issues(_doc()) == []
 
 
+def test_local_issues_empty_signals_is_clean():
+    # An onboarding chain (planes + ceiling set, no signals measured yet) is a valid,
+    # savable state — it must not be flagged as an issue.
+    from ui.calibration_panel import local_calibration_issues
+    d = _doc()
+    d["signals"] = {}
+    assert local_calibration_issues(d) == []
+
+
 def test_local_issues_flags_non_invertible_curve():
     from ui.calibration_panel import local_calibration_issues
     d = _doc()
