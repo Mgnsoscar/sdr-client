@@ -39,6 +39,11 @@ from .qt_adapter import DataHub
 from .theme import Palette
 
 
+# The task env key that carries the uncalibrated stop-gap gain (a script uses it only
+# while the unit is uncalibrated for the signal; see the Pi scripts' power precedence).
+FALLBACK_GAIN_ENV = "SDR_CAL_FALLBACK_GAIN"
+
+
 def _fmt_gain(v: float) -> str:
     return f"{v:g}"
 
@@ -82,6 +87,7 @@ class RunTaskDialog(QDialog):
         self._script_cal_signal: Optional[str] = None   # the SCRIPT's declared signal
         self._cal_bounds = None
         self._task_entry: Optional[dict] = None          # full tasks.yaml entry, for persistence
+        self._fallback_gain: Optional[str] = None         # persisted uncalibrated stop-gap gain
         self._params_ready = False
         self._cal_ready = False
 
@@ -226,6 +232,7 @@ class RunTaskDialog(QDialog):
 
         # The task opts into calibration by setting this env to the script's signal id.
         self._cal_signal_id = (entry.get("env") or {}).get("SDR_CAL_SIGNAL_ID")
+        self._fallback_gain = (entry.get("env") or {}).get(FALLBACK_GAIN_ENV)
 
         command = list(entry.get("command", []))
         if command:
@@ -292,6 +299,10 @@ class RunTaskDialog(QDialog):
             # form has no --power field here, so set_values returns it as an "extra". Drop
             # it rather than surfacing a stale, un-runnable value in Additional args.
             extra = _without_flag(extra, _POWER_FLAGS)
+            # Pre-fill the relative gain from a previously persisted fallback, so a task
+            # that already has one runs (and quick-plays) without re-prompting.
+            if self._fallback_gain and not _has_flag(self._current_args, _GAIN_FLAGS):
+                self._form.set_values([_GAIN_FLAGS[0], self._fallback_gain])
         if extra:
             self._extra.setText(" ".join(shlex.quote(e) for e in extra))
 
@@ -332,24 +343,25 @@ class RunTaskDialog(QDialog):
         # On an uncalibrated unit, absolute --power can't be honoured. If the operator
         # hasn't set a relative --gain, explain and capture one before running (and before
         # the form's required-gain check fires) — rather than starting on a meaningless dBm.
+        prompted_gain = None
         if self._uncalibrated_absolute() and not _has_flag(self._override_args(), _GAIN_FLAGS):
             gain = self._prompt_relative_gain()
             if gain is None:
                 return                                   # cancelled — don't start
             self._form.set_values([_GAIN_FLAGS[0], _fmt_gain(gain)])
             self._update_preview()
+            prompted_gain = gain
         err = self._form.validate()
         if err:
             self._set_status(err, error=True)
             return
         args = self._override_args()
-        # If we're running an uncalibrated task that was authored with absolute power via a
-        # relative gain, persist that as the task's stored command so quick-play and
-        # sequences use the same gain (no re-prompt). One-time: only while --power lingers.
-        if (self._uncalibrated_absolute() and self._task_entry is not None
-                and _has_flag(self._current_args, _POWER_FLAGS)
-                and _has_flag(args, _GAIN_FLAGS)):
-            self._persist_gain_default(args)
+        # Persist the stop-gap gain as the task's uncalibrated FALLBACK (env), NOT by
+        # overwriting --power — the command keeps its authored absolute power, so quick-play
+        # and sequences use the fallback gain while uncalibrated and auto-revert to the dBm
+        # value the moment the unit is calibrated for the signal.
+        if prompted_gain is not None and self._task_entry is not None:
+            self._persist_fallback_gain(prompted_gain)
         # replace_args=True: the form's values become the task's trailing args for
         # this run only. With no args (script has no params, nothing added) the
         # agent falls back to the task's configured command, so Start still works.
@@ -376,17 +388,22 @@ class RunTaskDialog(QDialog):
             self, "Set a relative gain to run",
             (f"This unit isn't calibrated for '{self._cal_signal_id}', so the absolute "
              f"power this task was authored with can't be converted to a real level.\n\n"
-             f"Set a relative TX gain (raw dB) to run it here. This becomes the task's "
-             f"default gain on this unit — used every time you Start it or run it in a "
-             f"sequence — until you calibrate the unit or change it."),
+             f"Set a relative TX gain (raw dB) to run it here. It becomes this unit's "
+             f"fallback gain for the task — used every time you Start it or run it in a "
+             f"sequence, while uncalibrated.\n\n"
+             f"The task keeps its Library absolute power: once you calibrate this unit for "
+             f"'{self._cal_signal_id}', it automatically reverts to that dBm value."),
             start, lo, hi, 2)
         return float(val) if ok else None
 
-    def _persist_gain_default(self, args: List[str]) -> None:
-        """Rewrite this task's stored command on the unit to the relative-gain args (no
-        --power), so future Starts/sequences reuse the chosen gain without re-prompting."""
+    def _persist_fallback_gain(self, gain: float) -> None:
+        """Persist the stop-gap gain as the task's SDR_CAL_FALLBACK_GAIN env, keeping the
+        command (and its authored --power) intact. The script uses this fallback only while
+        uncalibrated; calibrating the unit auto-reverts to the absolute --power."""
         entry = dict(self._task_entry or {})
-        entry["command"] = [self._interp, self._script_path] + list(args)
+        env = dict(entry.get("env") or {})
+        env[FALLBACK_GAIN_ENV] = _fmt_gain(gain)
+        entry["env"] = env
         self.hub.run_async(
             f"runtask_persist:{self.hostname}",
             lambda: self.hub.fleet.get(self.hostname).update_task(self.task_name, entry),

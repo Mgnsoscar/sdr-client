@@ -149,11 +149,33 @@ def test_start_uncalibrated_prompts_for_gain_then_persists(monkeypatch):
     _, req = client.started[-1]
     assert any(f in req.args for f in ("--gain", "-Gain")) and "55" in req.args
     assert not any(f in req.args for f in ("--power", "-Power"))   # absolute never sent
-    # persisted to the stored command so a plain Start/sequence reuses it
+    # Persisted as an env FALLBACK — the command KEEPS its --power so calibrating the unit
+    # auto-reverts to the authored dBm value.
     assert client.updated, "the gain should be persisted to the task"
     _, spec = client.updated[-1]
-    assert any(f in spec["command"] for f in ("--gain", "-Gain"))
-    assert not any(f in spec["command"] for f in ("--power", "-Power"))
+    assert spec["env"]["SDR_CAL_FALLBACK_GAIN"] == "55"
+    assert any(f in spec["command"] for f in ("--power", "-Power"))   # authored power retained
+
+
+def test_persisted_fallback_prefills_and_does_not_reprompt(monkeypatch):
+    # A task that already carries SDR_CAL_FALLBACK_GAIN pre-fills the relative gain, so
+    # Start runs without prompting again.
+    yaml = (
+        "tasks:\n"
+        "  - name: mocktask\n"
+        "    command: [python3, mock_tx.py, --power, \"40\"]\n"
+        "    env: { SDR_CAL_SIGNAL_ID: mock, SDR_CAL_FALLBACK_GAIN: \"42\" }\n")
+    client = FakeClient(yaml=yaml, params=PARAMS_PG, cal=AgentHTTPError("u", 404, "none"))
+    dlg = RunTaskDialog(FakeHub(client), "u", "mocktask")
+    from PyQt6.QtWidgets import QInputDialog
+    called = {"n": 0}
+    monkeypatch.setattr(QInputDialog, "getDouble",
+                        staticmethod(lambda *a, **k: (called.__setitem__("n", called["n"] + 1), (0.0, False))[1]))
+    dlg._on_run()
+    assert called["n"] == 0, "should not prompt when a fallback gain is already persisted"
+    assert client.started
+    _, req = client.started[-1]
+    assert "42" in req.args and any(f in req.args for f in ("--gain", "-Gain"))
 
 
 def test_start_uncalibrated_cancel_does_not_run(monkeypatch):
