@@ -279,10 +279,13 @@ class Fleet:
             if components is not None:
                 res.components = self._deploy_components_to(c, components, prune, cal)
             # Absolute --power levels this unit can't produce (the agent clips them at
-            # transmit) — surfaced so the operator knows before it happens.
-            from state import scan_absolute_power, power_out_of_range
+            # transmit), and --amplitude values that don't match what the calibration
+            # curve assumes (power scales with amplitude) — surfaced before it matters.
+            from state import (scan_absolute_power, power_out_of_range,
+                               scan_amplitudes, amplitude_mismatch)
             scoped = m.scoped_library(library, c.unit_type)
             res.power_warnings = power_out_of_range(scan_absolute_power(scoped), cal)
+            res.amplitude_warnings = amplitude_mismatch(scan_amplitudes(scoped), cal)
             c.put_plans(plans)
             c.put_schedule(schedule)
             return res

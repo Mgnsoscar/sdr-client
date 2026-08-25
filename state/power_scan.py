@@ -10,15 +10,16 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 
 POWER_FLAGS = ("--power", "-Power")
+AMP_FLAGS = ("--amplitude", "-Amplitude", "--ampl")
 
 
-def extract_power(args) -> Optional[float]:
-    """The absolute ``--power`` value (dBm, float) in a CLI arg list, or None if absent
-    or unparseable. The last one wins if repeated (mirrors argparse)."""
+def _extract_flag(args, flags) -> Optional[float]:
+    """The float value of the first matching ``flags`` in a CLI arg list (last wins if
+    repeated), or None if absent/unparseable."""
     val: Optional[float] = None
     args = list(args or [])
     for i, a in enumerate(args):
-        if a in POWER_FLAGS and i + 1 < len(args):
+        if a in flags and i + 1 < len(args):
             try:
                 val = float(args[i + 1])
             except (TypeError, ValueError):
@@ -26,24 +27,60 @@ def extract_power(args) -> Optional[float]:
     return val
 
 
-def scan_absolute_power(library) -> List[Tuple[str, Optional[str], float]]:
-    """Every absolute --power level a library sets, as ``[(where, signal_id, dbm)]``.
-    Covers each task's command default and each sequence step's args. ``signal_id`` is the
-    task's ``SDR_CAL_SIGNAL_ID`` (None when the task doesn't opt into calibration, so its
-    power can't be range-checked)."""
+def extract_power(args) -> Optional[float]:
+    """The absolute ``--power`` value (dBm) in a CLI arg list, or None."""
+    return _extract_flag(args, POWER_FLAGS)
+
+
+def extract_amplitude(args) -> Optional[float]:
+    """The baseband ``--amplitude`` value (0–1) in a CLI arg list, or None."""
+    return _extract_flag(args, AMP_FLAGS)
+
+
+def _scan(library, extract_fn) -> List[Tuple[str, Optional[str], float]]:
+    """Every value ``extract_fn`` finds across a library's task commands and sequence
+    step args, as ``[(where, signal_id, value)]``. ``signal_id`` is the task's
+    ``SDR_CAL_SIGNAL_ID`` (None when it doesn't opt into calibration)."""
     sig_of = {t.name: (getattr(t, "env", None) or {}).get("SDR_CAL_SIGNAL_ID")
               for t in getattr(library, "tasks", [])}
     out: List[Tuple[str, Optional[str], float]] = []
     for t in getattr(library, "tasks", []):
-        p = extract_power(getattr(t, "command", []))
-        if p is not None:
-            out.append((f"task {t.name}", sig_of.get(t.name), p))
+        v = extract_fn(getattr(t, "command", []))
+        if v is not None:
+            out.append((f"task {t.name}", sig_of.get(t.name), v))
     for q in getattr(library, "sequences", []):
         for i, step in enumerate(getattr(q, "steps", [])):
-            p = extract_power(getattr(step, "args", []))
-            if p is not None:
+            v = extract_fn(getattr(step, "args", []))
+            if v is not None:
                 out.append((f"sequence {q.name} · step {i + 1} ({step.task_name})",
-                            sig_of.get(step.task_name), p))
+                            sig_of.get(step.task_name), v))
+    return out
+
+
+def scan_absolute_power(library) -> List[Tuple[str, Optional[str], float]]:
+    """Every absolute --power level a library sets (see _scan)."""
+    return _scan(library, extract_power)
+
+
+def scan_amplitudes(library) -> List[Tuple[str, Optional[str], float]]:
+    """Every baseband --amplitude a library sets (see _scan)."""
+    return _scan(library, extract_amplitude)
+
+
+def amplitude_mismatch(levels, calibration) -> List[dict]:
+    """Scanned --amplitude levels that differ from the amplitude the unit's calibration
+    curve was measured at, as ``[{where, amp, cal_amp}]`` — power scales with amplitude,
+    so a mismatch makes --power inaccurate. Signals the unit isn't calibrated for (or that
+    record no amplitude) are skipped."""
+    signals = (calibration or {}).get("signals") or {}
+    out: List[dict] = []
+    for where, sid, amp in levels:
+        b = signals.get(sid) if sid else None
+        cal_amp = (b or {}).get("amplitude")
+        if cal_amp is None:
+            continue
+        if abs(float(amp) - float(cal_amp)) > 1e-9:
+            out.append({"where": where, "amp": float(amp), "cal_amp": float(cal_amp)})
     return out
 
 

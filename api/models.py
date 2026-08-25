@@ -499,6 +499,9 @@ class DeployLibraryResult(BaseModel):
     # Absolute --power levels this unit can't produce (it clips them at transmit) — see
     # power_scan.power_out_of_range. Each: {where, dbm, limit, side}.
     power_warnings: list = []
+    # --amplitude values that differ from what the calibration curve assumes (power scales
+    # with amplitude) — see power_scan.amplitude_mismatch. Each: {where, amp, cal_amp}.
+    amplitude_warnings: list = []
 
 
 def scoped_library(library: "Library", unit_type: str) -> "Library":

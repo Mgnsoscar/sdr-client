@@ -2,7 +2,10 @@
 calibration (deploy-time 'this unit will clip that level' informing). Pure logic."""
 from types import SimpleNamespace as NS
 
-from state.power_scan import extract_power, scan_absolute_power, power_out_of_range
+from state.power_scan import (
+    extract_power, scan_absolute_power, power_out_of_range,
+    extract_amplitude, scan_amplitudes, amplitude_mismatch,
+)
 
 
 def test_extract_power_finds_flag():
@@ -59,3 +62,47 @@ def test_out_of_range_below_minimum():
 def test_in_range_is_silent():
     levels = [("task ok", "l1", 20.0)]
     assert power_out_of_range(levels, _cal({"l1": (-30.0, 24.0)})) == []
+
+
+# ── amplitude scan + mismatch ───────────────────────────────────────────────────
+
+def test_extract_amplitude():
+    assert extract_amplitude(["--power", "20", "--amplitude", "0.5"]) == 0.5
+    assert extract_amplitude(["-Amplitude", "0.3"]) == 0.3
+    assert extract_amplitude(["--power", "20"]) is None
+
+
+def _amp_lib():
+    tasks = [
+        NS(name="beacon", env={"SDR_CAL_SIGNAL_ID": "l1"},
+           command=["python", "b.py", "--amplitude", "0.5"]),
+        NS(name="uncal", env={}, command=["python", "u.py", "--amplitude", "0.9"]),
+    ]
+    seqs = [NS(name="sweep", steps=[NS(task_name="beacon", args=["--amplitude", "0.8"])])]
+    return NS(tasks=tasks, sequences=seqs)
+
+
+def _cal_amp(sig_amp):
+    return {"signals": {sid: {"amplitude": a} for sid, a in sig_amp.items()}}
+
+
+def test_scan_amplitudes_collects_task_and_step():
+    got = {w: (sid, a) for w, sid, a in scan_amplitudes(_amp_lib())}
+    assert got["task beacon"] == ("l1", 0.5)
+    assert got["sequence sweep · step 1 (beacon)"] == ("l1", 0.8)
+
+
+def test_amplitude_mismatch_flags_differences():
+    warns = amplitude_mismatch(scan_amplitudes(_amp_lib()), _cal_amp({"l1": 0.8}))
+    where = {w["where"]: w for w in warns}
+    # beacon task set 0.5 but the curve was measured at 0.8 → flagged
+    assert where["task beacon"]["amp"] == 0.5 and where["task beacon"]["cal_amp"] == 0.8
+    # the sequence step set 0.8, which matches → not flagged
+    assert "sequence sweep · step 1 (beacon)" not in where
+    # the uncal task has no signal → skipped
+    assert "task uncal" not in where
+
+
+def test_amplitude_mismatch_skips_when_calibration_records_none():
+    warns = amplitude_mismatch([("task x", "l1", 0.5)], {"signals": {"l1": {}}})
+    assert warns == []

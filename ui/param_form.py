@@ -155,9 +155,11 @@ def range_hint(spec: dict) -> str:
 
 POWER_DEST = "power"
 GAIN_DEST = "gain"
+AMP_DEST = "amplitude"
 
 _POWER_FLAGS = ("--power", "-Power")
 _GAIN_FLAGS = ("--gain", "-Gain")
+_AMP_FLAGS = ("--amplitude", "-Amplitude", "--ampl")
 
 
 def power_mode_of_args(args) -> Optional[str]:
@@ -185,6 +187,17 @@ def find_gain_index(specs: List[dict]):
     """Index of the relative --gain parameter in a spec list, or None."""
     for i, s in enumerate(specs):
         if s.get("dest") == GAIN_DEST or "--gain" in (s.get("flags") or []):
+            return i
+    return None
+
+
+def find_amplitude_index(specs: List[dict]):
+    """Index of the baseband --amplitude parameter in a spec list, or None. This is the
+    knob that must match the amplitude the calibration curve was measured at (power scales
+    with it), so the form can default it to the calibrated value and flag an override."""
+    for i, s in enumerate(specs):
+        flags = s.get("flags") or []
+        if s.get("dest") == AMP_DEST or any(f in _AMP_FLAGS for f in flags):
             return i
     return None
 
@@ -391,12 +404,16 @@ class ParamForm(QWidget):
         self._cal_bounds = None
         self._hint_bounds = None
         self._caution = None
+        self._cal_amplitude = None              # amplitude the calibration curve assumes
+        self._amp_warn = None                   # the live amplitude-mismatch caption
         self._absolute_allowed = False
         self._power_modes: List[str] = []
         self._power_mode = None
         self._form = QFormLayout(self)
         self._form.setContentsMargins(0, 0, 0, 0)
         self._form.setSpacing(6)
+        # Keep the amplitude-mismatch caption in step with edits (and with set_values).
+        self.changed.connect(self._update_amplitude_warning)
 
     # ── Build ────────────────────────────────────────────────────────────────
 
@@ -419,6 +436,7 @@ class ParamForm(QWidget):
         self._cal_bounds = cal_bounds
         self._hint_bounds = hint_bounds
         self._caution = caution
+        self._cal_amplitude = (cal_bounds or {}).get("amplitude")
         self._absolute_allowed = absolute_allowed
         self._power_modes = _compute_power_modes(specs, cal_bounds, absolute_allowed)
         if default_power_mode in self._power_modes:
@@ -453,6 +471,9 @@ class ParamForm(QWidget):
         if len(self._power_modes) > 1:                 # relative/absolute chooser
             self._form.addRow(self._mode_label(), self._mode_toggle())
 
+        self._amp_warn = None
+        aidx = find_amplitude_index(self._base_specs)
+        amp_dest = self._base_specs[aidx]["dest"] if aidx is not None else None
         specs = self._effective_specs()
         if not specs:
             note = QLabel("This script declares no parameters.")
@@ -471,7 +492,35 @@ class ParamForm(QWidget):
                 cap = QLabel(spec["_hint"]); cap.setWordWrap(True)
                 cap.setStyleSheet(f"font-size: 10px; color: {Palette.TEXT_FAINT};")
                 self._form.addRow("", cap)
+            # Live amplitude-mismatch caption, right under the amplitude field.
+            if spec["dest"] == amp_dest and self._cal_amplitude is not None:
+                self._amp_warn = QLabel(""); self._amp_warn.setWordWrap(True)
+                self._amp_warn.setVisible(False)
+                self._amp_warn.setStyleSheet(
+                    f"font-size: 10px; color: {Palette.ARMED}; font-weight: 600;")
+                self._form.addRow("", self._amp_warn)
         self.changed.emit()
+
+    def _update_amplitude_warning(self) -> None:
+        """Show a caption when the baseband amplitude differs from the value the
+        calibration curve assumes — power scales with amplitude, so a mismatch makes
+        --power (and the reported power) inaccurate until you recalibrate at it."""
+        lbl = self._amp_warn
+        if lbl is None or self._cal_amplitude is None:
+            return
+        aidx = find_amplitude_index(self._base_specs)
+        dest = self._base_specs[aidx]["dest"] if aidx is not None else None
+        val = self.values().get(dest) if dest else None
+        if isinstance(val, (int, float)) and not isinstance(val, bool) \
+                and abs(float(val) - float(self._cal_amplitude)) > 1e-9:
+            lbl.setText(
+                f"⚠ Amplitude {float(val):g} differs from the calibrated "
+                f"{float(self._cal_amplitude):g} — the gain→power curve was measured at "
+                f"{float(self._cal_amplitude):g}, so --power will be off. Match it, or "
+                f"recalibrate the signal at {float(val):g}.")
+            lbl.setVisible(True)
+        else:
+            lbl.setVisible(False)
 
     # ── Power mode ─────────────────────────────────────────────────────────────
     def power_mode(self):
@@ -482,9 +531,14 @@ class ParamForm(QWidget):
         for absolute) in place, the other one dropped, everything else unchanged."""
         pidx = find_power_index(self._base_specs)
         gidx = find_gain_index(self._base_specs)
+        aidx = find_amplitude_index(self._base_specs)
         out: List[dict] = []
         for i, s in enumerate(self._base_specs):
-            if i == pidx:
+            if i == aidx and self._cal_amplitude is not None:
+                # Default the baseband amplitude to the value the calibration was measured
+                # at, so a fresh form matches the curve (an override is flagged live).
+                out.append({**s, "default": self._cal_amplitude})
+            elif i == pidx:
                 if self._power_mode == "absolute":
                     if self._cal_bounds:                 # a targeted unit → hard bounds
                         out.append(apply_power_bounds([s], self._cal_bounds)[0])

@@ -484,20 +484,24 @@ class LibraryTab(QWidget):
             comp_lines += [f"• {n}" for n in comp_dangling]
         # Absolute --power levels a unit can't produce (it clips them at transmit).
         power_lines = []
+        amp_lines = []
         for h, r in ok.items():
-            warns = getattr(r, "power_warnings", None) or []
-            for w in warns:
+            for w in (getattr(r, "power_warnings", None) or []):
                 arrow = "above" if w.get("side") == "above" else "below"
                 power_lines.append(
                     f"{self._label(h)} — {w['where']}: {w['dbm']:g} dBm is {arrow} the "
                     f"unit's {w['limit']:g} dBm; it will transmit clipped to {w['limit']:g}.")
+            for w in (getattr(r, "amplitude_warnings", None) or []):
+                amp_lines.append(
+                    f"{self._label(h)} — {w['where']}: amplitude {w['amp']:g} ≠ the "
+                    f"calibrated {w['cal_amp']:g}; --power will be off.")
         status = f"deployed to {len(ok)} unit(s)"
         if offline:
             status += f" · {len(offline)} offline"
         if failed:
             status += f" · {len(failed)} failed"
         self._set_status(status, error=bool(failed))
-        if failed or notes or zero_task_units or comp_lines or power_lines:
+        if failed or notes or zero_task_units or comp_lines or power_lines or amp_lines:
             lines = []
             if failed:
                 lines.append("Failed (redeploy when reachable):")
@@ -529,6 +533,13 @@ class LibraryTab(QWidget):
                              "clipped to its limit — set the level within range, or run on "
                              "a more capable unit, if the plan needs the full power):")
                 lines += [f"• {n}" for n in power_lines]
+            if amp_lines:
+                if lines:
+                    lines.append("")
+                lines.append("⚠ Baseband amplitude differs from the calibration (power "
+                             "scales with amplitude, so --power will be inaccurate — match "
+                             "it, or recalibrate the signal at this amplitude):")
+                lines += [f"• {n}" for n in amp_lines]
             QMessageBox.warning(self, "Deploy — details", "\n".join(lines))
         elif offline:
             # No real failures — just some units offline. Benign, so inform (not warn).
