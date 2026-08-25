@@ -68,6 +68,27 @@ _LIMIT_SIDE_NEEDS_NEWER = (
     "ignore 'side' and apply the cap at the plane's output — a different, unsafe limit. "
     "Update the agent, or set every limit's side to Output (the plane itself).")
 
+# The baseband amplitude every broadcaster script transmits at is a FIXED constant (the
+# scripts' baked AMPLITUDE), not an operator control — so calibration is always measured at
+# this amplitude and the editor does not expose it as an editable field. It is recorded on
+# the document so the script's calkit amplitude gate can validate against it. A calibration
+# whose stored amplitude differs (measured with an older, differently-amplitude'd script) is
+# NOT silently relabelled: it is flagged here and rejected at runtime until re-measured.
+FIXED_BASEBAND_AMPLITUDE = 0.5
+_AMPLITUDE_TOL = 1e-6
+
+
+def _amp_conflicts(value) -> bool:
+    """True when a stored amplitude is present and differs from the fixed fleet amplitude —
+    i.e. a legacy calibration measured with a differently-amplitude'd script. Such a value is
+    preserved (never relabelled) so the runtime gate rejects it until it is re-measured."""
+    if value is None:
+        return False
+    try:
+        return abs(float(value) - FIXED_BASEBAND_AMPLITUDE) > _AMPLITUDE_TOL
+    except (TypeError, ValueError):
+        return False
+
 # When the unit is simply uncalibrated, the /calibration route answers 404 with this
 # detail. A generic "Not Found" 404 instead means the route itself is missing — i.e.
 # the agent deployed on the unit predates the calibration endpoints and must be updated.
@@ -214,6 +235,7 @@ def local_calibration_issues(doc) -> list:
     # saved before any signal is measured (the agent accepts a signal-less document;
     # nothing can transmit until a signal is added). So it is not flagged as an issue.
     signals = doc.get("signals") or {}
+    default_amp = ((doc.get("defaults") or {}).get("amplitude"))
     for sid, sig in signals.items():
         for pname, curve in ((sig or {}).get("curves") or {}).items():
             if pname not in planes:
@@ -221,6 +243,15 @@ def local_calibration_issues(doc) -> list:
             elif pname not in measured:
                 issues.append(f"signal '{sid}': curve given for derived plane '{pname}'")
             issues.extend(_curve_issues(sid, pname, (curve or {}).get("points")))
+        # Amplitude is fixed at FIXED_BASEBAND_AMPLITUDE. A curve measured at a different
+        # amplitude describes a different power scale, so the script runs uncalibrated until
+        # it is re-measured — surface that here (the runtime enforces it too).
+        eff = (sig or {}).get("amplitude", default_amp)
+        if eff is not None and abs(float(eff) - FIXED_BASEBAND_AMPLITUDE) > _AMPLITUDE_TOL:
+            issues.append(
+                f"signal '{sid}': calibrated at amplitude {float(eff):g}, but scripts "
+                f"transmit at {FIXED_BASEBAND_AMPLITUDE:g} — re-measure at "
+                f"{FIXED_BASEBAND_AMPLITUDE:g} (runs uncalibrated until then)")
     return issues
 
 
@@ -600,9 +631,9 @@ def _template() -> dict:
                 "sdr_output": {"type": "measured", "quantity": "total in-band power"},
             },
         },
-        "defaults": {"amplitude": 0.8},
+        "defaults": {"amplitude": FIXED_BASEBAND_AMPLITUDE},
         "signals": {
-            "mock": {"amplitude": 0.8, "curves": {
+            "mock": {"curves": {
                 "sdr_output": {"points": [
                     {"gain_db": 40, "power_dbm": -36}, {"gain_db": 74, "power_dbm": -2.5}]}}},
         },
@@ -1073,8 +1104,8 @@ class CalibrationPanel(QWidget):
         sig_card, sig_body = self._make_card(
             lbl="Signals", sub="resolved --power at each frequency", trailing=add_sig)
         sig_body.setContentsMargins(0, 0, 0, 0)
-        self._table = QTableWidget(0, 4)
-        self._table.setHorizontalHeaderLabels(["Signal", "Freq MHz", "Ampl.", "--power dBm"])
+        self._table = QTableWidget(0, 3)
+        self._table.setHorizontalHeaderLabels(["Signal", "Freq MHz", "--power dBm"])
         self._table.verticalHeader().setVisible(False)
         # Only the Signal cell is editable — double-click it to rename the signal id (the
         # other columns are read-outs). See _populate_table for the per-cell flags.
@@ -1129,16 +1160,15 @@ class CalibrationPanel(QWidget):
         self._f["min_gain"].setToolTip("Lowest usable SDR internal gain (dB).")
         self._f["max_gain"].setToolTip(
             "Highest SDR gain the safety ceilings allow (usually the amp's P1dB gain).")
-        self._f["def_amp"] = QLineEdit()
-        self._f["def_amp"].setToolTip(
-            "Default baseband amplitude (0–1) a signal uses when it sets none of its own.")
+        # Baseband amplitude is fixed fleet-wide (FIXED_BASEBAND_AMPLITUDE) and owned by the
+        # scripts, so it is NOT an editable field here — it is recorded on save and any
+        # legacy mismatch is flagged by local_calibration_issues.
         set_card, set_body = self._make_card(
             lbl="Chain settings", sub="gain range · defaults")
         form = QFormLayout(); form.setContentsMargins(0, 0, 0, 0)
         form.addRow("Unit type", self._f["unit_type"])
         form.addRow("Min gain (dB)", self._f["min_gain"])
         form.addRow("Max gain (dB)", self._f["max_gain"])
-        form.addRow("Default amplitude", self._f["def_amp"])
         set_body.addLayout(form)
         self._editor_layout.addWidget(set_card)
 
@@ -1245,7 +1275,6 @@ class CalibrationPanel(QWidget):
         elif ut:                                    # a type we don't have a label for
             self._f["unit_type"].addItem(ut, ut)
             self._f["unit_type"].setCurrentIndex(self._f["unit_type"].count() - 1)
-        self._f["def_amp"].setText(_numstr(((doc or {}).get("defaults") or {}).get("amplitude")))
 
         # plane rows + signal entries: create the editable widgets (the chain/detail
         # render decides where the selected ones are shown).
@@ -2029,7 +2058,6 @@ class CalibrationPanel(QWidget):
         sub.addWidget(QLabel("plot label")); entry["plabel"].setFixedWidth(90)
         sub.addWidget(entry["plabel"])
         sub.addStretch(1)
-        sub.addWidget(QLabel("ampl.")); entry["amp"].setFixedWidth(64); sub.addWidget(entry["amp"])
         sub.addWidget(QLabel("freq Hz")); entry["cfreq"].setFixedWidth(104); sub.addWidget(entry["cfreq"])
         bv.addLayout(sub)
         grid = QHBoxLayout()
@@ -2307,14 +2335,6 @@ class CalibrationPanel(QWidget):
         BW, centre frequency, and a curve grid + sparkline per measured plane. The
         measured-stage detail places the ones for the selected plane; _read_form reads
         them all regardless of placement."""
-        amp = QLineEdit(_numstr(sig.get("amplitude")))
-        def_amp = ((self._doc or {}).get("defaults") or {}).get("amplitude")
-        if def_amp is not None:
-            amp.setPlaceholderText(f"inherits ({_numstr(def_amp)})")
-        amp.setToolTip("Baseband amplitude (0–1) for this signal — must match the "
-                       "amplitude used while measuring the curve. Blank = inherit the "
-                       "chain default.")
-        amp.editingFinished.connect(self._update_issues)
         bw = QLineEdit(_numstr(sig.get("occupied_bw_hz")))
         bw.setToolTip("Occupied bandwidth (Hz), optional.")
         cfreq = QLineEdit(_numstr(sig.get("center_freq_hz")))
@@ -2338,7 +2358,7 @@ class CalibrationPanel(QWidget):
             spark.set_points(tbl.numeric_points())
             self._spark_src[spark] = tbl
             curves[plane] = tbl; sparks[plane] = spark
-        self._f["signals"][sid] = {"amp": amp, "bw": bw, "cfreq": cfreq,
+        self._f["signals"][sid] = {"bw": bw, "cfreq": cfreq,
                                    "plabel": plabel, "curves": curves, "sparks": sparks}
 
     def _on_curve_changed(self, spark: "_Sparkline") -> None:
@@ -2358,16 +2378,14 @@ class CalibrationPanel(QWidget):
         ut = self._f["unit_type"].currentData()
         if ut:
             doc["unit_type"] = ut
-        def_amp_text = self._f["def_amp"].text().strip()
+        # Amplitude is fixed at FIXED_BASEBAND_AMPLITUDE, not an editable field. Normalise an
+        # absent or already-matching chain default to exactly that value (so the artifact
+        # records it for the runtime gate), but PRESERVE a conflicting legacy value rather
+        # than silently relabelling curves measured at a different amplitude.
         defaults = doc.setdefault("defaults", {})
-        if def_amp_text:
-            try:
-                defaults["amplitude"] = _to_float(def_amp_text, "default amplitude")
-            except ValueError:
-                if strict:
-                    raise
-        else:
-            defaults.pop("amplitude", None)       # blank ⇒ no chain-wide default
+        cur = defaults.get("amplitude")
+        if not _amp_conflicts(cur):
+            defaults["amplitude"] = FIXED_BASEBAND_AMPLITUDE
         if not defaults:
             doc.pop("defaults", None)
         chain = doc.setdefault("chain", {})
@@ -2405,9 +2423,10 @@ class CalibrationPanel(QWidget):
             # tab is the source of truth for those) survive a form round-trip; then
             # overwrite only what the form edits.
             sig = dict(prev_sigs.get(sid) or {})
-            if w["amp"].text().strip():
-                sig["amplitude"] = _to_float(w["amp"].text(), f"{sid} amplitude")
-            else:
+            # Amplitude is not editable per signal. Drop a stored per-signal amplitude that
+            # matches the fixed fleet value (let it inherit the chain default); PRESERVE a
+            # conflicting legacy value so it stays flagged and is rejected at runtime.
+            if not _amp_conflicts(sig.get("amplitude")):
                 sig.pop("amplitude", None)
             if w["bw"].text().strip():
                 sig["occupied_bw_hz"] = _to_float(w["bw"].text(), f"{sid} occupied BW")
@@ -3193,12 +3212,11 @@ class CalibrationPanel(QWidget):
                     CalibrationPanel._clear_layout(child)
 
     def _populate_table(self, signals: dict, resolved: bool = True) -> None:
-        """Fill the resolved Signals table (Signal | Freq | Ampl. | --power range). Freq
-        and amplitude come from the document; the --power range from the resolver.
-        `resolved=False` (the plain editor view, before a Validate/Save) shows a
-        "validate to resolve" placeholder for the --power column instead."""
+        """Fill the resolved Signals table (Signal | Freq | --power range). Freq comes from
+        the document; the --power range from the resolver. `resolved=False` (the plain editor
+        view, before a Validate/Save) shows a "validate to resolve" placeholder for the
+        --power column instead. (Amplitude is fixed fleet-wide, so it is not shown.)"""
         doc_sigs = (self._doc or {}).get("signals") or {}
-        def_amp = ((self._doc or {}).get("defaults") or {}).get("amplitude")
         active = self._active_signal_ids()               # rows to tint (editor on screen)
         hi = QColor(Palette.ACCENT_SOFT)
         # Programmatic (re)fill fires itemChanged; mute it so it isn't mistaken for a rename.
@@ -3211,14 +3229,12 @@ class CalibrationPanel(QWidget):
                 freq = f"{float(f)/1e6:.2f}" if f else "at run"
             except (TypeError, ValueError):
                 freq = "at run"
-            amp = dsig.get("amplitude", def_amp)
-            ampl = _numstr(amp) if amp is not None else "—"
             rng = _fmt_range(info.get("min_power_dbm"), info.get("max_power_dbm"), "").strip()
             if not resolved:                             # plain editor view, pre-validate
                 rng = "validate to resolve"
             elif rng in ("—", "") and not f:
                 rng = "per frequency"
-            for c, text in enumerate([sid, freq, ampl, rng or "—"]):
+            for c, text in enumerate([sid, freq, rng or "—"]):
                 item = QTableWidgetItem(str(text))
                 if c == 0:                               # the Signal cell: editable → rename
                     item.setData(Qt.ItemDataRole.UserRole, sid)   # its current id, for rename

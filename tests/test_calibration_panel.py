@@ -89,8 +89,8 @@ def _doc():
             "limits": [{"plane": "sdr_output", "max_dbm": -2.5, "reason": "amp P1dB"}],
             "planes": {"sdr_output": {"type": "measured", "quantity": "total in-band power"}},
         },
-        "defaults": {"amplitude": 0.8},
-        "signals": {"mock": {"amplitude": 0.8, "curves": {
+        "defaults": {"amplitude": 0.5},
+        "signals": {"mock": {"curves": {
             "sdr_output": {"points": [{"gain_db": 40, "power_dbm": -36},
                                       {"gain_db": 74, "power_dbm": -2.5}]}}}},
     }
@@ -203,7 +203,9 @@ def test_form_round_trips_through_widgets():
     assert out["chain"]["gain_limits"] == {"min_gain_db": 0.0, "max_gain_db": 89.75}
     assert out["chain"]["operating_plane"] == "sdr_output"
     assert out["chain"]["limits"] == [{"plane": "sdr_output", "max_dbm": -2.5, "reason": "amp P1dB"}]
-    assert out["signals"]["mock"]["amplitude"] == 0.8
+    # amplitude is fixed fleet-wide: recorded on the chain default, not per signal
+    assert out["defaults"]["amplitude"] == 0.5
+    assert "amplitude" not in out["signals"]["mock"]
     pts = out["signals"]["mock"]["curves"]["sdr_output"]["points"]
     assert [(pt["gain_db"], pt["power_dbm"]) for pt in pts] == [(40.0, -36.0), (74.0, -2.5)]
     # plane topology is preserved from the model even though the form doesn't edit it
@@ -474,18 +476,47 @@ def test_issues_panel_shows_after_bad_edit():
 
 # ── C: unit_type + defaults.amplitude round-trip through the Editor ────────────────
 
-def test_unit_type_and_default_amplitude_round_trip():
+def test_unit_type_round_trips_and_amplitude_is_fixed():
     d = _doc()
     d["unit_type"] = "x410"
-    d["defaults"] = {"amplitude": 0.7}
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(d)
     out = p._read_form(strict=True)
     assert out["unit_type"] == "x410"
-    assert out["defaults"]["amplitude"] == 0.7
-    # editing them in the form is read back
-    p._f["def_amp"].setText("0.55")
-    assert p._read_form(strict=True)["defaults"]["amplitude"] == 0.55
+    # amplitude is not editable — it is normalised to the fixed fleet value on save
+    assert out["defaults"]["amplitude"] == 0.5
+    # …and there is no amplitude field in the editor
+    assert "def_amp" not in p._f
+    assert "amp" not in (p._f["signals"].get("mock") or {})
+
+
+def test_matching_per_signal_amplitude_is_normalised_away():
+    # A per-signal amplitude equal to the fixed value is dropped so it inherits the chain
+    # default (kept as a single 0.5), rather than restated on every signal.
+    from ui.calibration_panel import local_calibration_issues
+    d = _doc()
+    d["signals"]["mock"]["amplitude"] = 0.5
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(d)
+    out = p._read_form(strict=True)
+    assert "amplitude" not in out["signals"]["mock"]
+    assert out["defaults"]["amplitude"] == 0.5
+    assert local_calibration_issues(out) == []
+
+
+def test_legacy_amplitude_is_flagged_not_silently_relabelled():
+    # A calibration measured at a different amplitude (legacy) must be FLAGGED and its value
+    # PRESERVED on save — never rewritten to 0.5, which would mislabel the old curves and
+    # defeat the runtime amplitude gate.
+    from ui.calibration_panel import local_calibration_issues
+    d = _doc()
+    d["defaults"]["amplitude"] = 0.8                      # measured with an older script
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(d)
+    issues = local_calibration_issues(d)
+    assert any("0.8" in i and "re-measure" in i for i in issues)
+    out = p._read_form(strict=True)
+    assert out["defaults"]["amplitude"] == 0.8           # preserved, not relabelled to 0.5
 
 
 # ── D: dry-run validate ───────────────────────────────────────────────────────────
@@ -571,7 +602,7 @@ def test_validate_still_passes_a_clean_doc():
     assert "dry run" in p._status.text()
 
 
-# ── F: curve polish (CSV paste, sparkline, inherited-amplitude placeholder) ────────
+# ── F: curve polish (CSV paste, sparkline) ────────────────────────────────────────
 
 def test_csv_paste_adds_points():
     from PyQt6.QtWidgets import QApplication
@@ -592,17 +623,6 @@ def test_sparkline_handles_points_and_empty():
     assert len(s._pts) == 2
     s.set_points([])                                     # must not raise
     assert s._pts == []
-
-
-def test_blank_amplitude_shows_inherited_default_placeholder():
-    d = _doc()
-    d["defaults"] = {"amplitude": 0.8}
-    d["signals"]["mock"].pop("amplitude", None)          # inherit
-    p = CalibrationPanel("u", FakeHub(FakeClient()))
-    p._set_doc(d)
-    amp = p._f["signals"]["mock"]["amp"]
-    assert amp.text() == ""
-    assert "0.8" in amp.placeholderText()
 
 
 # ── calibration v2: the chain-builder UI (mockup) ─────────────────────────────────
@@ -695,16 +715,17 @@ def test_selecting_a_stage_updates_selection_and_survives_read():
     assert out["chain"]["planes"]["antenna_eirp"]["component"] == "patch_a"
 
 
-def test_signals_table_shows_freq_and_amplitude():
+def test_signals_table_shows_freq_and_range():
+    # Amplitude is fixed fleet-wide, so the table no longer carries an Ampl. column:
+    # Signal | Freq MHz | --power dBm.
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     _seed_catalog(p)
     p._set_doc(_v2_doc())
     p._populate_table({"mock": {"min_power_dbm": -12.4, "max_power_dbm": 28.2}})
-    assert p._table.columnCount() == 4
+    assert p._table.columnCount() == 3
     assert p._table.item(0, 0).text() == "mock"
     assert p._table.item(0, 1).text() == "1575.42"       # centre freq in MHz
-    assert p._table.item(0, 2).text() == "0.8"           # amplitude
-    assert "28.2" in p._table.item(0, 3).text()          # resolved --power range
+    assert "28.2" in p._table.item(0, 2).text()          # resolved --power range
 
 
 def test_multifreq_signal_shows_at_run():
@@ -715,7 +736,7 @@ def test_multifreq_signal_shows_at_run():
     p._set_doc(d)
     p._populate_table({"mock": {}})
     assert p._table.item(0, 1).text() == "at run"
-    assert p._table.item(0, 3).text() == "per frequency"
+    assert p._table.item(0, 2).text() == "per frequency"
 
 
 def test_editor_table_lists_signals_before_validate():
@@ -726,7 +747,7 @@ def test_editor_table_lists_signals_before_validate():
     p._set_doc(_v2_doc())
     assert p._table.rowCount() == 1
     assert p._table.item(0, 0).text() == "mock"
-    assert p._table.item(0, 3).text() == "validate to resolve"
+    assert p._table.item(0, 2).text() == "validate to resolve"
 
 
 def test_clicking_a_signal_opens_its_measured_curve():
@@ -777,7 +798,6 @@ def test_rename_signal_preserves_its_curves_and_order():
     out = p._read_form(strict=False)["signals"]
     assert "mock" not in out and "gnss_l1" in out
     assert out["gnss_l1"]["curves"] == before["curves"]        # curves carried over intact
-    assert out["gnss_l1"]["amplitude"] == before["amplitude"]
     assert list(out.keys()) == ["gnss_l1", "other"]            # insertion order preserved
 
 
@@ -871,18 +891,18 @@ def test_rename_persists_only_the_rename_not_the_working_edits(monkeypatch):
     client = _TasksClient(_TASKS_YAML)
     p = CalibrationPanel("u", FakeHub(client))
     _seed_catalog(p)
-    saved = _v2_doc()                                # defaults.amplitude == 0.8
+    saved = _v2_doc()                                # saved min_gain_db == 0.0
     p._set_doc(saved)
     p._saved_doc = copy.deepcopy(saved)              # as _handle_get would record
     p._handle_tasks(_TASKS_YAML)
-    p._f["def_amp"].setText("0.33")                  # a pending, unsaved working-doc edit
+    p._f["min_gain"].setText("5")                    # a pending, unsaved working-doc edit
     p._rename_signal("mock", "gnss_l1")
     saves = [c for (nm, c) in client.uploaded if nm == "calibration.json"]
     assert saves, "the rename should be persisted on its own"
     pushed = json.loads(saves[-1])
     assert "gnss_l1" in pushed["signals"] and "mock" not in pushed["signals"]
-    # the unsaved amplitude edit must NOT have gone out with the rename
-    assert pushed.get("defaults", {}).get("amplitude") == 0.8
+    # the unsaved min-gain edit must NOT have gone out with the rename
+    assert pushed.get("chain", {}).get("gain_limits", {}).get("min_gain_db") == 0.0
 
 
 def test_rename_of_an_unsaved_signal_does_not_push(monkeypatch):
