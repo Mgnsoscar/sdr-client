@@ -25,15 +25,39 @@ import yaml
 
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
+    QDialog, QDialogButtonBox, QFormLayout, QInputDialog, QLabel, QLineEdit,
     QPlainTextEdit, QScrollArea, QVBoxLayout,
 )
 
 from api import models as m
 
-from .param_form import ParamForm, power_mode_of_args
+from .param_form import (
+    ParamForm, power_mode_of_args, find_power_index, find_gain_index,
+    _POWER_FLAGS, _GAIN_FLAGS,
+)
 from .qt_adapter import DataHub
 from .theme import Palette
+
+
+def _fmt_gain(v: float) -> str:
+    return f"{v:g}"
+
+
+def _has_flag(args: List[str], flags) -> bool:
+    return any(a in flags for a in args)
+
+
+def _without_flag(args: List[str], flags) -> List[str]:
+    """Drop each occurrence of a flag AND the value token after it."""
+    out: List[str] = []
+    i = 0
+    while i < len(args):
+        if args[i] in flags:
+            i += 2                                   # skip the flag and its value
+            continue
+        out.append(args[i])
+        i += 1
+    return out
 
 
 class RunTaskDialog(QDialog):
@@ -57,6 +81,7 @@ class RunTaskDialog(QDialog):
         self._cal_signal_id: Optional[str] = None
         self._script_cal_signal: Optional[str] = None   # the SCRIPT's declared signal
         self._cal_bounds = None
+        self._task_entry: Optional[dict] = None          # full tasks.yaml entry, for persistence
         self._params_ready = False
         self._cal_ready = False
 
@@ -197,6 +222,7 @@ class RunTaskDialog(QDialog):
             self._set_status(
                 "Couldn't read this task's definition from the unit.", error=True)
             return
+        self._task_entry = dict(entry)                   # kept for persisting a gain default
 
         # The task opts into calibration by setting this env to the script's signal id.
         self._cal_signal_id = (entry.get("env") or {}).get("SDR_CAL_SIGNAL_ID")
@@ -261,8 +287,23 @@ class RunTaskDialog(QDialog):
         # Prefill from the deployed args; anything the form doesn't recognise
         # (positional args, flags not in the schema) drops into "Additional args".
         extra = self._form.set_values(self._current_args)
+        if self._uncalibrated_absolute():
+            # An authored absolute --power is meaningless on an uncalibrated unit and the
+            # form has no --power field here, so set_values returns it as an "extra". Drop
+            # it rather than surfacing a stale, un-runnable value in Additional args.
+            extra = _without_flag(extra, _POWER_FLAGS)
         if extra:
             self._extra.setText(" ".join(shlex.quote(e) for e in extra))
+
+    def _uncalibrated_absolute(self) -> bool:
+        """True when this task opts into calibration, the unit has NO resolved bounds for
+        the signal (so absolute --power is meaningless here), and the script exposes BOTH a
+        --power and a relative --gain. In that state --power is never sent and a relative
+        --gain is required. A script with only --power (no relative fallback) keeps showing
+        the power field, so it's excluded here."""
+        return (bool(self._cal_signal_id) and self._cal_bounds is None
+                and find_power_index(self._param_specs) is not None
+                and find_gain_index(self._param_specs) is not None)
         self._set_status("")
         self._update_preview()
 
@@ -288,11 +329,27 @@ class RunTaskDialog(QDialog):
     def _on_run(self) -> None:
         if self._starting:
             return
+        # On an uncalibrated unit, absolute --power can't be honoured. If the operator
+        # hasn't set a relative --gain, explain and capture one before running (and before
+        # the form's required-gain check fires) — rather than starting on a meaningless dBm.
+        if self._uncalibrated_absolute() and not _has_flag(self._override_args(), _GAIN_FLAGS):
+            gain = self._prompt_relative_gain()
+            if gain is None:
+                return                                   # cancelled — don't start
+            self._form.set_values([_GAIN_FLAGS[0], _fmt_gain(gain)])
+            self._update_preview()
         err = self._form.validate()
         if err:
             self._set_status(err, error=True)
             return
         args = self._override_args()
+        # If we're running an uncalibrated task that was authored with absolute power via a
+        # relative gain, persist that as the task's stored command so quick-play and
+        # sequences use the same gain (no re-prompt). One-time: only while --power lingers.
+        if (self._uncalibrated_absolute() and self._task_entry is not None
+                and _has_flag(self._current_args, _POWER_FLAGS)
+                and _has_flag(args, _GAIN_FLAGS)):
+            self._persist_gain_default(args)
         # replace_args=True: the form's values become the task's trailing args for
         # this run only. With no args (script has no params, nothing added) the
         # agent falls back to the task's configured command, so Start still works.
@@ -303,6 +360,36 @@ class RunTaskDialog(QDialog):
         self.hub.run_async(
             f"runtask_start:{self.hostname}",
             lambda: self.hub.fleet.get(self.hostname).start_task(self.task_name, req),
+        )
+
+    def _prompt_relative_gain(self) -> Optional[float]:
+        """Modal: explain the unit is uncalibrated for this signal and capture a relative
+        TX gain (dB). Returns the value, or None if cancelled. Bounds come from the --gain
+        param's schema."""
+        gi = find_gain_index(self._param_specs)
+        spec = self._param_specs[gi] if gi is not None else {}
+        lo = float(spec.get("min", 0.0) or 0.0)
+        hi = float(spec.get("max", 89.75) or 89.75)
+        default = spec.get("default")
+        start = float(default) if default is not None else lo
+        val, ok = QInputDialog.getDouble(
+            self, "Set a relative gain to run",
+            (f"This unit isn't calibrated for '{self._cal_signal_id}', so the absolute "
+             f"power this task was authored with can't be converted to a real level.\n\n"
+             f"Set a relative TX gain (raw dB) to run it here. This becomes the task's "
+             f"default gain on this unit — used every time you Start it or run it in a "
+             f"sequence — until you calibrate the unit or change it."),
+            start, lo, hi, 2)
+        return float(val) if ok else None
+
+    def _persist_gain_default(self, args: List[str]) -> None:
+        """Rewrite this task's stored command on the unit to the relative-gain args (no
+        --power), so future Starts/sequences reuse the chosen gain without re-prompting."""
+        entry = dict(self._task_entry or {})
+        entry["command"] = [self._interp, self._script_path] + list(args)
+        self.hub.run_async(
+            f"runtask_persist:{self.hostname}",
+            lambda: self.hub.fleet.get(self.hostname).update_task(self.task_name, entry),
         )
 
     # ── Misc ────────────────────────────────────────────────────────────────────
