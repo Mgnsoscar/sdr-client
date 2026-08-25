@@ -58,6 +58,10 @@ CAL_PARTIAL_STAGES_CAPABILITY = "calibration-partial-stages"  # agent >= 1.3.0
 _PARTIAL_STAGES_NEEDS_NEWER = (
     "this unit's agent is too old to leave a measured stage unmeasured for some signals "
     "(needs 1.3.0+). Update the agent, or measure every signal on each measured stage.")
+CAL_NO_SIGNALS_CAPABILITY = "calibration-no-signals"  # agent >= 1.4.0
+_NO_SIGNALS_NEEDS_NEWER = (
+    "this unit's agent is too old to save a calibration with no signals yet (needs 1.4.0+). "
+    "Update the agent, or add at least one measured signal before saving.")
 
 # When the unit is simply uncalibrated, the /calibration route answers 404 with this
 # detail. A generic "Not Found" 404 instead means the route itself is missing — i.e.
@@ -2478,7 +2482,8 @@ class CalibrationPanel(QWidget):
         if self._doc is None:
             self._set_status("nothing to save", kind="error")
             return
-        if self._blocks_on_components() or self._blocks_on_partial_stages():
+        if (self._blocks_on_components() or self._blocks_on_partial_stages()
+                or self._blocks_on_no_signals()):
             return
         self._send(json.dumps(self._doc).encode("utf-8"))
 
@@ -2522,6 +2527,15 @@ class CalibrationPanel(QWidget):
             return True
         return False
 
+    def _blocks_on_no_signals(self) -> bool:
+        """Guard: an agent older than 1.4.0 rejects a signal-less document ("document has
+        no signals"), so warn rather than let a first onboarding Save fail confusingly."""
+        if not ((self._doc or {}).get("signals") or {}) and not self._supports(
+                CAL_NO_SIGNALS_CAPABILITY):
+            self._set_status(_NO_SIGNALS_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
     def _supports(self, capability: str) -> bool:
         try:
             client = self.hub.fleet.get(self.hostname)
@@ -2560,7 +2574,8 @@ class CalibrationPanel(QWidget):
                 "no local issues found (agent too old to dry-run on the unit)",
                 kind="error" if issues else "warn")
             return
-        if self._blocks_on_components() or self._blocks_on_partial_stages():
+        if (self._blocks_on_components() or self._blocks_on_partial_stages()
+                or self._blocks_on_no_signals()):
             return
         self._set_status("validating (dry run — not saving)…")
         doc = self._doc

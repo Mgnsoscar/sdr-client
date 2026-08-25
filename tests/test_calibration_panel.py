@@ -1264,6 +1264,29 @@ def test_partial_stage_save_allowed_on_capable_agent():
     assert client.uploaded                                # the file was pushed (not blocked)
 
 
+def test_no_signals_save_blocked_on_old_agent():
+    # An agent without the 1.4.0 capability rejects a signal-less document, so Save warns
+    # instead of pushing an onboarding chain that would fail on the unit.
+    d = _doc()
+    d["signals"] = {}
+    client = FakeClient(caps=["calibration"])
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(d)
+    p._on_save()
+    assert "1.4.0" in p._status.text()
+    assert client.uploaded == []                         # nothing was pushed
+
+
+def test_no_signals_save_allowed_on_capable_agent():
+    d = _doc()
+    d["signals"] = {}
+    client = FakeClient(caps=["calibration", "calibration-no-signals"])
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(d)
+    p._on_save()
+    assert client.uploaded                                # the onboarding chain was pushed
+
+
 def test_library_grid_has_a_card_per_component_plus_add():
     from ui.calibration_panel import _ClickCard
     p = CalibrationPanel("u", FakeHub(FakeClient()))
