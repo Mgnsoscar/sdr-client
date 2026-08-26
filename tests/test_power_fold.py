@@ -1,7 +1,7 @@
 """Client-side re-fold of a resolved calibration artifact at a chosen transmit
 frequency — the mirror of the agent's calkit PowerMap. Expectations track the agent's
 tests/test_calibration_v2.py fixture so the two stay in step."""
-from state.power_fold import PowerFold, refold_bounds
+from state.power_fold import PowerFold, refold_bounds, clamp_warning
 
 
 # A v2 artifact: amp anchor tops at 24 dBm @ gain 74, min gain 40 @ -6 dBm; a
@@ -59,6 +59,26 @@ def test_refold_bounds_rewrites_the_power_range():
     assert out["max_power_dbm"] == 28.0 and out["min_power_dbm"] == -2.0
     assert out["quantity"] == "EIRP"                 # non-power fields carried through
     assert bounds["max_power_dbm"] == 27.0           # original dict untouched
+
+
+def test_clamp_warning_fires_when_power_exceeds_the_ceiling_at_a_frequency():
+    art = _v2_artifact()
+    # max EIRP is 27 @1 GHz, 28 @2 GHz. A target of 27.5 is fine at 2 GHz…
+    assert clamp_warning(art, 2.0e9, 27.5) is None
+    # …but exceeds the ceiling at 1 GHz → warn it will be clamped down.
+    msg = clamp_warning(art, 1.0e9, 27.5)
+    assert msg and "clamped down" in msg and "27.00" in msg
+    # below the floor → warn it will be raised.
+    lo = clamp_warning(art, 1.0e9, -10.0)
+    assert lo and "raised to it" in lo
+
+
+def test_clamp_warning_silent_when_not_frequency_dependent_or_unknown():
+    flat = {"curve": [[40.0, -6.0], [74.0, 24.0]], "min_gain_db": 40.0, "max_gain_db": 74.0}
+    assert clamp_warning(flat, 1.0e9, 999.0) is None       # constant chain → never clamps by freq
+    assert clamp_warning(_v2_artifact(), None, 27.5) is None   # unknown frequency
+    assert clamp_warning(_v2_artifact(), 1.0e9, None) is None  # unknown power
+    assert clamp_warning(None, 1.0e9, 27.5) is None            # no artifact
 
 
 def test_refold_bounds_is_a_noop_without_frequency_or_artifact():

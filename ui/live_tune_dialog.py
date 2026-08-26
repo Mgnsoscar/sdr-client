@@ -44,6 +44,7 @@ class LiveTuneDialog(QDialog):
         # Per-unit power calibration: reflect the real --power range while retuning.
         self._cal_signal_id = None
         self._cal_bounds = None
+        self._script_cal_freq_param = None
         self._params_ready = False
         self._cal_ready = False
 
@@ -71,12 +72,22 @@ class LiveTuneDialog(QDialog):
 
         self._form = ParamForm()
         self._form.changed.connect(self._mark_dirty)
+        self._form.changed.connect(self._update_clamp_warning)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setWidget(self._form)
         scroll.setMinimumHeight(120)
         root.addWidget(scroll, stretch=1)
+
+        # A warning (not a block) when the current frequency puts --power beyond what the
+        # unit can deliver there — the running task clamps it, so it delivers less.
+        self._clamp_warn = QLabel("")
+        self._clamp_warn.setWordWrap(True)
+        self._clamp_warn.setVisible(False)
+        self._clamp_warn.setStyleSheet(
+            f"font-size: 11px; color: {Palette.ARMED}; font-weight: 600;")
+        root.addWidget(self._clamp_warn)
 
         self._result = QLabel("")
         self._result.setWordWrap(True)
@@ -146,6 +157,7 @@ class LiveTuneDialog(QDialog):
         elif op == "livetune_params":
             specs = (result or {}).get("params", [])
             self._live_specs = [s for s in specs if s.get("live")]
+            self._script_cal_freq_param = (result or {}).get("calibration_freq_param")
             self._params_ready = True
             self._maybe_build()
         elif op == "livetune_get":
@@ -191,7 +203,8 @@ class LiveTuneDialog(QDialog):
             return
         self._form.set_params(self._live_specs, cal_bounds=self._cal_bounds,
                               absolute_allowed=True,
-                              default_power_mode=getattr(self, "_default_power_mode", None))
+                              default_power_mode=getattr(self, "_default_power_mode", None),
+                              cal_freq_param=self._script_cal_freq_param)
         if not self._live_specs:
             self._set_result("This task declares no live parameters.")
             self._form.setEnabled(False)
@@ -231,6 +244,24 @@ class LiveTuneDialog(QDialog):
             return
         self._dirty = True
         self._set_result("Unsaved changes — press Update to apply.")
+
+    def _update_clamp_warning(self) -> None:
+        """Warn (never block) when the current --power can't be delivered at the current
+        frequency — the running task clamps it, so it delivers less than the number says.
+        The power field re-bounds to the achievable range too; this spells out the clamp."""
+        from state.power_fold import clamp_warning
+        from .param_form import find_power_index
+        lbl = getattr(self, "_clamp_warn", None)
+        if lbl is None:
+            return
+        vals = self._form.values()
+        pidx = find_power_index(self._live_specs)
+        power_dest = self._live_specs[pidx]["dest"] if pidx is not None else None
+        freq = vals.get(self._script_cal_freq_param) if self._script_cal_freq_param else None
+        power = vals.get(power_dest) if power_dest else None
+        msg = clamp_warning((self._cal_bounds or {}).get("artifact"), freq, power)
+        lbl.setText("⚠ " + msg if msg else "")
+        lbl.setVisible(bool(msg))
 
     def _apply(self) -> None:
         if self._applying:

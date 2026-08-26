@@ -404,6 +404,7 @@ class ParamForm(QWidget):
         self._base_specs: List[dict] = []
         self._cal_bounds = None
         self._cal_freq_param = None             # dest of the freq field (CAL_FREQ_PARAM)
+        self._cal_freq_default = None           # freq to fold at when the field isn't set
         self._folded_at = None                  # freq the power/gain bounds were last folded at
         self._render_freq = None                # freq to fold at for the in-progress render
         self._refolding = False                 # re-entrancy guard for the re-fold re-render
@@ -426,7 +427,7 @@ class ParamForm(QWidget):
     def set_params(self, specs: List[dict], selectable: bool = False,
                    cal_bounds=None, absolute_allowed: bool = False,
                    default_power_mode=None, hint_bounds=None, caution=None,
-                   cal_freq_param=None) -> None:
+                   cal_freq_param=None, cal_freq_default=None) -> None:
         """Rebuild the form for a parameter schema (clears existing widgets).
 
         selectable=True prefixes each row with an include checkbox: values() then
@@ -442,8 +443,12 @@ class ParamForm(QWidget):
         self._selectable = selectable
         self._cal_bounds = cal_bounds
         self._cal_freq_param = cal_freq_param
+        self._cal_freq_default = cal_freq_default
         self._folded_at = None
-        self._render_freq = self._spec_default_freq()   # fold at the freq field's default
+        # Fold at the carried-forward frequency (a sequence step's effective freq) when
+        # given, else the freq field's own default.
+        self._render_freq = (cal_freq_default if cal_freq_default is not None
+                             else self._spec_default_freq())
         self._hint_bounds = hint_bounds
         self._caution = caution
         self._cal_amplitude = (cal_bounds or {}).get("amplitude")
@@ -537,6 +542,10 @@ class ParamForm(QWidget):
                 w.lineEdit().editingFinished.connect(self._on_freq_changed)
         elif isinstance(w, (QSpinBox, QDoubleSpinBox, QLineEdit)):
             w.editingFinished.connect(self._on_freq_changed)
+        # In tune (selectable) mode, ticking the freq param on/off changes whether it
+        # overrides the carried-forward frequency, so re-fold on that too.
+        if self._selectable and dest in self._checks:
+            self._checks[dest].toggled.connect(self._on_freq_changed)
 
     def _on_freq_changed(self, *_) -> None:
         """Re-fold the power/gain bounds when the transmit frequency is committed."""
@@ -544,7 +553,7 @@ class ParamForm(QWidget):
             return
         if self._power_mode not in ("absolute", "relative"):
             return
-        if self._current_freq_hz() == self._folded_at:   # frequency didn't actually move
+        if self._fold_freq_now() == self._folded_at:     # frequency didn't actually move
             return
         self._do_refold()
 
@@ -558,14 +567,14 @@ class ParamForm(QWidget):
         dest = self._freq_dest()
         if dest is None or dest not in self._widgets or not self._is_freq_dependent():
             return
-        if self._current_freq_hz() == self._folded_at:
+        if self._fold_freq_now() == self._folded_at:
             return
         self._do_refold()
 
     def _do_refold(self) -> None:
-        """Re-render folding at the frequency now in the field, preserving the other field
+        """Re-render folding at the frequency now in effect, preserving the other field
         values (the same rebuild-and-restore the power-mode toggle uses)."""
-        self._render_freq = self._current_freq_hz()    # capture BEFORE the widgets clear
+        self._render_freq = self._fold_freq_now()      # capture BEFORE the widgets clear
         self._refolding = True
         try:
             keep = self.build_args()
@@ -618,6 +627,20 @@ class ParamForm(QWidget):
         if isinstance(val, (int, float)) and not isinstance(val, bool):
             return float(val)
         return None
+
+    def _fold_freq_now(self) -> Optional[float]:
+        """The frequency to fold the power/gain range at right now: the freq field's value
+        when it is actively set (in selectable/tune mode that means its checkbox is ticked),
+        otherwise the carried-forward frequency (a sequence step's effective freq)."""
+        dest = self._freq_dest()
+        if dest and dest in self._widgets:
+            active = (not self._selectable
+                      or (dest in self._checks and self._checks[dest].isChecked()))
+            if active:
+                v = self._current_freq_hz()
+                if v is not None:
+                    return v
+        return self._cal_freq_default
 
     def _spec_default_freq(self) -> Optional[float]:
         """The freq field's default from the schema — the fold frequency for the FIRST
@@ -699,7 +722,7 @@ class ParamForm(QWidget):
             return
         keep = self.build_args()                # carry non-power params across
         self._power_mode = self._power_modes[idx]
-        self._render_freq = self._current_freq_hz() or self._render_freq   # fold at the field
+        self._render_freq = self._fold_freq_now()       # fold at the effective frequency
         self._render()
         self.set_values(keep)
         self.changed.emit()

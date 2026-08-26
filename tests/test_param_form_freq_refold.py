@@ -84,6 +84,31 @@ def test_prefill_folds_at_the_loaded_frequency():
     assert _power_max(f) == 28.0
 
 
+def test_folds_at_carried_default_when_freq_field_not_set():
+    # A sequence step that does NOT set --freq folds the --power range at the carried-forward
+    # frequency (the effective freq at that offset), not the field's schema default.
+    f = ParamForm()
+    f.set_params(_specs(), cal_bounds=_bounds(), absolute_allowed=True,
+                 default_power_mode="absolute", cal_freq_param="freq",
+                 cal_freq_default=2.0e9)                    # effective freq carried in
+    assert _power_max(f) == 28.0                            # folded at 2 GHz, not the 1 GHz default
+
+
+def test_selectable_freq_overrides_the_carried_default_only_when_ticked():
+    # In a tune step (selectable), the freq field folds only when its box is ticked;
+    # unticked, the carried-forward frequency governs the --power range.
+    f = ParamForm()
+    f.set_params(_specs(), selectable=True, cal_bounds=_bounds(), absolute_allowed=True,
+                 default_power_mode="absolute", cal_freq_param="freq",
+                 cal_freq_default=2.0e9)
+    assert _power_max(f) == 28.0                            # unticked freq → carried 2 GHz
+    # tick freq and set it to 1 GHz → now the step's own frequency governs
+    f._checks["freq"].setChecked(True)
+    f._widgets["freq"][0].setCurrentText("f1")
+    f._on_freq_changed()
+    assert _power_max(f) == 27.0
+
+
 def test_no_refold_without_cal_freq_param():
     # Same schema/bounds but the script didn't declare CAL_FREQ_PARAM → the range stays at
     # the resolved (representative) value regardless of the freq field.

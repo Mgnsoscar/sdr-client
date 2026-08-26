@@ -152,6 +152,28 @@ class PowerFold:
                    gain_step_db=step)
 
 
+def clamp_warning(artifact: Optional[dict], freq_hz: Optional[float],
+                  power_dbm: Optional[float], tol: float = 0.05) -> Optional[str]:
+    """A one-line caption when an absolute ``power_dbm`` can't be delivered at ``freq_hz``
+    on this artifact's chain — the transmitter clamps to the achievable range (safe, but it
+    delivers a different power than asked). None when the request is in range, the chain
+    isn't frequency-dependent, or either value is unknown. Used to warn (never block) when a
+    tune places the frequency where the power can't follow."""
+    fold = PowerFold.from_artifact(artifact or {})
+    if fold is None or not fold.freq_dependent or freq_hz is None or power_dbm is None:
+        return None
+    b = fold.bounds_at(float(freq_hz))
+    lo, hi, p = b["min_power_dbm"], b["max_power_dbm"], float(power_dbm)
+    mhz = float(freq_hz) / 1e6
+    if p > hi + tol:
+        return (f"at {mhz:.3f} MHz this unit delivers at most {hi:.2f} dBm — the requested "
+                f"{p:.2f} dBm will be clamped down to it.")
+    if p < lo - tol:
+        return (f"at {mhz:.3f} MHz this unit's floor is {lo:.2f} dBm — the requested "
+                f"{p:.2f} dBm will be raised to it.")
+    return None
+
+
 def refold_bounds(bounds: dict, freq_hz: Optional[float]) -> dict:
     """Return a copy of a /calibration signal summary ``bounds`` dict with its
     power/gain range re-folded at ``freq_hz`` from the embedded ``artifact``. No-op (the

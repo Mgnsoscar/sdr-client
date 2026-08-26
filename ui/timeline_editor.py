@@ -1021,7 +1021,21 @@ class StepEditorDialog(QDialog):
         self._params_status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         outer.addWidget(self._params_status)
 
+        # A warning (not a block) when this step's effective frequency puts the running
+        # --power beyond what the unit can deliver there — the runtime clamps it safely.
+        self._clamp_warn = QLabel("")
+        self._clamp_warn.setWordWrap(True)
+        self._clamp_warn.setVisible(False)
+        self._clamp_warn.setStyleSheet(
+            f"font-size: 11px; color: {Palette.ARMED}; font-weight: 600;")
+        outer.addWidget(self._clamp_warn)
+
         self._form = ParamForm()
+        self._form.changed.connect(self._update_clamp_warning)
+        # Moving the step changes which earlier steps precede it, hence the carried-forward
+        # frequency/power — refresh the clamp warning. (Wired here, after _clamp_warn exists.)
+        self._anchor.currentIndexChanged.connect(lambda *_: self._update_clamp_warning())
+        self._run_off.valueChanged.connect(lambda *_: self._update_clamp_warning())
         pscroll = QScrollArea()
         pscroll.setWidgetResizable(True)
         pscroll.setWidget(self._form)
@@ -1204,6 +1218,12 @@ class StepEditorDialog(QDialog):
         # if --gain) — otherwise a saved-absolute task could fall back to the form's
         # default (or a mode left over from a previously-selected task).
         mode = power_mode_of_args(prefill)
+        freq_param = self._editor._script_cal_freq_params.get(script)
+        # The frequency (and power) in effect when this step fires — replayed from the
+        # task's deployed args and the earlier same-task steps — so the form folds the
+        # --power range at that frequency even when this step doesn't set --freq itself.
+        self._carried = self._carried_values(task, script, specs)
+        carried_freq = self._carried.get(freq_param) if freq_param else None
         if self._is_tune():
             # Only live-tunable params can be changed mid-run; the checkboxes let
             # you pick exactly which ones this step sets.
@@ -1211,7 +1231,7 @@ class StepEditorDialog(QDialog):
             self._form.set_params(specs, selectable=True, cal_bounds=bounds,
                                   absolute_allowed=abs_allowed, default_power_mode=mode,
                                   hint_bounds=hint, caution=caution,
-                                  cal_freq_param=self._editor._script_cal_freq_params.get(script))
+                                  cal_freq_param=freq_param, cal_freq_default=carried_freq)
             self._params_status.setText(
                 "tick the parameters to set at this offset" if specs
                 else "this task's script declares no live parameters")
@@ -1220,13 +1240,62 @@ class StepEditorDialog(QDialog):
             self._form.set_params(specs, cal_bounds=bounds,
                                   absolute_allowed=abs_allowed, default_power_mode=mode,
                                   hint_bounds=hint, caution=caution,
-                                  cal_freq_param=self._editor._script_cal_freq_params.get(script))
+                                  cal_freq_param=freq_param, cal_freq_default=carried_freq)
             self._params_status.setText(
                 "" if specs else "this script declares no parameters — use extra args")
             self._apply_prefill()
+        self._update_clamp_warning()
         if bounds and self._editor.cal_is_stale():
             self._params_status.setText("absolute power uses last-known calibration "
                                         "(unit offline) — refreshes when it reconnects")
+
+    def _current_order_key(self):
+        """This step's best-effort position on the task's timeline (see
+        timeline_model._carry_order_key), so state is carried forward only from earlier
+        steps. A duration bar starts the task (rank 0); a tune/ramp uses its anchor+offset."""
+        if self._is_tune() or self._type.currentData() == "ramp":
+            anchor = self._anchor.currentData() or "start"
+            off = round(self._run_off.value(), 1)
+            return (1, off) if anchor == "stop" else (0, off)
+        return (0, 0.0)                                  # a bar / run starts the task
+
+    def _carried_values(self, task: str, script: str, specs: list) -> dict:
+        """The {dest: value} parameter state (effective --freq / --power) the task is
+        running with when this step fires — the task's deployed args replayed through the
+        earlier same-task steps in this sequence."""
+        _s, base_args = self._editor.script_for_task(task)
+        try:
+            return tlm.sequence_effective_values(
+                self._editor.items(), task, base_args, specs, self._src.uid,
+                target_key=self._current_order_key())
+        except Exception:      # noqa: BLE001  — a warning helper must never break the editor
+            return {}
+
+    def _update_clamp_warning(self) -> None:
+        """Warn (never block) when this step's effective frequency puts the running --power
+        beyond what the unit can deliver there — the runtime clamps it, so the delivered
+        power won't match the number. Effective freq/power = the carried-forward state with
+        this step's own set values layered on top."""
+        from state.power_fold import clamp_warning
+        from .param_form import find_power_index
+        lbl = self._clamp_warn
+        task = self._task.currentText().strip()
+        bounds = self._editor.cal_bounds_for_task(task)
+        script, _ = self._editor.script_for_task(task)
+        if not bounds:
+            lbl.setVisible(False); return
+        specs = self._editor.param_cache().get(script, [])
+        freq_param = self._editor._script_cal_freq_params.get(script)
+        pidx = find_power_index(specs)
+        power_dest = specs[pidx]["dest"] if pidx is not None else None
+        if not freq_param or power_dest is None:
+            lbl.setVisible(False); return
+        carried = self._carried_values(task, script, specs)
+        effective = {**carried, **self._form.values()}   # this step's set values win
+        msg = clamp_warning(bounds.get("artifact"), effective.get(freq_param),
+                            effective.get(power_dest))
+        lbl.setText("⚠ " + msg if msg else "")
+        lbl.setVisible(bool(msg))
 
     def _apply_prefill(self) -> None:
         if self._pending_prefill is None:
