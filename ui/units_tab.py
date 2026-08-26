@@ -426,6 +426,13 @@ class UnitsTab(QWidget):
     def _detail_is_open(self) -> bool:
         return self._stack.currentIndex() == 1
 
+    def confirm_leave(self) -> bool:
+        """OK to switch the top-level app tab away from Units? Defers to the open unit's
+        detail so unsaved calibration edits are flagged before leaving. True = go ahead."""
+        if self._detail_is_open():
+            return self._detail.confirm_leave()
+        return True
+
     # ── Data updates (called by MainWindow from hub signals) ────────────────────
 
     def on_fast_update(self, snap) -> None:

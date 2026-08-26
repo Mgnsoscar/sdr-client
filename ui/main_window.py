@@ -166,6 +166,14 @@ class MainWindow(QMainWindow):
     # ── Tab switching ───────────────────────────────────────────────────────────
 
     def _select_tab(self, idx: int) -> None:
+        # Leaving the Units tab while a unit's Calibration sub-tab holds unsaved edits?
+        # Let it warn first (Save / Don't save / Cancel), same as navigating inside the unit.
+        cur = self._stack.currentWidget()
+        if (cur is self.units_tab and self._stack.widget(idx) is not self.units_tab
+                and not self.units_tab.confirm_leave()):
+            for i, btn in enumerate(self._tab_buttons):        # stay on Units
+                btn.setChecked(self._stack.currentIndex() == i)
+            return
         self._stack.setCurrentIndex(idx)
         for i, btn in enumerate(self._tab_buttons):
             btn.setChecked(i == idx)

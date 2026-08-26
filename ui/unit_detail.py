@@ -470,24 +470,41 @@ class UnitDetail(QWidget):
         panel = getattr(self, "_calibration_panel", None)
         if panel is None or not panel.has_unsaved_changes():
             return True
+        decision = self._ask_unsaved_decision()
+        if decision == "cancel":
+            return False                                   # stay on Calibration
+        if decision == "save":
+            # Only leave once the save actually dispatched; if it was blocked (invalid form
+            # or an unsupported-agent guard) stay so the user can see why.
+            return panel.request_save()
+        return True                                        # "discard" → leave, edits kept
+
+    def _ask_unsaved_decision(self) -> str:
+        """Prompt for what to do about unsaved calibration edits. Returns 'save', 'discard'
+        (leave without saving), or 'cancel' (stay). Split out so the leave logic is testable
+        without driving a modal."""
         box = QMessageBox(self.window())
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("Unsaved calibration changes")
         box.setText("You have unsaved changes to this unit's calibration.")
         box.setInformativeText("Save them before leaving the Calibration tab?")
         save = box.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Don't save", QMessageBox.ButtonRole.DestructiveRole)
+        discard = box.addButton("Don't save", QMessageBox.ButtonRole.DestructiveRole)
         cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(save)
         box.exec()
         clicked = box.clickedButton()
         if clicked is cancel:
-            return False                                   # stay on Calibration
-        if clicked is save:
-            # Only leave once the save actually dispatched; if it was blocked (invalid form
-            # or an unsupported-agent guard) stay so the user can see why.
-            return panel.request_save()
-        return True                                        # "Don't save" → leave, edits kept
+            return "cancel"
+        if clicked is discard:
+            return "discard"
+        return "save"
+
+    def confirm_leave(self) -> bool:
+        """Public: OK to navigate away from this unit's detail entirely (e.g. switching
+        the top-level app tab to Library/Schedule)? Prompts about unsaved calibration
+        edits exactly as the back button does. True = go ahead, False = stay."""
+        return self._confirm_leave_calibration()
 
     def _handle_back(self) -> None:
         if not self._confirm_leave_calibration():
