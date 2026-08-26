@@ -1180,6 +1180,7 @@ class StepEditorDialog(QDialog):
             return
         self._editor.param_cache()[script] = (result or {}).get("params", [])
         self._editor._script_cal_signals[script] = (result or {}).get("calibration_signal")
+        self._editor._script_cal_freq_params[script] = (result or {}).get("calibration_freq_param")
         if script == self._current_script:
             self._build_form(script)
 
@@ -1209,7 +1210,8 @@ class StepEditorDialog(QDialog):
             specs = [s for s in specs if s.get("live")]
             self._form.set_params(specs, selectable=True, cal_bounds=bounds,
                                   absolute_allowed=abs_allowed, default_power_mode=mode,
-                                  hint_bounds=hint, caution=caution)
+                                  hint_bounds=hint, caution=caution,
+                                  cal_freq_param=self._editor._script_cal_freq_params.get(script))
             self._params_status.setText(
                 "tick the parameters to set at this offset" if specs
                 else "this task's script declares no live parameters")
@@ -1217,7 +1219,8 @@ class StepEditorDialog(QDialog):
         else:
             self._form.set_params(specs, cal_bounds=bounds,
                                   absolute_allowed=abs_allowed, default_power_mode=mode,
-                                  hint_bounds=hint, caution=caution)
+                                  hint_bounds=hint, caution=caution,
+                                  cal_freq_param=self._editor._script_cal_freq_params.get(script))
             self._params_status.setText(
                 "" if specs else "this script declares no parameters — use extra args")
             self._apply_prefill()
@@ -1323,6 +1326,7 @@ class TimelineEditor(QWidget):
         self._task_commands: Dict[str, List[str]] = {}
         self._param_specs: Dict[str, list] = {}
         self._script_cal_signals: Dict[str, str] = {}   # script -> its declared CAL_SIGNAL_ID
+        self._script_cal_freq_params: Dict[str, str] = {}  # script -> its CAL_FREQ_PARAM
         self._params_inflight: set = set()
         # Calibration context: params come from the library (same across units), but
         # absolute-power bounds are per-UNIT, so the calibration host is tracked

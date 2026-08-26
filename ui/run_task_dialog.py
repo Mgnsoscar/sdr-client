@@ -90,6 +90,7 @@ class RunTaskDialog(QDialog):
         # bounds for it, so the --power field shows this unit's real min/max.
         self._cal_signal_id: Optional[str] = None
         self._script_cal_signal: Optional[str] = None   # the SCRIPT's declared signal
+        self._script_cal_freq_param: Optional[str] = None  # CAL_FREQ_PARAM: the freq field
         self._cal_bounds = None
         self._task_entry: Optional[dict] = None          # full tasks.yaml entry, for persistence
         self._fallback_gain: Optional[str] = None         # persisted uncalibrated stop-gap gain
@@ -220,6 +221,7 @@ class RunTaskDialog(QDialog):
             self._params_ready = True
             self._param_specs = (result or {}).get("params", [])
             self._script_cal_signal = (result or {}).get("calibration_signal")
+            self._script_cal_freq_param = (result or {}).get("calibration_freq_param")
             self._maybe_build()
 
     # ── Parse the task's command → interpreter + script + args ──────────────────
@@ -301,7 +303,7 @@ class RunTaskDialog(QDialog):
             script_calibratable=bool(self._script_cal_signal or self._cal_signal_id))
         self._form.set_params(self._param_specs, cal_bounds=self._cal_bounds,
                               absolute_allowed=True, default_power_mode=mode,
-                              caution=caution)
+                              caution=caution, cal_freq_param=self._script_cal_freq_param)
         # Prefill from the deployed args; anything the form doesn't recognise
         # (positional args, flags not in the schema) drops into "Additional args".
         extra = self._form.set_values(self._current_args)

@@ -28,6 +28,7 @@ from .power_scan import (
     scan_absolute_power, power_out_of_range, scan_amplitudes, amplitude_mismatch,
     clip_library_power,
 )
+from .power_fold import PowerFold, refold_bounds
 
 __all__ = ["Poller", "FastSnapshot", "SlowSnapshot", "LogTailer", "local_ip",
            "PlanStore", "new_plan_id", "ScheduleStore", "new_scheduled_id",
@@ -38,4 +39,5 @@ __all__ = ["Poller", "FastSnapshot", "SlowSnapshot", "LogTailer", "local_ip",
            "ComponentCatalog", "CatalogError", "parse_sweep", "validate_table",
            "COMPONENTS_WIRE_NAME", "dump_components", "referenced_components",
            "plan_unit_deploy", "scan_absolute_power", "power_out_of_range",
-           "scan_amplitudes", "amplitude_mismatch", "clip_library_power"]
+           "scan_amplitudes", "amplitude_mismatch", "clip_library_power",
+           "PowerFold", "refold_bounds"]
