@@ -681,8 +681,9 @@ class _CurveTable(QTableWidget):
                         "with gain AND power both strictly increasing.\n\n"
                         "Double-click a cell (or just type) to edit · Del clears the "
                         "current cell · Ctrl+Z / Ctrl+Y undo/redo · Esc or click away "
-                        "to deselect · paste rows of \"gain, power\" (Ctrl+V) from a "
-                        "spreadsheet.")
+                        "to deselect · paste (Ctrl+V) a \"gain, power\" block from a "
+                        "spreadsheet — it lands at the selected cell (or appends), and a "
+                        "single column fills just that column.")
         # Undo/redo history of row snapshots (see _record_history / undo / redo).
         self._history: list = [[]]
         self._hist_idx = 0
@@ -819,23 +820,65 @@ class _CurveTable(QTableWidget):
             self._hist_idx += 1
             self._restore(self._history[self._hist_idx])
 
+    @staticmethod
+    def _is_num(s: str) -> bool:
+        try:
+            float(s)
+            return True
+        except (TypeError, ValueError):
+            return False
+
+    def _strip_trailing_blank_rows(self) -> int:
+        """Drop fully-empty rows at the bottom (from an unfilled “+ point”), returning the
+        resulting row count — the anchor for an append-style paste, so pasted data lands
+        against the real points instead of below stray blanks."""
+        r = self.rowCount() - 1
+        while r >= 0:
+            g = self.item(r, 0).text().strip() if self.item(r, 0) else ""
+            p = self.item(r, 1).text().strip() if self.item(r, 1) else ""
+            if g == "" and p == "":
+                self.removeRow(r)
+                r -= 1
+            else:
+                break
+        return self.rowCount()
+
     def _paste_csv(self) -> bool:
+        """Paste a spreadsheet block of gain/power values. Cells are comma-, tab-, or
+        whitespace-separated; a leading header row ("gain … power …") is skipped. The block
+        lands at the current cell (overwriting downward and extending rows, spreadsheet
+        style); with no current cell it appends after the existing points. A single-column
+        paste fills just the focused column, so you can drop in gains or powers on their own."""
         text = QApplication.clipboard().text()
         if not text or not text.strip():
             return False
-        rows = []
+        grid = []
         for line in text.splitlines():
-            line = line.strip().replace(",", " ").replace("\t", " ")
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) >= 2:
-                rows.append((parts[0], parts[1]))
-        if not rows:
+            parts = [p for p in line.strip().replace(",", " ").replace("\t", " ").split()
+                     if p != ""]
+            if parts:
+                grid.append(parts)
+        if grid and not self._is_num(grid[0][0]):
+            grid = grid[1:]                              # drop a header line
+        if not grid:
             return False
+        ncols = min(2, max(len(r) for r in grid))
+        cur_r, cur_c = self.currentRow(), self.currentColumn()
+        # A 2-column block always starts in the gain column; a 1-column paste fills the
+        # focused column (gain or power), so you can paste a single measured column.
+        start_col = 0 if ncols >= 2 else (cur_c if cur_c in (0, 1) else 0)
+        start_row = cur_r if cur_r is not None and cur_r >= 0 \
+            else self._strip_trailing_blank_rows()
         self.blockSignals(True)
-        for g, p in rows:
-            self._append(g, p)
+        for i, fields in enumerate(grid):
+            r = start_row + i
+            while r >= self.rowCount():
+                self._append()
+            for j in range(min(ncols, len(fields))):
+                c = start_col + j
+                if c > 1:
+                    break
+                self.setItem(r, c, QTableWidgetItem(fields[j]))
         self.blockSignals(False)
         self._fit_height()
         self._changed()
