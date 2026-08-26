@@ -77,6 +77,11 @@ _GAIN_STEP_NEEDS_NEWER = (
     "this unit's agent is too old to snap the gain to a step (needs 1.7.0+). It would ignore "
     "the gain step and command an off-grid gain the SDR silently rounds. Update the agent, or "
     "clear the Gain step field.")
+CAL_FREQ_OPTIONAL_CENTER_CAPABILITY = "calibration-freq-optional-center"  # agent >= 1.7.1
+_FREQ_OPTIONAL_CENTER_NEEDS_NEWER = (
+    "this unit's agent is too old to leave the centre frequency blank on a frequency-dependent "
+    "chain (needs 1.7.1+). It requires a centre frequency to fold the operating point. Update "
+    "the agent, or fill in each signal's centre frequency.")
 
 # The baseband amplitude every broadcaster script transmits at is a FIXED constant (the
 # scripts' baked AMPLITUDE), not an operator control — so calibration is always measured at
@@ -2512,11 +2517,14 @@ class CalibrationPanel(QWidget):
         bw = QLineEdit(_numstr(sig.get("occupied_bw_hz")))
         bw.setToolTip("Occupied bandwidth (Hz), optional.")
         cfreq = QLineEdit(_numstr(sig.get("center_freq_hz")))
-        cfreq.setPlaceholderText("Hz — required for a frequency-dependent chain")
+        cfreq.setPlaceholderText("Hz — optional; blank folds at a representative frequency")
         cfreq.setToolTip("Centre frequency (Hz) at which this signal's chain is evaluated "
-                         "for the --power bounds. Required when a cable/antenna is "
-                         "frequency-dependent; blank for a chirp (many frequencies) or a "
-                         "flat chain.")
+                         "for the --power bounds. Optional even on a frequency-dependent "
+                         "chain — the transmit frequency is set at runtime by the task's "
+                         "--freq, and left blank the agent folds the bounds at a "
+                         "representative (worst-case) frequency. Set it to pin the preview "
+                         "to one frequency (needs agent 1.7.1+ to leave blank when a "
+                         "cable/antenna is frequency-dependent).")
         cfreq.editingFinished.connect(self._refresh_form_from_widgets)
         plabel = QLineEdit(sig.get("plot_label", ""))
         plabel.setPlaceholderText(sid)
@@ -2721,7 +2729,8 @@ class CalibrationPanel(QWidget):
             return False
         if (self._blocks_on_components() or self._blocks_on_partial_stages()
                 or self._blocks_on_no_signals() or self._blocks_on_limit_side()
-                or self._blocks_on_plane_roles() or self._blocks_on_gain_step()):
+                or self._blocks_on_plane_roles() or self._blocks_on_gain_step()
+                or self._blocks_on_freq_optional_center()):
             return False
         self._send(json.dumps(self._doc).encode("utf-8"))
         return True
@@ -2830,6 +2839,31 @@ class CalibrationPanel(QWidget):
             return True
         return False
 
+    def _doc_uses_freq_optional_center(self, doc) -> bool:
+        """True when the chain is frequency-dependent (a derived plane references a
+        multi-point component table) AND at least one signal declares no center_freq_hz.
+        Only then does an agent older than 1.7.1 reject the document (a flat / single-point
+        component needs no frequency, and a signal that supplies its own centre frequency
+        resolves on any agent)."""
+        planes = ((doc or {}).get("chain") or {}).get("planes") or {}
+        freq_dep = any(isinstance(p, dict) and p.get("component")
+                       and len(self._comp_table(p.get("component"))) > 1
+                       for p in planes.values())
+        if not freq_dep:
+            return False
+        return any(not (sig or {}).get("center_freq_hz")
+                   for sig in ((doc or {}).get("signals") or {}).values())
+
+    def _blocks_on_freq_optional_center(self) -> bool:
+        """Guard: an agent older than 1.7.1 rejects a frequency-dependent chain whose signal
+        has no center_freq_hz ("uses a frequency-dependent component but has no
+        'center_freq_hz'"), so warn rather than let Save fail confusingly on the unit."""
+        if self._doc_uses_freq_optional_center(self._doc) and not self._supports(
+                CAL_FREQ_OPTIONAL_CENTER_CAPABILITY):
+            self._set_status(_FREQ_OPTIONAL_CENTER_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
     def _supports(self, capability: str) -> bool:
         try:
             client = self.hub.fleet.get(self.hostname)
@@ -2870,7 +2904,8 @@ class CalibrationPanel(QWidget):
             return
         if (self._blocks_on_components() or self._blocks_on_partial_stages()
                 or self._blocks_on_no_signals() or self._blocks_on_limit_side()
-                or self._blocks_on_plane_roles() or self._blocks_on_gain_step()):
+                or self._blocks_on_plane_roles() or self._blocks_on_gain_step()
+                or self._blocks_on_freq_optional_center()):
             return
         self._set_status("validating (dry run — not saving)…")
         doc = self._doc

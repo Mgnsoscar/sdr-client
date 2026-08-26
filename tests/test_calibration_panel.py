@@ -1513,6 +1513,47 @@ def test_gain_step_save_allowed_on_capable_agent():
     assert client.uploaded
 
 
+# ── optional centre frequency on a frequency-dependent chain (agent >= 1.7.1) ───────
+
+def _freq_dep_no_center_doc():
+    d = _v2_doc()
+    d["signals"]["mock"].pop("center_freq_hz", None)     # blank on a freq-dependent chain
+    return d
+
+
+def test_freq_optional_center_detection():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    # a freq-dependent chain with no centre frequency → needs the newer agent
+    assert p._doc_uses_freq_optional_center(_freq_dep_no_center_doc()) is True
+    # the same chain WITH a centre frequency resolves on any agent → not gated
+    assert p._doc_uses_freq_optional_center(_v2_doc()) is False
+    # a flat chain (no multi-point component) is never gated, centre frequency or not
+    assert p._doc_uses_freq_optional_center(_doc()) is False
+
+
+_FREQ_BASE_CAPS = ["calibration", "calibration-components", "calibration-partial-stages"]
+
+
+def test_freq_optional_center_save_blocked_on_old_agent():
+    client = FakeClient(caps=_FREQ_BASE_CAPS)          # everything BUT the 1.7.1 gate
+    p = CalibrationPanel("u", FakeHub(client))
+    _seed_catalog(p)
+    p._set_doc(_freq_dep_no_center_doc())
+    p._on_save()
+    assert "1.7.1" in p._status.text()
+    assert client.uploaded == []
+
+
+def test_freq_optional_center_save_allowed_on_capable_agent():
+    client = FakeClient(caps=_FREQ_BASE_CAPS + ["calibration-freq-optional-center"])
+    p = CalibrationPanel("u", FakeHub(client))
+    _seed_catalog(p)
+    p._set_doc(_freq_dep_no_center_doc())
+    p._on_save()
+    assert client.uploaded
+
+
 # ── unsaved-changes tracking (warn before leaving the Calibration tab) ──────────────
 
 def test_freshly_loaded_document_has_no_unsaved_changes():
