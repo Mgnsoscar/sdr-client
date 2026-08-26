@@ -4,8 +4,9 @@ from types import SimpleNamespace as NS
 
 from state.power_scan import (
     extract_power, scan_absolute_power, power_out_of_range,
-    extract_amplitude, scan_amplitudes, amplitude_mismatch,
+    extract_amplitude, scan_amplitudes, amplitude_mismatch, clip_library_power,
 )
+from api import models as m
 
 
 def test_extract_power_finds_flag():
@@ -106,3 +107,44 @@ def test_amplitude_mismatch_flags_differences():
 def test_amplitude_mismatch_skips_when_calibration_records_none():
     warns = amplitude_mismatch([("task x", "l1", 0.5)], {"signals": {"l1": {}}})
     assert warns == []
+
+
+# ── deploy-time clip: rewrite the DEPLOYED task's --power to the unit's range ─────────
+
+def _real_lib():
+    return m.Library(
+        tasks=[
+            m.TaskConfig(name="beacon", command=["python", "b.py", "--power", "40"],
+                         env={"SDR_CAL_SIGNAL_ID": "l1"}),        # above max → clip down
+            m.TaskConfig(name="low", command=["python", "l.py", "--power", "-30"],
+                         env={"SDR_CAL_SIGNAL_ID": "l1"}),        # below min → clamp up
+            m.TaskConfig(name="fine", command=["python", "f.py", "--power", "10"],
+                         env={"SDR_CAL_SIGNAL_ID": "l1"}),        # in range → untouched
+            m.TaskConfig(name="uncal", command=["python", "u.py", "--power", "99"],
+                         env={}),                                  # no signal → untouched
+        ],
+        sequences=[m.Sequence(id="s1", name="sweep", steps=[
+            m.SequenceStep(offset_s=0.0, action=m.StepAction.RUN, task_name="beacon",
+                           args=["--power", "50"]),               # above max → clip down
+        ])],
+    )
+
+
+def test_clip_library_power_clamps_deployed_tasks():
+    cal = _cal({"l1": (-1.8, 28.2)})
+    clipped, adjustments = clip_library_power(_real_lib(), cal)
+    by = {t.name: t.command for t in clipped.tasks}
+    assert by["beacon"][-1] == "28.2"          # 40 → max
+    assert by["low"][-1] == "-1.8"             # -30 → min
+    assert by["fine"][-1] == "10"              # untouched
+    assert by["uncal"][-1] == "99"             # not calibrated → untouched
+    assert clipped.sequences[0].steps[0].args[-1] == "28.2"     # step 50 → max
+    wheres = {a["where"]: a["to"] for a in adjustments}
+    assert wheres["task beacon"] == 28.2 and wheres["task low"] == -1.8
+    assert "task fine" not in wheres and "task uncal" not in wheres
+
+
+def test_clip_library_power_does_not_mutate_the_original():
+    lib = _real_lib()
+    clip_library_power(lib, _cal({"l1": (-1.8, 28.2)}))
+    assert lib.tasks[0].command[-1] == "40"    # original library untouched (deep copy)

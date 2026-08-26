@@ -322,14 +322,78 @@ class RunTaskDialog(QDialog):
     def _quick_dispatch(self) -> None:
         """Headless decision for the unit's play button. An uncalibrated absolute-power task
         needs a relative gain, so run the same first-Start flow as the visible dialog (prompt +
-        persist); a cancelled prompt closes without starting. Anything else starts from the
+        persist); a cancelled prompt closes without starting. A calibrated task whose stored
+        --power is out of the unit's range is clamped to the limit here (the client handles it,
+        so the script never receives a level it would just clip). Anything else starts from the
         task's stored command/env untouched."""
         if self._uncalibrated_absolute():
             self._on_run()
             if not self._starting:
                 self.reject()                            # gain prompt cancelled — don't start
+            return
+        clamp = self._clamp_absolute_power()
+        if clamp is not None:
+            args, value = clamp
+            self._persist_clamped_power(value)           # heal the stored config to the limit
+            self._quick_start_args(args)                 # run at the limit, not the script's clip
         else:
             self._quick_plain_start()
+
+    def _clamp_absolute_power(self):
+        """If the unit is calibrated for this signal and the stored --power is outside the
+        resolved range, return (clamped_trailing_args, clamped_dbm); else None. Clamping here
+        keeps an out-of-range level (e.g. after a recalibration) from reaching the script,
+        which would otherwise transmit clipped to its limit with no UI feedback."""
+        if self._cal_bounds is None or find_power_index(self._param_specs) is None:
+            return None
+        lo = self._cal_bounds.get("min_power_dbm")
+        hi = self._cal_bounds.get("max_power_dbm")
+        args = list(self._current_args)
+        clamped = None
+        for i, a in enumerate(args):
+            if a in _POWER_FLAGS and i + 1 < len(args):
+                try:
+                    v = float(args[i + 1])
+                except (TypeError, ValueError):
+                    continue
+                nv = v
+                if hi is not None and v > float(hi):
+                    nv = float(hi)
+                elif lo is not None and v < float(lo):
+                    nv = float(lo)
+                if nv != v:
+                    args[i + 1] = f"{nv:g}"
+                    clamped = nv
+        return (args, clamped) if clamped is not None else None
+
+    def _persist_clamped_power(self, value: float) -> None:
+        """Rewrite the stored task command's --power to ``value`` (the unit's limit) and
+        persist it, so the deployed task no longer shows/uses a level the unit can't produce."""
+        if self._task_entry is None:
+            return
+        entry = dict(self._task_entry)
+        cmd = list(entry.get("command") or [])
+        for i, a in enumerate(cmd):
+            if a in _POWER_FLAGS and i + 1 < len(cmd):
+                cmd[i + 1] = f"{value:g}"
+        entry["command"] = cmd
+        self.hub.run_async(
+            f"runtask_persist:{self.hostname}",
+            lambda: self.hub.fleet.get(self.hostname).update_task(self.task_name, entry),
+        )
+
+    def _quick_start_args(self, args: List[str]) -> None:
+        """Start with the given trailing args (replace_args), used by quick-start to run a
+        clamped --power instead of the stored over-range one."""
+        if self._starting:
+            return
+        self._starting = True
+        self._set_status("starting…")
+        req = m.StartRequest(args=args, replace_args=True)
+        self.hub.run_async(
+            f"runtask_start:{self.hostname}",
+            lambda: self.hub.fleet.get(self.hostname).start_task(self.task_name, req),
+        )
 
     def _quick_plain_start(self) -> None:
         """Start the task from its stored command/env (no arg replacement), exactly like the

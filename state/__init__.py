@@ -26,6 +26,7 @@ from .component_catalog import (
 )
 from .power_scan import (
     scan_absolute_power, power_out_of_range, scan_amplitudes, amplitude_mismatch,
+    clip_library_power,
 )
 
 __all__ = ["Poller", "FastSnapshot", "SlowSnapshot", "LogTailer", "local_ip",
@@ -37,4 +38,4 @@ __all__ = ["Poller", "FastSnapshot", "SlowSnapshot", "LogTailer", "local_ip",
            "ComponentCatalog", "CatalogError", "parse_sweep", "validate_table",
            "COMPONENTS_WIRE_NAME", "dump_components", "referenced_components",
            "plan_unit_deploy", "scan_absolute_power", "power_out_of_range",
-           "scan_amplitudes", "amplitude_mismatch"]
+           "scan_amplitudes", "amplitude_mismatch", "clip_library_power"]

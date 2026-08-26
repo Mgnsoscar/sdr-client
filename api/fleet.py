@@ -274,18 +274,22 @@ class Fleet:
         ``components.yaml`` is reconciled to it — but a component the unit's calibration
         still references is never removed (see :func:`state.plan_unit_deploy`)."""
         def do(c):
-            res = c.deploy_library(m.scoped_library(library, c.unit_type), prune)
-            cal = self._fetch_calibration(c)          # once — used below for both checks
-            if components is not None:
-                res.components = self._deploy_components_to(c, components, prune, cal)
-            # Absolute --power levels this unit can't produce (the agent clips them at
-            # transmit), and --amplitude values that don't match what the calibration
-            # curve assumes (power scales with amplitude) — surfaced before it matters.
-            from state import (scan_absolute_power, power_out_of_range,
+            cal = self._fetch_calibration(c)          # once — used below for both checks + clip
+            from state import (scan_absolute_power, power_out_of_range, clip_library_power,
                                scan_amplitudes, amplitude_mismatch)
             scoped = m.scoped_library(library, c.unit_type)
-            res.power_warnings = power_out_of_range(scan_absolute_power(scoped), cal)
+            # Warn about absolute --power levels this unit can't produce (from the ORIGINAL,
+            # so the operator sees the value they set), then DEPLOY A COPY clipped to the
+            # unit's range — so the stored task never holds a level the unit can't produce
+            # (which the Start button would otherwise run and the script would clip). The
+            # library keeps the operator's value for more capable units.
+            power_warnings = power_out_of_range(scan_absolute_power(scoped), cal)
+            clipped, _adjusted = clip_library_power(scoped, cal)
+            res = c.deploy_library(clipped, prune)
+            res.power_warnings = power_warnings
             res.amplitude_warnings = amplitude_mismatch(scan_amplitudes(scoped), cal)
+            if components is not None:
+                res.components = self._deploy_components_to(c, components, prune, cal)
             c.put_plans(plans)
             c.put_schedule(schedule)
             return res

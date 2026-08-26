@@ -84,6 +84,67 @@ def amplitude_mismatch(levels, calibration) -> List[dict]:
     return out
 
 
+def _clamp_power_in_args(args, lo, hi):
+    """Return (new_args, clamped_value) with each --power in ``args`` clamped into
+    [lo, hi] (either bound may be None), or (args, None) if nothing was out of range."""
+    args = list(args or [])
+    clamped = None
+    for i, a in enumerate(args):
+        if a in POWER_FLAGS and i + 1 < len(args):
+            try:
+                v = float(args[i + 1])
+            except (TypeError, ValueError):
+                continue
+            nv = v
+            if hi is not None and v > float(hi):
+                nv = float(hi)
+            elif lo is not None and v < float(lo):
+                nv = float(lo)
+            if nv != v:
+                args[i + 1] = f"{nv:g}"
+                clamped = nv
+    return args, clamped
+
+
+def clip_library_power(library, calibration):
+    """A deep copy of ``library`` with every absolute --power (task commands and sequence
+    step args) clamped into the unit's achievable range for that signal, plus the list of
+    adjustments made as ``[{where, from, to}]``. Signals the unit isn't calibrated for are
+    left untouched. Deployed instead of the original so a unit never stores a level it can't
+    produce (the library keeps the operator's value for more capable units)."""
+    signals = (calibration or {}).get("signals") or {}
+    lib = library.model_copy(deep=True)
+    sig_of = {t.name: (getattr(t, "env", None) or {}).get("SDR_CAL_SIGNAL_ID")
+              for t in getattr(lib, "tasks", [])}
+
+    def _bounds(sid):
+        b = signals.get(sid) if sid else None
+        if not b:
+            return None, None
+        return b.get("min_power_dbm"), b.get("max_power_dbm")
+
+    adjustments: List[dict] = []
+    for t in getattr(lib, "tasks", []):
+        lo, hi = _bounds(sig_of.get(t.name))
+        if lo is None and hi is None:
+            continue
+        new_args, clamped = _clamp_power_in_args(getattr(t, "command", []), lo, hi)
+        if clamped is not None:
+            t.command = new_args
+            adjustments.append({"where": f"task {t.name}", "to": clamped})
+    for q in getattr(lib, "sequences", []):
+        for i, step in enumerate(getattr(q, "steps", [])):
+            lo, hi = _bounds(sig_of.get(step.task_name))
+            if lo is None and hi is None:
+                continue
+            new_args, clamped = _clamp_power_in_args(getattr(step, "args", []), lo, hi)
+            if clamped is not None:
+                step.args = new_args
+                adjustments.append(
+                    {"where": f"sequence {q.name} · step {i + 1}", "to": clamped})
+    return lib, adjustments
+
+
 def power_out_of_range(levels, calibration) -> List[dict]:
     """Given scanned ``levels`` and a unit's calibration result, the ones outside the
     unit's achievable range, as ``[{where, dbm, limit, side}]`` (side 'above'/'below').

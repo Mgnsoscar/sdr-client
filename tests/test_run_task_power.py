@@ -236,13 +236,48 @@ def test_quick_start_persisted_fallback_starts_without_prompt(monkeypatch):
     assert "42" in req.args and any(f in req.args for f in ("--gain", "-Gain"))
 
 
-def test_quick_start_calibrated_starts_stored_command():
-    # Calibrated (or any non-uncalibrated-absolute) task: quick-start runs the stored
+_YAML_INRANGE = (
+    "tasks:\n"
+    "  - name: mocktask\n"
+    "    command: [python3, mock_tx.py, --power, \"10\"]\n"     # within CAL's -1.8..28.2
+    "    env: { SDR_CAL_SIGNAL_ID: mock }\n")
+
+
+def test_quick_start_calibrated_in_range_starts_stored_command():
+    # Calibrated task whose stored --power is IN range: quick-start runs the stored
     # command/env untouched — start_task called with no StartRequest.
-    client = FakeClient(yaml=YAML, params=PARAMS_PG, cal=CAL)
+    client = FakeClient(yaml=_YAML_INRANGE, params=PARAMS_PG, cal=CAL)
     RunTaskDialog(FakeHub(client), "u", "mocktask", quick=True)
     assert client.started == [("mocktask", None)]
     assert client.updated == []
+
+
+def _clamp_yaml(power):
+    return ("tasks:\n"
+            "  - name: mocktask\n"
+            f"    command: [python3, mock_tx.py, --power, \"{power}\"]\n"
+            "    env: { SDR_CAL_SIGNAL_ID: mock }\n")
+
+
+def test_quick_start_calibrated_over_range_clamps_and_persists():
+    # #Clipping: a calibrated task whose stored --power exceeds the unit's max (28.2) is
+    # clamped to the limit for the run (replace_args) AND the stored command is healed to it,
+    # so the deployed task no longer holds a level the unit can't produce.
+    client = FakeClient(yaml=_clamp_yaml("40"), params=PARAMS_PG, cal=CAL)
+    RunTaskDialog(FakeHub(client), "u", "mocktask", quick=True)
+    assert client.started, "should still start"
+    _, req = client.started[-1]
+    assert req is not None and "--power" in req.args
+    assert req.args[req.args.index("--power") + 1] == "28.2"       # clamped to the max
+    _, spec = client.updated[-1]                                    # stored command healed
+    assert "28.2" in spec["command"] and "40" not in spec["command"]
+
+
+def test_quick_start_calibrated_under_range_clamps_up_to_min():
+    client = FakeClient(yaml=_clamp_yaml("-30"), params=PARAMS_PG, cal=CAL)
+    RunTaskDialog(FakeHub(client), "u", "mocktask", quick=True)
+    _, req = client.started[-1]
+    assert req.args[req.args.index("--power") + 1] == "-1.8"        # clamped up to the min
 
 
 def test_quick_start_no_optin_starts_stored_command():

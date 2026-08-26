@@ -490,7 +490,7 @@ class LibraryTab(QWidget):
                 arrow = "above" if w.get("side") == "above" else "below"
                 power_lines.append(
                     f"{self._label(h)} — {w['where']}: {w['dbm']:g} dBm is {arrow} the "
-                    f"unit's {w['limit']:g} dBm; it will transmit clipped to {w['limit']:g}.")
+                    f"unit's {w['limit']:g} dBm; the deployed task was set to {w['limit']:g} dBm.")
             for w in (getattr(r, "amplitude_warnings", None) or []):
                 amp_lines.append(
                     f"{self._label(h)} — {w['where']}: amplitude {w['amp']:g} ≠ the "
@@ -529,9 +529,10 @@ class LibraryTab(QWidget):
             if power_lines:
                 if lines:
                     lines.append("")
-                lines.append("⚠ Absolute power levels this unit can't produce (transmit "
-                             "clipped to its limit — set the level within range, or run on "
-                             "a more capable unit, if the plan needs the full power):")
+                lines.append("⚠ Absolute power levels adjusted to this unit's range (the "
+                             "deployed task was capped to the unit's limit so Start uses a "
+                             "real level; your library keeps the original for more capable "
+                             "units):")
                 lines += [f"• {n}" for n in power_lines]
             if amp_lines:
                 if lines:
