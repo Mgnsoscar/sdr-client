@@ -72,6 +72,11 @@ _PLANE_ROLES_NEEDS_NEWER = (
     "this unit's agent is too old for reported (report-only) measured stages (needs 1.6.0+). "
     "It would treat a reported stage as an ordinary limiting one and mis-gauge the ceiling. "
     "Update the agent, or make every measured stage Limiting.")
+CAL_GAIN_STEP_CAPABILITY = "calibration-gain-step"  # agent >= 1.7.0
+_GAIN_STEP_NEEDS_NEWER = (
+    "this unit's agent is too old to snap the gain to a step (needs 1.7.0+). It would ignore "
+    "the gain step and command an off-grid gain the SDR silently rounds. Update the agent, or "
+    "clear the Gain step field.")
 
 # The baseband amplitude every broadcaster script transmits at is a FIXED constant (the
 # scripts' baked AMPLITUDE), not an operator control — so calibration is always measured at
@@ -1211,9 +1216,15 @@ class CalibrationPanel(QWidget):
             "This unit's hardware type. It selects the shared type-defaults chain that's "
             "merged in, so it must match the real unit — a wrong type silently mis-resolves.")
         self._f["min_gain"] = QLineEdit(); self._f["max_gain"] = QLineEdit()
+        self._f["gain_step"] = QLineEdit()
+        self._f["gain_step"].setPlaceholderText("optional, e.g. 0.25")
         self._f["min_gain"].setToolTip("Lowest usable SDR internal gain (dB).")
         self._f["max_gain"].setToolTip(
             "Highest SDR gain the safety ceilings allow (usually the amp's P1dB gain).")
+        self._f["gain_step"].setToolTip(
+            "SDR gain step (dB), optional. The radio only settles on a discrete gain grid "
+            "(e.g. 0.25 dB); set it and calibration snaps the commanded gain to the nearest "
+            "step — never above the ceiling — so delivered power matches. Blank = continuous.")
         # Baseband amplitude is fixed fleet-wide (FIXED_BASEBAND_AMPLITUDE) and owned by the
         # scripts, so it is NOT an editable field here — it is recorded on save and any
         # legacy mismatch is flagged by local_calibration_issues.
@@ -1223,6 +1234,7 @@ class CalibrationPanel(QWidget):
         form.addRow("Unit type", self._f["unit_type"])
         form.addRow("Min gain (dB)", self._f["min_gain"])
         form.addRow("Max gain (dB)", self._f["max_gain"])
+        form.addRow("Gain step (dB)", self._f["gain_step"])
         set_body.addLayout(form)
         self._editor_layout.addWidget(set_card)
 
@@ -1342,6 +1354,7 @@ class CalibrationPanel(QWidget):
         gl = chain.get("gain_limits") or {}
         self._f["min_gain"].setText(_numstr(gl.get("min_gain_db")))
         self._f["max_gain"].setText(_numstr(gl.get("max_gain_db")))
+        self._f["gain_step"].setText(_numstr(gl.get("gain_step_db")))
 
         ut = (doc or {}).get("unit_type", "")
         i = self._f["unit_type"].findData(ut)
@@ -2553,6 +2566,8 @@ class CalibrationPanel(QWidget):
         gl = chain.setdefault("gain_limits", {})
         self._set_num(gl, "min_gain_db", self._f["min_gain"].text(), "min gain", strict)
         self._set_num(gl, "max_gain_db", self._f["max_gain"].text(), "max gain", strict)
+        gl.pop("gain_step_db", None)                  # rewritten below only if provided
+        self._set_num(gl, "gain_step_db", self._f["gain_step"].text(), "gain step", strict)
         chain["planes"] = self._read_planes(strict)
         # The operating plane is ALWAYS the last stage in the chain (that's where --power
         # is delivered), so it's derived from the order, never set by hand.
@@ -2706,7 +2721,7 @@ class CalibrationPanel(QWidget):
             return False
         if (self._blocks_on_components() or self._blocks_on_partial_stages()
                 or self._blocks_on_no_signals() or self._blocks_on_limit_side()
-                or self._blocks_on_plane_roles()):
+                or self._blocks_on_plane_roles() or self._blocks_on_gain_step()):
             return False
         self._send(json.dumps(self._doc).encode("utf-8"))
         return True
@@ -2800,6 +2815,21 @@ class CalibrationPanel(QWidget):
             return True
         return False
 
+    @staticmethod
+    def _doc_uses_gain_step(doc) -> bool:
+        return ((((doc or {}).get("chain") or {}).get("gain_limits") or {})
+                .get("gain_step_db") is not None)
+
+    def _blocks_on_gain_step(self) -> bool:
+        """Guard: an agent older than 1.7.0 ignores gain_step_db and would command an
+        off-grid gain the SDR silently rounds, so the delivered power wouldn't match the
+        calibration — refuse to push rather than mislead."""
+        if self._doc_uses_gain_step(self._doc) and not self._supports(
+                CAL_GAIN_STEP_CAPABILITY):
+            self._set_status(_GAIN_STEP_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
     def _supports(self, capability: str) -> bool:
         try:
             client = self.hub.fleet.get(self.hostname)
@@ -2840,7 +2870,7 @@ class CalibrationPanel(QWidget):
             return
         if (self._blocks_on_components() or self._blocks_on_partial_stages()
                 or self._blocks_on_no_signals() or self._blocks_on_limit_side()
-                or self._blocks_on_plane_roles()):
+                or self._blocks_on_plane_roles() or self._blocks_on_gain_step()):
             return
         self._set_status("validating (dry run — not saving)…")
         doc = self._doc

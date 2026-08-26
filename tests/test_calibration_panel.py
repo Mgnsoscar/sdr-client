@@ -1461,6 +1461,58 @@ def test_reported_role_save_allowed_on_capable_agent():
     assert client.uploaded                                # the role-using doc was pushed
 
 
+# ── gain step (SDR gain grid) ───────────────────────────────────────────────────────
+
+def test_gain_step_round_trips_through_form():
+    d = _doc()
+    d["chain"]["gain_limits"]["gain_step_db"] = 0.25
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(d)
+    assert p._f["gain_step"].text() in ("0.25", ".25")
+    gl = p._read_form(strict=True)["chain"]["gain_limits"]
+    assert gl["gain_step_db"] == 0.25
+
+
+def test_blank_gain_step_is_omitted():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc())                                   # no gain_step_db
+    assert "gain_step_db" not in p._read_form(strict=True)["chain"]["gain_limits"]
+
+
+def test_clearing_gain_step_removes_it():
+    d = _doc()
+    d["chain"]["gain_limits"]["gain_step_db"] = 0.25
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(d)
+    p._f["gain_step"].setText("")                        # operator clears it
+    assert "gain_step_db" not in p._read_form(strict=True)["chain"]["gain_limits"]
+
+
+def test_gain_step_detection():
+    d = _doc(); d["chain"]["gain_limits"]["gain_step_db"] = 0.25
+    assert CalibrationPanel._doc_uses_gain_step(d) is True
+    assert CalibrationPanel._doc_uses_gain_step(_doc()) is False
+
+
+def test_gain_step_save_blocked_on_old_agent():
+    d = _doc(); d["chain"]["gain_limits"]["gain_step_db"] = 0.25
+    client = FakeClient(caps=["calibration"])
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(d)
+    p._on_save()
+    assert "1.7.0" in p._status.text()
+    assert client.uploaded == []
+
+
+def test_gain_step_save_allowed_on_capable_agent():
+    d = _doc(); d["chain"]["gain_limits"]["gain_step_db"] = 0.25
+    client = FakeClient(caps=["calibration", "calibration-gain-step"])
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(d)
+    p._on_save()
+    assert client.uploaded
+
+
 # ── unsaved-changes tracking (warn before leaving the Calibration tab) ──────────────
 
 def test_freshly_loaded_document_has_no_unsaved_changes():
