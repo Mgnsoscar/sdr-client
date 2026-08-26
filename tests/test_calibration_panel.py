@@ -1399,6 +1399,50 @@ def test_plane_roles_detection():
     assert CalibrationPanel._doc_uses_plane_roles(_two_measured_doc(measure_second=True)) is False
 
 
+def test_reported_of_is_derived_automatically_not_from_the_document():
+    # The input doc marks the stage reported but names a bogus `of`; the panel ignores it
+    # and derives `of` from chain position (nearest limiting stage upstream = sdr_output).
+    d = _two_measured_doc(measure_second=True)
+    d["chain"]["planes"]["amplifier_output"] = {
+        "type": "measured", "role": "reported", "of": "bogus", "quantity": "mlp"}
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(d)
+    assert p._read_form(strict=True)["chain"]["planes"]["amplifier_output"]["of"] == "sdr_output"
+
+
+def test_reported_stack_shares_the_limiting_basis():
+    # Two reported re-measurements of the source node both gauge on the source (the nearest
+    # limiting stage upstream), skipping over the intervening reported stage.
+    d = _doc()
+    d["chain"]["operating_plane"] = "view_b"
+    d["chain"]["planes"] = {
+        "source": {"type": "measured", "quantity": "full-band"},
+        "view_a": {"type": "measured", "role": "reported", "quantity": "main-lobe"},
+        "view_b": {"type": "measured", "role": "reported", "quantity": "narrower"},
+    }
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(d)
+    planes = p._read_form(strict=True)["chain"]["planes"]
+    assert planes["view_a"]["of"] == "source"
+    assert planes["view_b"]["of"] == "source"
+
+
+def test_reported_after_a_passive_stage_is_not_honoured():
+    # A passive stage between the reported stage and any limiting curve means it's a
+    # different physical node, so there's no valid basis — the reported mark is dropped.
+    d = _doc()
+    d["chain"]["operating_plane"] = "post_pad"
+    d["chain"]["planes"] = {
+        "source":   {"type": "measured", "quantity": "full-band"},
+        "pad":      {"type": "derived", "from": "source", "delta_db": -6.0},
+        "post_pad": {"type": "measured", "role": "reported", "quantity": "main-lobe"},
+    }
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(d)
+    post = p._read_form(strict=True)["chain"]["planes"]["post_pad"]
+    assert "role" not in post and "of" not in post          # left limiting, no basis
+
+
 def test_reported_role_save_blocked_on_old_agent():
     # A ≤1.5.2 agent treats a reported stage as limiting and would mis-gauge the ceiling.
     client = FakeClient(caps=["calibration"])

@@ -1459,14 +1459,13 @@ class CalibrationPanel(QWidget):
         delta_e.editingFinished.connect(self._refresh_form_from_widgets)
         # "orig" is the plane's last-committed name, so a rename propagates to everything
         # that references it instead of silently dangling.
-        # cal_role / of: a MEASURED stage is "limiting" (default — safety limits gauge on it)
-        # or "reported" (report-only; limits punch through it to the limiting plane named by
-        # `of`). See docs/calibration.md §4.1.
+        # cal_role: a MEASURED stage is "limiting" (default — safety limits gauge on it) or
+        # "reported" (report-only; limits punch through it to the nearest limiting stage
+        # upstream, derived automatically at save — see _auto_of / docs/calibration.md §4.1).
         cal_role = spec.get("role", "limiting") if role == "measured" else "limiting"
         row = {"name": name_e, "role": role, "comp_id": spec.get("component") or "",
                "delta": delta_e, "orig": name,
-               "cal_role": cal_role if cal_role == "reported" else "limiting",
-               "of": spec.get("of", "") if role == "measured" else ""}
+               "cal_role": cal_role if cal_role == "reported" else "limiting"}
         name_e.editingFinished.connect(lambda r=row: self._on_plane_name_changed(r))
         return row
 
@@ -1985,65 +1984,69 @@ class CalibrationPanel(QWidget):
         note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
         self._detail_body.addWidget(note)
 
-    def _limiting_predecessors(self, plane: str) -> list:
-        """Measured LIMITING stages that come before ``plane`` in the chain — the valid
-        `of` targets for a reported stage (the curve its limits punch through to)."""
-        out = []
-        for r in self._f.get("planes", []):
-            nm = r["name"].text().strip()
-            if nm == plane:
-                break
-            if r.get("role", "measured") == "measured" and r.get("cal_role") != "reported":
-                out.append(nm)
-        return out
+    def _auto_of(self, plane: str) -> Optional[str]:
+        """The limiting curve a reported stage at ``plane`` gauges its limits through,
+        derived automatically (there's no picker): the nearest LIMITING measured stage
+        upstream. Reported stages in between are skipped (several re-measurements of one
+        node share its limiting basis). A PASSIVE stage in between means ``plane`` is a
+        different physical node than any upstream limiting curve, so there is no valid
+        basis — returns None, and the toggle refuses Reported there."""
+        rows = self._f.get("planes", [])
+        idx = next((i for i, r in enumerate(rows)
+                    if r["name"].text().strip() == plane), None)
+        if idx is None:
+            return None
+        for j in range(idx - 1, -1, -1):
+            r = rows[j]
+            if r.get("role", "measured") != "measured":     # a passive stage → different node
+                return None
+            if r.get("cal_role") != "reported":             # the nearest limiting curve
+                return r["name"].text().strip()
+        return None                                          # only reported/none upstream
 
     def _measured_role_controls(self, row, plane: str) -> QWidget:
         """Limiting/Reported gauge-role control for a non-source measured stage. Reported
-        (report-only) means safety limits ignore this curve and punch through to the
-        limiting stage picked in `of` — so --power can show a region-of-interest quantity
-        (e.g. main-lobe power) while limits stay gauged on the full-band curve (§4.1)."""
+        (report-only) means safety limits ignore this curve and punch through to the nearest
+        limiting stage upstream (chosen automatically) — so --power can show a
+        region-of-interest quantity (e.g. main-lobe power) while limits stay gauged on the
+        full-band curve (§4.1)."""
         box = QFrame(); box.setObjectName("rolebox")
         box.setStyleSheet(f"#rolebox {{ border:1px solid {Palette.BORDER}; border-radius:8px; }}")
         v = QVBoxLayout(box); v.setContentsMargins(10, 8, 10, 8); v.setSpacing(6)
         top = QHBoxLayout()
         lab = QLabel("Gauge role")
         lab.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+        auto_of = self._auto_of(plane)
         combo = QComboBox()
         combo.addItem("Limiting — safety limits gauge on this curve", "limiting")
-        combo.addItem("Reported — report-only; limits punch through to…", "reported")
+        combo.addItem("Reported — report-only (limits gauge upstream)", "reported")
         combo.setCurrentIndex(1 if row.get("cal_role") == "reported" else 0)
-        preds = self._limiting_predecessors(plane)
-        of_combo = QComboBox()
-        for nm in preds:
-            of_combo.addItem(nm, nm)
-        if row.get("of") in preds:
-            of_combo.setCurrentIndex(preds.index(row["of"]))
-        of_combo.setVisible(row.get("cal_role") == "reported")
-        of_combo.setEnabled(bool(preds))
 
         def _apply():
             role = combo.currentData()
-            if role == "reported" and not preds:
-                # No limiting stage precedes this one — a reported stage would have nothing
-                # to gauge through, so keep it limiting and say why.
+            if role == "reported" and auto_of is None:
+                # No limiting stage is reachable upstream at this node — a reported stage
+                # would have nothing to gauge through, so keep it limiting and say why.
                 combo.setCurrentIndex(0)
-                self._set_status("a reported stage needs a limiting stage before it to gauge "
-                                 "limits through — none precedes this one", kind="warn")
+                self._set_status("a reported stage needs a limiting stage directly upstream "
+                                 "to gauge limits through — none is reachable here", kind="warn")
                 return
             row["cal_role"] = role
-            row["of"] = of_combo.currentData() if role == "reported" else ""
             self._sync_from(strict=False)
             self._render_chain()
             self._render_detail()
 
         combo.currentIndexChanged.connect(lambda _=0: _apply())
-        of_combo.currentIndexChanged.connect(lambda _=0: _apply())
-        top.addWidget(lab); top.addWidget(combo, 1); top.addWidget(of_combo, 1)
+        top.addWidget(lab); top.addWidget(combo, 1)
         v.addLayout(top)
+        if row.get("cal_role") == "reported" and auto_of:
+            gv = QLabel(f"Safety limits gauge on <b>{auto_of}</b> (upstream limiting curve).")
+            gv.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_MUTED};")
+            v.addWidget(gv)
         note = QLabel(
             "Reported shows a different quantity than the limits use — e.g. main-lobe power "
             "for the operator, while an amplifier's input limit stays gauged on the full-band "
-            "‘of’ stage. The source stage is always limiting.")
+            "curve upstream. The source stage is always limiting.")
         note.setWordWrap(True); note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
         v.addWidget(note)
         return box
@@ -2326,12 +2329,16 @@ class CalibrationPanel(QWidget):
                 for k in ("description", "quantity"):
                     if old.get(k):
                         p[k] = old[k]
-            # A measured stage may be marked reported (report-only, gauged via `of`). Emit
-            # it from the row so the editor's choice round-trips; a reported stage without a
-            # valid `of` is left limiting (the agent would reject role without of anyway).
-            if p.get("type") == "measured" and row.get("cal_role") == "reported" and row.get("of"):
-                p["role"] = "reported"
-                p["of"] = row["of"]
+            # A measured stage may be marked reported (report-only). `of` — the limiting
+            # curve its limits gauge through — is derived automatically from chain position
+            # (nearest limiting stage upstream), never picked by the user. If none is
+            # reachable (a passive stage intervenes, or nothing limiting upstream), the
+            # reported mark can't be honoured, so the stage stays limiting.
+            if p.get("type") == "measured" and row.get("cal_role") == "reported":
+                of = self._auto_of(name)
+                if of:
+                    p["role"] = "reported"
+                    p["of"] = of
             planes[name] = p
             prev_name = name
         return planes
