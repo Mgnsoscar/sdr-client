@@ -1365,6 +1365,58 @@ def test_input_side_save_allowed_on_capable_agent():
     assert client.uploaded                                # the side-using doc was pushed
 
 
+# ── measured-plane roles: limiting vs reported (§4.1) ───────────────────────────────
+
+def _roles_doc():
+    """A two-measured chain where the 2nd stage is reported (re-measures the source)."""
+    d = _two_measured_doc(measure_second=True)
+    d["chain"]["planes"]["amplifier_output"] = {
+        "type": "measured", "quantity": "main-lobe power",
+        "role": "reported", "of": "sdr_output"}
+    return d
+
+
+def test_reported_role_round_trips_through_form():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_roles_doc())
+    planes = p._read_form(strict=True)["chain"]["planes"]
+    assert planes["amplifier_output"]["role"] == "reported"
+    assert planes["amplifier_output"]["of"] == "sdr_output"
+    # the source stays limiting (no role key emitted — limiting is the default)
+    assert "role" not in planes["sdr_output"]
+
+
+def test_limiting_role_is_omitted_from_document():
+    # 'limiting' is the default, so an all-limiting chain is byte-identical to a v1 doc.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_two_measured_doc(measure_second=True))
+    planes = p._read_form(strict=True)["chain"]["planes"]
+    assert all("role" not in pl and "of" not in pl for pl in planes.values())
+
+
+def test_plane_roles_detection():
+    assert CalibrationPanel._doc_uses_plane_roles(_roles_doc()) is True
+    assert CalibrationPanel._doc_uses_plane_roles(_two_measured_doc(measure_second=True)) is False
+
+
+def test_reported_role_save_blocked_on_old_agent():
+    # A ≤1.5.2 agent treats a reported stage as limiting and would mis-gauge the ceiling.
+    client = FakeClient(caps=["calibration"])
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(_roles_doc())
+    p._on_save()
+    assert "1.6.0" in p._status.text()
+    assert client.uploaded == []                         # nothing was pushed
+
+
+def test_reported_role_save_allowed_on_capable_agent():
+    client = FakeClient(caps=["calibration", "calibration-plane-roles"])
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(_roles_doc())
+    p._on_save()
+    assert client.uploaded                                # the role-using doc was pushed
+
+
 def test_library_grid_has_a_card_per_component_plus_add():
     from ui.calibration_panel import _ClickCard
     p = CalibrationPanel("u", FakeHub(FakeClient()))

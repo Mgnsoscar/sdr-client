@@ -67,6 +67,11 @@ _LIMIT_SIDE_NEEDS_NEWER = (
     "this unit's agent is too old for input/output-side limits (needs 1.5.0+). It would "
     "ignore 'side' and apply the cap at the plane's output — a different, unsafe limit. "
     "Update the agent, or set every limit's side to Output (the plane itself).")
+CAL_PLANE_ROLES_CAPABILITY = "calibration-plane-roles"  # agent >= 1.6.0
+_PLANE_ROLES_NEEDS_NEWER = (
+    "this unit's agent is too old for reported (report-only) measured stages (needs 1.6.0+). "
+    "It would treat a reported stage as an ordinary limiting one and mis-gauge the ceiling. "
+    "Update the agent, or make every measured stage Limiting.")
 
 # The baseband amplitude every broadcaster script transmits at is a FIXED constant (the
 # scripts' baked AMPLITUDE), not an operator control — so calibration is always measured at
@@ -612,6 +617,8 @@ def _rename_plane_in_doc(doc: dict, old: str, new: str) -> dict:
     for spec in (chain.get("planes") or {}).values():
         if isinstance(spec, dict) and spec.get("from") == old:
             spec["from"] = new
+        if isinstance(spec, dict) and spec.get("of") == old:   # reported plane's basis
+            spec["of"] = new
     for sig in (doc.get("signals") or {}).values():
         curves = (sig or {}).get("curves")
         if isinstance(curves, dict) and old in curves:
@@ -1452,8 +1459,14 @@ class CalibrationPanel(QWidget):
         delta_e.editingFinished.connect(self._refresh_form_from_widgets)
         # "orig" is the plane's last-committed name, so a rename propagates to everything
         # that references it instead of silently dangling.
+        # cal_role / of: a MEASURED stage is "limiting" (default — safety limits gauge on it)
+        # or "reported" (report-only; limits punch through it to the limiting plane named by
+        # `of`). See docs/calibration.md §4.1.
+        cal_role = spec.get("role", "limiting") if role == "measured" else "limiting"
         row = {"name": name_e, "role": role, "comp_id": spec.get("component") or "",
-               "delta": delta_e, "orig": name}
+               "delta": delta_e, "orig": name,
+               "cal_role": cal_role if cal_role == "reported" else "limiting",
+               "of": spec.get("of", "") if role == "measured" else ""}
         name_e.editingFinished.connect(lambda r=row: self._on_plane_name_changed(r))
         return row
 
@@ -1557,6 +1570,8 @@ class CalibrationPanel(QWidget):
         fg, kbg = _KIND_COLORS[kind]
         badge_text = {"source": "SOURCE", "measured": "MEASURED",
                       "passive": "Passive · from library"}[kind]
+        if kind == "measured" and row.get("cal_role") == "reported":
+            badge_text = "REPORTED"           # report-only: invisible to safety limits
         v.addWidget(_badge(badge_text, fg, kbg), alignment=Qt.AlignmentFlag.AlignLeft)
 
         title = QLabel(name or "(unnamed)")
@@ -1970,9 +1985,74 @@ class CalibrationPanel(QWidget):
         note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
         self._detail_body.addWidget(note)
 
+    def _limiting_predecessors(self, plane: str) -> list:
+        """Measured LIMITING stages that come before ``plane`` in the chain — the valid
+        `of` targets for a reported stage (the curve its limits punch through to)."""
+        out = []
+        for r in self._f.get("planes", []):
+            nm = r["name"].text().strip()
+            if nm == plane:
+                break
+            if r.get("role", "measured") == "measured" and r.get("cal_role") != "reported":
+                out.append(nm)
+        return out
+
+    def _measured_role_controls(self, row, plane: str) -> QWidget:
+        """Limiting/Reported gauge-role control for a non-source measured stage. Reported
+        (report-only) means safety limits ignore this curve and punch through to the
+        limiting stage picked in `of` — so --power can show a region-of-interest quantity
+        (e.g. main-lobe power) while limits stay gauged on the full-band curve (§4.1)."""
+        box = QFrame(); box.setObjectName("rolebox")
+        box.setStyleSheet(f"#rolebox {{ border:1px solid {Palette.BORDER}; border-radius:8px; }}")
+        v = QVBoxLayout(box); v.setContentsMargins(10, 8, 10, 8); v.setSpacing(6)
+        top = QHBoxLayout()
+        lab = QLabel("Gauge role")
+        lab.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+        combo = QComboBox()
+        combo.addItem("Limiting — safety limits gauge on this curve", "limiting")
+        combo.addItem("Reported — report-only; limits punch through to…", "reported")
+        combo.setCurrentIndex(1 if row.get("cal_role") == "reported" else 0)
+        preds = self._limiting_predecessors(plane)
+        of_combo = QComboBox()
+        for nm in preds:
+            of_combo.addItem(nm, nm)
+        if row.get("of") in preds:
+            of_combo.setCurrentIndex(preds.index(row["of"]))
+        of_combo.setVisible(row.get("cal_role") == "reported")
+        of_combo.setEnabled(bool(preds))
+
+        def _apply():
+            role = combo.currentData()
+            if role == "reported" and not preds:
+                # No limiting stage precedes this one — a reported stage would have nothing
+                # to gauge through, so keep it limiting and say why.
+                combo.setCurrentIndex(0)
+                self._set_status("a reported stage needs a limiting stage before it to gauge "
+                                 "limits through — none precedes this one", kind="warn")
+                return
+            row["cal_role"] = role
+            row["of"] = of_combo.currentData() if role == "reported" else ""
+            self._sync_from(strict=False)
+            self._render_chain()
+            self._render_detail()
+
+        combo.currentIndexChanged.connect(lambda _=0: _apply())
+        of_combo.currentIndexChanged.connect(lambda _=0: _apply())
+        top.addWidget(lab); top.addWidget(combo, 1); top.addWidget(of_combo, 1)
+        v.addLayout(top)
+        note = QLabel(
+            "Reported shows a different quantity than the limits use — e.g. main-lobe power "
+            "for the operator, while an amplifier's input limit stays gauged on the full-band "
+            "‘of’ stage. The source stage is always limiting.")
+        note.setWordWrap(True); note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+        v.addWidget(note)
+        return box
+
     def _detail_measured(self, row) -> None:
         plane = row["name"].text().strip()
         is_source = (plane == self._source_plane())
+        if not is_source:
+            self._detail_body.addWidget(self._measured_role_controls(row, plane))
         all_sigs = self._f.get("signals", {})
         # The source shows every signal; a downstream measured stage shows only the ones
         # actually measured there (or just opened for measuring) — so it reads as an
@@ -2246,6 +2326,12 @@ class CalibrationPanel(QWidget):
                 for k in ("description", "quantity"):
                     if old.get(k):
                         p[k] = old[k]
+            # A measured stage may be marked reported (report-only, gauged via `of`). Emit
+            # it from the row so the editor's choice round-trips; a reported stage without a
+            # valid `of` is left limiting (the agent would reject role without of anyway).
+            if p.get("type") == "measured" and row.get("cal_role") == "reported" and row.get("of"):
+                p["role"] = "reported"
+                p["of"] = row["of"]
             planes[name] = p
             prev_name = name
         return planes
@@ -2541,7 +2627,8 @@ class CalibrationPanel(QWidget):
             self._set_status("nothing to save", kind="error")
             return
         if (self._blocks_on_components() or self._blocks_on_partial_stages()
-                or self._blocks_on_no_signals() or self._blocks_on_limit_side()):
+                or self._blocks_on_no_signals() or self._blocks_on_limit_side()
+                or self._blocks_on_plane_roles()):
             return
         self._send(json.dumps(self._doc).encode("utf-8"))
 
@@ -2612,6 +2699,23 @@ class CalibrationPanel(QWidget):
             return True
         return False
 
+    @staticmethod
+    def _doc_uses_plane_roles(doc) -> bool:
+        """True when any measured plane is marked role: reported. (An explicit 'limiting' is
+        identical to the default, so only 'reported' needs the newer agent.)"""
+        return any(isinstance(p, dict) and p.get("role") == "reported"
+                   for p in (((doc or {}).get("chain") or {}).get("planes") or {}).values())
+
+    def _blocks_on_plane_roles(self) -> bool:
+        """Guard: an agent older than 1.6.0 doesn't understand role/of and would treat a
+        reported (report-only) stage as an ordinary limiting one — inverting a limit through
+        the wrong-quantity curve and mis-gauging the ceiling — so refuse to push."""
+        if self._doc_uses_plane_roles(self._doc) and not self._supports(
+                CAL_PLANE_ROLES_CAPABILITY):
+            self._set_status(_PLANE_ROLES_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
     def _supports(self, capability: str) -> bool:
         try:
             client = self.hub.fleet.get(self.hostname)
@@ -2651,7 +2755,8 @@ class CalibrationPanel(QWidget):
                 kind="error" if issues else "warn")
             return
         if (self._blocks_on_components() or self._blocks_on_partial_stages()
-                or self._blocks_on_no_signals() or self._blocks_on_limit_side()):
+                or self._blocks_on_no_signals() or self._blocks_on_limit_side()
+                or self._blocks_on_plane_roles()):
             return
         self._set_status("validating (dry run — not saving)…")
         doc = self._doc
