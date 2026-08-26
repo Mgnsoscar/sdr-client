@@ -21,7 +21,7 @@ from typing import Dict, Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -439,6 +439,14 @@ class UnitDetail(QWidget):
         self.hub.refresh_now(hostname)
 
     def _select_subtab(self, idx: int) -> None:
+        # Leaving the Calibration tab with unsaved edits? Warn first — it's easy to tweak
+        # a curve/limit and switch away thinking it was saved.
+        if not self._confirm_leave_calibration(idx):
+            # Keep the button state on the tab we're staying on.
+            cur = self._sub_stack.currentIndex()
+            for i, b in enumerate(self._subtab_buttons):
+                b.setChecked(i == cur)
+            return
         self._sub_stack.setCurrentIndex(idx)
         for i, b in enumerate(self._subtab_buttons):
             b.setChecked(i == idx)
@@ -448,7 +456,42 @@ class UnitDetail(QWidget):
         if hasattr(w, "on_shown"):
             w.on_shown()
 
+    _CAL_SUBTAB = 2                             # index of the Calibration sub-tab
+
+    def _confirm_leave_calibration(self, target_idx: Optional[int] = None) -> bool:
+        """When the Calibration tab is active and holds unsaved edits, ask before leaving.
+        Returns True if it's OK to proceed (saved, chose not to save, or nothing pending),
+        False to stay put. ``target_idx`` is the sub-tab being switched to (None = leaving
+        the unit view entirely); a no-op when we're not actually leaving Calibration."""
+        if self._sub_stack.currentIndex() != self._CAL_SUBTAB:
+            return True
+        if target_idx == self._CAL_SUBTAB:                 # not actually leaving
+            return True
+        panel = getattr(self, "_calibration_panel", None)
+        if panel is None or not panel.has_unsaved_changes():
+            return True
+        box = QMessageBox(self.window())
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Unsaved calibration changes")
+        box.setText("You have unsaved changes to this unit's calibration.")
+        box.setInformativeText("Save them before leaving the Calibration tab?")
+        save = box.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Don't save", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(save)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is cancel:
+            return False                                   # stay on Calibration
+        if clicked is save:
+            # Only leave once the save actually dispatched; if it was blocked (invalid form
+            # or an unsupported-agent guard) stay so the user can see why.
+            return panel.request_save()
+        return True                                        # "Don't save" → leave, edits kept
+
     def _handle_back(self) -> None:
+        if not self._confirm_leave_calibration():
+            return
         self._on_back()
 
     def _open_update(self) -> None:

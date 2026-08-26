@@ -953,6 +953,10 @@ class CalibrationPanel(QWidget):
         self._task_signals: dict = {}          # task name → SDR_CAL_SIGNAL_ID it references
         self._tasks_yaml: str = ""             # last-fetched tasks.yaml (for task renames)
         self._saved_doc: Optional[dict] = None  # the unit's last-persisted calibration doc
+        # Canonical form snapshot taken whenever a whole document is loaded into the editor
+        # (get/template/upload/save-refresh). has_unsaved_changes() compares the live form
+        # against it, so the host can warn before the user leaves with unsaved edits.
+        self._baseline: Optional[str] = None
         # plane id → set of signal ids opened on a NON-source measured stage that don't
         # yet have data there (so the user can enter points). Reset on a fresh document.
         self._stage_extra: dict = {}
@@ -1249,6 +1253,27 @@ class CalibrationPanel(QWidget):
         self._stage_extra = {}                  # a fresh document → forget transient adds
         self._download_btn.setEnabled(doc is not None)
         self._doc_to_form()
+        # A whole document was just loaded into the editor → this is the clean baseline
+        # against which later edits count as unsaved (see has_unsaved_changes).
+        self._baseline = self._canonical_form()
+
+    def _canonical_form(self) -> Optional[str]:
+        """A stable JSON snapshot of the live form, or None if it can't be read. Insertion
+        order is preserved (not sort_keys) so a stage reorder — which is a real edit — is
+        detected, not normalised away."""
+        try:
+            return json.dumps(self._read_form(strict=False), default=str)
+        except Exception:  # noqa: BLE001 — a mid-edit form that won't read is treated as dirty
+            return None
+
+    def has_unsaved_changes(self) -> bool:
+        """True when the editor holds edits not yet saved to the unit. Compares the live
+        form to the baseline captured at the last load/save. Used by the host to warn
+        before the user leaves the Calibration tab."""
+        if self._baseline is None:
+            return False
+        cur = self._canonical_form()
+        return cur is None or cur != self._baseline
 
     def _plane_names(self):
         planes = ((self._doc or {}).get("chain") or {}).get("planes") or {}
@@ -2624,20 +2649,29 @@ class CalibrationPanel(QWidget):
             return
         self._send(content)
 
-    def _on_save(self) -> None:
+    def _on_save(self) -> bool:
+        """Validate + push the calibration. Returns True when a save was dispatched, False
+        when it was blocked (invalid form, nothing to save, or a capability guard) — the
+        host uses that to decide whether it's safe to leave the tab."""
         try:
             self._sync_from(strict=True)
         except ValueError as exc:
             self._set_status(f"cannot save: {exc}", kind="error")
-            return
+            return False
         if self._doc is None:
             self._set_status("nothing to save", kind="error")
-            return
+            return False
         if (self._blocks_on_components() or self._blocks_on_partial_stages()
                 or self._blocks_on_no_signals() or self._blocks_on_limit_side()
                 or self._blocks_on_plane_roles()):
-            return
+            return False
         self._send(json.dumps(self._doc).encode("utf-8"))
+        return True
+
+    def request_save(self) -> bool:
+        """Public entry the host calls to save on the user's behalf (e.g. from the
+        leave-with-unsaved-changes prompt). Returns whether a save was dispatched."""
+        return self._on_save()
 
     @staticmethod
     def _doc_uses_components(doc) -> bool:

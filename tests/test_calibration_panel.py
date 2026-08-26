@@ -1461,6 +1461,57 @@ def test_reported_role_save_allowed_on_capable_agent():
     assert client.uploaded                                # the role-using doc was pushed
 
 
+# ── unsaved-changes tracking (warn before leaving the Calibration tab) ──────────────
+
+def test_freshly_loaded_document_has_no_unsaved_changes():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc())
+    assert p.has_unsaved_changes() is False
+
+
+def test_editing_a_field_marks_unsaved_changes():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc())
+    p._f["max_gain"].setText("50")                      # a real edit
+    assert p.has_unsaved_changes() is True
+
+
+def test_reloading_the_document_clears_unsaved_changes():
+    # A successful save re-GETs and reloads the document; _set_doc re-baselines, so the
+    # tab reads clean again.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc())
+    p._f["max_gain"].setText("50")
+    assert p.has_unsaved_changes() is True
+    p._set_doc(p._read_form(strict=False))              # emulate the post-save reload
+    assert p.has_unsaved_changes() is False
+
+
+def test_no_baseline_means_no_unsaved_changes():
+    # Before any document is loaded there's nothing to lose, so leaving never prompts.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    assert p.has_unsaved_changes() is False
+
+
+def test_request_save_dispatches_and_returns_true():
+    client = FakeClient(caps=["calibration"])
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(_doc())
+    p._f["max_gain"].setText("50")
+    assert p.request_save() is True
+    assert client.uploaded                               # the edit was pushed
+
+
+def test_request_save_blocked_returns_false():
+    # A capability guard (reported stage on a ≤1.5.2 agent) blocks the save — request_save
+    # reports False so the host keeps the user on the tab to see the error.
+    client = FakeClient(caps=["calibration"])
+    p = CalibrationPanel("u", FakeHub(client))
+    p._set_doc(_roles_doc())
+    assert p.request_save() is False
+    assert client.uploaded == []
+
+
 def test_library_grid_has_a_card_per_component_plus_add():
     from ui.calibration_panel import _ClickCard
     p = CalibrationPanel("u", FakeHub(FakeClient()))
