@@ -29,6 +29,7 @@ class Fleet:
     def __init__(self, max_workers: int = 16):
         self._units: Dict[str, AgentClient] = {}
         self._library = None          # a LibraryClient-shaped object, or None
+        self._component_catalog = None  # the one shared RF-component library (lazy)
         self._max_workers = max_workers
 
     # ── Registry ────────────────────────────────────────────────────────────────
@@ -45,6 +46,17 @@ class Fleet:
         The Library tab uses this so it, the reused panels (via the LibraryClient),
         and the fleet all read and write the same store instance."""
         return self._library.store if self._library is not None else None
+
+    def component_catalog(self):
+        """The one shared RF-component library (calibration v2), created on first use.
+        The Library tab's Components sub-tab and every unit's calibration panel read and
+        write THIS instance, so a part characterized in one place is immediately known
+        everywhere and edits are never split across stale copies. It is a local file, so
+        it needs no unit connection."""
+        if self._component_catalog is None:
+            from state import ComponentCatalog
+            self._component_catalog = ComponentCatalog()
+        return self._component_catalog
 
     def add(self, client: AgentClient) -> None:
         # Key by hostname, which is stable for the client's lifetime. unit_id is
@@ -249,18 +261,68 @@ class Fleet:
 
     def deploy_state_all(self, library: "m.Library", plans: List["m.Plan"],
                          schedule: List["m.ScheduledPlan"], prune: bool = True,
-                         units: Optional[List[str]] = None) -> Dict[str, object]:
+                         units: Optional[List[str]] = None,
+                         components: Optional[Dict[str, dict]] = None) -> Dict[str, object]:
         """Replicate EVERYTHING to each unit in one pass: the library (definition-
-        only, safe on air), then the plan + schedule replicas (wholesale). Values
-        are the unit's DeployLibraryResult on success, or the Exception that stopped
-        it. Plans/schedule are pushed only after the library succeeds, so a unit
-        never ends up with plans referencing sequences it doesn't yet have."""
+        only, safe on air), the shared RF-component catalog, then the plan + schedule
+        replicas (wholesale). Values are the unit's DeployLibraryResult on success (with
+        its per-unit component outcome attached under ``.components``), or the Exception
+        that stopped it. Plans/schedule are pushed only after the library succeeds, so a
+        unit never ends up with plans referencing sequences it doesn't yet have.
+
+        ``components`` is the shared catalog as ``{id: spec}``; when given, each unit's
+        ``components.yaml`` is reconciled to it — but a component the unit's calibration
+        still references is never removed (see :func:`state.plan_unit_deploy`)."""
         def do(c):
-            res = c.deploy_library(m.scoped_library(library, c.unit_type), prune)
+            cal = self._fetch_calibration(c)          # once — used below for both checks + clip
+            from state import (scan_absolute_power, power_out_of_range, clip_library_power,
+                               scan_amplitudes, amplitude_mismatch)
+            scoped = m.scoped_library(library, c.unit_type)
+            # Warn about absolute --power levels this unit can't produce (from the ORIGINAL,
+            # so the operator sees the value they set), then DEPLOY A COPY clipped to the
+            # unit's range — so the stored task never holds a level the unit can't produce
+            # (which the Start button would otherwise run and the script would clip). The
+            # library keeps the operator's value for more capable units.
+            power_warnings = power_out_of_range(scan_absolute_power(scoped), cal)
+            clipped, _adjusted = clip_library_power(scoped, cal)
+            res = c.deploy_library(clipped, prune)
+            res.power_warnings = power_warnings
+            res.amplitude_warnings = amplitude_mismatch(scan_amplitudes(scoped), cal)
+            if components is not None:
+                res.components = self._deploy_components_to(c, components, prune, cal)
             c.put_plans(plans)
             c.put_schedule(schedule)
             return res
         return self._fan_out_reachable(do, units)
+
+    @staticmethod
+    def _fetch_calibration(c) -> dict:
+        """The unit's calibration result ({} when it's uncalibrated / has no document)."""
+        from .client import AgentHTTPError
+        try:
+            return c.get_calibration() or {}
+        except AgentHTTPError as exc:
+            if exc.status_code != 404:
+                raise
+            return {}
+
+    @staticmethod
+    def _deploy_components_to(c, library: Dict[str, dict], prune: bool, cal: dict) -> dict:
+        """Reconcile one unit's ``components.yaml`` to the shared library, keeping any
+        component the unit's calibration still references. Returns the change summary."""
+        from state import (ComponentCatalog, dump_components, plan_unit_deploy,
+                           referenced_components)
+        referenced = referenced_components((cal or {}).get("document"))
+        try:
+            on_unit = ComponentCatalog.parse_wire(c.get_components() or "")
+        except Exception:                             # noqa: BLE001 — a broken unit file
+            on_unit = {}
+        upload, info = plan_unit_deploy(library, on_unit, referenced, prune)
+        # Only touch the unit when the reconciled catalog actually differs from what it
+        # holds — an unchanged deploy shouldn't rewrite the file.
+        if upload != on_unit:
+            c.upload_components(dump_components(upload))
+        return info
 
     def panic_all(self, units: Optional[List[str]] = None) -> Dict[str, object]:
         """

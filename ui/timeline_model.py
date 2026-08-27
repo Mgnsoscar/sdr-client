@@ -430,6 +430,82 @@ def step_within_task_error(spans: List[Tuple[float, float]], anchor: str,
             f"at or after {fmt_duration(s, signed=True)}")
 
 
+def _args_to_values(args: List[str], flag_to_dest: Dict[str, str]) -> Dict[str, float]:
+    """Numeric ``{dest: value}`` from a CLI arg list, keeping only flags the schema knows
+    and values that parse as numbers (freq/power are numbers). A flag repeated keeps its
+    last value."""
+    out: Dict[str, float] = {}
+    i = 0
+    while i < len(args):
+        dest = flag_to_dest.get(args[i])
+        if dest is not None and i + 1 < len(args):
+            try:
+                out[dest] = float(args[i + 1])
+            except (TypeError, ValueError):
+                pass
+            i += 2
+        else:
+            i += 1
+    return out
+
+
+def _carry_order_key(it) -> Tuple[int, float]:
+    """A best-effort absolute-order key for carrying parameter state forward along one
+    task's items. Start-anchored items (a bar's start, a start-anchored tune) order by
+    their on-air offset; stop-anchored items happen near the end, so they sort after every
+    start-anchored one. (The on-air window length isn't known at author time, so start- and
+    stop-anchored offsets can't be interleaved exactly — this orders the common case, a
+    series of start-anchored steps, correctly.)"""
+    anchor = getattr(it, "anchor", "start")
+    if it.kind == "bar":
+        return (0, float(getattr(it, "start_offset", 0.0)))
+    off = float(getattr(it, "offset", 0.0))
+    return (1, off) if anchor == "stop" else (0, off)
+
+
+def sequence_effective_values(items, task: str, base_args: List[str], specs: List[dict],
+                              target_uid: int, target_key: Optional[Tuple[int, float]] = None
+                              ) -> Dict[str, float]:
+    """The numeric parameter state (``{dest: value}`` — e.g. the effective ``freq`` /
+    ``power``) a task is running with when the step ``target_uid`` fires, by replaying the
+    task's deployed ``base_args`` then every earlier same-task item in this sequence.
+
+    A duration bar's args are the on-air baseline; a ``tune`` step merges its ``params``;
+    a fire-and-exit ``run`` with ``replace_args`` resets the args. Ordering is best-effort
+    (see ``_carry_order_key``). Used to fold the --power range and flag a clamp at the
+    frequency actually in effect at that offset — not the step's own default."""
+    flag_to_dest: Dict[str, str] = {}
+    for s in specs:
+        for f in s.get("flags") or []:
+            flag_to_dest[f] = s.get("dest") or s.get("name")
+    state = _args_to_values(base_args or [], flag_to_dest)
+    mine = [it for it in items if getattr(it, "task_name", None) == task
+            and getattr(it, "uid", None) != target_uid]
+    if target_key is None:
+        target_key = (1, float("inf"))                 # no anchor info → replay all priors
+    for it in sorted(mine, key=_carry_order_key):
+        if _carry_order_key(it) >= target_key:
+            continue
+        if it.kind == "bar":
+            if getattr(it, "replace_args", True):
+                state = _args_to_values(list(it.args), flag_to_dest)
+            else:
+                state.update(_args_to_values(list(it.args), flag_to_dest))
+        elif getattr(it, "action", "run") == "tune":
+            for name, val in (it.params or {}).items():
+                try:
+                    state[name] = float(val)
+                except (TypeError, ValueError):
+                    pass
+        elif getattr(it, "action", "run") == "run":
+            if getattr(it, "replace_args", True):
+                state = _args_to_values(list(it.args), flag_to_dest)
+            else:
+                state.update(_args_to_values(list(it.args), flag_to_dest))
+        # a ramp sweeps a single param over time — skip (no single carried value)
+    return state
+
+
 def min_on_air_duration(items) -> float:
     """The shortest on-air window this item set fits in (seconds). Delegates to the
     shared api.ramp math after normalising items to step-shaped objects."""

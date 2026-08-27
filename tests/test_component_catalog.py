@@ -5,7 +5,12 @@ import pytest
 
 from state.component_catalog import (
     ComponentCatalog, CatalogError, parse_sweep, validate_table,
+    referenced_components, plan_unit_deploy, dump_components,
 )
+
+
+def _spec(d, kind="cable"):
+    return {"kind": kind, "delta_db_by_freq": [[1.0e9, d]]}
 
 
 # ── table validation ─────────────────────────────────────────────────────────────
@@ -135,3 +140,121 @@ def test_load_skips_a_broken_component(tmp_path):
                  ' "bad": {"kind":"cable","delta_db_by_freq":[]}}}', encoding="utf-8")
     c = ComponentCatalog(path=p)
     assert c.get("ok") is not None and c.get("bad") is None
+
+
+def test_fleet_shares_one_catalog():
+    # The fleet hands out ONE shared catalog instance (created lazily), so the Library
+    # tab and every unit's calibration panel read/write the same parts. No Qt, no unit.
+    from api.fleet import Fleet
+    f = Fleet()
+    a = f.component_catalog()
+    b = f.component_catalog()
+    assert a is b
+
+
+# ── deploy planning (fleet-wide push of the catalog to units) ───────────────────
+
+def test_referenced_components_reads_chain():
+    doc = {"chain": {"planes": {
+        "sdr_output": {"type": "measured"},
+        "cable": {"type": "derived", "from": "sdr_output", "component": "cab_a"},
+        "ant": {"type": "derived", "from": "cable", "component": "ant_a"},
+        "pad": {"type": "derived", "from": "ant", "delta_db": -1.0}}}}
+    assert referenced_components(doc) == {"cab_a", "ant_a"}
+    assert referenced_components(None) == set()
+    assert referenced_components({}) == set()
+
+
+def test_plan_prune_keeps_referenced_and_prunes_unused():
+    # ant_a was deleted from the shared library, but the unit's calibration still uses it
+    # → it must persist on the unit; an unrelated old_pad the unit doesn't use is pruned.
+    library = {"cab_a": _spec(-2.0)}
+    on_unit = {"cab_a": _spec(-2.0), "ant_a": _spec(6.0, "antenna"), "old_pad": _spec(-1.0, "pad")}
+    upload, info = plan_unit_deploy(library, on_unit, referenced={"cab_a", "ant_a"}, prune=True)
+    assert set(upload) == {"cab_a", "ant_a"}
+    assert info["kept_referenced"] == ["ant_a"]
+    assert info["pruned"] == ["old_pad"]
+    assert info["dangling"] == [] and info["added"] == [] and info["updated"] == []
+
+
+def test_plan_flags_dangling_reference():
+    # referenced by a calibration but present neither in the library nor on the unit
+    _, info = plan_unit_deploy(library={}, on_unit={}, referenced={"ant_a"}, prune=True)
+    assert info["dangling"] == ["ant_a"]
+
+
+def test_plan_no_prune_is_union_with_library_winning():
+    library = {"cab_a": _spec(-3.0)}                       # cab_a's value changed in the library
+    on_unit = {"cab_a": _spec(-2.0), "extra": _spec(0.0)}  # extra is not in the library
+    upload, info = plan_unit_deploy(library, on_unit, referenced=set(), prune=False)
+    assert set(upload) == {"cab_a", "extra"}              # nothing removed without prune
+    assert upload["cab_a"] == _spec(-3.0)                 # library value wins on shared ids
+    assert info["updated"] == ["cab_a"] and info["pruned"] == []
+
+
+def test_plan_reports_added():
+    library = {"cab_a": _spec(-2.0), "new_ant": _spec(5.0, "antenna")}
+    _, info = plan_unit_deploy(library, on_unit={"cab_a": _spec(-2.0)}, referenced=set(), prune=True)
+    assert info["added"] == ["new_ant"]
+
+
+def test_dump_components_round_trips():
+    comps = {"cab_a": _spec(-2.0), "ant_a": _spec(6.0, "antenna")}
+    assert ComponentCatalog.parse_wire(dump_components(comps)) == comps
+
+
+class _FakeUnit:
+    """Minimal client for exercising Fleet._deploy_components_to."""
+    def __init__(self, cal, comps_text):
+        self._cal = cal
+        self._comps_text = comps_text
+        self.uploaded = None
+
+    def get_calibration(self):
+        if self._cal is None:
+            from api.client import AgentHTTPError
+            raise AgentHTTPError("u", 404, "no calibration document")
+        return self._cal
+
+    def get_components(self):
+        return self._comps_text
+
+    def upload_components(self, text):
+        self.uploaded = text
+        return {"saved": "components.yaml"}
+
+
+def test_deploy_components_to_keeps_referenced_part():
+    from api.fleet import Fleet
+    cal = {"document": {"chain": {"planes": {
+        "sdr": {"type": "measured"},
+        "ant": {"type": "derived", "from": "sdr", "component": "ant_a"}}}}}
+    unit = _FakeUnit(cal, dump_components({"ant_a": _spec(6.0, "antenna"),
+                                           "junk": _spec(-9.0)}))
+    # library no longer has ant_a (deleted) — but the unit's calibration references it.
+    info = Fleet._deploy_components_to(unit, library={"cab_a": _spec(-2.0)}, prune=True,
+                                       cal=Fleet._fetch_calibration(unit))
+    assert unit.uploaded is not None
+    pushed = ComponentCatalog.parse_wire(unit.uploaded)
+    assert set(pushed) == {"cab_a", "ant_a"}             # ant_a persisted, junk pruned
+    assert info["kept_referenced"] == ["ant_a"] and info["pruned"] == ["junk"]
+
+
+def test_deploy_components_to_skips_upload_when_unchanged():
+    from api.fleet import Fleet
+    same = {"cab_a": _spec(-2.0)}
+    unit = _FakeUnit({"document": {"chain": {"planes": {"sdr": {"type": "measured"}}}}},
+                     dump_components(same))
+    info = Fleet._deploy_components_to(unit, library=same, prune=True,
+                                       cal=Fleet._fetch_calibration(unit))
+    assert unit.uploaded is None                          # nothing changed → no re-upload
+    assert info["added"] == [] and info["pruned"] == []
+
+
+def test_deploy_components_to_handles_uncalibrated_unit():
+    from api.fleet import Fleet
+    unit = _FakeUnit(None, "")                            # 404 calibration, no components yet
+    info = Fleet._deploy_components_to(unit, library={"cab_a": _spec(-2.0)}, prune=True,
+                                       cal=Fleet._fetch_calibration(unit))
+    assert ComponentCatalog.parse_wire(unit.uploaded) == {"cab_a": _spec(-2.0)}
+    assert info["added"] == ["cab_a"]

@@ -115,6 +115,64 @@ def test_remove_without_current_drops_last_row():
     assert t.points(strict=True) == [{"gain_db": 40.0, "power_dbm": -36.0}]
 
 
+# ── paste a gain/power block (Ctrl+V) ────────────────────────────────────────────
+
+def _paste(table, text):
+    QApplication.clipboard().setText(text)
+    return table._paste_csv()
+
+
+def test_paste_two_column_block_into_empty_grid():
+    t = _CurveTable()
+    assert _paste(t, "40, -36\n50, -26\n74, -2.5") is True
+    assert t.numeric_points() == [(40.0, -36.0), (50.0, -26.0), (74.0, -2.5)]
+
+
+def test_paste_accepts_tabs_and_skips_a_header_row():
+    t = _CurveTable()
+    _paste(t, "gain (dB)\tpower (dBm)\n40\t-36\n74\t-2.5")
+    assert t.numeric_points() == [(40.0, -36.0), (74.0, -2.5)]
+
+
+def test_paste_at_current_cell_overwrites_downward():
+    t = _table([(40, -36), (50, -26), (60, -16)])
+    t.setCurrentCell(1, 0)                       # anchor on the 2nd row
+    _paste(t, "55, -21\n65, -11")
+    # rows 1..2 overwritten; row 0 kept
+    assert t.numeric_points() == [(40.0, -36.0), (55.0, -21.0), (65.0, -11.0)]
+
+
+def test_paste_extends_rows_when_block_runs_past_the_end():
+    t = _table([(40, -36)])
+    t.setCurrentCell(0, 0)
+    _paste(t, "40, -36\n50, -26\n60, -16")
+    assert t.numeric_points() == [(40.0, -36.0), (50.0, -26.0), (60.0, -16.0)]
+
+
+def test_single_column_paste_fills_the_focused_column():
+    t = _table([(40, -36), (50, -26)])
+    t.setCurrentCell(0, 1)                       # power column
+    _paste(t, "-35\n-25")
+    assert t.numeric_points() == [(40.0, -35.0), (50.0, -25.0)]
+
+
+def test_paste_with_no_current_cell_appends_after_stripping_blanks():
+    t = _table([(40, -36)])
+    t.add_blank_row()                            # a trailing empty row
+    t.setCurrentCell(-1, -1)                     # nothing focused
+    _paste(t, "50, -26\n60, -16")
+    assert t.numeric_points() == [(40.0, -36.0), (50.0, -26.0), (60.0, -16.0)]
+
+
+def test_paste_is_undoable():
+    t = _table([(40, -36)])
+    t.setCurrentCell(-1, -1)
+    _paste(t, "50, -26")
+    assert (50.0, -26.0) in t.numeric_points()
+    t.undo()
+    assert t.numeric_points() == [(40.0, -36.0)]
+
+
 # ── undo / redo ──────────────────────────────────────────────────────────────────
 
 def test_undo_redo_a_cell_edit():

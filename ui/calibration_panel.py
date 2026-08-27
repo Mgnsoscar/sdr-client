@@ -33,7 +33,7 @@ import copy
 import json
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QRect, Qt
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractItemDelegate, QAbstractItemView, QAbstractScrollArea, QApplication,
@@ -54,6 +54,55 @@ CAL_COMPONENTS_CAPABILITY = "calibration-components"   # agent >= 1.2.0 (v2 comp
 _COMPONENTS_NEEDS_NEWER = (
     "this unit's agent is too old for component-based calibration (needs 1.2.0+). "
     "Update the agent, or use a constant Δ dB on the passive planes.")
+CAL_PARTIAL_STAGES_CAPABILITY = "calibration-partial-stages"  # agent >= 1.3.0
+_PARTIAL_STAGES_NEEDS_NEWER = (
+    "this unit's agent is too old to leave a measured stage unmeasured for some signals "
+    "(needs 1.3.0+). Update the agent, or measure every signal on each measured stage.")
+CAL_NO_SIGNALS_CAPABILITY = "calibration-no-signals"  # agent >= 1.4.0
+_NO_SIGNALS_NEEDS_NEWER = (
+    "this unit's agent is too old to save a calibration with no signals yet (needs 1.4.0+). "
+    "Update the agent, or add at least one measured signal before saving.")
+CAL_LIMIT_SIDE_CAPABILITY = "calibration-limit-side"  # agent >= 1.5.0
+_LIMIT_SIDE_NEEDS_NEWER = (
+    "this unit's agent is too old for input/output-side limits (needs 1.5.0+). It would "
+    "ignore 'side' and apply the cap at the plane's output — a different, unsafe limit. "
+    "Update the agent, or set every limit's side to Output (the plane itself).")
+CAL_PLANE_ROLES_CAPABILITY = "calibration-plane-roles"  # agent >= 1.6.0
+_PLANE_ROLES_NEEDS_NEWER = (
+    "this unit's agent is too old for reported (report-only) measured stages (needs 1.6.0+). "
+    "It would treat a reported stage as an ordinary limiting one and mis-gauge the ceiling. "
+    "Update the agent, or make every measured stage Limiting.")
+CAL_GAIN_STEP_CAPABILITY = "calibration-gain-step"  # agent >= 1.7.0
+_GAIN_STEP_NEEDS_NEWER = (
+    "this unit's agent is too old to snap the gain to a step (needs 1.7.0+). It would ignore "
+    "the gain step and command an off-grid gain the SDR silently rounds. Update the agent, or "
+    "clear the Gain step field.")
+CAL_FREQ_OPTIONAL_CENTER_CAPABILITY = "calibration-freq-optional-center"  # agent >= 1.7.1
+_FREQ_OPTIONAL_CENTER_NEEDS_NEWER = (
+    "this unit's agent is too old to leave the centre frequency blank on a frequency-dependent "
+    "chain (needs 1.7.1+). It requires a centre frequency to fold the operating point. Update "
+    "the agent, or fill in each signal's centre frequency.")
+
+# The baseband amplitude every broadcaster script transmits at is a FIXED constant (the
+# scripts' baked AMPLITUDE), not an operator control — so calibration is always measured at
+# this amplitude and the editor does not expose it as an editable field. It is recorded on
+# the document so the script's calkit amplitude gate can validate against it. A calibration
+# whose stored amplitude differs (measured with an older, differently-amplitude'd script) is
+# NOT silently relabelled: it is flagged here and rejected at runtime until re-measured.
+FIXED_BASEBAND_AMPLITUDE = 0.5
+_AMPLITUDE_TOL = 1e-6
+
+
+def _amp_conflicts(value) -> bool:
+    """True when a stored amplitude is present and differs from the fixed fleet amplitude —
+    i.e. a legacy calibration measured with a differently-amplitude'd script. Such a value is
+    preserved (never relabelled) so the runtime gate rejects it until it is re-measured."""
+    if value is None:
+        return False
+    try:
+        return abs(float(value) - FIXED_BASEBAND_AMPLITUDE) > _AMPLITUDE_TOL
+    except (TypeError, ValueError):
+        return False
 
 # When the unit is simply uncalibrated, the /calibration route answers 404 with this
 # detail. A generic "Not Found" 404 instead means the route itself is missing — i.e.
@@ -117,6 +166,19 @@ def _curve_issues(sid: str, plane: str, pts) -> list:
     return out
 
 
+def _upstream_plane_name(planes: dict, name: str):
+    """The plane feeding INTO ``name``'s stage — one hop upstream in the cascade, mirroring
+    the agent (agent/calibration.py:_upstream_plane): a derived plane's parent is its
+    ``from``; a measured plane's is the plane before it in cascade (dict) order. Returns
+    None when ``name`` is the first plane (nothing upstream)."""
+    p = planes.get(name)
+    if isinstance(p, dict) and p.get("type") == "derived":
+        return p.get("from")
+    keys = list(planes)
+    i = keys.index(name) if name in keys else -1
+    return keys[i - 1] if i > 0 else None
+
+
 def local_calibration_issues(doc) -> list:
     """A fast, best-effort structural check of a working document, for instant editor
     feedback BEFORE the authoritative agent validate/save. Catches the common mistakes
@@ -172,12 +234,23 @@ def local_calibration_issues(doc) -> list:
     if gl.get("max_gain_db") is None and not chain.get("limits"):
         issues.append("no safety ceiling — set a max gain or add at least one limit")
     for lim in (chain.get("limits") or []):
-        if isinstance(lim, dict) and lim.get("plane") not in planes:
+        if not isinstance(lim, dict):
+            continue
+        if lim.get("plane") not in planes:
             issues.append(f"limit references unknown plane '{lim.get('plane')}'")
+            continue
+        side = lim.get("side", "output")
+        if side not in ("input", "output"):
+            issues.append(f"limit on '{lim.get('plane')}': side must be input or output")
+        elif side == "input" and _upstream_plane_name(planes, lim["plane"]) is None:
+            issues.append(f"limit on '{lim.get('plane')}' is input-side but that stage "
+                          "is first in the chain — nothing upstream to cap")
 
+    # An empty signal set is a valid onboarding state — the chain + ceiling can be
+    # saved before any signal is measured (the agent accepts a signal-less document;
+    # nothing can transmit until a signal is added). So it is not flagged as an issue.
     signals = doc.get("signals") or {}
-    if not signals:
-        issues.append("no signals — add at least one")
+    default_amp = ((doc.get("defaults") or {}).get("amplitude"))
     for sid, sig in signals.items():
         for pname, curve in ((sig or {}).get("curves") or {}).items():
             if pname not in planes:
@@ -185,18 +258,38 @@ def local_calibration_issues(doc) -> list:
             elif pname not in measured:
                 issues.append(f"signal '{sid}': curve given for derived plane '{pname}'")
             issues.extend(_curve_issues(sid, pname, (curve or {}).get("points")))
+        # Amplitude is fixed at FIXED_BASEBAND_AMPLITUDE. A curve measured at a different
+        # amplitude describes a different power scale, so the script runs uncalibrated until
+        # it is re-measured — surface that here (the runtime enforces it too).
+        eff = (sig or {}).get("amplitude", default_amp)
+        if eff is not None and abs(float(eff) - FIXED_BASEBAND_AMPLITUDE) > _AMPLITUDE_TOL:
+            issues.append(
+                f"signal '{sid}': calibrated at amplitude {float(eff):g}, but scripts "
+                f"transmit at {FIXED_BASEBAND_AMPLITUDE:g} — re-measure at "
+                f"{FIXED_BASEBAND_AMPLITUDE:g} (runs uncalibrated until then)")
     return issues
 
 
 class _Sparkline(QWidget):
-    """A tiny gain→power plot of a curve's points, so a fat-fingered point (a dip, a
-    duplicate) is obvious at a glance next to the grid."""
-    def __init__(self):
+    """A tiny plot of a curve's points, so a fat-fingered point (a dip, a duplicate) is
+    obvious at a glance next to the grid.
+
+    ``mode`` sets both the axes hint and how the line is COLOURED:
+      • "curve" (default) — a measured gain→power curve. It MUST be invertible (power
+        strictly increasing with gain), so a non-monotonic sequence is drawn red as a
+        warning.
+      • "delta" — a component's Δ dB vs frequency. Monotonicity is meaningless here (an
+        antenna/cable can roll off with frequency), so it's coloured by SIGN instead:
+        accent for a net gain (positive dB), red for a net loss (negative) — matching
+        the gain=blue / loss=red intuition."""
+    def __init__(self, mode: str = "curve"):
         super().__init__()
         self._pts: list = []
+        self._mode = mode
         self.setFixedHeight(46)
         self.setMinimumWidth(120)
-        self.setToolTip("gain (x) → power (y) for the points above")
+        self.setToolTip("Δ dB (y) across frequency (x)" if mode == "delta"
+                        else "gain (x) → power (y) for the points above")
 
     def set_points(self, pts) -> None:
         vals = []
@@ -208,6 +301,18 @@ class _Sparkline(QWidget):
         vals.sort(key=lambda gp: gp[0])
         self._pts = vals
         self.update()
+
+    def _line_color(self) -> QColor:
+        """The plot colour. In "delta" mode: accent for a net gain, red for a net loss.
+        In "curve" mode: red when the power sequence isn't strictly increasing (a
+        non-invertible measured curve), else accent."""
+        ps = [p for _, p in self._pts]
+        if not ps:
+            return QColor(Palette.ACCENT)
+        if self._mode == "delta":
+            return QColor(Palette.ACCENT if sum(ps) >= 0 else Palette.CRASH)
+        bad = any(ps[i] <= ps[i - 1] for i in range(1, len(ps)))
+        return QColor(Palette.CRASH if bad else Palette.ACCENT)
 
     def paintEvent(self, _evt) -> None:
         qp = QPainter(self)
@@ -226,9 +331,7 @@ class _Sparkline(QWidget):
             y = h - pad - (p - p0) / pspan * (h - 2 * pad)   # y grows downward
             return x, y
 
-        # detect a non-monotonic (non-invertible) power sequence → draw the line red
-        bad = any(ps[i] <= ps[i - 1] for i in range(1, len(ps)))
-        line = QColor(Palette.CRASH if bad else Palette.ACCENT)
+        line = self._line_color()
         qp.setPen(QPen(line, 1.5))
         for i in range(1, len(self._pts)):
             x0, y0 = xy(*self._pts[i - 1]); x1, y1 = xy(*self._pts[i])
@@ -442,63 +545,66 @@ class _FreqResponsePlot(QWidget):
             qp.drawEllipse(int(X(freq)) - 4, int(Y(d)) - 4, 8, 8)
 
 
-_STAGE_MIME = "application/x-sdr-stage"
-
-
 class _ClickCard(QFrame):
     """A QFrame that runs a callback when clicked — used for the chain stages and the
-    component-library cards. Optionally a drop target: when `on_drop` is given it accepts
-    a dragged stage (see _DragHandle) and calls on_drop(src_name, self._drop_name)."""
-    def __init__(self, on_click=None, on_drop=None, drop_name=None):
+    component-library cards."""
+    def __init__(self, on_click=None):
         super().__init__()
         self._on_click = on_click
-        self._on_drop = on_drop
-        self._drop_name = drop_name
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        if on_drop is not None:
-            self.setAcceptDrops(True)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if self._on_click is not None and event.button() == Qt.MouseButton.LeftButton:
             self._on_click()
         super().mousePressEvent(event)
 
-    def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if self._on_drop is not None and event.mimeData().hasFormat(_STAGE_MIME):
-            event.acceptProposedAction()
-
-    def dragMoveEvent(self, event) -> None:  # noqa: N802
-        if self._on_drop is not None and event.mimeData().hasFormat(_STAGE_MIME):
-            event.acceptProposedAction()
-
-    def dropEvent(self, event) -> None:  # noqa: N802
-        if self._on_drop is not None and event.mimeData().hasFormat(_STAGE_MIME):
-            src = bytes(event.mimeData().data(_STAGE_MIME)).decode("utf-8")
-            event.acceptProposedAction()
-            if src and src != self._drop_name:
-                self._on_drop(src, self._drop_name)
-
 
 class _DragHandle(QLabel):
-    """The grip on a chain stage: dragging it reorders the stage (dropping onto another
-    stage card). Kept separate from the card's click-to-select so the two don't fight."""
-    def __init__(self, name: str):
+    """The grip on a chain stage. Dragging it runs a LIVE reorder: the real card follows
+    the cursor and its neighbours slide aside as it crosses them (via the panel's
+    ``on_start`` / ``on_move`` / ``on_end`` callbacks), so you see where it lands before
+    letting go. Releasing finalises. Kept separate from the card's click-to-select so the
+    two don't fight (accepting the press makes this widget the mouse grabber)."""
+    def __init__(self, name: str, on_start, on_move, on_end):
         super().__init__("⠿")
         self._name = name
+        self._on_start, self._on_move, self._on_end = on_start, on_move, on_end
+        self._press = None                    # press-point, set once we own the press
+        self._dragging = False
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.setToolTip("Drag to reorder this stage")
         self.setStyleSheet(f"color:{Palette.TEXT_FAINT};font-size:13px;")
 
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if not (event.buttons() & Qt.MouseButton.LeftButton):
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press = event.globalPosition().toPoint()
+            self._dragging = False
+            event.accept()
             return
-        from PyQt6.QtCore import QMimeData
-        from PyQt6.QtGui import QDrag
-        drag = QDrag(self)
-        mime = QMimeData()
-        mime.setData(_STAGE_MIME, self._name.encode("utf-8"))
-        drag.setMimeData(mime)
-        drag.exec(Qt.DropAction.MoveAction)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._press is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        gp = event.globalPosition().toPoint()
+        if not self._dragging:
+            if (gp - self._press).manhattanLength() < QApplication.startDragDistance():
+                return                        # below the threshold — a click, not a drag
+            self._dragging = True
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self._on_start(self._name, gp)
+        else:
+            self._on_move(gp)
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        was = self._dragging
+        self._press = None
+        self._dragging = False
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        if was:
+            self._on_end()
+        event.accept()
 
 
 def _rename_plane_in_doc(doc: dict, old: str, new: str) -> dict:
@@ -521,6 +627,8 @@ def _rename_plane_in_doc(doc: dict, old: str, new: str) -> dict:
     for spec in (chain.get("planes") or {}).values():
         if isinstance(spec, dict) and spec.get("from") == old:
             spec["from"] = new
+        if isinstance(spec, dict) and spec.get("of") == old:   # reported plane's basis
+            spec["of"] = new
     for sig in (doc.get("signals") or {}).values():
         curves = (sig or {}).get("curves")
         if isinstance(curves, dict) and old in curves:
@@ -540,9 +648,9 @@ def _template() -> dict:
                 "sdr_output": {"type": "measured", "quantity": "total in-band power"},
             },
         },
-        "defaults": {"amplitude": 0.8},
+        "defaults": {"amplitude": FIXED_BASEBAND_AMPLITUDE},
         "signals": {
-            "mock": {"amplitude": 0.8, "curves": {
+            "mock": {"curves": {
                 "sdr_output": {"points": [
                     {"gain_db": 40, "power_dbm": -36}, {"gain_db": 74, "power_dbm": -2.5}]}}},
         },
@@ -583,8 +691,9 @@ class _CurveTable(QTableWidget):
                         "with gain AND power both strictly increasing.\n\n"
                         "Double-click a cell (or just type) to edit · Del clears the "
                         "current cell · Ctrl+Z / Ctrl+Y undo/redo · Esc or click away "
-                        "to deselect · paste rows of \"gain, power\" (Ctrl+V) from a "
-                        "spreadsheet.")
+                        "to deselect · paste (Ctrl+V) a \"gain, power\" block from a "
+                        "spreadsheet — it lands at the selected cell (or appends), and a "
+                        "single column fills just that column.")
         # Undo/redo history of row snapshots (see _record_history / undo / redo).
         self._history: list = [[]]
         self._hist_idx = 0
@@ -721,23 +830,65 @@ class _CurveTable(QTableWidget):
             self._hist_idx += 1
             self._restore(self._history[self._hist_idx])
 
+    @staticmethod
+    def _is_num(s: str) -> bool:
+        try:
+            float(s)
+            return True
+        except (TypeError, ValueError):
+            return False
+
+    def _strip_trailing_blank_rows(self) -> int:
+        """Drop fully-empty rows at the bottom (from an unfilled “+ point”), returning the
+        resulting row count — the anchor for an append-style paste, so pasted data lands
+        against the real points instead of below stray blanks."""
+        r = self.rowCount() - 1
+        while r >= 0:
+            g = self.item(r, 0).text().strip() if self.item(r, 0) else ""
+            p = self.item(r, 1).text().strip() if self.item(r, 1) else ""
+            if g == "" and p == "":
+                self.removeRow(r)
+                r -= 1
+            else:
+                break
+        return self.rowCount()
+
     def _paste_csv(self) -> bool:
+        """Paste a spreadsheet block of gain/power values. Cells are comma-, tab-, or
+        whitespace-separated; a leading header row ("gain … power …") is skipped. The block
+        lands at the current cell (overwriting downward and extending rows, spreadsheet
+        style); with no current cell it appends after the existing points. A single-column
+        paste fills just the focused column, so you can drop in gains or powers on their own."""
         text = QApplication.clipboard().text()
         if not text or not text.strip():
             return False
-        rows = []
+        grid = []
         for line in text.splitlines():
-            line = line.strip().replace(",", " ").replace("\t", " ")
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) >= 2:
-                rows.append((parts[0], parts[1]))
-        if not rows:
+            parts = [p for p in line.strip().replace(",", " ").replace("\t", " ").split()
+                     if p != ""]
+            if parts:
+                grid.append(parts)
+        if grid and not self._is_num(grid[0][0]):
+            grid = grid[1:]                              # drop a header line
+        if not grid:
             return False
+        ncols = min(2, max(len(r) for r in grid))
+        cur_r, cur_c = self.currentRow(), self.currentColumn()
+        # A 2-column block always starts in the gain column; a 1-column paste fills the
+        # focused column (gain or power), so you can paste a single measured column.
+        start_col = 0 if ncols >= 2 else (cur_c if cur_c in (0, 1) else 0)
+        start_row = cur_r if cur_r is not None and cur_r >= 0 \
+            else self._strip_trailing_blank_rows()
         self.blockSignals(True)
-        for g, p in rows:
-            self._append(g, p)
+        for i, fields in enumerate(grid):
+            r = start_row + i
+            while r >= self.rowCount():
+                self._append()
+            for j in range(min(ncols, len(fields))):
+                c = start_col + j
+                if c > 1:
+                    break
+                self.setItem(r, c, QTableWidgetItem(fields[j]))
         self.blockSignals(False)
         self._fit_height()
         self._changed()
@@ -851,8 +1002,28 @@ class CalibrationPanel(QWidget):
         self._doc: Optional[dict] = None       # the working document model
         self._f: dict = {}                      # references to editor widgets
         self._expanded_signals: set = set()    # measured-detail signals shown expanded
-        from state import ComponentCatalog
-        self._catalog = ComponentCatalog()      # the client's canonical component library
+        self._task_signal_ids: list = []       # signal ids this unit's tasks reference (hints)
+        self._task_signals: dict = {}          # task name → SDR_CAL_SIGNAL_ID it references
+        self._tasks_yaml: str = ""             # last-fetched tasks.yaml (for task renames)
+        self._saved_doc: Optional[dict] = None  # the unit's last-persisted calibration doc
+        # Canonical form snapshot taken whenever a whole document is loaded into the editor
+        # (get/template/upload/save-refresh). has_unsaved_changes() compares the live form
+        # against it, so the host can warn before the user leaves with unsaved edits.
+        self._baseline: Optional[str] = None
+        # plane id → set of signal ids opened on a NON-source measured stage that don't
+        # yet have data there (so the user can enter points). Reset on a fresh document.
+        self._stage_extra: dict = {}
+        self._drag: Optional[dict] = None       # in-flight chain drag state (see below)
+        # The one fleet-wide component library, shared with the Library tab's Components
+        # sub-tab so a part characterized anywhere is immediately available here. Falls
+        # back to a private catalog only when the fleet can't supply one (test fakes).
+        fleet = getattr(self.hub, "fleet", None)
+        getter = getattr(fleet, "component_catalog", None)
+        if callable(getter):
+            self._catalog = getter()
+        else:
+            from state import ComponentCatalog
+            self._catalog = ComponentCatalog()
         self._components_synced = False          # merged this unit's catalog on first load
         self._build()
         self.hub.task_done.connect(self._on_task_done)
@@ -976,7 +1147,8 @@ class CalibrationPanel(QWidget):
         chain_scroll.setFrameShape(QFrame.Shape.NoFrame)
         chain_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         chain_scroll.setMinimumHeight(190)
-        holder = QWidget(); self._chain_row = QHBoxLayout(holder)
+        holder = QWidget(); self._chain_holder = holder
+        self._chain_row = QHBoxLayout(holder)
         self._chain_row.setContentsMargins(0, 2, 0, 2); self._chain_row.setSpacing(0)
         chain_scroll.setWidget(holder)
         chain_body.addWidget(chain_scroll)
@@ -996,15 +1168,23 @@ class CalibrationPanel(QWidget):
         sig_card, sig_body = self._make_card(
             lbl="Signals", sub="resolved --power at each frequency", trailing=add_sig)
         sig_body.setContentsMargins(0, 0, 0, 0)
-        self._table = QTableWidget(0, 4)
-        self._table.setHorizontalHeaderLabels(["Signal", "Freq MHz", "Ampl.", "--power dBm"])
+        self._table = QTableWidget(0, 3)
+        self._table.setHorizontalHeaderLabels(["Signal", "Freq MHz", "--power dBm"])
         self._table.verticalHeader().setVisible(False)
-        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        # Only the Signal cell is editable — double-click it to rename the signal id (the
+        # other columns are read-outs). See _populate_table for the per-cell flags.
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked |
+                                    QAbstractItemView.EditTrigger.EditKeyPressed)
+        self._table.itemChanged.connect(self._on_signal_item_changed)
+        # No built-in (blue, persistent) selection: clicking a row still fires
+        # cellClicked, but the highlight is painted by hand in _populate_table — with the
+        # app's accent tint, and only while that signal's editor is actually open (see
+        # _active_signal_ids). So nothing stays highlighted after you leave it.
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table.setMaximumHeight(180)
-        self._table.setToolTip("Click a signal to open its measured curve for editing.")
+        self._table.setToolTip("Click a signal to open its measured curve for editing; "
+                               "double-click its name to rename it.")
         self._table.cellClicked.connect(self._on_signal_row_clicked)
         sig_body.addWidget(self._table)
         rcol.addWidget(sig_card)
@@ -1041,19 +1221,25 @@ class CalibrationPanel(QWidget):
             "This unit's hardware type. It selects the shared type-defaults chain that's "
             "merged in, so it must match the real unit — a wrong type silently mis-resolves.")
         self._f["min_gain"] = QLineEdit(); self._f["max_gain"] = QLineEdit()
+        self._f["gain_step"] = QLineEdit()
+        self._f["gain_step"].setPlaceholderText("optional, e.g. 0.25")
         self._f["min_gain"].setToolTip("Lowest usable SDR internal gain (dB).")
         self._f["max_gain"].setToolTip(
             "Highest SDR gain the safety ceilings allow (usually the amp's P1dB gain).")
-        self._f["def_amp"] = QLineEdit()
-        self._f["def_amp"].setToolTip(
-            "Default baseband amplitude (0–1) a signal uses when it sets none of its own.")
+        self._f["gain_step"].setToolTip(
+            "SDR gain step (dB), optional. The radio only settles on a discrete gain grid "
+            "(e.g. 0.25 dB); set it and calibration snaps the commanded gain to the nearest "
+            "step — never above the ceiling — so delivered power matches. Blank = continuous.")
+        # Baseband amplitude is fixed fleet-wide (FIXED_BASEBAND_AMPLITUDE) and owned by the
+        # scripts, so it is NOT an editable field here — it is recorded on save and any
+        # legacy mismatch is flagged by local_calibration_issues.
         set_card, set_body = self._make_card(
             lbl="Chain settings", sub="gain range · defaults")
         form = QFormLayout(); form.setContentsMargins(0, 0, 0, 0)
         form.addRow("Unit type", self._f["unit_type"])
         form.addRow("Min gain (dB)", self._f["min_gain"])
         form.addRow("Max gain (dB)", self._f["max_gain"])
-        form.addRow("Default amplitude", self._f["def_amp"])
+        form.addRow("Gain step (dB)", self._f["gain_step"])
         set_body.addLayout(form)
         self._editor_layout.addWidget(set_card)
 
@@ -1124,8 +1310,30 @@ class CalibrationPanel(QWidget):
     # ── model → views ────────────────────────────────────────────────────────────
     def _set_doc(self, doc: Optional[dict]) -> None:
         self._doc = doc
+        self._stage_extra = {}                  # a fresh document → forget transient adds
         self._download_btn.setEnabled(doc is not None)
         self._doc_to_form()
+        # A whole document was just loaded into the editor → this is the clean baseline
+        # against which later edits count as unsaved (see has_unsaved_changes).
+        self._baseline = self._canonical_form()
+
+    def _canonical_form(self) -> Optional[str]:
+        """A stable JSON snapshot of the live form, or None if it can't be read. Insertion
+        order is preserved (not sort_keys) so a stage reorder — which is a real edit — is
+        detected, not normalised away."""
+        try:
+            return json.dumps(self._read_form(strict=False), default=str)
+        except Exception:  # noqa: BLE001 — a mid-edit form that won't read is treated as dirty
+            return None
+
+    def has_unsaved_changes(self) -> bool:
+        """True when the editor holds edits not yet saved to the unit. Compares the live
+        form to the baseline captured at the last load/save. Used by the host to warn
+        before the user leaves the Calibration tab."""
+        if self._baseline is None:
+            return False
+        cur = self._canonical_form()
+        return cur is None or cur != self._baseline
 
     def _plane_names(self):
         planes = ((self._doc or {}).get("chain") or {}).get("planes") or {}
@@ -1151,6 +1359,7 @@ class CalibrationPanel(QWidget):
         gl = chain.get("gain_limits") or {}
         self._f["min_gain"].setText(_numstr(gl.get("min_gain_db")))
         self._f["max_gain"].setText(_numstr(gl.get("max_gain_db")))
+        self._f["gain_step"].setText(_numstr(gl.get("gain_step_db")))
 
         ut = (doc or {}).get("unit_type", "")
         i = self._f["unit_type"].findData(ut)
@@ -1159,7 +1368,6 @@ class CalibrationPanel(QWidget):
         elif ut:                                    # a type we don't have a label for
             self._f["unit_type"].addItem(ut, ut)
             self._f["unit_type"].setCurrentIndex(self._f["unit_type"].count() - 1)
-        self._f["def_amp"].setText(_numstr(((doc or {}).get("defaults") or {}).get("amplitude")))
 
         # plane rows + signal entries: create the editable widgets (the chain/detail
         # render decides where the selected ones are shown).
@@ -1272,19 +1480,28 @@ class CalibrationPanel(QWidget):
         lim = lim or {}
         w = QWidget(); h = QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0)
         plane = QComboBox(); plane.addItems(self._plane_names())
-        plane.setToolTip("The plane this ceiling is measured at.")
+        plane.setToolTip("The stage this ceiling protects.")
         if lim.get("plane") in self._plane_names():
             plane.setCurrentText(lim["plane"])
+        side = QComboBox(); side.addItems(["output", "input"])
+        side.setToolTip(
+            "Which boundary of that stage the cap applies at.\n"
+            "• output — the plane itself (e.g. a licence EIRP cap on the antenna).\n"
+            "• input — the plane feeding the stage (e.g. an amp's max input power). An\n"
+            "  input limit follows its stage: insert a component upstream and it stays put,\n"
+            "  no need to restate it on the new part.")
+        side.setCurrentText(lim.get("side", "output") if lim.get("side") in ("input", "output")
+                            else "output")
         max_dbm = QLineEdit(_numstr(lim.get("max_dbm"))); max_dbm.setPlaceholderText("max dBm")
-        max_dbm.setToolTip("Maximum power (dBm) permitted at that plane.")
+        max_dbm.setToolTip("Maximum power (dBm) permitted at that stage boundary.")
         reason = QLineEdit(lim.get("reason", "")); reason.setPlaceholderText("reason (optional)")
         reason.setToolTip("Why this ceiling exists — e.g. “amp P1dB input”, "
                           "“licence EIRP cap”. Shown for context only.")
         rm = QPushButton("✕"); rm.setFixedWidth(28)
-        for wdg, s in ((plane, 2), (max_dbm, 1), (reason, 3)):
+        for wdg, s in ((plane, 2), (side, 1), (max_dbm, 1), (reason, 3)):
             h.addWidget(wdg, s)
         h.addWidget(rm)
-        row = {"w": w, "plane": plane, "max": max_dbm, "reason": reason}
+        row = {"w": w, "plane": plane, "side": side, "max": max_dbm, "reason": reason}
         rm.clicked.connect(lambda: self._remove_row(self._limits_box, self._f["limits"], row))
         self._limits_box.addWidget(w)
         self._f["limits"].append(row)
@@ -1328,26 +1545,62 @@ class CalibrationPanel(QWidget):
         delta_e.editingFinished.connect(self._refresh_form_from_widgets)
         # "orig" is the plane's last-committed name, so a rename propagates to everything
         # that references it instead of silently dangling.
+        # cal_role: a MEASURED stage is "limiting" (default — safety limits gauge on it) or
+        # "reported" (report-only; limits punch through it to the nearest limiting stage
+        # upstream, derived automatically at save — see _auto_of / docs/calibration.md §4.1).
+        cal_role = spec.get("role", "limiting") if role == "measured" else "limiting"
         row = {"name": name_e, "role": role, "comp_id": spec.get("component") or "",
-               "delta": delta_e, "orig": name}
+               "delta": delta_e, "orig": name,
+               "cal_role": cal_role if cal_role == "reported" else "limiting"}
         name_e.editingFinished.connect(lambda r=row: self._on_plane_name_changed(r))
         return row
 
     # ── chain flow (mockup section 2) ────────────────────────────────────────────
     def _render_chain(self) -> None:
         self._clear_layout(self._chain_row)
+        self._drag = None                        # any in-flight drag is stale after a rebuild
         rows = self._f.get("planes", [])
         rep = self._rep_freq()
         n = len(rows)
+        # Each stage is a "slot" = its card plus a trailing "→", so a live reorder moves
+        # the card and its arrow as one unit and the flow always reads left-to-right.
+        self._chain_slots = []                   # [(plane_name, slot_widget)], chain order
         for i, row in enumerate(rows):
-            self._chain_row.addWidget(self._stage_card(row, i, n, rep))
+            slot = QWidget()
+            sl = QHBoxLayout(slot); sl.setContentsMargins(0, 0, 0, 0); sl.setSpacing(0)
+            sl.addWidget(self._stage_card(row, i, n, rep))
             arrow = QLabel("→")
             arrow.setStyleSheet(f"color:{Palette.BORDER_STRONG};font-size:18px;")
             arrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
             arrow.setFixedWidth(26)
-            self._chain_row.addWidget(arrow)
+            sl.addWidget(arrow)
+            self._chain_row.addWidget(slot)
+            self._chain_slots.append((row["name"].text().strip(), slot))
+        if n:                                    # mark the operating plane beside the end
+            self._chain_row.addWidget(self._operating_marker())
         self._chain_row.addWidget(self._add_stage_card())
         self._chain_row.addStretch(1)
+
+    def _operating_marker(self) -> QWidget:
+        """The “operating plane” callout, placed to the RIGHT of the last stage (not on it):
+        the last stage's output is where an absolute --power value is read. Kept as its own
+        fixed element so it doesn't travel with a card during a drag reorder."""
+        marker = QWidget()
+        marker.setToolTip("Operating plane — where an absolute --power value is read "
+                          "(the output of the last stage). It's always the final stage.")
+        col = QVBoxLayout(marker); col.setContentsMargins(2, 0, 10, 0); col.setSpacing(0)
+        col.addStretch(1)
+        inner = QHBoxLayout(); inner.setSpacing(6)
+        arrow = QLabel("◀")
+        arrow.setStyleSheet(f"color:{Palette.ONLINE};font-size:16px;font-weight:700;")
+        pill = QLabel("--power\nreads here")
+        pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pill.setStyleSheet(f"color:#fff;background:{Palette.ONLINE};font-size:10px;"
+                           f"font-weight:700;padding:4px 9px;border-radius:8px;")
+        inner.addWidget(arrow); inner.addWidget(pill)
+        col.addLayout(inner)
+        col.addStretch(1)
+        return marker
 
     def _add_stage_card(self) -> QWidget:
         """The dashed “+ Add stage” tile at the end of the chain."""
@@ -1371,29 +1624,23 @@ class CalibrationPanel(QWidget):
         role = row.get("role", "measured")
         kind = "source" if index == 0 else ("passive" if role != "measured" else "measured")
         selected = (name == self._selected_plane)
-        operating = (index == total - 1)          # operating plane = last stage, always
-        border = (Palette.ONLINE if operating else
-                  Palette.ACCENT if selected else Palette.BORDER)
-        bg = Palette.SURFACE if (operating or selected) else Palette.SURFACE_ALT
-        # Non-source stages are drop targets (drag another stage onto them to reorder).
-        card = _ClickCard(on_click=lambda n=name: self._select_plane(n),
-                          on_drop=(self._reorder_stage if index > 0 else None),
-                          drop_name=name)
+        # The operating plane (always the last stage) is marked by a callout to the RIGHT
+        # of the chain, not by styling this card — so a card doesn't flash "operating"
+        # while being dragged past the end. Cards are visually uniform bar the selection.
+        border = Palette.ACCENT if selected else Palette.BORDER
+        bg = Palette.SURFACE if selected else Palette.SURFACE_ALT
+        card = _ClickCard(on_click=lambda n=name: self._select_plane(n))
         card.setObjectName("stage")
         card.setStyleSheet(f"#stage {{ background:{bg}; border:1px solid {border}; "
                            f"border-radius:10px; }}")
         card.setMinimumWidth(178); card.setMaximumWidth(230)
         v = QVBoxLayout(card); v.setContentsMargins(12, 10, 12, 12); v.setSpacing(7)
 
-        # top row: drag grip + operating badge + move ◀▶ handles (none on the source)
+        # top row: drag grip + move ◀▶ handles (none on the source)
         top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0)
         if index > 0:
-            top.addWidget(_DragHandle(name))
-        if operating:
-            opb = QLabel("--power reads here")
-            opb.setStyleSheet(f"color:#fff;background:{Palette.ONLINE};font-size:10px;"
-                              f"font-weight:700;padding:2px 8px;border-radius:999px;")
-            top.addWidget(opb)
+            top.addWidget(_DragHandle(name, self._chain_drag_start,
+                                      self._chain_drag_move, self._chain_drag_end))
         top.addStretch(1)
         if index > 0:                             # the source stage stays first
             for glyph, delta, en in (("◀", -1, index > 1), ("▶", +1, index < total - 1)):
@@ -1408,6 +1655,8 @@ class CalibrationPanel(QWidget):
         fg, kbg = _KIND_COLORS[kind]
         badge_text = {"source": "SOURCE", "measured": "MEASURED",
                       "passive": "Passive · from library"}[kind]
+        if kind == "measured" and row.get("cal_role") == "reported":
+            badge_text = "REPORTED"           # report-only: invisible to safety limits
         v.addWidget(_badge(badge_text, fg, kbg), alignment=Qt.AlignmentFlag.AlignLeft)
 
         title = QLabel(name or "(unnamed)")
@@ -1552,6 +1801,111 @@ class CalibrationPanel(QWidget):
         self._selected_plane = src
         self._doc_to_form()
 
+    def _reorder_planes_to(self, plane: str, index: int) -> None:
+        """Move ``plane`` so it lands at position ``index`` in the chain, clamped to keep
+        the source pinned first and stay in range. Commits to the model, then rebuilds."""
+        try:
+            self._doc = self._read_form(strict=False)
+        except ValueError:
+            pass
+        planes = (self._doc or {}).get("chain", {}).get("planes") or {}
+        names = list(planes.keys())
+        if plane not in names or names.index(plane) == 0:
+            return                                 # the source stays pinned first
+        names.remove(plane)
+        index = max(1, min(index, len(names)))     # never before the source, never off the end
+        names.insert(index, plane)
+        self._doc["chain"]["planes"] = {nm: planes[nm] for nm in names}
+        self._selected_plane = plane
+        self._doc_to_form()
+
+    # ── live drag-reorder of chain stages ────────────────────────────────────────
+    # The real stage card is lifted out of the flow and follows the cursor; a same-size
+    # placeholder holds its spot, and as the card crosses a neighbour the placeholder
+    # hops past it (the neighbours slide over with a short animation). Releasing drops the
+    # card where the placeholder sits and commits the new order. The source stays pinned.
+    def _stage_positions(self):
+        """(slot, centre_x) for every stage slot except the one being dragged, in the
+        holder's coordinates and current visual order."""
+        out = []
+        for name, slot in self._chain_slots:
+            if self._drag and name == self._drag["plane"]:
+                continue
+            out.append((slot, slot.x() + slot.width() / 2))
+        return out
+
+    def _chain_drag_start(self, plane: str, global_pos) -> None:
+        slot = next((s for n, s in self._chain_slots if n == plane), None)
+        if slot is None:
+            return
+        holder = self._chain_holder
+        idx = self._chain_row.indexOf(slot)
+        placeholder = QWidget(); placeholder.setFixedSize(slot.size())
+        self._chain_row.insertWidget(idx, placeholder)   # holds the gap at the live index
+        self._chain_row.removeWidget(slot)
+        geo = slot.geometry()
+        slot.setParent(holder)                            # float free of the layout
+        slot.setGeometry(geo); slot.show(); slot.raise_()
+        card = slot.findChild(QFrame, "stage")
+        if card is not None:                              # a lifted look while dragging
+            card.setStyleSheet(f"#stage {{ background:{Palette.SURFACE}; "
+                               f"border:1px solid {Palette.ACCENT}; border-radius:10px; }}")
+        local = holder.mapFromGlobal(global_pos)
+        self._drag = {"plane": plane, "slot": slot, "placeholder": placeholder,
+                      "holder": holder, "grab_dx": local.x() - geo.x(), "y": geo.y(),
+                      "anims": []}
+
+    def _chain_drag_move(self, global_pos) -> None:
+        d = self._drag
+        if not d:
+            return
+        holder, slot = d["holder"], d["slot"]
+        x = holder.mapFromGlobal(global_pos).x() - d["grab_dx"]
+        x = max(0, min(x, holder.width() - slot.width()))
+        slot.move(int(x), d["y"])
+        # The placeholder goes after every stage whose centre is left of the dragged card;
+        # clamp so the source (index 0) stays pinned and the index stays in range.
+        centre = x + slot.width() / 2
+        k = sum(1 for _, cx in self._stage_positions() if cx < centre)
+        target = max(1, min(k, len(self._chain_slots) - 1))
+        if self._chain_row.indexOf(d["placeholder"]) != target:
+            self._move_placeholder(target)
+
+    def _move_placeholder(self, target: int) -> None:
+        """Reposition the gap to ``target`` and slide the displaced stage slots over."""
+        d = self._drag
+        before = {s: s.geometry() for _, s in self._chain_slots if s is not d["slot"]}
+        self._chain_row.removeWidget(d["placeholder"])
+        self._chain_row.insertWidget(target, d["placeholder"])
+        self._chain_row.activate()                        # recompute the new geometry now
+        for anim in d["anims"]:
+            anim.stop()
+        d["anims"] = []
+        for _, s in self._chain_slots:
+            if s is d["slot"] or s not in before:
+                continue
+            new = s.geometry()
+            if new == before[s]:
+                continue
+            a = QPropertyAnimation(s, b"geometry", self)
+            a.setDuration(140); a.setEasingCurve(QEasingCurve.Type.OutCubic)
+            a.setStartValue(before[s]); a.setEndValue(new)
+            a.start()
+            d["anims"].append(a)
+
+    def _chain_drag_end(self) -> None:
+        d = self._drag
+        if not d:
+            return
+        target = self._chain_row.indexOf(d["placeholder"])
+        for anim in d["anims"]:
+            anim.stop()
+        d["slot"].setParent(None); d["slot"].deleteLater()
+        d["placeholder"].setParent(None); d["placeholder"].deleteLater()
+        plane = d["plane"]
+        self._drag = None
+        self._reorder_planes_to(plane, target)            # commit + full rebuild
+
     def _first_curve_points(self, plane: str):
         """The first signal's measured points on `plane`, for a stage minicurve."""
         for sig in ((self._doc or {}).get("signals") or {}).values():
@@ -1575,24 +1929,62 @@ class CalibrationPanel(QWidget):
         if item is not None:
             self._select_signal(item.text().strip())
 
+    def _active_signal_ids(self) -> set:
+        """Signals whose editor is currently on screen: a MEASURED stage is selected and
+        the signal is both shown there and expanded. These get the accent row-highlight in
+        the Signals table — and only these, so the highlight tracks the visible editor and
+        clears when you collapse it or move to a passive/other stage."""
+        sel = self._selected_plane
+        if not self._is_measured_plane(sel):
+            return set()
+        return {sid for sid in self._expanded_signals
+                if sid in self._f.get("signals", {}) and self._signal_shown_on(sid, sel)}
+
+    # ── stage / signal membership helpers ────────────────────────────────────────
+    def _ordered_plane_names(self) -> list:
+        return [r["name"].text().strip() for r in self._f.get("planes", [])]
+
+    def _measured_plane_names(self) -> list:
+        return [r["name"].text().strip() for r in self._f.get("planes", [])
+                if r.get("role", "measured") == "measured"]
+
+    def _source_plane(self) -> Optional[str]:
+        """The chain's first stage — always the measured origin every signal is shown on."""
+        names = self._ordered_plane_names()
+        return names[0] if names else None
+
+    def _is_measured_plane(self, name: Optional[str]) -> bool:
+        row = next((r for r in self._f.get("planes", [])
+                    if r["name"].text().strip() == name), None)
+        return row is not None and row.get("role", "measured") == "measured"
+
+    def _signal_has_data_on(self, sid: str, plane: str) -> bool:
+        """True when this signal's grid on ``plane`` holds at least one numeric point."""
+        entry = self._f.get("signals", {}).get(sid)
+        tbl = entry and entry["curves"].get(plane)
+        return bool(tbl and tbl.numeric_points())
+
+    def _signal_shown_on(self, sid: str, plane: str) -> bool:
+        """Whether ``sid`` appears in ``plane``'s measured detail. The SOURCE shows every
+        signal; a downstream measured stage shows only those measured there (or just
+        opened for measuring via '+ Measure a signal here')."""
+        if plane == self._source_plane():
+            return True
+        return (self._signal_has_data_on(sid, plane)
+                or sid in self._stage_extra.get(plane, set()))
+
     def _select_signal(self, sid: str) -> None:
-        """Clicking a signal opens its measured curve: select the measured stage that
-        carries it (the source, or the first measured plane) and expand just that signal
-        in the stage detail so it's ready to edit."""
+        """Clicking a signal opens its measured curve and expands just that signal. Stay
+        on the currently-open measured stage when it already shows this signal (don't yank
+        the view back to Source); otherwise fall back to the Source, where every signal is
+        shown."""
         try:
             self._doc = self._read_form(strict=False)
         except ValueError:
             pass
-        plane = None
-        measured = []
-        for row in self._f.get("planes", []):
-            if row.get("role") == "measured":
-                nm = row["name"].text().strip()
-                measured.append(nm)
-                entry = self._f.get("signals", {}).get(sid)
-                if plane is None and entry and nm in (entry.get("curves") or {}):
-                    plane = nm
-        self._selected_plane = plane or (measured[0] if measured else self._selected_plane)
+        cur = self._selected_plane
+        if not (self._is_measured_plane(cur) and self._signal_shown_on(sid, cur)):
+            self._selected_plane = self._source_plane() or cur
         self._expanded_signals = {sid}
         self._doc_to_form()
 
@@ -1678,21 +2070,98 @@ class CalibrationPanel(QWidget):
         note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
         self._detail_body.addWidget(note)
 
+    def _auto_of(self, plane: str) -> Optional[str]:
+        """The limiting curve a reported stage at ``plane`` gauges its limits through,
+        derived automatically (there's no picker): the nearest LIMITING measured stage
+        upstream. Reported stages in between are skipped (several re-measurements of one
+        node share its limiting basis). A PASSIVE stage in between means ``plane`` is a
+        different physical node than any upstream limiting curve, so there is no valid
+        basis — returns None, and the toggle refuses Reported there."""
+        rows = self._f.get("planes", [])
+        idx = next((i for i, r in enumerate(rows)
+                    if r["name"].text().strip() == plane), None)
+        if idx is None:
+            return None
+        for j in range(idx - 1, -1, -1):
+            r = rows[j]
+            if r.get("role", "measured") != "measured":     # a passive stage → different node
+                return None
+            if r.get("cal_role") != "reported":             # the nearest limiting curve
+                return r["name"].text().strip()
+        return None                                          # only reported/none upstream
+
+    def _measured_role_controls(self, row, plane: str) -> QWidget:
+        """Limiting/Reported gauge-role control for a non-source measured stage. Reported
+        (report-only) means safety limits ignore this curve and punch through to the nearest
+        limiting stage upstream (chosen automatically) — so --power can show a
+        region-of-interest quantity (e.g. main-lobe power) while limits stay gauged on the
+        full-band curve (§4.1)."""
+        box = QFrame(); box.setObjectName("rolebox")
+        box.setStyleSheet(f"#rolebox {{ border:1px solid {Palette.BORDER}; border-radius:8px; }}")
+        v = QVBoxLayout(box); v.setContentsMargins(10, 8, 10, 8); v.setSpacing(6)
+        top = QHBoxLayout()
+        lab = QLabel("Gauge role")
+        lab.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+        auto_of = self._auto_of(plane)
+        combo = QComboBox()
+        combo.addItem("Limiting — safety limits gauge on this curve", "limiting")
+        combo.addItem("Reported — report-only (limits gauge upstream)", "reported")
+        combo.setCurrentIndex(1 if row.get("cal_role") == "reported" else 0)
+
+        def _apply():
+            role = combo.currentData()
+            if role == "reported" and auto_of is None:
+                # No limiting stage is reachable upstream at this node — a reported stage
+                # would have nothing to gauge through, so keep it limiting and say why.
+                combo.setCurrentIndex(0)
+                self._set_status("a reported stage needs a limiting stage directly upstream "
+                                 "to gauge limits through — none is reachable here", kind="warn")
+                return
+            row["cal_role"] = role
+            self._sync_from(strict=False)
+            self._render_chain()
+            self._render_detail()
+
+        combo.currentIndexChanged.connect(lambda _=0: _apply())
+        top.addWidget(lab); top.addWidget(combo, 1)
+        v.addLayout(top)
+        if row.get("cal_role") == "reported" and auto_of:
+            gv = QLabel(f"Safety limits gauge on <b>{auto_of}</b> (upstream limiting curve).")
+            gv.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_MUTED};")
+            v.addWidget(gv)
+        note = QLabel(
+            "Reported shows a different quantity than the limits use — e.g. main-lobe power "
+            "for the operator, while an amplifier's input limit stays gauged on the full-band "
+            "curve upstream. The source stage is always limiting.")
+        note.setWordWrap(True); note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+        v.addWidget(note)
+        return box
+
     def _detail_measured(self, row) -> None:
         plane = row["name"].text().strip()
-        sigs = {sid: e for sid, e in self._f.get("signals", {}).items()
-                if e["curves"].get(plane) is not None}
-        if not sigs:
-            l = QLabel("No signals yet — “+ Add signal…” (right), then enter its measured "
-                       "gain→power points here.")
-            l.setWordWrap(True); l.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_FAINT};")
-            self._detail_body.addWidget(l)
-            return
+        is_source = (plane == self._source_plane())
+        if not is_source:
+            self._detail_body.addWidget(self._measured_role_controls(row, plane))
+        all_sigs = self._f.get("signals", {})
+        # The source shows every signal; a downstream measured stage shows only the ones
+        # actually measured there (or just opened for measuring) — so it reads as an
+        # override list, not a duplicate of the whole signal set.
+        sigs = (dict(all_sigs) if is_source else
+                {sid: e for sid, e in all_sigs.items() if self._signal_shown_on(sid, plane)})
+
         head = QHBoxLayout()
-        intro = QLabel("Enter the gain→power points you measured on this plane, per signal. "
-                       "Click a signal to expand it.")
+        intro = QLabel(
+            "Enter the gain→power points you measured on this plane, per signal. "
+            "Click a signal to expand it." if is_source else
+            "Only signals you measured on this stage are shown — each overrides the "
+            "upstream curve here. Add one to measure it on this stage.")
         intro.setWordWrap(True); intro.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
         head.addWidget(intro, 1)
+        if not is_source:
+            addb = QPushButton("+ Measure a signal here")
+            addb.setFocusPolicy(Qt.FocusPolicy.NoFocus); addb.setStyleSheet("font-size:11px;")
+            addb.clicked.connect(lambda _=False, p=plane: self._add_signal_to_stage(p))
+            head.addWidget(addb)
         # expand/collapse-all when there are enough signals to be worth it
         if len(sigs) > 1:
             all_open = self._expanded_signals.issuperset(sigs)
@@ -1703,14 +2172,32 @@ class CalibrationPanel(QWidget):
                 lambda _=False, s=set(sigs), o=all_open: self._toggle_all_signals(s, o))
             head.addWidget(toggle_all)
         self._detail_body.addLayout(head)
+        if not sigs:
+            l = QLabel("No signals yet — “+ Add signal…” (right), then enter its measured "
+                       "gain→power points here." if is_source else
+                       "No signals measured on this stage yet — use “+ Measure a signal "
+                       "here”. Signals you don't measure here inherit the upstream curve.")
+            l.setWordWrap(True); l.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_FAINT};")
+            self._detail_body.addWidget(l)
+            return
         for sid, entry in sigs.items():
-            self._detail_body.addWidget(self._signal_section(sid, entry, plane))
+            self._detail_body.addWidget(self._signal_section(sid, entry, plane, is_source))
 
-    def _signal_section(self, sid: str, entry: dict, plane: str) -> QWidget:
+    def _signal_section(self, sid: str, entry: dict, plane: str,
+                        is_source: bool = True) -> QWidget:
         """One collapsible signal in the measured-stage detail: a header that toggles,
-        and (when expanded) its amplitude/frequency + the gain→power grid."""
+        and (when expanded) its amplitude/frequency + the gain→power grid. On the source
+        the remove action deletes the whole signal; on a downstream stage it only clears
+        the signal's measurement here (and downstream)."""
         tbl = entry["curves"][plane]
         expanded = sid in self._expanded_signals
+        npts = len(tbl.numeric_points())
+        # A non-source measured stage with no points for THIS signal isn't broken — the
+        # unit inherits the previous stage's curve (see the agent resolver's partial
+        # measured-stage fallback). Name that behaviour instead of just "no points".
+        names = [r["name"].text().strip() for r in self._f.get("planes", [])]
+        prev_stage = names[names.index(plane) - 1] if plane in names and names.index(plane) > 0 else None
+        inherits = npts == 0 and prev_stage is not None
         box = QFrame(); box.setObjectName("sigbox")
         box.setStyleSheet(f"#sigbox {{ border:1px solid "
                           f"{Palette.ACCENT if expanded else Palette.BORDER}; border-radius:8px; }}")
@@ -1723,18 +2210,23 @@ class CalibrationPanel(QWidget):
         nm = QLabel(sid); nm.setStyleSheet(f"font-weight:600;color:{Palette.TEXT};")
         hh.addWidget(chev); hh.addWidget(nm); hh.addStretch(1)
         if not expanded:                                 # a compact summary while collapsed
-            npts = len(tbl.numeric_points())
-            summ = QLabel(f"{npts} point(s)" if npts else "no points yet")
+            summ = QLabel(f"{npts} point(s)" if npts else
+                          (f"inherits “{prev_stage}”" if inherits else "no points yet"))
             summ.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
             hh.addWidget(summ)
         bv.addWidget(header)
         if not expanded:
             return box
+        if inherits:
+            note = QLabel(f"No points here — this signal inherits the “{prev_stage}” "
+                          f"curve. Add points only if you measured this stage for it.")
+            note.setWordWrap(True)
+            note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+            bv.addWidget(note)
         sub = QHBoxLayout()
         sub.addWidget(QLabel("plot label")); entry["plabel"].setFixedWidth(90)
         sub.addWidget(entry["plabel"])
         sub.addStretch(1)
-        sub.addWidget(QLabel("ampl.")); entry["amp"].setFixedWidth(64); sub.addWidget(entry["amp"])
         sub.addWidget(QLabel("freq Hz")); entry["cfreq"].setFixedWidth(104); sub.addWidget(entry["cfreq"])
         bv.addLayout(sub)
         grid = QHBoxLayout()
@@ -1745,7 +2237,20 @@ class CalibrationPanel(QWidget):
         addp.clicked.connect(tbl.add_blank_row)
         rmp = QPushButton("− point"); rmp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         rmp.clicked.connect(tbl.remove_selected)
-        btns.addWidget(addp); btns.addWidget(rmp); btns.addStretch(1)
+        rmsig = QPushButton("Remove signal" if is_source else "Remove from this stage")
+        rmsig.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        rmsig.setStyleSheet(f"color:{Palette.CRASH};font-size:11px;")
+        if is_source:
+            rmsig.setToolTip("Delete this signal and all its measured curves from the "
+                             "calibration (every stage).")
+            rmsig.clicked.connect(lambda _=False, s=sid: self._on_remove_signal(s))
+        else:
+            rmsig.setToolTip("Remove this signal's measured points from this stage (and "
+                             "any downstream measured stage). It stays measured upstream "
+                             "and inherits that curve here.")
+            rmsig.clicked.connect(
+                lambda _=False, s=sid, p=plane: self._on_remove_signal_from_stage(s, p))
+        btns.addWidget(addp); btns.addWidget(rmp); btns.addStretch(1); btns.addWidget(rmsig)
         bv.addLayout(btns)
         return box
 
@@ -1759,6 +2264,28 @@ class CalibrationPanel(QWidget):
         else:
             self._expanded_signals |= sids
         self._refresh_form_from_widgets()
+
+    def _add_signal_to_stage(self, plane: str) -> None:
+        """On a downstream measured stage, pick an existing signal to ALSO measure here.
+        It's shown (empty, ready for points) until you enter data; a signal you never
+        measure here just inherits the upstream curve."""
+        candidates = [sid for sid in self._f.get("signals", {})
+                      if not self._signal_shown_on(sid, plane)]
+        if not candidates:
+            QMessageBox.information(
+                self, "Measure a signal here",
+                "Every signal is already shown on this stage. Add a brand-new signal with "
+                "“+ Add signal…” first.")
+            return
+        sid, ok = QInputDialog.getItem(
+            self, "Measure a signal here",
+            f"Which signal did you measure on “{plane}”?", candidates, 0, False)
+        sid = (sid or "").strip()
+        if not ok or not sid:
+            return
+        self._stage_extra.setdefault(plane, set()).add(sid)
+        self._expanded_signals = {sid}
+        self._refresh_form_from_widgets()        # keeps the current stage selected
 
     def _stage_advanced(self, row) -> QWidget:
         """The bits the chain flow doesn't show inline: the stage's id (renaming it
@@ -1775,12 +2302,22 @@ class CalibrationPanel(QWidget):
         form = QFormLayout(); form.setContentsMargins(0, 0, 0, 0)
         form.addRow("Plane id", row["name"])
         v.addLayout(form)
-        actions = QHBoxLayout()
-        rm = QPushButton("Remove stage")
-        # NB: clicked emits a `checked` bool — absorb it with a leading throwaway
-        # parameter, or it clobbers the r=row default (r would become False).
-        rm.clicked.connect(lambda _=False, r=row: self._remove_plane(r))
-        actions.addStretch(1); actions.addWidget(rm)
+        actions = QHBoxLayout(); actions.addStretch(1)
+        rows = self._f.get("planes", [])
+        is_source = bool(rows) and rows[0] is row
+        if is_source:
+            # The source is the chain's measured origin — everything derives from it and
+            # there's no way to re-create it once gone, so it can't be removed. Say so
+            # instead of offering a button that would strand the chain.
+            note = QLabel("The source stage can't be removed — it's the chain's origin.")
+            note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+            actions.insertWidget(0, note)
+        else:
+            rm = QPushButton("Remove stage")
+            # NB: clicked emits a `checked` bool — absorb it with a leading throwaway
+            # parameter, or it clobbers the r=row default (r would become False).
+            rm.clicked.connect(lambda _=False, r=row: self._remove_plane(r))
+            actions.addWidget(rm)
         v.addLayout(actions)
         return frame
 
@@ -1878,11 +2415,28 @@ class CalibrationPanel(QWidget):
                 for k in ("description", "quantity"):
                     if old.get(k):
                         p[k] = old[k]
+            # A measured stage may be marked reported (report-only). `of` — the limiting
+            # curve its limits gauge through — is derived automatically from chain position
+            # (nearest limiting stage upstream), never picked by the user. If none is
+            # reachable (a passive stage intervenes, or nothing limiting upstream), the
+            # reported mark can't be honoured, so the stage stays limiting.
+            if p.get("type") == "measured" and row.get("cal_role") == "reported":
+                of = self._auto_of(name)
+                if of:
+                    p["role"] = "reported"
+                    p["of"] = of
             planes[name] = p
             prev_name = name
         return planes
 
     def _remove_plane(self, row) -> None:
+        rows = self._f.get("planes", [])
+        if rows and rows[0] is row:
+            # The source (first) stage is the chain's measured origin and can't be
+            # rebuilt from the editor, so removing it would strand the unit. Refuse.
+            self._set_status("the source stage can't be removed — it's the chain's origin",
+                             kind="warn")
+            return
         try:
             self._sync_from(strict=False)
         except ValueError:
@@ -1960,22 +2514,17 @@ class CalibrationPanel(QWidget):
         BW, centre frequency, and a curve grid + sparkline per measured plane. The
         measured-stage detail places the ones for the selected plane; _read_form reads
         them all regardless of placement."""
-        amp = QLineEdit(_numstr(sig.get("amplitude")))
-        def_amp = ((self._doc or {}).get("defaults") or {}).get("amplitude")
-        if def_amp is not None:
-            amp.setPlaceholderText(f"inherits ({_numstr(def_amp)})")
-        amp.setToolTip("Baseband amplitude (0–1) for this signal — must match the "
-                       "amplitude used while measuring the curve. Blank = inherit the "
-                       "chain default.")
-        amp.editingFinished.connect(self._update_issues)
         bw = QLineEdit(_numstr(sig.get("occupied_bw_hz")))
         bw.setToolTip("Occupied bandwidth (Hz), optional.")
         cfreq = QLineEdit(_numstr(sig.get("center_freq_hz")))
-        cfreq.setPlaceholderText("Hz — required for a frequency-dependent chain")
+        cfreq.setPlaceholderText("Hz — optional; blank folds at a representative frequency")
         cfreq.setToolTip("Centre frequency (Hz) at which this signal's chain is evaluated "
-                         "for the --power bounds. Required when a cable/antenna is "
-                         "frequency-dependent; blank for a chirp (many frequencies) or a "
-                         "flat chain.")
+                         "for the --power bounds. Optional even on a frequency-dependent "
+                         "chain — the transmit frequency is set at runtime by the task's "
+                         "--freq, and left blank the agent folds the bounds at a "
+                         "representative (worst-case) frequency. Set it to pin the preview "
+                         "to one frequency (needs agent 1.7.1+ to leave blank when a "
+                         "cable/antenna is frequency-dependent).")
         cfreq.editingFinished.connect(self._refresh_form_from_widgets)
         plabel = QLineEdit(sig.get("plot_label", ""))
         plabel.setPlaceholderText(sid)
@@ -1991,7 +2540,7 @@ class CalibrationPanel(QWidget):
             spark.set_points(tbl.numeric_points())
             self._spark_src[spark] = tbl
             curves[plane] = tbl; sparks[plane] = spark
-        self._f["signals"][sid] = {"amp": amp, "bw": bw, "cfreq": cfreq,
+        self._f["signals"][sid] = {"bw": bw, "cfreq": cfreq,
                                    "plabel": plabel, "curves": curves, "sparks": sparks}
 
     def _on_curve_changed(self, spark: "_Sparkline") -> None:
@@ -2011,22 +2560,22 @@ class CalibrationPanel(QWidget):
         ut = self._f["unit_type"].currentData()
         if ut:
             doc["unit_type"] = ut
-        def_amp_text = self._f["def_amp"].text().strip()
+        # Amplitude is fixed at FIXED_BASEBAND_AMPLITUDE, not an editable field. Normalise an
+        # absent or already-matching chain default to exactly that value (so the artifact
+        # records it for the runtime gate), but PRESERVE a conflicting legacy value rather
+        # than silently relabelling curves measured at a different amplitude.
         defaults = doc.setdefault("defaults", {})
-        if def_amp_text:
-            try:
-                defaults["amplitude"] = _to_float(def_amp_text, "default amplitude")
-            except ValueError:
-                if strict:
-                    raise
-        else:
-            defaults.pop("amplitude", None)       # blank ⇒ no chain-wide default
+        cur = defaults.get("amplitude")
+        if not _amp_conflicts(cur):
+            defaults["amplitude"] = FIXED_BASEBAND_AMPLITUDE
         if not defaults:
             doc.pop("defaults", None)
         chain = doc.setdefault("chain", {})
         gl = chain.setdefault("gain_limits", {})
         self._set_num(gl, "min_gain_db", self._f["min_gain"].text(), "min gain", strict)
         self._set_num(gl, "max_gain_db", self._f["max_gain"].text(), "max gain", strict)
+        gl.pop("gain_step_db", None)                  # rewritten below only if provided
+        self._set_num(gl, "gain_step_db", self._f["gain_step"].text(), "gain step", strict)
         chain["planes"] = self._read_planes(strict)
         # The operating plane is ALWAYS the last stage in the chain (that's where --power
         # is delivered), so it's derived from the order, never set by hand.
@@ -2043,6 +2592,9 @@ class CalibrationPanel(QWidget):
                 continue
             lim = {"plane": row["plane"].currentText(),
                    "max_dbm": _to_float(mx, "limit max dBm")}
+            side = row["side"].currentText()
+            if side == "input":                 # omit the default 'output' to keep docs clean
+                lim["side"] = side
             if row["reason"].text().strip():
                 lim["reason"] = row["reason"].text().strip()
             limits.append(lim)
@@ -2055,9 +2607,10 @@ class CalibrationPanel(QWidget):
             # tab is the source of truth for those) survive a form round-trip; then
             # overwrite only what the form edits.
             sig = dict(prev_sigs.get(sid) or {})
-            if w["amp"].text().strip():
-                sig["amplitude"] = _to_float(w["amp"].text(), f"{sid} amplitude")
-            else:
+            # Amplitude is not editable per signal. Drop a stored per-signal amplitude that
+            # matches the fixed fleet value (let it inherit the chain default); PRESERVE a
+            # conflicting legacy value so it stays flagged and is rejected at runtime.
+            if not _amp_conflicts(sig.get("amplitude")):
                 sig.pop("amplitude", None)
             if w["bw"].text().strip():
                 sig["occupied_bw_hz"] = _to_float(w["bw"].text(), f"{sid} occupied BW")
@@ -2118,6 +2671,11 @@ class CalibrationPanel(QWidget):
             self.hub.run_async(
                 f"cal_components:{self.hostname}",
                 lambda: self.hub.fleet.get(self.hostname).get_components())
+        # Learn which calibration signals this unit's tasks reference, to suggest them
+        # when adding a signal (best-effort — the picker still works without them).
+        self.hub.run_async(
+            f"cal_tasks:{self.hostname}",
+            lambda: self.hub.fleet.get(self.hostname).get_tasks_yaml())
 
     def _unit_meta(self) -> tuple[str, str]:
         """This unit's type + id, read from its client, to seed a new document with
@@ -2157,18 +2715,30 @@ class CalibrationPanel(QWidget):
             return
         self._send(content)
 
-    def _on_save(self) -> None:
+    def _on_save(self) -> bool:
+        """Validate + push the calibration. Returns True when a save was dispatched, False
+        when it was blocked (invalid form, nothing to save, or a capability guard) — the
+        host uses that to decide whether it's safe to leave the tab."""
         try:
             self._sync_from(strict=True)
         except ValueError as exc:
             self._set_status(f"cannot save: {exc}", kind="error")
-            return
+            return False
         if self._doc is None:
             self._set_status("nothing to save", kind="error")
-            return
-        if self._blocks_on_components():
-            return
+            return False
+        if (self._blocks_on_components() or self._blocks_on_partial_stages()
+                or self._blocks_on_no_signals() or self._blocks_on_limit_side()
+                or self._blocks_on_plane_roles() or self._blocks_on_gain_step()
+                or self._blocks_on_freq_optional_center()):
+            return False
         self._send(json.dumps(self._doc).encode("utf-8"))
+        return True
+
+    def request_save(self) -> bool:
+        """Public entry the host calls to save on the user's behalf (e.g. from the
+        leave-with-unsaved-changes prompt). Returns whether a save was dispatched."""
+        return self._on_save()
 
     @staticmethod
     def _doc_uses_components(doc) -> bool:
@@ -2181,6 +2751,116 @@ class CalibrationPanel(QWidget):
         shows why) when blocked."""
         if self._doc_uses_components(self._doc) and not self._supports(CAL_COMPONENTS_CAPABILITY):
             self._set_status(_COMPONENTS_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
+    @staticmethod
+    def _doc_uses_partial_stages(doc) -> bool:
+        """True when a signal omits the curve for a non-first MEASURED stage — it would
+        rely on the agent's inherit-the-upstream-curve fallback (agent >= 1.3.0)."""
+        planes = ((doc or {}).get("chain") or {}).get("planes") or {}
+        names = list(planes.keys())
+        downstream_measured = [n for i, n in enumerate(names)
+                               if i > 0 and isinstance(planes.get(n), dict)
+                               and planes[n].get("type") == "measured"]
+        if not downstream_measured:
+            return False
+        for sig in ((doc or {}).get("signals") or {}).values():
+            curves = (sig or {}).get("curves") or {}
+            if any(dm not in curves for dm in downstream_measured):
+                return True
+        return False
+
+    def _blocks_on_partial_stages(self) -> bool:
+        """Guard: an agent older than 1.3.0 rejects a signal that skips a downstream
+        measured stage, so warn rather than let it fail confusingly on the unit."""
+        if self._doc_uses_partial_stages(self._doc) and not self._supports(
+                CAL_PARTIAL_STAGES_CAPABILITY):
+            self._set_status(_PARTIAL_STAGES_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
+    def _blocks_on_no_signals(self) -> bool:
+        """Guard: an agent older than 1.4.0 rejects a signal-less document ("document has
+        no signals"), so warn rather than let a first onboarding Save fail confusingly."""
+        if not ((self._doc or {}).get("signals") or {}) and not self._supports(
+                CAL_NO_SIGNALS_CAPABILITY):
+            self._set_status(_NO_SIGNALS_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
+    @staticmethod
+    def _doc_uses_limit_side(doc) -> bool:
+        """True when a limit sets side: input. (An explicit 'output' is identical to the
+        default, so an older agent resolves it correctly — only 'input' needs the newer
+        agent.)"""
+        return any(isinstance(l, dict) and l.get("side") == "input"
+                   for l in (((doc or {}).get("chain") or {}).get("limits") or []))
+
+    def _blocks_on_limit_side(self) -> bool:
+        """Guard: an agent older than 1.5.0 IGNORES a limit's side and would apply an
+        input-side cap at the plane's output — a different, unsafe limit — so refuse to
+        push rather than silently mis-protect the hardware."""
+        if self._doc_uses_limit_side(self._doc) and not self._supports(
+                CAL_LIMIT_SIDE_CAPABILITY):
+            self._set_status(_LIMIT_SIDE_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
+    @staticmethod
+    def _doc_uses_plane_roles(doc) -> bool:
+        """True when any measured plane is marked role: reported. (An explicit 'limiting' is
+        identical to the default, so only 'reported' needs the newer agent.)"""
+        return any(isinstance(p, dict) and p.get("role") == "reported"
+                   for p in (((doc or {}).get("chain") or {}).get("planes") or {}).values())
+
+    def _blocks_on_plane_roles(self) -> bool:
+        """Guard: an agent older than 1.6.0 doesn't understand role/of and would treat a
+        reported (report-only) stage as an ordinary limiting one — inverting a limit through
+        the wrong-quantity curve and mis-gauging the ceiling — so refuse to push."""
+        if self._doc_uses_plane_roles(self._doc) and not self._supports(
+                CAL_PLANE_ROLES_CAPABILITY):
+            self._set_status(_PLANE_ROLES_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
+    @staticmethod
+    def _doc_uses_gain_step(doc) -> bool:
+        return ((((doc or {}).get("chain") or {}).get("gain_limits") or {})
+                .get("gain_step_db") is not None)
+
+    def _blocks_on_gain_step(self) -> bool:
+        """Guard: an agent older than 1.7.0 ignores gain_step_db and would command an
+        off-grid gain the SDR silently rounds, so the delivered power wouldn't match the
+        calibration — refuse to push rather than mislead."""
+        if self._doc_uses_gain_step(self._doc) and not self._supports(
+                CAL_GAIN_STEP_CAPABILITY):
+            self._set_status(_GAIN_STEP_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
+    def _doc_uses_freq_optional_center(self, doc) -> bool:
+        """True when the chain is frequency-dependent (a derived plane references a
+        multi-point component table) AND at least one signal declares no center_freq_hz.
+        Only then does an agent older than 1.7.1 reject the document (a flat / single-point
+        component needs no frequency, and a signal that supplies its own centre frequency
+        resolves on any agent)."""
+        planes = ((doc or {}).get("chain") or {}).get("planes") or {}
+        freq_dep = any(isinstance(p, dict) and p.get("component")
+                       and len(self._comp_table(p.get("component"))) > 1
+                       for p in planes.values())
+        if not freq_dep:
+            return False
+        return any(not (sig or {}).get("center_freq_hz")
+                   for sig in ((doc or {}).get("signals") or {}).values())
+
+    def _blocks_on_freq_optional_center(self) -> bool:
+        """Guard: an agent older than 1.7.1 rejects a frequency-dependent chain whose signal
+        has no center_freq_hz ("uses a frequency-dependent component but has no
+        'center_freq_hz'"), so warn rather than let Save fail confusingly on the unit."""
+        if self._doc_uses_freq_optional_center(self._doc) and not self._supports(
+                CAL_FREQ_OPTIONAL_CENTER_CAPABILITY):
+            self._set_status(_FREQ_OPTIONAL_CENTER_NEEDS_NEWER, kind="error")
             return True
         return False
 
@@ -2222,7 +2902,10 @@ class CalibrationPanel(QWidget):
                 "no local issues found (agent too old to dry-run on the unit)",
                 kind="error" if issues else "warn")
             return
-        if self._blocks_on_components():
+        if (self._blocks_on_components() or self._blocks_on_partial_stages()
+                or self._blocks_on_no_signals() or self._blocks_on_limit_side()
+                or self._blocks_on_plane_roles() or self._blocks_on_gain_step()
+                or self._blocks_on_freq_optional_center()):
             return
         self._set_status("validating (dry run — not saving)…")
         doc = self._doc
@@ -2298,6 +2981,28 @@ class CalibrationPanel(QWidget):
             self._handle_validate(result)
         elif parts[0] == "cal_components":
             self._handle_components(result)
+        elif parts[0] == "cal_tasks":
+            self._handle_tasks(result)
+        elif parts[0] == "cal_taskrename":
+            self._handle_task_rename(parts[2] if len(parts) > 2 else "", result)
+        elif parts[0] == "cal_rename_save":
+            self._handle_rename_save(result)
+        elif parts[0] == "cal_fleetrename":
+            self._handle_fleet_rename(result)
+
+    def _handle_tasks(self, result) -> None:
+        """Record which calibration signal each of this unit's tasks references (via its
+        SDR_CAL_SIGNAL_ID) — used to suggest ids when adding a signal, and to offer to
+        rename a task's signal when the signal is renamed here. Best-effort."""
+        if isinstance(result, Exception) or not isinstance(result, str) or not result.strip():
+            return
+        try:
+            from .timeline_editor import task_signals_from_yaml
+            self._tasks_yaml = result
+            self._task_signals = task_signals_from_yaml(result)
+            self._task_signal_ids = sorted(set(self._task_signals.values()))
+        except Exception:  # noqa: BLE001 — a broken tasks file shouldn't break the panel
+            return
 
     def _handle_components(self, result) -> None:
         """Merge the unit's stored catalog into the local one (additive — never clobbers
@@ -2361,6 +3066,9 @@ class CalibrationPanel(QWidget):
             self._set_status("unexpected response", kind="error")
             return
         self._set_doc(result.get("document"))
+        # Remember the persisted document so a signal rename can be pushed on its own
+        # (without saving the working doc's other in-progress edits).
+        self._saved_doc = copy.deepcopy(result.get("document"))
         utype = result.get("unit_type") or "—"
         if result.get("valid"):
             from state.calibration_cache import get_calibration_cache
@@ -2395,8 +3103,29 @@ class CalibrationPanel(QWidget):
         self._refresh()
 
     # ── helpers ─────────────────────────────────────────────────────────────────
+    def _suggested_signal_ids(self) -> list:
+        """Signal ids to offer when adding a signal: those this unit's tasks reference plus
+        any the fleet's calibration cache has seen, minus ids already in this document
+        (no point re-adding). Task-referenced ids come first — those are the ones a task
+        actually expects this document to define."""
+        from state.calibration_cache import get_calibration_cache
+        have = set(((self._doc or {}).get("signals") or {}).keys())
+        out: list = []
+        for sid in list(self._task_signal_ids) + get_calibration_cache().known_signal_ids():
+            if sid and sid not in have and sid not in out:
+                out.append(sid)
+        return out
+
     def _on_add_signal(self) -> None:
-        sid, ok = QInputDialog.getText(self, "Add signal", "Signal id (e.g. gps_l1_mcode):")
+        suggestions = self._suggested_signal_ids()
+        if suggestions:
+            # Editable combo: pick an id a task/the fleet already uses, or type a new one.
+            sid, ok = QInputDialog.getItem(
+                self, "Add signal", "Signal id (pick one your tasks use, or type a new one):",
+                suggestions, 0, True)
+        else:
+            sid, ok = QInputDialog.getText(
+                self, "Add signal", "Signal id (e.g. gps_l1_mcode):")
         sid = (sid or "").strip()
         if not ok or not sid:
             return
@@ -2411,6 +3140,19 @@ class CalibrationPanel(QWidget):
         self._download_btn.setEnabled(True)
         self._doc_to_form()
 
+    def _on_remove_signal(self, sid: str) -> None:
+        """Confirm, then delete a signal (it drops all its measured curves), and drop it
+        from the expanded set so nothing dangles on the rebuild."""
+        if QMessageBox.question(
+                self, "Remove signal",
+                f"Remove signal '{sid}' and all its measured curves from this "
+                f"calibration?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        self._expanded_signals.discard(sid)
+        self._remove_signal(sid)
+
     def _remove_signal(self, sid: str) -> None:
         try:
             self._sync_from(strict=False)
@@ -2418,6 +3160,290 @@ class CalibrationPanel(QWidget):
             pass
         if self._doc and sid in (self._doc.get("signals") or {}):
             del self._doc["signals"][sid]
+        for shown in self._stage_extra.values():
+            shown.discard(sid)
+        self._doc_to_form()
+
+    def _rename_signal(self, old: str, new: str) -> None:
+        """Rename a signal id in place, keeping its curves/amplitude/plot label — so a task
+        rename can be mirrored here without deleting and re-entering the signal. The id is
+        only a dict key in the calibration document (curves nest under it), so a key rename
+        that preserves order is enough."""
+        new = (new or "").strip()
+        if not new or new == old:
+            return
+        # Fold current widget edits into the model first, so nothing typed is lost.
+        try:
+            self._sync_from(strict=False)
+        except ValueError:
+            pass
+        signals = (self._doc or {}).get("signals") or {}
+        if old not in signals:
+            return                                    # already renamed (re-entrant blur)
+        if new in signals:
+            QMessageBox.warning(self, "Rename signal",
+                                f"A signal named “{new}” already exists — pick another id.")
+            self._doc_to_form()                       # repaint the field back to the old id
+            return
+        # A calibration signal id is a fleet-wide contract name: the shared task library
+        # carries one SDR_CAL_SIGNAL_ID deployed to every unit. So if any task references
+        # the old id (here or in the library), renaming is a fleet-wide change — confirm it
+        # up front. Yes propagates everywhere; Cancel aborts (the signal stays as it was).
+        local_tasks = sorted(n for n, s in self._task_signals.items() if s == old)
+        lib_tasks = self._library_tasks_referencing(old)
+        go_fleet = False
+        if local_tasks or lib_tasks:
+            others = self._other_unit_hosts()
+            scope = ["the shared task library", "this unit’s calibration and tasks"]
+            if others:
+                scope.append(f"{len(others)} other unit(s) — online ones now, "
+                             f"offline ones reported so you can finish them later")
+            resp = QMessageBox.question(
+                self, "Rename signal across the fleet",
+                f"Calibration signal ids are shared across the fleet, and “{old}” is used "
+                f"by task(s). Renaming it to “{new}” is a fleet-wide change.\n\n"
+                f"This updates:\n• " + "\n• ".join(scope) + f"\n\n"
+                f"Rename “{old}” → “{new}” across the fleet?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes)
+            if resp != QMessageBox.StandardButton.Yes:
+                self._doc_to_form()                   # abort — repaint the name back
+                return
+            go_fleet = True
+        self._doc["signals"] = {(new if k == old else k): v for k, v in signals.items()}
+        if old in self._expanded_signals:             # keep it expanded under the new id
+            self._expanded_signals.discard(old)
+            self._expanded_signals.add(new)
+        for shown in self._stage_extra.values():      # keep it shown on any downstream stage
+            if old in shown:
+                shown.discard(old)
+                shown.add(new)
+        self._set_status(f"renamed signal “{old}” → “{new}”", kind="ok")
+        self._doc_to_form()
+        self._persist_signal_rename(old, new)         # persist just the rename (not a full save)
+        if go_fleet:
+            self._rename_library_tasks(old, new)      # the deploy source
+            if local_tasks:
+                self._rename_tasks_signal(local_tasks, new)   # this unit's live tasks
+            self._rename_across_fleet(old, new)       # every other unit's cal + tasks
+
+    def _persist_signal_rename(self, old: str, new: str) -> None:
+        """Push ONLY the signal rename to the unit — not the working doc's other unsaved
+        edits. Renames the key in a copy of the last-persisted calibration and uploads
+        that, so the rename sticks (matching the tasks we just updated) without a full Save
+        and without discarding the user's in-progress edits on refresh. No-op until the
+        unit has a stored calibration that actually contains the old id."""
+        saved = self._saved_doc
+        if not isinstance(saved, dict) or old not in (saved.get("signals") or {}):
+            return
+        renamed = copy.deepcopy(saved)
+        renamed["signals"] = {(new if k == old else k): v
+                              for k, v in (renamed.get("signals") or {}).items()}
+        self._saved_doc = renamed                      # our view of what's now persisted
+        host = self.hostname
+        content = json.dumps(renamed).encode("utf-8")
+        wire = self._catalog.to_wire()
+
+        def _do():
+            client = self.hub.fleet.get(host)
+            client.upload_components(wire)             # keep component refs resolvable
+            return client.upload_file(CAL_NAME, content)
+        self.hub.run_async(f"cal_rename_save:{host}", _do)
+
+    def _handle_rename_save(self, result) -> None:
+        # Success is silent — the working doc already shows the rename and we must NOT
+        # refresh (that would replace it and drop the user's other unsaved edits). Only a
+        # failure is worth surfacing.
+        if isinstance(result, Exception):
+            self._set_status(f"couldn't persist the signal rename: {result}", kind="error")
+
+    # ── Fleet-wide signal rename (library + every other unit) ─────────────────────
+    def _library_store(self):
+        getter = getattr(getattr(self.hub, "fleet", None), "library_store", None)
+        return getter() if callable(getter) else None
+
+    def _other_unit_hosts(self) -> list:
+        fleet = getattr(self.hub, "fleet", None)
+        names = getattr(fleet, "hostnames", None)
+        if not callable(names):
+            return []
+        return [h for h in names() if h != self.hostname]
+
+    def _library_tasks_referencing(self, sid: str) -> list:
+        """Names of canonical-library tasks whose SDR_CAL_SIGNAL_ID is `sid`."""
+        store = self._library_store()
+        if store is None:
+            return []
+        return [t.name for t in store.tasks()
+                if (getattr(t, "env", None) or {}).get("SDR_CAL_SIGNAL_ID") == sid]
+
+    def _rename_library_tasks(self, old: str, new: str) -> int:
+        """Repoint the shared library's task(s) at the new id — the deploy source, so a
+        later library→unit deploy carries the rename instead of reinstating the old id."""
+        store = self._library_store()
+        if store is None:
+            return 0
+        n = 0
+        for t in store.tasks():
+            if (getattr(t, "env", None) or {}).get("SDR_CAL_SIGNAL_ID") == old:
+                t.env["SDR_CAL_SIGNAL_ID"] = new
+                store.upsert_task(t)
+                n += 1
+        return n
+
+    def _rename_across_fleet(self, old: str, new: str) -> None:
+        """Rename the signal on every OTHER unit — its calibration and its tasks — off the
+        GUI thread. Units we can't reach (offline) are reported, not silently skipped."""
+        hosts = self._other_unit_hosts()
+        if not hosts:
+            return
+        wire = self._catalog.to_wire()
+
+        def _do():
+            fleet = self.hub.fleet
+            renamed, no_signal, unreachable = [], [], []
+            for h in hosts:
+                try:
+                    client = fleet.get(h)
+                    touched = self._rename_signal_on_client(client, old, new, wire)
+                except Exception:  # noqa: BLE001 — offline / transport error → report it
+                    unreachable.append(h)
+                    continue
+                (renamed if touched else no_signal).append(h)
+            return {"renamed": renamed, "no_signal": no_signal, "unreachable": unreachable}
+        self._set_status(f"renaming “{old}” → “{new}” across the fleet…")
+        self.hub.run_async(f"cal_fleetrename:{self.hostname}", _do)
+
+    def _rename_signal_on_client(self, client, old: str, new: str, wire: str) -> bool:
+        """Rename the signal on ONE unit: the key in its calibration.json (if present) and
+        any task env that references it. Runs on the worker thread (agent I/O). Returns
+        True if anything was changed. A 404 calibration (unit not calibrated) is not an
+        error — its tasks may still reference the id."""
+        touched = False
+        try:
+            res = client.get_calibration()
+            doc = res.get("document") if isinstance(res, dict) else None
+            if isinstance(doc, dict) and old in (doc.get("signals") or {}):
+                doc = copy.deepcopy(doc)
+                doc["signals"] = {(new if k == old else k): v
+                                  for k, v in doc["signals"].items()}
+                client.upload_components(wire)
+                client.upload_file(CAL_NAME, json.dumps(doc).encode("utf-8"))
+                touched = True
+        except AgentHTTPError as exc:
+            if exc.status_code != 404:                # 404 = not calibrated (fine); else real
+                raise
+        import yaml as _yaml
+        tdoc = _yaml.safe_load(client.get_tasks_yaml()) or {}
+        for entry in (tdoc.get("tasks") or []):
+            if isinstance(entry, dict) and (entry.get("env") or {}).get("SDR_CAL_SIGNAL_ID") == old:
+                spec = dict(entry)
+                spec["env"] = {**(spec.get("env") or {}), "SDR_CAL_SIGNAL_ID": new}
+                client.update_task(entry.get("name"), spec)
+                touched = True
+        return touched
+
+    def _handle_fleet_rename(self, result) -> None:
+        if isinstance(result, Exception):
+            self._set_status(f"fleet rename error: {result}", kind="error")
+            return
+        renamed = result.get("renamed", [])
+        unreachable = result.get("unreachable", [])
+        if unreachable:
+            QMessageBox.warning(
+                self, "Some units weren’t updated",
+                f"Renamed the signal on {len(renamed)} other unit(s).\n\n"
+                f"These units are offline / unreachable and still use the old id — reopen "
+                f"their calibration when they’re back to finish the rename:\n\n"
+                f"{', '.join(unreachable)}")
+            self._set_status(f"fleet rename: {len(renamed)} updated · "
+                             f"{len(unreachable)} offline", kind="warn")
+        else:
+            self._set_status(f"fleet rename applied on {len(renamed)} other unit(s)", kind="ok")
+
+    def _rename_tasks_signal(self, names: list, new: str) -> None:
+        """Point each named task's SDR_CAL_SIGNAL_ID at `new`, preserving every other field
+        (the full stored entry is sent back). Each update is a live PUT the agent reloads."""
+        import yaml as _yaml
+        try:
+            doc = _yaml.safe_load(self._tasks_yaml) or {}
+        except _yaml.YAMLError:
+            self._set_status("couldn't parse this unit's tasks to update them", kind="error")
+            return
+        entries = {e.get("name"): e for e in (doc.get("tasks") or []) if isinstance(e, dict)}
+        host = self.hostname
+        self._task_rename_total = 0
+        self._task_rename_errors = []
+        for name in names:
+            entry = entries.get(name)
+            if not isinstance(entry, dict):
+                continue
+            spec = dict(entry)
+            spec["env"] = {**(spec.get("env") or {}), "SDR_CAL_SIGNAL_ID": new}
+            self._task_signals[name] = new           # optimistic; re-fetched on completion
+            self._task_rename_total += 1
+            self.hub.run_async(
+                f"cal_taskrename:{host}:{name}",
+                lambda n=name, s=spec: self.hub.fleet.get(host).update_task(n, s))
+        if self._task_rename_total:
+            self._set_status(f"updating {self._task_rename_total} task(s) to “{new}”…")
+
+    def _handle_task_rename(self, name: str, result) -> None:
+        if isinstance(result, Exception):
+            self._task_rename_errors.append(name)
+        self._task_rename_total = max(0, getattr(self, "_task_rename_total", 1) - 1)
+        if self._task_rename_total > 0:
+            return                                    # wait for the rest to land
+        errs = getattr(self, "_task_rename_errors", [])
+        if errs:
+            self._set_status(f"couldn't update {len(errs)} task(s): {', '.join(errs)}",
+                             kind="error")
+        else:
+            self._set_status("tasks updated to the new signal id", kind="ok")
+        # Re-sync our view of the unit's tasks so a later rename sees the fresh state.
+        self.hub.run_async(f"cal_tasks:{self.hostname}",
+                           lambda: self.hub.fleet.get(self.hostname).get_tasks_yaml())
+
+    def _on_remove_signal_from_stage(self, sid: str, plane: str) -> None:
+        """Downstream-stage remove: clear this signal's measured points from ``plane`` and
+        every measured stage after it (data flows downstream, so a later stage that was
+        measured for it goes too). The signal stays measured upstream and keeps
+        transmitting — it just inherits the upstream curve here. The user is told exactly
+        which stages are affected before it happens."""
+        measured = self._measured_plane_names()
+        if plane not in measured:
+            return
+        downstream = measured[measured.index(plane):]        # this stage + all later ones
+        affected = [p for p in downstream if self._signal_has_data_on(sid, p)]
+        if not affected:
+            # nothing measured here yet (a just-opened, empty row) — just stop showing it
+            self._stage_extra.get(plane, set()).discard(sid)
+            self._expanded_signals.discard(sid)
+            self._refresh_form_from_widgets()
+            return
+        later = [p for p in affected if p != plane]
+        detail = (f"\n\nThis also removes its points from the downstream measured "
+                  f"stage(s): {', '.join(later)}." if later else "")
+        if QMessageBox.question(
+                self, "Remove signal from stage",
+                f"Remove signal '{sid}'’s measured points from stage '{plane}'?{detail}"
+                f"\n\nThe signal stays measured upstream and keeps transmitting — it "
+                f"inherits the upstream curve on {'these stages' if later else 'this stage'}.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._doc = self._read_form(strict=False)
+        except ValueError:
+            pass
+        sig = ((self._doc or {}).get("signals") or {}).get(sid)
+        if isinstance(sig, dict):
+            curves = sig.get("curves")
+            if isinstance(curves, dict):
+                for p in affected:
+                    curves.pop(p, None)
+        for p in affected:
+            self._stage_extra.get(p, set()).discard(sid)
         self._doc_to_form()
 
     def _remove_row(self, layout, registry: list, row: dict) -> None:
@@ -2440,12 +3466,15 @@ class CalibrationPanel(QWidget):
                     CalibrationPanel._clear_layout(child)
 
     def _populate_table(self, signals: dict, resolved: bool = True) -> None:
-        """Fill the resolved Signals table (Signal | Freq | Ampl. | --power range). Freq
-        and amplitude come from the document; the --power range from the resolver.
-        `resolved=False` (the plain editor view, before a Validate/Save) shows a
-        "validate to resolve" placeholder for the --power column instead."""
+        """Fill the resolved Signals table (Signal | Freq | --power range). Freq comes from
+        the document; the --power range from the resolver. `resolved=False` (the plain editor
+        view, before a Validate/Save) shows a "validate to resolve" placeholder for the
+        --power column instead. (Amplitude is fixed fleet-wide, so it is not shown.)"""
         doc_sigs = (self._doc or {}).get("signals") or {}
-        def_amp = ((self._doc or {}).get("defaults") or {}).get("amplitude")
+        active = self._active_signal_ids()               # rows to tint (editor on screen)
+        hi = QColor(Palette.ACCENT_SOFT)
+        # Programmatic (re)fill fires itemChanged; mute it so it isn't mistaken for a rename.
+        self._table.blockSignals(True)
         self._table.setRowCount(len(signals))
         for r, (sid, info) in enumerate(sorted(signals.items())):
             dsig = doc_sigs.get(sid) or {}
@@ -2454,18 +3483,35 @@ class CalibrationPanel(QWidget):
                 freq = f"{float(f)/1e6:.2f}" if f else "at run"
             except (TypeError, ValueError):
                 freq = "at run"
-            amp = dsig.get("amplitude", def_amp)
-            ampl = _numstr(amp) if amp is not None else "—"
             rng = _fmt_range(info.get("min_power_dbm"), info.get("max_power_dbm"), "").strip()
             if not resolved:                             # plain editor view, pre-validate
                 rng = "validate to resolve"
             elif rng in ("—", "") and not f:
                 rng = "per frequency"
-            for c, text in enumerate([sid, freq, ampl, rng or "—"]):
+            for c, text in enumerate([sid, freq, rng or "—"]):
                 item = QTableWidgetItem(str(text))
-                if c == 0:
-                    item.setToolTip("Click to edit this signal's measured curve.")
+                if c == 0:                               # the Signal cell: editable → rename
+                    item.setData(Qt.ItemDataRole.UserRole, sid)   # its current id, for rename
+                    item.setToolTip("Click to edit this signal's measured curve; "
+                                    "double-click to rename it.")
+                else:                                    # read-out columns aren't editable
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if sid in active:                        # accent tint while its editor is open
+                    item.setBackground(hi)
                 self._table.setItem(r, c, item)
+        self._table.blockSignals(False)
+
+    def _on_signal_item_changed(self, item) -> None:
+        """The Signal cell was edited in place → rename the signal. The item's stored id is
+        the old name; its new text is the target. Other columns are read-only, so this only
+        fires for a rename."""
+        if item.column() != 0:
+            return
+        old = item.data(Qt.ItemDataRole.UserRole)
+        new = (item.text() or "").strip()
+        if not old or new == old:
+            return
+        self._rename_signal(old, new)
 
     def _set_status(self, text: str, kind: str = "muted") -> None:
         color = {"ok": Palette.ONLINE, "warn": Palette.ARMED, "error": Palette.CRASH,

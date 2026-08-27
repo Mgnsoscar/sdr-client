@@ -22,8 +22,13 @@ from .unit_ledger import UnitLedger
 from .address_cache import AddressCache
 from .component_catalog import (
     ComponentCatalog, CatalogError, parse_sweep, validate_table,
-    COMPONENTS_WIRE_NAME,
+    COMPONENTS_WIRE_NAME, dump_components, referenced_components, plan_unit_deploy,
 )
+from .power_scan import (
+    scan_absolute_power, power_out_of_range, scan_amplitudes, amplitude_mismatch,
+    clip_library_power,
+)
+from .power_fold import PowerFold, refold_bounds, clamp_warning
 
 __all__ = ["Poller", "FastSnapshot", "SlowSnapshot", "LogTailer", "local_ip",
            "PlanStore", "new_plan_id", "ScheduleStore", "new_scheduled_id",
@@ -32,4 +37,7 @@ __all__ = ["Poller", "FastSnapshot", "SlowSnapshot", "LogTailer", "local_ip",
            "UnitSnapshot", "LibraryClient", "LibraryError",
            "Discovery", "DiscoveredUnit", "UnitLedger", "AddressCache",
            "ComponentCatalog", "CatalogError", "parse_sweep", "validate_table",
-           "COMPONENTS_WIRE_NAME"]
+           "COMPONENTS_WIRE_NAME", "dump_components", "referenced_components",
+           "plan_unit_deploy", "scan_absolute_power", "power_out_of_range",
+           "scan_amplitudes", "amplitude_mismatch", "clip_library_power",
+           "PowerFold", "refold_bounds", "clamp_warning"]

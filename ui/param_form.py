@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .theme import Palette
+from state.power_fold import refold_bounds
 
 
 # ── Schema helpers (paramkit superset over the classic argparse schema) ───────
@@ -155,6 +156,24 @@ def range_hint(spec: dict) -> str:
 
 POWER_DEST = "power"
 GAIN_DEST = "gain"
+AMP_DEST = "amplitude"
+
+_POWER_FLAGS = ("--power", "-Power")
+_GAIN_FLAGS = ("--gain", "-Gain")
+_AMP_FLAGS = ("--amplitude", "-Amplitude", "--ampl")
+
+
+def power_mode_of_args(args) -> Optional[str]:
+    """The power mode a saved arg list was authored in: 'absolute' if it sets --power,
+    'relative' if it sets --gain, else None (let the form pick its default). Absolute
+    wins if somehow both are present. Used so fetching a task preserves the mode it was
+    saved with instead of falling back to the form's default."""
+    have = list(args or [])
+    if any(a in _POWER_FLAGS for a in have):
+        return "absolute"
+    if any(a in _GAIN_FLAGS for a in have):
+        return "relative"
+    return None
 
 
 def find_power_index(specs: List[dict]):
@@ -173,21 +192,91 @@ def find_gain_index(specs: List[dict]):
     return None
 
 
+def find_amplitude_index(specs: List[dict]):
+    """Index of the baseband --amplitude parameter in a spec list, or None. This is the
+    knob that must match the amplitude the calibration curve was measured at (power scales
+    with it), so the form can default it to the calibrated value and flag an override."""
+    for i, s in enumerate(specs):
+        flags = s.get("flags") or []
+        if s.get("dest") == AMP_DEST or any(f in _AMP_FLAGS for f in flags):
+            return i
+    return None
+
+
 def _compute_power_modes(specs, cal_bounds, absolute_allowed) -> List[str]:
-    """Which power modes to offer. Absolute (calibrated dBm) needs a known unit
-    (`absolute_allowed`) that is calibrated for the signal (`cal_bounds`); Relative
-    (raw gain) needs a --gain param. In the Library (no unit) only Relative is
-    offered; a script with only --power keeps Absolute (its schema range)."""
+    """Which power modes to offer, absolute first (so it's the default). Absolute (dBm)
+    is offered when:
+      • a specific unit is targeted (``absolute_allowed``) AND it's calibrated for the
+        signal (``cal_bounds``) — the field is bounded to that unit's range; or
+      • NO unit is targeted (the Library) — absolute power is the portable, plan-faithful
+        quantity, entered free-form (each unit converts + clips it at transmit).
+    A targeted-but-uncalibrated unit gets no absolute (nothing to convert against).
+    Relative (raw gain) is offered whenever a --gain param exists."""
     has_power = find_power_index(specs) is not None
     has_gain = find_gain_index(specs) is not None
     modes: List[str] = []
-    if has_power and absolute_allowed and cal_bounds:
+    if has_power and (cal_bounds or not absolute_allowed):
         modes.append("absolute")
     if has_gain:
         modes.append("relative")
     if not modes and has_power:
         modes.append("absolute")
     return modes
+
+
+def apply_power_hint(spec: dict, agg) -> dict:
+    """Attach a soft, achievable-range HINT (from cached units) to an absolute --power
+    field WITHOUT bounding it — the Library holds the plan's intended dBm level, and
+    per-unit clipping happens at deploy/run. Returns a copy with an ``_hint`` caption and
+    an appended help note. No-op when `agg` is falsy."""
+    if not agg:
+        return spec
+    out = dict(spec)
+    n = agg.get("n_units", 0)
+    unit_word = "unit" if n == 1 else "units"
+    any_lo, any_hi = agg.get("any_min"), agg.get("any_max")
+    all_lo, all_hi = agg.get("all_min"), agg.get("all_max")
+    if all_lo is not None and all_hi is not None and all_lo <= all_hi:
+        hint = (f"Seen {n} {unit_word}: all reach {all_lo:g}…{all_hi:g} dBm · "
+                f"at least one reaches {any_lo:g}…{any_hi:g} dBm")
+    else:
+        hint = (f"Seen {n} {unit_word}: their ranges don't overlap — no single dBm works "
+                f"on all · at least one reaches {any_lo:g}…{any_hi:g} dBm")
+    out["_hint"] = hint
+    note = ("Absolute power from your plan — stored as-is; each unit converts it and "
+            "clips to its own range at transmit. " + hint)
+    base = (out.get("help") or "").strip()
+    out["help"] = f"{base}\n\n{note}" if base else note
+    out.setdefault("unit", "dBm")
+    return out
+
+
+def calibration_caution(has_signal: bool, targeted: bool, calibrated: bool,
+                        script_calibratable: bool = True):
+    """The 'no safeguards in place' caution for a power/gain form, or None when there's
+    nothing to warn about. Shown so an operator knows when a value goes out raw:
+      • ``script_calibratable`` — the SCRIPT declares a calibration signal, i.e. its
+        power/gain is meant to be calibrated. When it doesn't, power/gain are raw by
+        design (bounded only by the script's own schema) and there's no missing
+        safeguard, so no caution.
+      • ``has_signal`` — the TASK opts into calibration (sets SDR_CAL_SIGNAL_ID);
+      • ``targeted``   — a specific unit is in play (a run/tune, or a plan/sequence
+        pointed at a unit) as opposed to open Library authoring;
+      • ``calibrated`` — that unit is calibrated for the signal (bounds available).
+    A calibratable script whose task hasn't been assigned a signal is raw everywhere; a
+    targeted-but-uncalibrated unit is raw too. Open Library authoring with a signal is
+    fine — limits apply once it hits a calibrated unit (a deploy flags anything out of
+    range)."""
+    if not script_calibratable:
+        return None
+    if not has_signal:
+        return ("This task's script supports calibrated power, but no calibration signal "
+                "is assigned — power/gain go out RAW, with no limits protecting the "
+                "hardware. Assign the signal (edit the task) to enable the limits.")
+    if targeted and not calibrated:
+        return ("This unit isn't calibrated for this signal, so no calibration limits "
+                "apply — power/gain go out raw. Set them carefully.")
+    return None
 
 
 def apply_power_bounds(specs: List[dict], bounds) -> List[dict]:
@@ -218,6 +307,34 @@ def apply_power_bounds(specs: List[dict], bounds) -> List[dict]:
     sp["unit"] = f"dBm {quantity}" if quantity and quantity.lower() != "power" else "dBm"
     where = quantity + (f" at {plane}" if plane else "") if quantity else (plane or "")
     note = f"This unit (calibrated): {lo}…{hi} dBm" + (f" — {where}." if where else ".")
+    base = (sp.get("help") or "").strip()
+    sp["help"] = f"{base}\n\n{note}" if base else note
+    return out
+
+
+def apply_gain_bounds(specs: List[dict], bounds) -> List[dict]:
+    """Return a copy of `specs` with the relative --gain param bounded to a unit's
+    resolved calibration gain range [min_gain_db, max_gain_db], so a gain that would
+    breach a calibration limit can't be dialled in. No-op when `bounds` is falsy, there's
+    no --gain param, or the gain range is incomplete."""
+    i = find_gain_index(specs)
+    if i is None or not bounds:
+        return specs
+    lo, hi = bounds.get("min_gain_db"), bounds.get("max_gain_db")
+    if lo is None or hi is None:
+        return specs
+    lo, hi = round(float(lo), 2), round(float(hi), 2)
+    out = [dict(s) for s in specs]
+    sp = out[i]
+    sp["min"], sp["max"] = lo, hi
+    sp["type"] = "float"
+    sp.setdefault("step", 0.25)                # bounded spinbox → can't breach the limit
+    d = sp.get("default")
+    if isinstance(d, (int, float)) and not isinstance(d, bool):
+        sp["default"] = min(max(float(d), lo), hi)
+    sp.setdefault("unit", "dB")
+    note = (f"This unit (calibrated): usable gain {lo}…{hi} dB — beyond this range would "
+            f"break a calibration limit.")
     base = (sp.get("help") or "").strip()
     sp["help"] = f"{base}\n\n{note}" if base else note
     return out
@@ -286,18 +403,31 @@ class ParamForm(QWidget):
         # Power mode (relative gain vs absolute dBm) — see _compute_power_modes.
         self._base_specs: List[dict] = []
         self._cal_bounds = None
+        self._cal_freq_param = None             # dest of the freq field (CAL_FREQ_PARAM)
+        self._cal_freq_default = None           # freq to fold at when the field isn't set
+        self._folded_at = None                  # freq the power/gain bounds were last folded at
+        self._render_freq = None                # freq to fold at for the in-progress render
+        self._refolding = False                 # re-entrancy guard for the re-fold re-render
+        self._loading = False                   # a programmatic prefill (set_values) is running
+        self._hint_bounds = None
+        self._caution = None
+        self._cal_amplitude = None              # amplitude the calibration curve assumes
+        self._amp_warn = None                   # the live amplitude-mismatch caption
         self._absolute_allowed = False
         self._power_modes: List[str] = []
         self._power_mode = None
         self._form = QFormLayout(self)
         self._form.setContentsMargins(0, 0, 0, 0)
         self._form.setSpacing(6)
+        # Keep the amplitude-mismatch caption in step with edits (and with set_values).
+        self.changed.connect(self._update_amplitude_warning)
 
     # ── Build ────────────────────────────────────────────────────────────────
 
     def set_params(self, specs: List[dict], selectable: bool = False,
                    cal_bounds=None, absolute_allowed: bool = False,
-                   default_power_mode=None) -> None:
+                   default_power_mode=None, hint_bounds=None, caution=None,
+                   cal_freq_param=None, cal_freq_default=None) -> None:
         """Rebuild the form for a parameter schema (clears existing widgets).
 
         selectable=True prefixes each row with an include checkbox: values() then
@@ -312,6 +442,16 @@ class ParamForm(QWidget):
         self._base_specs = list(specs)
         self._selectable = selectable
         self._cal_bounds = cal_bounds
+        self._cal_freq_param = cal_freq_param
+        self._cal_freq_default = cal_freq_default
+        self._folded_at = None
+        # Fold at the carried-forward frequency (a sequence step's effective freq) when
+        # given, else the freq field's own default.
+        self._render_freq = (cal_freq_default if cal_freq_default is not None
+                             else self._spec_default_freq())
+        self._hint_bounds = hint_bounds
+        self._caution = caution
+        self._cal_amplitude = (cal_bounds or {}).get("amplitude")
         self._absolute_allowed = absolute_allowed
         self._power_modes = _compute_power_modes(specs, cal_bounds, absolute_allowed)
         if default_power_mode in self._power_modes:
@@ -329,9 +469,26 @@ class ParamForm(QWidget):
         self._widgets.clear()
         self._checks.clear()
 
+        # No-safeguard caution: raw power/gain with no calibration behind it (an
+        # uncalibrated unit, or a task with no calibration signal). Only shown when there
+        # IS a power/gain field to be careful about.
+        has_power_or_gain = (find_power_index(self._base_specs) is not None
+                             or find_gain_index(self._base_specs) is not None)
+        if self._caution and has_power_or_gain:
+            warn = QLabel("⚠ " + self._caution)
+            warn.setWordWrap(True)
+            warn.setStyleSheet(
+                f"font-size: 11px; color: {Palette.ARMED}; font-weight: 600; "
+                f"background: {Palette.ARMED_SOFT}; border: 1px solid {Palette.ARMED}; "
+                f"border-radius: 6px; padding: 6px 8px;")
+            self._form.addRow(warn)
+
         if len(self._power_modes) > 1:                 # relative/absolute chooser
             self._form.addRow(self._mode_label(), self._mode_toggle())
 
+        self._amp_warn = None
+        aidx = find_amplitude_index(self._base_specs)
+        amp_dest = self._base_specs[aidx]["dest"] if aidx is not None else None
         specs = self._effective_specs()
         if not specs:
             note = QLabel("This script declares no parameters.")
@@ -346,23 +503,190 @@ class ParamForm(QWidget):
                 self._form.addRow(chk, widget)
             else:
                 self._form.addRow(self._label_for(spec), widget)
+            if spec.get("_hint"):                        # soft achievable-range caption
+                cap = QLabel(spec["_hint"]); cap.setWordWrap(True)
+                cap.setStyleSheet(f"font-size: 10px; color: {Palette.TEXT_FAINT};")
+                self._form.addRow("", cap)
+            # Live amplitude-mismatch caption, right under the amplitude field.
+            if spec["dest"] == amp_dest and self._cal_amplitude is not None:
+                self._amp_warn = QLabel(""); self._amp_warn.setWordWrap(True)
+                self._amp_warn.setVisible(False)
+                self._amp_warn.setStyleSheet(
+                    f"font-size: 10px; color: {Palette.ARMED}; font-weight: 600;")
+                self._form.addRow("", self._amp_warn)
+        self._wire_freq_refold()
         self.changed.emit()
+
+    def _is_freq_dependent(self) -> bool:
+        """True when this signal's --power/gain range actually moves with frequency (a
+        frequency-dependent cable/antenna or per-frequency limit in the embedded artifact).
+        A constant chain never re-folds, so no wiring / re-render churn."""
+        from state.power_fold import PowerFold
+        fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
+        return fold is not None and fold.freq_dependent
+
+    def _wire_freq_refold(self) -> None:
+        """Connect the frequency field's change signal so the power/gain bounds re-fold at
+        the new frequency. Only wired when the calibration is frequency-dependent."""
+        dest = self._freq_dest()
+        if dest is None or dest not in self._widgets or not self._is_freq_dependent():
+            return
+        # Re-fold on COMMIT (preset pick, Enter, or focus-out), never per keystroke — a
+        # re-render mid-typing would steal focus. A preset dropdown fires currentIndexChanged
+        # on a pick and its inner line edit fires editingFinished on a typed value; a spinbox
+        # / line edit fire editingFinished.
+        w, _spec = self._widgets[dest]
+        if isinstance(w, QComboBox):
+            w.currentIndexChanged.connect(self._on_freq_changed)
+            if w.isEditable() and w.lineEdit() is not None:
+                w.lineEdit().editingFinished.connect(self._on_freq_changed)
+        elif isinstance(w, (QSpinBox, QDoubleSpinBox, QLineEdit)):
+            w.editingFinished.connect(self._on_freq_changed)
+        # In tune (selectable) mode, ticking the freq param on/off changes whether it
+        # overrides the carried-forward frequency, so re-fold on that too.
+        if self._selectable and dest in self._checks:
+            self._checks[dest].toggled.connect(self._on_freq_changed)
+
+    def _on_freq_changed(self, *_) -> None:
+        """Re-fold the power/gain bounds when the transmit frequency is committed."""
+        if self._refolding or self._loading:
+            return
+        if self._power_mode not in ("absolute", "relative"):
+            return
+        if self._fold_freq_now() == self._folded_at:     # frequency didn't actually move
+            return
+        self._do_refold()
+
+    def _maybe_refold_after_load(self) -> None:
+        """After a programmatic prefill (set_values), re-fold once if the loaded frequency
+        differs from the one the bounds were folded at during the last render."""
+        if self._refolding or self._loading:
+            return
+        if self._power_mode not in ("absolute", "relative"):
+            return
+        dest = self._freq_dest()
+        if dest is None or dest not in self._widgets or not self._is_freq_dependent():
+            return
+        if self._fold_freq_now() == self._folded_at:
+            return
+        self._do_refold()
+
+    def _do_refold(self) -> None:
+        """Re-render folding at the frequency now in effect, preserving the other field
+        values (the same rebuild-and-restore the power-mode toggle uses)."""
+        self._render_freq = self._fold_freq_now()      # capture BEFORE the widgets clear
+        self._refolding = True
+        try:
+            keep = self.build_args()
+            self._render()
+            self._set_values(keep)
+        finally:
+            self._refolding = False
+        self.changed.emit()
+
+    def _update_amplitude_warning(self) -> None:
+        """Show a caption when the baseband amplitude differs from the value the
+        calibration curve assumes — power scales with amplitude, so a mismatch makes
+        --power (and the reported power) inaccurate until you recalibrate at it."""
+        lbl = self._amp_warn
+        if lbl is None or self._cal_amplitude is None:
+            return
+        aidx = find_amplitude_index(self._base_specs)
+        dest = self._base_specs[aidx]["dest"] if aidx is not None else None
+        val = self.values().get(dest) if dest else None
+        if isinstance(val, (int, float)) and not isinstance(val, bool) \
+                and abs(float(val) - float(self._cal_amplitude)) > 1e-9:
+            lbl.setText(
+                f"⚠ Amplitude {float(val):g} differs from the calibrated "
+                f"{float(self._cal_amplitude):g} — the gain→power curve was measured at "
+                f"{float(self._cal_amplitude):g}, so --power will be off. Match it, or "
+                f"recalibrate the signal at {float(val):g}.")
+            lbl.setVisible(True)
+        else:
+            lbl.setVisible(False)
 
     # ── Power mode ─────────────────────────────────────────────────────────────
     def power_mode(self):
         return self._power_mode
+
+    def _freq_dest(self) -> Optional[str]:
+        """The dest of the frequency field the calibration folds at (CAL_FREQ_PARAM),
+        if the script declared one and that param exists in this schema."""
+        fp = self._cal_freq_param
+        if not fp:
+            return None
+        return next((s["dest"] for s in self._base_specs if s.get("dest") == fp), None)
+
+    def _current_freq_hz(self) -> Optional[float]:
+        """The transmit frequency currently entered in the freq field (Hz), or None when
+        there's no freq field, no widget yet, or the field is blank/unparseable."""
+        dest = self._freq_dest()
+        if dest is None or dest not in self._widgets:
+            return None
+        val = self.values().get(dest)
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            return float(val)
+        return None
+
+    def _fold_freq_now(self) -> Optional[float]:
+        """The frequency to fold the power/gain range at right now: the freq field's value
+        when it is actively set (in selectable/tune mode that means its checkbox is ticked),
+        otherwise the carried-forward frequency (a sequence step's effective freq)."""
+        dest = self._freq_dest()
+        if dest and dest in self._widgets:
+            active = (not self._selectable
+                      or (dest in self._checks and self._checks[dest].isChecked()))
+            if active:
+                v = self._current_freq_hz()
+                if v is not None:
+                    return v
+        return self._cal_freq_default
+
+    def _spec_default_freq(self) -> Optional[float]:
+        """The freq field's default from the schema — the fold frequency for the FIRST
+        render, before the widget (and any prefilled value) exists."""
+        dest = self._freq_dest()
+        if dest is None:
+            return None
+        for s in self._base_specs:
+            if s.get("dest") == dest:
+                d = s.get("default")
+                return float(d) if isinstance(d, (int, float)) and not isinstance(d, bool) else None
+        return None
+
+    def _effective_cal_bounds(self):
+        """The calibration bounds re-folded at ``_render_freq`` — the frequency captured
+        for this render — so a frequency-dependent chain's --power / --gain range tracks the
+        chosen frequency (the same fold the transmit script does). The specs are computed
+        while the widgets are being rebuilt, so the frequency can't be read from the field
+        here; the caller stamps ``_render_freq`` first. A no-op for a constant chain, a blank
+        frequency, or a summary with no embedded artifact."""
+        if not self._cal_bounds:
+            return self._cal_bounds
+        self._folded_at = self._render_freq
+        return refold_bounds(self._cal_bounds, self._render_freq)
 
     def _effective_specs(self) -> List[dict]:
         """The specs actually rendered: the active power/gain field (bounds applied
         for absolute) in place, the other one dropped, everything else unchanged."""
         pidx = find_power_index(self._base_specs)
         gidx = find_gain_index(self._base_specs)
+        aidx = find_amplitude_index(self._base_specs)
+        cal_bounds = self._effective_cal_bounds()
         out: List[dict] = []
         for i, s in enumerate(self._base_specs):
-            if i == pidx:
+            if i == aidx and self._cal_amplitude is not None:
+                # Default the baseband amplitude to the value the calibration was measured
+                # at, so a fresh form matches the curve (an override is flagged live).
+                out.append({**s, "default": self._cal_amplitude})
+            elif i == pidx:
                 if self._power_mode == "absolute":
-                    out.append(apply_power_bounds([s], self._cal_bounds)[0]
-                               if self._cal_bounds else s)
+                    if cal_bounds:                       # a targeted unit → hard bounds
+                        out.append(apply_power_bounds([s], cal_bounds)[0])
+                    elif self._hint_bounds:              # Library → free-form + soft hint
+                        out.append(apply_power_hint(s, self._hint_bounds))
+                    else:
+                        out.append(s)
             elif i == gidx:
                 if self._power_mode == "relative":
                     # Relative selects raw gain. If the schema gives no default, an
@@ -371,6 +695,8 @@ class ParamForm(QWidget):
                     g = dict(s)
                     if g.get("default") is None:
                         g["required"] = True
+                    if cal_bounds:             # a calibrated unit → bound to its limits
+                        g = apply_gain_bounds([g], cal_bounds)[0]
                     out.append(g)
             else:
                 out.append(s)
@@ -383,7 +709,8 @@ class ParamForm(QWidget):
 
     def _mode_toggle(self) -> QComboBox:
         combo = QComboBox()
-        names = {"absolute": "Absolute (dBm, calibrated)", "relative": "Relative (raw gain, dB)"}
+        abs_label = "Absolute (dBm, this unit)" if self._cal_bounds else "Absolute (dBm)"
+        names = {"absolute": abs_label, "relative": "Relative (raw gain, dB)"}
         for m in self._power_modes:
             combo.addItem(names.get(m, m), m)
         combo.setCurrentIndex(self._power_modes.index(self._power_mode))
@@ -395,6 +722,7 @@ class ParamForm(QWidget):
             return
         keep = self.build_args()                # carry non-power params across
         self._power_mode = self._power_modes[idx]
+        self._render_freq = self._fold_freq_now()       # fold at the effective frequency
         self._render()
         self.set_values(keep)
         self.changed.emit()
@@ -407,6 +735,18 @@ class ParamForm(QWidget):
     def set_values(self, args: List[str]) -> List[str]:
         """Prefill widgets from a CLI arg list; return the args not recognised as
         one of this form's parameters (so a caller can surface them separately)."""
+        # Setting the frequency widget here would fire its commit signal and re-fold
+        # mid-prefill — rebuilding the widgets this loop is still iterating. Suppress the
+        # re-fold during the loop; then fold once at the end for the prefilled frequency.
+        self._loading = True
+        try:
+            extra = self._set_values(args)
+        finally:
+            self._loading = False
+        self._maybe_refold_after_load()
+        return extra
+
+    def _set_values(self, args: List[str]) -> List[str]:
         flag_to_dest = {}
         for dest, (w, spec) in self._widgets.items():
             for f in spec["flags"]:

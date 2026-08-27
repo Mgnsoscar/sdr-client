@@ -68,9 +68,35 @@ def test_uncalibrated_unit_no_bounds():
     assert t.cal_bounds_for_task("mocktask") is None   # …but it isn't calibrated
 
 
-def test_no_unit_means_relative_only():
+def test_no_unit_means_free_form_absolute():
     t = TimelineEditor()
     t.set_task_signals(task_signals_from_yaml(YAML))
     t.set_calibration(FakeHub(), "")                    # library: no target unit
-    assert t.absolute_allowed() is False
+    assert t.absolute_allowed() is False               # → absolute is offered free-form
     assert t.cal_bounds_for_task("mocktask") is None
+
+
+def test_library_host_is_not_a_target_unit():
+    # The reserved LIBRARY_HOST is offline authoring, not a real unit — it must NOT count
+    # as a targeted unit (that made absolute unavailable and mis-fired the "uncalibrated
+    # unit" caution when authoring Library sequences).
+    from api.fleet import LIBRARY_HOST
+    t = TimelineEditor()
+    t.set_task_signals(task_signals_from_yaml(YAML))
+    t.set_calibration(FakeHub(), LIBRARY_HOST)
+    assert t.absolute_allowed() is False               # not a target → absolute free-form
+    assert t.cal_bounds_for_task("mocktask") is None
+    assert t.has_cal_signal("mocktask") is True         # the task still opts into calibration
+    assert t.has_cal_signal("plain") is False
+
+
+def test_script_calibratable_reflects_declared_signal():
+    # A task's SCRIPT declaring a calibration signal is what makes a missing task signal a
+    # real gap; a script that declares none takes raw power by design (no caution).
+    t = TimelineEditor()
+    t.set_task_commands({"tx": ["python3", "tx.py"]})
+    assert t.script_calibratable("tx") is True           # unknown (params unfetched) → assume yes
+    t._script_cal_signals["tx.py"] = "mock"
+    assert t.script_calibratable("tx") is True            # script declares a signal
+    t._script_cal_signals["tx.py"] = None
+    assert t.script_calibratable("tx") is False           # script declares none → raw by design

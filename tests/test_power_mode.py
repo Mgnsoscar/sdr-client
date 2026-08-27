@@ -1,6 +1,7 @@
-"""ParamForm power mode: relative (raw --gain) vs absolute (calibrated --power).
-Library / uncalibrated → relative only; a calibrated unit → a toggle. values() emits
-only the active field's flag."""
+"""ParamForm power mode: relative (raw --gain) vs absolute (--power, dBm).
+Library (no unit) → absolute is offered free-form and is the default (portable, plan-
+faithful); a targeted-but-uncalibrated unit → relative only; a calibrated unit → a
+bounded toggle. values() emits only the active field's flag."""
 import os
 
 import pytest
@@ -10,9 +11,38 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
-from ui.param_form import ParamForm, _compute_power_modes
+from ui.param_form import ParamForm, _compute_power_modes, power_mode_of_args
 
 _app = QApplication.instance() or QApplication([])
+
+
+# ── mode inferred from saved args (so a fetched task keeps its mode) ────────────────
+
+def test_power_mode_of_args():
+    assert power_mode_of_args(["--power", "-20"]) == "absolute"
+    assert power_mode_of_args(["-Power", "-20"]) == "absolute"
+    assert power_mode_of_args(["--gain", "30"]) == "relative"
+    assert power_mode_of_args(["-Gain", "30"]) == "relative"
+    assert power_mode_of_args(["--freq", "1e9"]) is None
+    assert power_mode_of_args([]) is None
+    assert power_mode_of_args(None) is None
+    # both present (shouldn't happen) → absolute wins
+    assert power_mode_of_args(["--power", "-5", "--gain", "10"]) == "absolute"
+
+
+def test_saved_absolute_survives_a_stale_relative_mode():
+    # Reproduces the sequence bug: a form that was left in relative mode (e.g. from a
+    # previously-selected task) must still open a saved-absolute task in absolute — the
+    # inferred default_power_mode overrides the stale, still-valid relative mode.
+    f = ParamForm()
+    f.set_params(_specs(), cal_bounds=_bounds(), absolute_allowed=True,
+                 default_power_mode="relative")
+    assert f.power_mode() == "relative"                 # form is now "stuck" in relative
+    saved = ["--power", "-12"]                           # a task saved as absolute
+    f.set_params(_specs(), cal_bounds=_bounds(), absolute_allowed=True,
+                 default_power_mode=power_mode_of_args(saved))
+    assert f.power_mode() == "absolute"
+    assert "power" in _dests(f) and "gain" not in _dests(f)
 
 
 def _specs():
@@ -33,8 +63,9 @@ def _bounds():
 
 # ── mode computation ─────────────────────────────────────────────────────────────
 
-def test_modes_library_relative_only():
-    assert _compute_power_modes(_specs(), None, False) == ["relative"]
+def test_modes_library_offers_absolute_default():
+    # Library (no unit): absolute is offered free-form AND first (the default).
+    assert _compute_power_modes(_specs(), None, False) == ["absolute", "relative"]
 
 
 def test_modes_uncalibrated_unit_relative_only():
@@ -56,10 +87,13 @@ def _dests(form):
     return set(form._widgets.keys())
 
 
-def test_library_shows_gain_hides_power():
+def test_library_defaults_to_absolute_free_form():
     f = ParamForm()
     f.set_params(_specs())                      # library: no unit context
-    assert "gain" in _dests(f) and "power" not in _dests(f)
+    assert f.power_mode() == "absolute"
+    assert "power" in _dests(f) and "gain" not in _dests(f)
+    # free-form: the --power field keeps its schema bounds (no unit's range clamped in)
+    assert f._widgets["power"][1]["max"] == 60.0
 
 
 def test_calibrated_defaults_to_absolute_with_bounds():
@@ -79,6 +113,23 @@ def test_default_power_mode_relative():
     assert f.power_mode() == "relative"
     assert "gain" in _dests(f) and "power" not in _dests(f)
     assert f._widgets["gain"][1].get("required") is True   # must be filled
+
+
+def test_apply_gain_bounds_limits_the_field():
+    from ui.param_form import apply_gain_bounds
+    specs = [{"dest": "gain", "flags": ["--gain"], "type": "float"}]
+    out = apply_gain_bounds(specs, {"min_gain_db": 0.0, "max_gain_db": 74.0})
+    assert out[0]["min"] == 0.0 and out[0]["max"] == 74.0 and out[0]["type"] == "float"
+
+
+def test_relative_mode_bounds_gain_to_calibration():
+    # On a calibrated unit, relative gain is clamped to the usable [min,max] gain range,
+    # so you can't dial a gain that breaks a limit.
+    f = ParamForm()
+    b = dict(_bounds()); b["min_gain_db"] = 0.0; b["max_gain_db"] = 74.0
+    f.set_params(_specs(), cal_bounds=b, absolute_allowed=True, default_power_mode="relative")
+    assert f.power_mode() == "relative"
+    assert f._widgets["gain"][1]["max"] == 74.0 and f._widgets["gain"][1]["min"] == 0.0
 
 
 def test_toggle_switches_field_and_keeps_other_params():

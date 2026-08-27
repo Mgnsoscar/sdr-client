@@ -493,6 +493,15 @@ class DeployLibraryResult(BaseModel):
     sequences_upserted: List[str] = []
     sequences_deleted: List[str] = []
     sequences_skipped: List[str] = []
+    # Set client-side after the deploy (not part of the agent's PUT /library response):
+    # the component-catalog outcome for this unit — see component_catalog.plan_unit_deploy.
+    components: dict = {}
+    # Absolute --power levels this unit can't produce (it clips them at transmit) — see
+    # power_scan.power_out_of_range. Each: {where, dbm, limit, side}.
+    power_warnings: list = []
+    # --amplitude values that differ from what the calibration curve assumes (power scales
+    # with amplitude) — see power_scan.amplitude_mismatch. Each: {where, amp, cal_amp}.
+    amplitude_warnings: list = []
 
 
 def scoped_library(library: "Library", unit_type: str) -> "Library":

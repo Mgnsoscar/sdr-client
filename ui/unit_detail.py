@@ -21,7 +21,7 @@ from typing import Dict, Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+    QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -158,10 +158,21 @@ class _TaskRow(QFrame):
 
     def _on_start(self) -> None:
         self._busy("starting…")
-        self.hub.run_async(
-            f"task_start:{self.hostname}:{self.task_name}",
-            lambda: self.hub.fleet.get(self.hostname).start_task(self.task_name),
-        )
+        # The play button starts with the task's saved defaults — but an uncalibrated
+        # absolute-power task can't just run its authored --power (the script refuses it).
+        # Route through RunTaskDialog in headless "quick" mode: it loads the task's
+        # calibration state and, only for that case, prompts for a stop-gap relative gain
+        # (persisting it) exactly like Run…; everything else starts from the stored command.
+        dlg = RunTaskDialog(self.hub, self.hostname, self.task_name,
+                            running=False, parent=self.window(), quick=True)
+        self._quick_dlg = dlg                     # keep alive across the async loads
+        dlg.finished.connect(self._on_quick_finished)
+
+    def _on_quick_finished(self, _result: int = 0) -> None:
+        self._quick_dlg = None
+        # Re-enable the buttons; the next poll settles the exact running/idle state.
+        for b in (self._start, self._stop):
+            b.setEnabled(True)
 
     def _on_stop(self) -> None:
         self._busy("stopping…")
@@ -428,6 +439,14 @@ class UnitDetail(QWidget):
         self.hub.refresh_now(hostname)
 
     def _select_subtab(self, idx: int) -> None:
+        # Leaving the Calibration tab with unsaved edits? Warn first — it's easy to tweak
+        # a curve/limit and switch away thinking it was saved.
+        if not self._confirm_leave_calibration(idx):
+            # Keep the button state on the tab we're staying on.
+            cur = self._sub_stack.currentIndex()
+            for i, b in enumerate(self._subtab_buttons):
+                b.setChecked(i == cur)
+            return
         self._sub_stack.setCurrentIndex(idx)
         for i, b in enumerate(self._subtab_buttons):
             b.setChecked(i == idx)
@@ -437,7 +456,59 @@ class UnitDetail(QWidget):
         if hasattr(w, "on_shown"):
             w.on_shown()
 
+    _CAL_SUBTAB = 2                             # index of the Calibration sub-tab
+
+    def _confirm_leave_calibration(self, target_idx: Optional[int] = None) -> bool:
+        """When the Calibration tab is active and holds unsaved edits, ask before leaving.
+        Returns True if it's OK to proceed (saved, chose not to save, or nothing pending),
+        False to stay put. ``target_idx`` is the sub-tab being switched to (None = leaving
+        the unit view entirely); a no-op when we're not actually leaving Calibration."""
+        if self._sub_stack.currentIndex() != self._CAL_SUBTAB:
+            return True
+        if target_idx == self._CAL_SUBTAB:                 # not actually leaving
+            return True
+        panel = getattr(self, "_calibration_panel", None)
+        if panel is None or not panel.has_unsaved_changes():
+            return True
+        decision = self._ask_unsaved_decision()
+        if decision == "cancel":
+            return False                                   # stay on Calibration
+        if decision == "save":
+            # Only leave once the save actually dispatched; if it was blocked (invalid form
+            # or an unsupported-agent guard) stay so the user can see why.
+            return panel.request_save()
+        return True                                        # "discard" → leave, edits kept
+
+    def _ask_unsaved_decision(self) -> str:
+        """Prompt for what to do about unsaved calibration edits. Returns 'save', 'discard'
+        (leave without saving), or 'cancel' (stay). Split out so the leave logic is testable
+        without driving a modal."""
+        box = QMessageBox(self.window())
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Unsaved calibration changes")
+        box.setText("You have unsaved changes to this unit's calibration.")
+        box.setInformativeText("Save them before leaving the Calibration tab?")
+        save = box.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
+        discard = box.addButton("Don't save", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(save)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is cancel:
+            return "cancel"
+        if clicked is discard:
+            return "discard"
+        return "save"
+
+    def confirm_leave(self) -> bool:
+        """Public: OK to navigate away from this unit's detail entirely (e.g. switching
+        the top-level app tab to Library/Schedule)? Prompts about unsaved calibration
+        edits exactly as the back button does. True = go ahead, False = stay."""
+        return self._confirm_leave_calibration()
+
     def _handle_back(self) -> None:
+        if not self._confirm_leave_calibration():
+            return
         self._on_back()
 
     def _open_update(self) -> None:

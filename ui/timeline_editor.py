@@ -53,9 +53,10 @@ from PyQt6.QtWidgets import (
 from api import models as m
 from . import timeline_model as tlm
 from api import ramp as _ramp
+from api.fleet import LIBRARY_HOST
 
 from .duration_spin import DurationSpinBox
-from .param_form import ParamForm, fmt_duration, fmt_value
+from .param_form import ParamForm, fmt_duration, fmt_value, power_mode_of_args
 from .ramp_editor import RampEditorDialog
 from .theme import Palette
 
@@ -1020,7 +1021,21 @@ class StepEditorDialog(QDialog):
         self._params_status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         outer.addWidget(self._params_status)
 
+        # A warning (not a block) when this step's effective frequency puts the running
+        # --power beyond what the unit can deliver there — the runtime clamps it safely.
+        self._clamp_warn = QLabel("")
+        self._clamp_warn.setWordWrap(True)
+        self._clamp_warn.setVisible(False)
+        self._clamp_warn.setStyleSheet(
+            f"font-size: 11px; color: {Palette.ARMED}; font-weight: 600;")
+        outer.addWidget(self._clamp_warn)
+
         self._form = ParamForm()
+        self._form.changed.connect(self._update_clamp_warning)
+        # Moving the step changes which earlier steps precede it, hence the carried-forward
+        # frequency/power — refresh the clamp warning. (Wired here, after _clamp_warn exists.)
+        self._anchor.currentIndexChanged.connect(lambda *_: self._update_clamp_warning())
+        self._run_off.valueChanged.connect(lambda *_: self._update_clamp_warning())
         pscroll = QScrollArea()
         pscroll.setWidgetResizable(True)
         pscroll.setWidget(self._form)
@@ -1178,6 +1193,8 @@ class StepEditorDialog(QDialog):
                 self._params_status.setText(f"could not load parameters: {result}")
             return
         self._editor.param_cache()[script] = (result or {}).get("params", [])
+        self._editor._script_cal_signals[script] = (result or {}).get("calibration_signal")
+        self._editor._script_cal_freq_params[script] = (result or {}).get("calibration_freq_param")
         if script == self._current_script:
             self._build_form(script)
 
@@ -1188,28 +1205,97 @@ class StepEditorDialog(QDialog):
         # the mode the step's args used (relative if they set --gain).
         task = self._task.currentText().strip()
         bounds = self._editor.cal_bounds_for_task(task)
+        hint = self._editor.power_hint_for_task(task)     # aggregate range for Library authoring
         abs_allowed = self._editor.absolute_allowed()
+        # No-safeguard caution: the task opts into no calibration signal, or a targeted
+        # unit isn't calibrated for it — either way power/gain go out raw.
+        from .param_form import calibration_caution
+        caution = calibration_caution(self._editor.has_cal_signal(task),
+                                      targeted=abs_allowed, calibrated=bounds is not None,
+                                      script_calibratable=self._editor.script_calibratable(task))
         prefill = self._pending_prefill or self._src.args or []
-        mode = "relative" if any(a in ("-Gain", "--gain") for a in prefill) else None
+        # Open in the mode the task was saved with (absolute if it sets --power, relative
+        # if --gain) — otherwise a saved-absolute task could fall back to the form's
+        # default (or a mode left over from a previously-selected task).
+        mode = power_mode_of_args(prefill)
+        freq_param = self._editor._script_cal_freq_params.get(script)
+        # The frequency (and power) in effect when this step fires — replayed from the
+        # task's deployed args and the earlier same-task steps — so the form folds the
+        # --power range at that frequency even when this step doesn't set --freq itself.
+        self._carried = self._carried_values(task, script, specs)
+        carried_freq = self._carried.get(freq_param) if freq_param else None
         if self._is_tune():
             # Only live-tunable params can be changed mid-run; the checkboxes let
             # you pick exactly which ones this step sets.
             specs = [s for s in specs if s.get("live")]
             self._form.set_params(specs, selectable=True, cal_bounds=bounds,
-                                  absolute_allowed=abs_allowed, default_power_mode=mode)
+                                  absolute_allowed=abs_allowed, default_power_mode=mode,
+                                  hint_bounds=hint, caution=caution,
+                                  cal_freq_param=freq_param, cal_freq_default=carried_freq)
             self._params_status.setText(
                 "tick the parameters to set at this offset" if specs
                 else "this task's script declares no live parameters")
             self._seed_from_params()
         else:
             self._form.set_params(specs, cal_bounds=bounds,
-                                  absolute_allowed=abs_allowed, default_power_mode=mode)
+                                  absolute_allowed=abs_allowed, default_power_mode=mode,
+                                  hint_bounds=hint, caution=caution,
+                                  cal_freq_param=freq_param, cal_freq_default=carried_freq)
             self._params_status.setText(
                 "" if specs else "this script declares no parameters — use extra args")
             self._apply_prefill()
+        self._update_clamp_warning()
         if bounds and self._editor.cal_is_stale():
             self._params_status.setText("absolute power uses last-known calibration "
                                         "(unit offline) — refreshes when it reconnects")
+
+    def _current_order_key(self):
+        """This step's best-effort position on the task's timeline (see
+        timeline_model._carry_order_key), so state is carried forward only from earlier
+        steps. A duration bar starts the task (rank 0); a tune/ramp uses its anchor+offset."""
+        if self._is_tune() or self._type.currentData() == "ramp":
+            anchor = self._anchor.currentData() or "start"
+            off = round(self._run_off.value(), 1)
+            return (1, off) if anchor == "stop" else (0, off)
+        return (0, 0.0)                                  # a bar / run starts the task
+
+    def _carried_values(self, task: str, script: str, specs: list) -> dict:
+        """The {dest: value} parameter state (effective --freq / --power) the task is
+        running with when this step fires — the task's deployed args replayed through the
+        earlier same-task steps in this sequence."""
+        _s, base_args = self._editor.script_for_task(task)
+        try:
+            return tlm.sequence_effective_values(
+                self._editor.items(), task, base_args, specs, self._src.uid,
+                target_key=self._current_order_key())
+        except Exception:      # noqa: BLE001  — a warning helper must never break the editor
+            return {}
+
+    def _update_clamp_warning(self) -> None:
+        """Warn (never block) when this step's effective frequency puts the running --power
+        beyond what the unit can deliver there — the runtime clamps it, so the delivered
+        power won't match the number. Effective freq/power = the carried-forward state with
+        this step's own set values layered on top."""
+        from state.power_fold import clamp_warning
+        from .param_form import find_power_index
+        lbl = self._clamp_warn
+        task = self._task.currentText().strip()
+        bounds = self._editor.cal_bounds_for_task(task)
+        script, _ = self._editor.script_for_task(task)
+        if not bounds:
+            lbl.setVisible(False); return
+        specs = self._editor.param_cache().get(script, [])
+        freq_param = self._editor._script_cal_freq_params.get(script)
+        pidx = find_power_index(specs)
+        power_dest = specs[pidx]["dest"] if pidx is not None else None
+        if not freq_param or power_dest is None:
+            lbl.setVisible(False); return
+        carried = self._carried_values(task, script, specs)
+        effective = {**carried, **self._form.values()}   # this step's set values win
+        msg = clamp_warning(bounds.get("artifact"), effective.get(freq_param),
+                            effective.get(power_dest))
+        lbl.setText("⚠ " + msg if msg else "")
+        lbl.setVisible(bool(msg))
 
     def _apply_prefill(self) -> None:
         if self._pending_prefill is None:
@@ -1308,6 +1394,8 @@ class TimelineEditor(QWidget):
         self._hostname = ""
         self._task_commands: Dict[str, List[str]] = {}
         self._param_specs: Dict[str, list] = {}
+        self._script_cal_signals: Dict[str, str] = {}   # script -> its declared CAL_SIGNAL_ID
+        self._script_cal_freq_params: Dict[str, str] = {}  # script -> its CAL_FREQ_PARAM
         self._params_inflight: set = set()
         # Calibration context: params come from the library (same across units), but
         # absolute-power bounds are per-UNIT, so the calibration host is tracked
@@ -1391,9 +1479,13 @@ class TimelineEditor(QWidget):
 
     def set_calibration(self, hub, hostname: str) -> None:
         """Point the step editor at the UNIT whose calibration governs absolute power
-        (the plan's target unit, or the sequences-tab unit). Empty hostname → no unit,
-        so only relative power is offered. Fetches GET /calibration once and caches
-        it; step forms read it via cal_bounds_for_task()."""
+        (the plan's target unit, or the sequences-tab unit). Empty hostname — or the
+        reserved LIBRARY_HOST, which is offline Library authoring, not a real unit — means
+        no unit is targeted, so absolute power is free-form (see _compute_power_modes).
+        Fetches GET /calibration once and caches it; step forms read it via
+        cal_bounds_for_task()."""
+        if hostname == LIBRARY_HOST:
+            hostname = ""                            # the library isn't a real unit
         self._cal_hostname = hostname or ""
         self._calibration = None
         if not hostname or hub is None:
@@ -1442,6 +1534,31 @@ class TimelineEditor(QWidget):
         if not sid:
             return None
         return (self._calibration.get("signals") or {}).get(sid)
+
+    def power_hint_for_task(self, task: str):
+        """A soft achievable-range hint for a task's signal, aggregated across every unit
+        seen before — used when authoring absolute power in the Library, where no single
+        unit is targeted. None when no cached unit resolves the signal."""
+        sid = self._task_signals.get(task)
+        if not sid:
+            return None
+        from state.calibration_cache import get_calibration_cache
+        return get_calibration_cache().aggregate_power_bounds(sid)
+
+    def has_cal_signal(self, task: str) -> bool:
+        """Whether a task opts into calibration (sets SDR_CAL_SIGNAL_ID). When it doesn't,
+        its power/gain are raw — no calibration limits apply on any unit."""
+        return bool(self._task_signals.get(task))
+
+    def script_calibratable(self, task: str) -> bool:
+        """Whether a task's SCRIPT declares a calibration signal — i.e. its power/gain is
+        MEANT to be calibrated (so a missing task signal is a real gap worth flagging). A
+        script that declares none takes raw power/gain by design. Unknown (params not
+        fetched yet) is treated as calibratable, so we don't hide a real gap on a race."""
+        script, _ = self.script_for_task(task)
+        if script not in self._script_cal_signals:
+            return True
+        return bool(self._script_cal_signals.get(script))
 
     def script_for_task(self, task: str) -> Tuple[str, List[str]]:
         """(script_filename, default_args) for a task name — for the step editor."""
