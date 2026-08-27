@@ -7,9 +7,20 @@ from __future__ import annotations
 from typing import Optional
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QLabel, QToolButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QLabel, QPlainTextEdit, QToolButton, QVBoxLayout, QWidget
 
 from .theme import Palette
+
+
+def description_editor(placeholder: str = "optional — multiple lines allowed",
+                       rows: int = 4) -> QPlainTextEdit:
+    """A multi-line description input: a few rows tall, then scrolls; Tab moves focus on
+    instead of inserting a tab. Shared by the task / sequence / plan editors."""
+    edit = QPlainTextEdit()
+    edit.setPlaceholderText(placeholder)
+    edit.setTabChangesFocus(True)
+    edit.setFixedHeight(edit.fontMetrics().lineSpacing() * rows + 12)
+    return edit
 
 
 class CollapsibleDescription(QWidget):

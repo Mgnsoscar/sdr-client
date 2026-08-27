@@ -189,9 +189,8 @@ class _SequenceRow(QFrame):
         header.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {Palette.TEXT};")
         box.addWidget(header)
         if seq.description:
-            desc = QLabel(seq.description)
-            desc.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-            box.addWidget(desc)
+            from .desc_widget import CollapsibleDescription
+            box.addWidget(CollapsibleDescription(seq.description))
         # Show the run's timing once armed (on a live unit), otherwise just a step
         # count — the full step list is noise here (edit the sequence to see it).
         if can_run and active:

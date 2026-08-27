@@ -188,9 +188,8 @@ class _PlanRow(QFrame):
         title.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {Palette.TEXT};")
         box.addWidget(title)
         if plan.description:
-            desc = QLabel(plan.description)
-            desc.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-            box.addWidget(desc)
+            from .desc_widget import CollapsibleDescription
+            box.addWidget(CollapsibleDescription(plan.description))
         # Once armed, show the run's timing (on-air/off-air/duration); otherwise the
         # plan's composition (units + overrides).
         timing = _plan_timing(runs) if active else ""

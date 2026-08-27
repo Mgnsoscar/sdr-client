@@ -625,7 +625,7 @@ class PlanEditorDialog(QDialog):
         self._build()
         if plan is not None:
             self._name.setText(plan.name)
-            self._desc.setText(plan.description)
+            self._desc.setPlainText(plan.description)
             # Bars render straight from the stored items (they carry cached unit /
             # sequence labels), so the timeline is populated before sequences load.
             self._timeline.set_items(plan.items)
@@ -647,8 +647,8 @@ class PlanEditorDialog(QDialog):
         self._name = QLineEdit()
         self._name.setPlaceholderText("unique plan name")
         form.addRow("Name *", self._name)
-        self._desc = QLineEdit()
-        self._desc.setPlaceholderText("optional")
+        from .desc_widget import description_editor
+        self._desc = description_editor()
         form.addRow("Description", self._desc)
         outer.addLayout(form)
 
@@ -721,7 +721,7 @@ class PlanEditorDialog(QDialog):
         self.result_plan = m.Plan(
             id=self._plan_id or new_plan_id(),
             name=name,
-            description=self._desc.text().strip(),
+            description=self._desc.toPlainText().strip(),
             items=self._timeline.items(),
         )
         self.accept()

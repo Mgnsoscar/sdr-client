@@ -99,11 +99,8 @@ class TaskEditorDialog(QDialog):
         self._script.currentTextChanged.connect(self._on_script_changed)
         form.addRow("Script *", self._script)
 
-        self._desc = QPlainTextEdit()
-        self._desc.setPlaceholderText("optional — multiple lines allowed")
-        self._desc.setTabChangesFocus(True)      # Tab moves on rather than inserting a tab
-        fm = self._desc.fontMetrics()
-        self._desc.setFixedHeight(fm.lineSpacing() * 4 + 12)   # ~4 lines tall, then scrolls
+        from .desc_widget import description_editor
+        self._desc = description_editor()
         form.addRow("Description", self._desc)
 
         # Which unit types this task deploys to. Only meaningful for the canonical
