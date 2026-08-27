@@ -32,6 +32,9 @@ QPlainTextEdit:focus, QAbstractSpinBox:focus {{
     background: {Palette.SURFACE};
 }}
 QComboBox::drop-down {{ border: none; width: 22px; }}
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{
+    width: 0; height: 0; border: none; margin: 0;
+}}
 QComboBox QAbstractItemView {{
     background: {Palette.SURFACE};
     border: 1px solid {Palette.BORDER_STRONG};
