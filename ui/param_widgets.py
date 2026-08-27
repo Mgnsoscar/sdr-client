@@ -204,11 +204,12 @@ class ToggleSwitch(QCheckBox):
 # ── Dropdown (visually distinct from a plain input) ─────────────────────────────
 
 class Dropdown(QComboBox):
-    """A combo box that reads as a dropdown, not a text field: it paints a chevron on the
-    right (a plain input has none, so the two are tellable apart). A type-or-pick (editable)
-    and a pick-only (non-editable) dropdown look identical — same chevron — the only
-    difference is whether you can type into it. Subclasses QComboBox, so the form's value
-    handling is unchanged."""
+    """A combo box that reads as a dropdown, not a text field. It paints a chevron on the
+    right; a pick-only (non-editable) dropdown shows it in a tinted chip with a pointing
+    cursor, while a type-or-pick (editable) dropdown shows a lighter chevron over a normal
+    text box — so idle you can tell which one lets you type. Its options always drop *below*
+    the field (a plain non-editable combo would otherwise overlay them on top of it).
+    Subclasses QComboBox, so the form's value handling is unchanged."""
 
     _DROP_W = 30.0                            # matches the ::drop-down width in the form QSS
 
@@ -218,6 +219,24 @@ class Dropdown(QComboBox):
         if not editable:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
 
+    def showPopup(self) -> None:
+        """Drop the option list below the field. Qt places a non-editable combo's popup so
+        the current item sits *over* the field; we move it under the field (flipping above
+        only when there isn't room below), so both dropdown kinds open the same way."""
+        super().showPopup()
+        container = self.view().parentWidget() if self.view() is not None else None
+        if container is None:
+            return
+        below = self.mapToGlobal(self.rect().bottomLeft())
+        top = self.mapToGlobal(self.rect().topLeft())
+        y = below.y()
+        screen = self.screen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            if y + container.height() > avail.bottom() and top.y() - container.height() >= avail.top():
+                y = top.y() - container.height()          # no room below → open upward
+        container.move(below.x(), y)
+
     def paintEvent(self, ev) -> None:
         super().paintEvent(ev)                # frame + text (or the editable line edit)
         p = QPainter(self)
@@ -226,7 +245,17 @@ class Dropdown(QComboBox):
         h = float(self.height())
         cx = w - self._DROP_W / 2.0
         cy = h / 2.0
-        pen = QPen(_c(Palette.TEXT_FAINT), 1.5)
+        if not self.isEditable():
+            chip = QRectF(w - self._DROP_W + 3, (h - 24) / 2, self._DROP_W - 9, 24)
+            path = QPainterPath()
+            path.addRoundedRect(chip, 7, 7)
+            p.fillPath(path, _c(Palette.ACCENT_SOFT))
+            colour = _c(Palette.ACCENT_INK)
+            weight = 1.8
+        else:
+            colour = _c(Palette.TEXT_FAINT)
+            weight = 1.5
+        pen = QPen(colour, weight)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         p.setPen(pen)
