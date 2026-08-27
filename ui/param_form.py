@@ -614,13 +614,16 @@ class ParamForm(QWidget):
 
     def _maybe_add_rail(self, spec: dict, widget, pg_dests: set) -> None:
         """Add the always-visible limit rail under a bounded numeric field: min/max at the
-        ends and a live thumb between them. For the power/gain field on a frequency-dependent
-        calibration it also notes the frequency the range was folded at (which re-renders,
-        and so re-folds, when the frequency changes)."""
+        ends and a live thumb between them. Applies to any number field with a real min AND
+        max (a spinbox OR a plain text box), so the limits stay on screen with a value typed
+        in — not just the calibrated power/gain field. The freq preset field is excluded (its
+        range is the whole band). For the power/gain field on a frequency-dependent
+        calibration the rail also notes the frequency the range was folded at (which
+        re-renders, and so re-folds, when the frequency changes)."""
         lo, hi = spec.get("min"), spec.get("max")
-        if not (_use_spinbox(spec) and isinstance(lo, (int, float))
-                and isinstance(hi, (int, float)) and not isinstance(lo, bool)
-                and not isinstance(hi, bool) and hi > lo):
+        if (spec.get("type") not in ("int", "float") or spec.get("presets")
+                or not isinstance(lo, (int, float)) or isinstance(lo, bool)
+                or not isinstance(hi, (int, float)) or isinstance(hi, bool) or hi <= lo):
             return
         note = ""
         if spec["dest"] in pg_dests and self._cal_bounds and self._is_freq_dependent():
@@ -631,6 +634,12 @@ class ParamForm(QWidget):
         if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
             rail.set_value(widget.value())
             widget.valueChanged.connect(rail.set_value)
+        elif isinstance(widget, QLineEdit):
+            def _upd(text, r=rail, d=lo):
+                n = num_or_none(text)
+                r.set_value(n if n is not None else d)
+            _upd(widget.text())
+            widget.textChanged.connect(_upd)
         self._form.addRow("", rail)
 
     def _is_freq_dependent(self) -> bool:

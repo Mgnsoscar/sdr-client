@@ -57,6 +57,17 @@ def test_bounded_fields_get_a_rail_unbounded_do_not():
     assert len(_rails(f)) == 2
 
 
+def test_bounded_field_without_a_step_still_gets_a_rail():
+    # A number with min/max but no `step` renders as a text box (not a spinbox); it must
+    # still get a rail, so limits show on plain bounded fields too — not only spinboxes.
+    specs = _specs() + [{"dest": "dur", "flags": ["--dur"], "type": "float",
+                         "unit": "s", "min": 1.0, "max": 1200.0, "default": 600.0}]
+    f = ParamForm()
+    f.set_params(specs, cal_bounds=_bounds(), absolute_allowed=True,
+                 default_power_mode="absolute", cal_freq_param="freq")
+    assert len(_rails(f)) == 3                                    # power, rate, dur
+
+
 def test_power_rail_carries_the_frequency_note():
     f = ParamForm()
     f.set_params(_specs(), cal_bounds=_bounds(), absolute_allowed=True,
