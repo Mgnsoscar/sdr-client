@@ -136,11 +136,22 @@ def test_caution_none_for_non_calibratable_script():
 
 
 def _warning_labels(form):
+    # The form lays fields out as nested frames now, so walk the layout tree and
+    # collect every warning label (⚠) wherever it sits.
     out = []
-    for i in range(form._form.count()):
-        w = form._form.itemAt(i).widget()
-        if isinstance(w, QLabel) and w.text().startswith("⚠"):
-            out.append(w.text())
+
+    def walk(layout):
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            w = item.widget()
+            if isinstance(w, QLabel) and w.text().startswith("⚠"):
+                out.append(w.text())
+            if item.layout() is not None:
+                walk(item.layout())
+            elif w is not None and w.layout() is not None:
+                walk(w.layout())
+
+    walk(form._body)
     return out
 
 

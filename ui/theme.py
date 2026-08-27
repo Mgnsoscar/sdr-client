@@ -13,8 +13,18 @@ Usage:
 """
 from __future__ import annotations
 
-from PyQt6.QtGui import QColor, QPalette
+import logging
+from pathlib import Path
+
+from PyQt6.QtGui import QColor, QFont, QFontDatabase, QPalette
 from PyQt6.QtWidgets import QApplication
+
+logger = logging.getLogger("sdr-client.theme")
+
+_FONT_DIR = Path(__file__).resolve().parent / "assets" / "fonts"
+# Filled in by _load_fonts(): the real family names Qt registered, or the
+# fallback stacks when the bundled IBM Plex faces aren't available.
+_FONTS_LOADED = False
 
 
 class Palette:
@@ -22,6 +32,7 @@ class Palette:
     BG          = "#F2F3F5"   # app background — soft cool grey, not stark white
     SURFACE     = "#FFFFFF"   # cards / panels sit above the background
     SURFACE_ALT = "#FAFBFC"   # subtle alternate (table stripes, insets)
+    INSET       = "#F1F4F7"   # recessed field background (inputs, chips)
     BORDER      = "#E2E5EA"   # hairline separators / card borders
     BORDER_STRONG = "#CDD2DA" # slightly stronger divider when needed
 
@@ -33,6 +44,7 @@ class Palette:
     # ── Accent (used sparingly — selected tab, focus, primary action) ─────────
     ACCENT      = "#2C6E9B"   # muted slate-blue; calm, not loud
     ACCENT_SOFT = "#E8F0F6"   # accent tint for selected/hover backgrounds
+    ACCENT_INK  = "#1F5476"   # darker accent for text on an accent-soft ground
 
     # ── Status (RESERVED for real state — never decorative) ───────────────────
     ONLINE      = "#1D9E75"   # connected / on-air / healthy (green)
@@ -48,6 +60,45 @@ class Palette:
     PANIC       = "#C8102E"
     PANIC_HOVER = "#A50D26"
     PANIC_TEXT  = "#FFFFFF"
+
+
+class Fonts:
+    """Font-family stacks used across the UI. The bundled IBM Plex faces
+    (ui/assets/fonts) are registered by ``_load_fonts`` at theme-apply time; the
+    trailing families are the graceful fallback when they aren't available, so the
+    layout is identical even where IBM Plex can't load."""
+    SANS = '"IBM Plex Sans", "Segoe UI", "Inter", "Helvetica Neue", Arial, sans-serif'
+    MONO = '"IBM Plex Mono", "DejaVu Sans Mono", "SF Mono", "Consolas", ui-monospace, monospace'
+
+
+def _load_fonts() -> None:
+    """Register the bundled IBM Plex woff2 faces with Qt so the app renders in the
+    same typography as the design mockups regardless of what's installed on the host.
+    Best-effort: a missing/failed file just leaves the fallback stack in Fonts."""
+    global _FONTS_LOADED
+    if _FONTS_LOADED:
+        return
+    _FONTS_LOADED = True
+    if not _FONT_DIR.is_dir():
+        logger.info("Bundled fonts not found at %s — using fallback families", _FONT_DIR)
+        return
+    loaded = 0
+    for path in sorted(_FONT_DIR.glob("*.woff2")):
+        if QFontDatabase.addApplicationFont(str(path)) == -1:
+            logger.warning("Could not load bundled font %s", path.name)
+        else:
+            loaded += 1
+    logger.info("Loaded %d bundled IBM Plex font file(s)", loaded)
+
+
+def mono_font(size: int = 13, weight: int = 400) -> QFont:
+    """A QFont in the app's monospace family at a given px size/weight — for tabular
+    numerics (field values, limit chips, command previews)."""
+    f = QFont("IBM Plex Mono")
+    f.setStyleHint(QFont.StyleHint.Monospace)
+    f.setPixelSize(size)
+    f.setWeight(QFont.Weight(weight))
+    return f
 
 
 # Semantic status name → (fg, bg) for pills/badges
@@ -82,7 +133,7 @@ def status_color(name: str) -> tuple[str, str]:
 
 QSS = f"""
 * {{
-    font-family: "Segoe UI", "Inter", "Helvetica Neue", Arial, sans-serif;
+    font-family: {Fonts.SANS};
     font-size: 13px;
     color: {Palette.TEXT};
 }}
@@ -220,6 +271,12 @@ QToolTip {{
 def apply_theme(app: QApplication) -> None:
     """Apply the palette + global stylesheet to the whole application."""
     app.setStyle("Fusion")   # consistent base across platforms
+    _load_fonts()            # register bundled IBM Plex faces before anything renders
+
+    # Make IBM Plex Sans the application default so even unstyled widgets match.
+    base = QFont("IBM Plex Sans")
+    base.setPixelSize(13)
+    app.setFont(base)
 
     pal = QPalette()
     pal.setColor(QPalette.ColorRole.Window, QColor(Palette.BG))
