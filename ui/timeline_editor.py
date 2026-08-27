@@ -960,6 +960,7 @@ class StepEditorDialog(QDialog):
 
     def _build(self, item) -> None:
         from .dialog_style import editor_qss
+        from .param_widgets import Dropdown
         self.setStyleSheet(editor_qss())
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 12)
@@ -969,7 +970,7 @@ class StepEditorDialog(QDialog):
         form.setSpacing(8)
 
         # Task — only tasks already defined on the unit are selectable.
-        self._task = QComboBox()
+        self._task = Dropdown()
         tasks = self._editor.available_tasks()
         if tasks:
             self._task.addItems(tasks)
@@ -981,7 +982,7 @@ class StepEditorDialog(QDialog):
         form.addRow("Task", self._task)
 
         # Type: duration bar vs one-shot pill.
-        self._type = QComboBox()
+        self._type = Dropdown()
         self._type.addItem("Duration  (on-air → off-air)", "bar")
         self._type.addItem("One-shot  (fires once)", "run")
         self._type.addItem("Tune  (set live params)", "tune")
@@ -1001,7 +1002,7 @@ class StepEditorDialog(QDialog):
         self._row_stop = self._add_row(form, "Stop — from OFF-AIR", self._stop_off)
 
         # One-shot anchor + single offset.
-        self._anchor = QComboBox()
+        self._anchor = Dropdown()
         self._anchor.addItem("on-air (T0)", "start")
         self._anchor.addItem("off-air", "stop")
         self._run_off = DurationSpinBox()

@@ -83,6 +83,7 @@ class TaskEditorDialog(QDialog):
 
     def _build(self) -> None:
         from .dialog_style import editor_qss
+        from .param_widgets import Dropdown
         self.setStyleSheet(editor_qss())
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 12)
@@ -97,7 +98,7 @@ class TaskEditorDialog(QDialog):
         self._name.textChanged.connect(self._update_preview)
         form.addRow("Name *", self._name)
 
-        self._script = QComboBox()
+        self._script = Dropdown()
         self._script.currentTextChanged.connect(self._on_script_changed)
         form.addRow("Script *", self._script)
 
@@ -139,7 +140,7 @@ class TaskEditorDialog(QDialog):
         self._cal_wrap = QWidget()
         cal_form = QFormLayout(self._cal_wrap)
         cal_form.setContentsMargins(0, 0, 0, 6); cal_form.setSpacing(4)
-        self._cal_combo = QComboBox(); self._cal_combo.setEditable(True)
+        self._cal_combo = Dropdown(editable=True)
         self._cal_combo.setToolTip(
             "Which calibrated signal this task transmits — its power/gain is resolved "
             "against this signal's calibration. Defaults to the script's declared signal; "

@@ -112,16 +112,19 @@ class PlanItemDialog(QDialog):
     # ── Construction ─────────────────────────────────────────────────────────
 
     def _build(self) -> None:
+        from .dialog_style import editor_qss
+        from .param_widgets import Dropdown
+        self.setStyleSheet(editor_qss())
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 12)
         outer.setSpacing(10)
 
         form = QFormLayout()
         form.setSpacing(8)
-        self._unit = QComboBox()
+        self._unit = Dropdown()
         self._unit.currentIndexChanged.connect(lambda _=0: self._on_unit_changed())
         form.addRow("Unit", self._unit)
-        self._seq = QComboBox()
+        self._seq = Dropdown()
         self._seq.currentIndexChanged.connect(lambda _=0: self._on_source_changed())
         self._seq.setToolTip("The sequence to copy into this plan. Picking one loads "
                              "its steps below; editing them changes only this plan.")

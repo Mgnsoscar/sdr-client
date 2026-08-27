@@ -31,7 +31,13 @@ QPlainTextEdit:focus, QAbstractSpinBox:focus {{
     border: 1px solid {Palette.ACCENT};
     background: {Palette.SURFACE};
 }}
-QComboBox::drop-down {{ border: none; width: 22px; }}
+/* The Dropdown widget paints its own chevron/chip (matching the parameter form), so
+   hide Qt's native arrow and reserve its width — scoped to Dropdown so a plain QComboBox,
+   if any, keeps a visible arrow. */
+Dropdown::drop-down {{
+    border: none; width: 26px; subcontrol-origin: padding; subcontrol-position: center right;
+}}
+Dropdown::down-arrow {{ image: none; width: 0; height: 0; }}
 QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{
     width: 0; height: 0; border: none; margin: 0;
 }}

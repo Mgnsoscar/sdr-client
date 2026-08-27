@@ -172,6 +172,7 @@ class RampEditorDialog(QDialog):
 
     def _build(self) -> None:
         from .dialog_style import editor_qss
+        from .param_widgets import Dropdown
         self.setStyleSheet(editor_qss())
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 12)
@@ -194,11 +195,11 @@ class RampEditorDialog(QDialog):
                                      "must run a task each step.")
         form.addRow("", self._run_chk)
 
-        self._task = QComboBox()
+        self._task = Dropdown()
         self._populate_tasks()
         form.addRow("Task", self._task)
 
-        self._param = QComboBox()
+        self._param = Dropdown()
         form.addRow("Parameter", self._param)
 
         self._start = QLineEdit(_fmt(r.get("start")));  self._start.setPlaceholderText("start value")
@@ -206,7 +207,7 @@ class RampEditorDialog(QDialog):
         form.addRow("From", self._start)
         form.addRow("To", self._stop)
 
-        self._anchor = QComboBox()
+        self._anchor = Dropdown()
         self._anchor.addItem("On-air (T0)", "start")
         self._anchor.addItem("Off-air", "stop")
         self._anchor.addItem("Fill on-air window", "both")
@@ -219,7 +220,7 @@ class RampEditorDialog(QDialog):
         self._off_lbl = _row(form, "Offset from anchor", self._offset)
         self._offend_lbl = _row(form, "End offset from off-air", self._offset_end)
 
-        self._mode = QComboBox()
+        self._mode = Dropdown()
         form.addRow("Define by", self._mode)
 
         self._steps = QLineEdit();    self._steps.setPlaceholderText("count (equal increments)")
