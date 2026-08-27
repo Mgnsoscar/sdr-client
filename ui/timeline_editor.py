@@ -959,6 +959,8 @@ class StepEditorDialog(QDialog):
     # ── Construction ─────────────────────────────────────────────────────────
 
     def _build(self, item) -> None:
+        from .dialog_style import editor_qss
+        self.setStyleSheet(editor_qss())
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 12)
         outer.setSpacing(10)
@@ -1066,8 +1068,9 @@ class StepEditorDialog(QDialog):
             remove.setStyleSheet(f"color: {Palette.CRASH};")
             buttons.addButton(remove, QDialogButtonBox.ButtonRole.DestructiveRole)
             remove.clicked.connect(lambda: self.done(self.REMOVE))
-        buttons.addButton(QDialogButtonBox.StandardButton.Ok)
+        ok_btn = buttons.addButton(QDialogButtonBox.StandardButton.Ok)
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        ok_btn.setDefault(True)                  # accent primary
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)

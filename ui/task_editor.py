@@ -82,6 +82,8 @@ class TaskEditorDialog(QDialog):
     # ── Construction ─────────────────────────────────────────────────────────
 
     def _build(self) -> None:
+        from .dialog_style import editor_qss
+        self.setStyleSheet(editor_qss())
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 12)
         outer.setSpacing(10)
@@ -205,6 +207,9 @@ class TaskEditorDialog(QDialog):
         )
         self._buttons.accepted.connect(self._on_save)
         self._buttons.rejected.connect(self.reject)
+        save_btn = self._buttons.button(QDialogButtonBox.StandardButton.Save)
+        if save_btn is not None:
+            save_btn.setDefault(True)            # renders as the accent primary
         outer.addWidget(self._buttons)
 
     @staticmethod

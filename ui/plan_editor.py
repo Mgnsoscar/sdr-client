@@ -637,6 +637,8 @@ class PlanEditorDialog(QDialog):
     # ── Construction ─────────────────────────────────────────────────────────
 
     def _build(self) -> None:
+        from .dialog_style import editor_qss
+        self.setStyleSheet(editor_qss())
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 12)
         outer.setSpacing(10)

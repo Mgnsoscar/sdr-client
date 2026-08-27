@@ -171,6 +171,8 @@ class RampEditorDialog(QDialog):
     # ── Layout ───────────────────────────────────────────────────────────────
 
     def _build(self) -> None:
+        from .dialog_style import editor_qss
+        self.setStyleSheet(editor_qss())
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 16, 16, 12)
         outer.setSpacing(10)
@@ -307,8 +309,9 @@ class RampEditorDialog(QDialog):
             rm = QPushButton("Remove"); rm.setStyleSheet(f"color: {Palette.CRASH};")
             buttons.addButton(rm, QDialogButtonBox.ButtonRole.DestructiveRole)
             rm.clicked.connect(lambda: self.done(self.REMOVE))
-        buttons.addButton(QDialogButtonBox.StandardButton.Ok)
+        ok_btn = buttons.addButton(QDialogButtonBox.StandardButton.Ok)
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        ok_btn.setDefault(True)                  # accent primary
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
