@@ -26,10 +26,10 @@ from __future__ import annotations
 import shlex
 from typing import Any, Dict, List, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QLocale, QObject, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
+    QAbstractSpinBox, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
+    QLabel, QLineEdit, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from .theme import Palette, mono_font
@@ -47,9 +47,9 @@ _FORM_QSS = f"""
 #paramForm QLineEdit, #paramForm QComboBox, #paramForm QAbstractSpinBox {{
     background: {Palette.INSET};
     border: 1px solid {Palette.BORDER};
-    border-radius: 10px;
-    min-height: 42px;
-    padding: 0 12px;
+    border-radius: 9px;
+    min-height: 34px;
+    padding: 0 11px;
     color: {Palette.TEXT};
     selection-background-color: {Palette.ACCENT_SOFT};
     selection-color: {Palette.TEXT};
@@ -63,7 +63,7 @@ _FORM_QSS = f"""
     width: 0; border: none;
 }}
 #paramForm QComboBox::drop-down {{
-    border: none; width: 30px; subcontrol-origin: padding; subcontrol-position: center right;
+    border: none; width: 26px; subcontrol-origin: padding; subcontrol-position: center right;
 }}
 #paramForm QComboBox::down-arrow {{ image: none; width: 0; height: 0; }}
 #paramForm QComboBox QAbstractItemView {{
@@ -76,6 +76,19 @@ _FORM_QSS = f"""
     selection-color: {Palette.ACCENT_INK};
 }}
 """
+
+
+class _WheelGuard(QObject):
+    """Stops the mouse wheel from changing (or focusing) a spinbox / dropdown the pointer
+    merely scrolls past: a wheel event is swallowed unless the field already has focus, so
+    scrolling the form never nudges a value or steals focus. One shared instance is installed
+    on each numeric/choice widget."""
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Type.Wheel and not obj.hasFocus():
+            event.ignore()
+            return True
+        return super().eventFilter(obj, event)
 
 
 # ── Schema helpers (paramkit superset over the classic argparse schema) ───────
@@ -421,6 +434,9 @@ def _make_spinbox(spec: dict):
         w.setRange(float(lo) if lo is not None else -1e12,
                    float(hi) if hi is not None else 1e12)
         w.setSingleStep(float(step))
+    # Use a '.' decimal separator regardless of the OS locale (a ',' locale would otherwise
+    # show — and accept — '0,00', which the scripts never use).
+    w.setLocale(QLocale(QLocale.Language.C))
     if spec.get("unit"):
         w.setSuffix(f" {spec['unit']}")
     default = spec.get("default")
@@ -458,6 +474,7 @@ class ParamForm(QWidget):
         self._absolute_allowed = False
         self._power_modes: List[str] = []
         self._power_mode = None
+        self._wheel_guard = _WheelGuard(self)   # eats stray wheel events over unfocused fields
         self.setObjectName("paramForm")
         self.setStyleSheet(_FORM_QSS)
         self._body = QVBoxLayout(self)
@@ -516,11 +533,11 @@ class ParamForm(QWidget):
                              or find_gain_index(self._base_specs) is not None)
         if self._caution and has_power_or_gain:
             self._body.addWidget(self._caution_banner(self._caution))
-            self._body.addSpacing(12)
+            self._body.addSpacing(8)
 
         if len(self._power_modes) > 1:                 # relative/absolute chooser
             self._body.addWidget(self._mode_segments())
-            self._body.addSpacing(16)
+            self._body.addSpacing(12)
 
         self._amp_warn = None
         aidx = find_amplitude_index(self._base_specs)
@@ -639,13 +656,13 @@ class ParamForm(QWidget):
         # (the scroll area then scrolls, as it should).
         frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         v = QVBoxLayout(frame)
-        v.setContentsMargins(0, 2 if not top_sep else 0, 0, 12)
-        v.setSpacing(7)
+        v.setContentsMargins(0, 2 if not top_sep else 0, 0, 9)
+        v.setSpacing(5)
         if top_sep:
             v.addWidget(self._hairline())
 
         # name row
-        lrow = QHBoxLayout(); lrow.setContentsMargins(0, 0, 0, 0); lrow.setSpacing(9)
+        lrow = QHBoxLayout(); lrow.setContentsMargins(0, 0, 0, 0); lrow.setSpacing(8)
         if chk is not None:
             chk.setText("")                       # the name is shown separately
             lrow.addWidget(chk)
@@ -658,7 +675,7 @@ class ParamForm(QWidget):
         v.addLayout(lrow)
 
         # control row
-        crow = QHBoxLayout(); crow.setContentsMargins(0, 0, 0, 0); crow.setSpacing(9)
+        crow = QHBoxLayout(); crow.setContentsMargins(0, 0, 0, 0); crow.setSpacing(8)
         crow.addWidget(widget, 1)
         lo, hi = spec.get("min"), spec.get("max")
         # A range rail + limit chip belong to a numeric input the operator types into —
@@ -708,6 +725,8 @@ class ParamForm(QWidget):
         into the field's input widget (which then re-emits and refreshes everything)."""
         lo, hi = float(spec["min"]), float(spec["max"])
         is_int = spec.get("type") == "int"
+        step = spec.get("step")
+        step = float(step) if isinstance(step, (int, float)) and step > 0 else None
         u = f" {spec['unit']}" if spec.get("unit") else ""
 
         def read():
@@ -719,6 +738,8 @@ class ParamForm(QWidget):
 
         def set_widget(value):
             value = min(max(value, lo), hi)                  # a drag can't leave the range
+            if step:                                         # snap to the script's step grid
+                value = min(max(lo + round((value - lo) / step) * step, lo), hi)
             if isinstance(widget, QSpinBox):
                 widget.setValue(int(round(value)))
             elif isinstance(widget, QDoubleSpinBox):
@@ -1136,7 +1157,7 @@ class ParamForm(QWidget):
             w.stateChanged.connect(self.changed.emit)
         elif spec.get("presets"):
             w = Dropdown(editable=True)          # type a value or pick a preset
-            w.setFont(mono_font(14, 500) if numeric else self._sans_input_font())
+            w.setFont(mono_font(13, 500) if numeric else self._sans_input_font())
             for p in spec["presets"]:
                 w.addItem(str(p["label"]))
             if default is not None:
@@ -1151,12 +1172,17 @@ class ParamForm(QWidget):
             if w.lineEdit() is not None:
                 w.lineEdit().setPlaceholderText(ph)
             w.currentTextChanged.connect(self.changed.emit)
-        elif _use_spinbox(spec):
+            self._guard_scroll(w)
+        elif _use_spinbox(spec) and default is not None:
+            # A stepper only when there's a sensible default to step from. A numeric field
+            # with NO default falls through to an empty text box below, so it reads as
+            # "nothing entered" instead of a misleading 0.
             w = _make_spinbox(spec)
             w.setSuffix("")                       # the unit lives in its own chip now
             w.setButtonSymbols(w.ButtonSymbols.NoButtons)
-            w.setFont(mono_font(15, 500))
+            w.setFont(mono_font(13, 500))
             w.valueChanged.connect(self.changed.emit)
+            self._guard_scroll(w)
         elif spec.get("choices"):
             w = Dropdown(editable=False)         # pick-only
             w.setFont(self._sans_input_font())
@@ -1164,22 +1190,31 @@ class ParamForm(QWidget):
             if default is not None and str(default) in [str(c) for c in spec["choices"]]:
                 w.setCurrentText(str(default))
             w.currentTextChanged.connect(self.changed.emit)
+            self._guard_scroll(w)
         else:
             w = QLineEdit()
-            w.setFont(mono_font(15, 500) if numeric else self._sans_input_font())
+            w.setFont(mono_font(13, 500) if numeric else self._sans_input_font())
             if default is not None:
                 w.setText(fmt_value(default))
-            hint = spec.get("type") or "text"
-            rng = range_hint(spec)
-            if rng:
-                hint += f" ({rng})"
-            if spec.get("required"):
-                hint += " (required)"
-            w.setPlaceholderText(hint)
+            if numeric:                           # empty = nothing entered; show the range
+                rng = range_hint(spec)
+                unit = f" {spec['unit']}" if spec.get("unit") else ""
+                ph = (f"empty — allowed {rng}{unit}" if rng else "empty — no value")
+            else:
+                ph = spec.get("type") or "text"
+                if spec.get("required"):
+                    ph += " (required)"
+            w.setPlaceholderText(ph)
             w.textChanged.connect(self.changed.emit)
         if spec.get("help"):
             w.setToolTip(spec["help"])
         return w
+
+    def _guard_scroll(self, w: QWidget) -> None:
+        """Make a stepper/dropdown ignore the mouse wheel unless it's focused, and never
+        grab focus just by being scrolled over (StrongFocus drops WheelFocus)."""
+        w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        w.installEventFilter(self._wheel_guard)
 
     @staticmethod
     def _sans_input_font():

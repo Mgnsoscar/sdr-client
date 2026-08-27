@@ -51,7 +51,7 @@ class SegmentedControl(QWidget):
         self._items = list(items)                    # [(main, sub), ...]
         self._index = 0
         self._thumb_pos = 0.0                        # animated float in [0, n-1]
-        self.setMinimumHeight(48)
+        self.setMinimumHeight(40)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._anim = QPropertyAnimation(self, b"thumbPos", self)
@@ -129,15 +129,15 @@ class SegmentedControl(QWidget):
             main_col = _c(Palette.TEXT) if active else _c(Palette.TEXT_MUTED)
             sub_col = _c(Palette.ACCENT_INK) if active else _c(Palette.TEXT_FAINT)
             fm = QFont("IBM Plex Sans")
-            fm.setPixelSize(13)
+            fm.setPixelSize(12)
             fm.setWeight(QFont.Weight.DemiBold)
             p.setFont(fm)
             p.setPen(main_col)
             if sub:
-                top = rect.adjusted(0, 6, 0, -rect.height() / 2 + 4)
+                top = rect.adjusted(0, 5, 0, -rect.height() / 2 + 3)
                 p.drawText(top, Qt.AlignmentFlag.AlignCenter, main)
                 fs = QFont("IBM Plex Sans")
-                fs.setPixelSize(10)
+                fs.setPixelSize(9)
                 p.setFont(fs)
                 p.setPen(sub_col)
                 bot = rect.adjusted(0, rect.height() / 2 - 3, 0, -5)
@@ -158,11 +158,11 @@ class ToggleSwitch(QCheckBox):
         super().__init__(parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.setFixedSize(112, 34)
+        self.setFixedSize(100, 30)
 
     def sizeHint(self):
         from PyQt6.QtCore import QSize
-        return QSize(112, 34)
+        return QSize(100, 30)
 
     def hitButton(self, pos) -> bool:                # whole widget toggles
         return self.rect().contains(pos)
@@ -189,7 +189,7 @@ class ToggleSwitch(QCheckBox):
         p.drawPath(knob)
 
         f = QFont("IBM Plex Sans")
-        f.setPixelSize(12)
+        f.setPixelSize(11)
         f.setWeight(QFont.Weight.DemiBold)
         p.setFont(f)
         left = QRectF(r.left() + pad, r.top(), half, r.height())
@@ -211,7 +211,7 @@ class Dropdown(QComboBox):
     the field (a plain non-editable combo would otherwise overlay them on top of it).
     Subclasses QComboBox, so the form's value handling is unchanged."""
 
-    _DROP_W = 30.0                            # matches the ::drop-down width in the form QSS
+    _DROP_W = 26.0                            # matches the ::drop-down width in the form QSS
 
     def __init__(self, editable: bool = False, parent=None):
         super().__init__(parent)
@@ -283,7 +283,7 @@ class RailTrack(QWidget):
         super().__init__(parent)
         self._fraction = 0.0
         self._out = False
-        self.setFixedHeight(16)
+        self.setFixedHeight(14)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -434,7 +434,7 @@ class LimitChip(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("limitChip")
-        self.setFixedHeight(42)
+        self.setFixedHeight(34)
         self._over = False
         self._under = False
         lay = QHBoxLayout(self)
@@ -461,7 +461,7 @@ class LimitChip(QFrame):
 
     def _val(self) -> QLabel:
         lbl = QLabel()
-        lbl.setFont(mono_font(12, 500))
+        lbl.setFont(mono_font(11, 500))
         return lbl
 
     def set_range(self, lo_text: str, hi_text: str) -> None:
