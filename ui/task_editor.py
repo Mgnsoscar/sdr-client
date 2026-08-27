@@ -99,8 +99,11 @@ class TaskEditorDialog(QDialog):
         self._script.currentTextChanged.connect(self._on_script_changed)
         form.addRow("Script *", self._script)
 
-        self._desc = QLineEdit()
-        self._desc.setPlaceholderText("optional")
+        self._desc = QPlainTextEdit()
+        self._desc.setPlaceholderText("optional — multiple lines allowed")
+        self._desc.setTabChangesFocus(True)      # Tab moves on rather than inserting a tab
+        fm = self._desc.fontMetrics()
+        self._desc.setFixedHeight(fm.lineSpacing() * 4 + 12)   # ~4 lines tall, then scrolls
         form.addRow("Description", self._desc)
 
         # Which unit types this task deploys to. Only meaningful for the canonical
@@ -385,7 +388,7 @@ class TaskEditorDialog(QDialog):
         # otherwise editing a task would silently reset those to their defaults.
         self._orig_entry = dict(entry)
         self._name.setText(entry.get("name", ""))
-        self._desc.setText(entry.get("description", ""))
+        self._desc.setPlainText(entry.get("description", ""))
         if self._scope is not None:
             self._scope.set_from_types(entry.get("types") or [])
         self._autostart.setChecked(bool(entry.get("autostart")))
@@ -557,7 +560,7 @@ class TaskEditorDialog(QDialog):
 
         edited = {
             "name": name,
-            "description": self._desc.text().strip(),
+            "description": self._desc.toPlainText().strip(),
             "command": self._build_command(),
             "working_dir": self._scripts_dir.text().strip(),
             "env": env,

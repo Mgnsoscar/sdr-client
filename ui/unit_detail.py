@@ -63,9 +63,8 @@ class _TaskRow(QFrame):
         self._name.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {Palette.TEXT};")
         namebox.addWidget(self._name)
         if task.description:
-            desc = QLabel(task.description)
-            desc.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-            namebox.addWidget(desc)
+            from .desc_widget import CollapsibleDescription
+            namebox.addWidget(CollapsibleDescription(task.description))
         lay.addLayout(namebox)
         lay.addStretch(1)
 

@@ -49,9 +49,8 @@ class _LibTaskRow(QFrame):
         name.setStyleSheet(f"font-size: 14px; font-weight: 600; color: {Palette.TEXT};")
         box.addWidget(name)
         if task.description:
-            desc = QLabel(task.description)
-            desc.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-            box.addWidget(desc)
+            from .desc_widget import CollapsibleDescription
+            box.addWidget(CollapsibleDescription(task.description))
         lay.addLayout(box, stretch=1)
         lay.addWidget(scope_chip(types), alignment=Qt.AlignmentFlag.AlignVCenter)
 
