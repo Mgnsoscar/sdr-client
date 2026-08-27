@@ -26,14 +26,56 @@ from __future__ import annotations
 import shlex
 from typing import Any, Dict, List, Optional
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QLabel, QLineEdit,
-    QSpinBox, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
 
-from .theme import Palette
+from .theme import Palette, mono_font
+from .param_widgets import (
+    Dropdown, LimitChip, LiveBadge, RangeRail, SegmentedControl, ToggleSwitch,
+    field_name_label, unit_chip,
+)
 from state.power_fold import refold_bounds
+
+
+# Scoped styling for the value inputs, so a field looks like the mockup's recessed
+# control (rounded inset, accent focus ring) without restyling QLineEdit/QComboBox
+# app-wide. Applied to the ParamForm (objectName paramForm); it cascades to children.
+_FORM_QSS = f"""
+#paramForm QLineEdit, #paramForm QComboBox, #paramForm QAbstractSpinBox {{
+    background: {Palette.INSET};
+    border: 1px solid {Palette.BORDER};
+    border-radius: 10px;
+    min-height: 42px;
+    padding: 0 12px;
+    color: {Palette.TEXT};
+    selection-background-color: {Palette.ACCENT_SOFT};
+    selection-color: {Palette.TEXT};
+}}
+#paramForm QLineEdit:focus, #paramForm QComboBox:focus, #paramForm QAbstractSpinBox:focus,
+#paramForm QComboBox:on {{
+    border: 1px solid {Palette.ACCENT};
+    background: {Palette.SURFACE};
+}}
+#paramForm QAbstractSpinBox::up-button, #paramForm QAbstractSpinBox::down-button {{
+    width: 0; border: none;
+}}
+#paramForm QComboBox::drop-down {{
+    border: none; width: 30px; subcontrol-origin: padding; subcontrol-position: center right;
+}}
+#paramForm QComboBox::down-arrow {{ image: none; width: 0; height: 0; }}
+#paramForm QComboBox QAbstractItemView {{
+    background: {Palette.SURFACE};
+    border: 1px solid {Palette.BORDER_STRONG};
+    border-radius: 8px;
+    padding: 4px;
+    outline: 0;
+    selection-background-color: {Palette.ACCENT_SOFT};
+    selection-color: {Palette.ACCENT_INK};
+}}
+"""
 
 
 # ── Schema helpers (paramkit superset over the classic argparse schema) ───────
@@ -416,9 +458,11 @@ class ParamForm(QWidget):
         self._absolute_allowed = False
         self._power_modes: List[str] = []
         self._power_mode = None
-        self._form = QFormLayout(self)
-        self._form.setContentsMargins(0, 0, 0, 0)
-        self._form.setSpacing(6)
+        self.setObjectName("paramForm")
+        self.setStyleSheet(_FORM_QSS)
+        self._body = QVBoxLayout(self)
+        self._body.setContentsMargins(0, 0, 0, 0)
+        self._body.setSpacing(0)          # per-field frames own their own spacing
         # Keep the amplitude-mismatch caption in step with edits (and with set_values).
         self.changed.connect(self._update_amplitude_warning)
 
@@ -461,11 +505,7 @@ class ParamForm(QWidget):
         self._render()
 
     def _render(self) -> None:
-        while self._form.count():
-            item = self._form.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
+        self._clear_layout(self._body)
         self._widgets.clear()
         self._checks.clear()
 
@@ -475,16 +515,12 @@ class ParamForm(QWidget):
         has_power_or_gain = (find_power_index(self._base_specs) is not None
                              or find_gain_index(self._base_specs) is not None)
         if self._caution and has_power_or_gain:
-            warn = QLabel("⚠ " + self._caution)
-            warn.setWordWrap(True)
-            warn.setStyleSheet(
-                f"font-size: 11px; color: {Palette.ARMED}; font-weight: 600; "
-                f"background: {Palette.ARMED_SOFT}; border: 1px solid {Palette.ARMED}; "
-                f"border-radius: 6px; padding: 6px 8px;")
-            self._form.addRow(warn)
+            self._body.addWidget(self._caution_banner(self._caution))
+            self._body.addSpacing(12)
 
         if len(self._power_modes) > 1:                 # relative/absolute chooser
-            self._form.addRow(self._mode_label(), self._mode_toggle())
+            self._body.addWidget(self._mode_segments())
+            self._body.addSpacing(16)
 
         self._amp_warn = None
         aidx = find_amplitude_index(self._base_specs)
@@ -492,30 +528,228 @@ class ParamForm(QWidget):
         specs = self._effective_specs()
         if not specs:
             note = QLabel("This script declares no parameters.")
-            note.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-            self._form.addRow(note)
+            note.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT}; padding: 6px 0;")
+            self._body.addWidget(note)
+        first = True
         for spec in specs:
             widget = self._widget_for(spec)
             self._widgets[spec["dest"]] = (widget, spec)
+            chk = None
             if self._selectable:
                 chk = self._check_for(spec)
                 self._checks[spec["dest"]] = chk
-                self._form.addRow(chk, widget)
-            else:
-                self._form.addRow(self._label_for(spec), widget)
+            self._body.addWidget(self._field_frame(spec, widget, chk, top_sep=not first))
+            first = False
             if spec.get("_hint"):                        # soft achievable-range caption
                 cap = QLabel(spec["_hint"]); cap.setWordWrap(True)
-                cap.setStyleSheet(f"font-size: 10px; color: {Palette.TEXT_FAINT};")
-                self._form.addRow("", cap)
+                cap.setStyleSheet(f"font-size: 10px; color: {Palette.TEXT_FAINT}; padding: 2px 2px 0;")
+                self._body.addWidget(cap)
             # Live amplitude-mismatch caption, right under the amplitude field.
             if spec["dest"] == amp_dest and self._cal_amplitude is not None:
                 self._amp_warn = QLabel(""); self._amp_warn.setWordWrap(True)
                 self._amp_warn.setVisible(False)
                 self._amp_warn.setStyleSheet(
-                    f"font-size: 10px; color: {Palette.ARMED}; font-weight: 600;")
-                self._form.addRow("", self._amp_warn)
+                    f"font-size: 10px; color: {Palette.ARMED}; font-weight: 600; padding: 2px 2px 0;")
+                self._body.addWidget(self._amp_warn)
+        self._body.addStretch(1)          # keep fields compact + top-aligned
         self._wire_freq_refold()
         self.changed.emit()
+
+    # ── Layout building blocks (mockup field frames) ───────────────────────────
+
+    @staticmethod
+    def _clear_layout(layout) -> None:
+        """Tear down every item in a layout (widgets and nested layouts) so a
+        re-render starts clean."""
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)     # drop from the tree now (deleteLater is deferred),
+                w.deleteLater()       # so findChildren / a re-render never see the old one
+                continue
+            child = item.layout()
+            if child is not None:
+                ParamForm._clear_layout(child)
+
+    @staticmethod
+    def _hairline() -> QFrame:
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background: {Palette.BORDER}; border: none;")
+        return line
+
+    @staticmethod
+    def _fmt_bound(v) -> str:
+        """Compact display of a range end: whole values without a decimal or exponent
+        (1575420000, not 1.57542e+09), fractional values trimmed (61.44), with a proper
+        minus sign (−1.8)."""
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return str(v)
+        s = str(int(f)) if f.is_integer() else f"{f:g}"
+        return s.replace("-", "−")
+
+    def _display_name(self, spec: dict) -> str:
+        """The field's human name: the long flag without dashes, spaces for hyphens,
+        a trailing * when required (units live in their own chip)."""
+        flag = spec["flags"][0] if spec.get("flags") else spec.get("dest", "")
+        name = flag.lstrip("-").replace("-", " ")
+        return name + (" *" if spec.get("required") else "")
+
+    @staticmethod
+    def _is_power_or_gain(spec: dict) -> bool:
+        flags = spec.get("flags") or []
+        return (spec.get("dest") in (POWER_DEST, GAIN_DEST)
+                or "--power" in flags or "--gain" in flags)
+
+    def _caution_banner(self, text: str) -> QLabel:
+        warn = QLabel("⚠ " + text)
+        warn.setWordWrap(True)
+        warn.setStyleSheet(
+            f"font-size: 11px; color: {Palette.ARMED}; font-weight: 600; "
+            f"background: {Palette.ARMED_SOFT}; border: 1px solid {Palette.ARMED}; "
+            f"border-radius: 9px; padding: 8px 10px;")
+        return warn
+
+    def _mode_segments(self) -> SegmentedControl:
+        """The Absolute / Relative power-mode chooser as a segmented control with a
+        sliding thumb (replaces the old dropdown; same _on_mode_changed logic)."""
+        subs = {
+            "absolute": "dBm · this unit" if self._cal_bounds else "dBm",
+            "relative": "raw gain · dB",
+        }
+        names = {"absolute": "Absolute", "relative": "Relative"}
+        items = [(names.get(m, m), subs.get(m, "")) for m in self._power_modes]
+        seg = SegmentedControl(items)
+        seg.setCurrentIndex(self._power_modes.index(self._power_mode), animate=False)
+        seg.changed.connect(self._on_mode_changed)
+        return seg
+
+    def _field_frame(self, spec: dict, widget: QWidget, chk, top_sep: bool) -> QWidget:
+        """One field, laid out like the mockup: a name row (uppercase name + unit chip +
+        live badge), a control row (input + always-visible limit chip), and — for a
+        bounded numeric — a range rail (with a frequency note on a freq-dependent power
+        field) and a clamp warning."""
+        frame = QWidget()
+        # Minimum vertical policy: a field keeps (at least) its content height and is
+        # never squeezed to overlap its neighbour when the form is taller than the view
+        # (the scroll area then scrolls, as it should).
+        frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        v = QVBoxLayout(frame)
+        v.setContentsMargins(0, 2 if not top_sep else 0, 0, 12)
+        v.setSpacing(7)
+        if top_sep:
+            v.addWidget(self._hairline())
+
+        # name row
+        lrow = QHBoxLayout(); lrow.setContentsMargins(0, 0, 0, 0); lrow.setSpacing(9)
+        if chk is not None:
+            chk.setText("")                       # the name is shown separately
+            lrow.addWidget(chk)
+        lrow.addWidget(field_name_label(self._display_name(spec)))
+        if spec.get("unit"):
+            lrow.addWidget(unit_chip(spec["unit"].replace(" ", " · ")))
+        lrow.addStretch(1)
+        if spec.get("live"):
+            lrow.addWidget(LiveBadge())
+        v.addLayout(lrow)
+
+        # control row
+        crow = QHBoxLayout(); crow.setContentsMargins(0, 0, 0, 0); crow.setSpacing(9)
+        crow.addWidget(widget, 1)
+        lo, hi = spec.get("min"), spec.get("max")
+        # A range rail + limit chip belong to a numeric input the operator types into —
+        # not a preset/choice dropdown that happens to carry min/max (e.g. a frequency
+        # picker). Gate on the actual widget being a spinbox or line edit.
+        bounded = (spec.get("type") in ("int", "float") and lo is not None and hi is not None
+                   and isinstance(widget, (QSpinBox, QDoubleSpinBox, QLineEdit)))
+        chip = None
+        if bounded:
+            chip = LimitChip()
+            chip.set_range(self._fmt_bound(lo), self._fmt_bound(hi))
+            crow.addWidget(chip)
+        v.addLayout(crow)
+
+        if bounded:
+            rail = RangeRail()
+            rail.set_bounds(float(lo), float(hi), self._fmt_bound)
+            # On a frequency-dependent calibration, the power/gain range moves with the
+            # carrier — note the frequency it was folded at (the note lives inside the rail
+            # and is rebuilt, so re-folded, when the frequency changes).
+            if (self._is_power_or_gain(spec) and self._is_freq_dependent()
+                    and isinstance(self._folded_at, (int, float))):
+                mhz = self._folded_at / 1e6
+                rail.set_note(
+                    f'Range at <span style="color:{Palette.ACCENT_INK}; font-weight:600;">'
+                    f'{mhz:.2f} MHz</span> · moves with frequency')
+            v.addWidget(rail)
+            warn = self._warn_line()
+            v.addWidget(warn)
+            self._wire_rail(widget, spec, rail, chip, warn)
+        return frame
+
+    def _warn_line(self) -> QLabel:
+        """A hidden clamp warning; _wire_rail fills in the message and shows it when a
+        value is above the max or below the min."""
+        lbl = QLabel()
+        lbl.setWordWrap(True)
+        lbl.setVisible(False)
+        lbl.setStyleSheet(
+            f"font-size: 12px; color: {Palette.ARMED}; background: {Palette.ARMED_SOFT}; "
+            f"border: 1px solid {Palette.ARMED}; border-radius: 9px; padding: 8px 10px;")
+        return lbl
+
+    def _wire_rail(self, widget, spec: dict, rail: "RangeRail", chip, warn) -> None:
+        """Keep a bounded field's rail, limit chip and clamp warning in step with the
+        value the operator types/steps, and let a drag on the rail set the value back
+        into the field's input widget (which then re-emits and refreshes everything)."""
+        lo, hi = float(spec["min"]), float(spec["max"])
+        is_int = spec.get("type") == "int"
+        u = f" {spec['unit']}" if spec.get("unit") else ""
+
+        def read():
+            if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+                return float(widget.value())
+            if isinstance(widget, QLineEdit):
+                return num_or_none(widget.text().strip())
+            return None
+
+        def set_widget(value):
+            value = min(max(value, lo), hi)                  # a drag can't leave the range
+            if isinstance(widget, QSpinBox):
+                widget.setValue(int(round(value)))
+            elif isinstance(widget, QDoubleSpinBox):
+                widget.setValue(value)
+            elif isinstance(widget, QLineEdit):
+                widget.setText(str(int(round(value))) if is_int else f"{value:g}")
+
+        def update(*_):
+            v = read()
+            rail.set_value(v)
+            over = v is not None and v > hi + 1e-9
+            under = v is not None and v < lo - 1e-9
+            if chip is not None:
+                chip.set_state(over=over, under=under)
+            if warn is not None:
+                if over:
+                    warn.setText(
+                        f"⚠ Above the maximum this unit can deliver "
+                        f"({self._fmt_bound(hi)}{u}) — the request will be clamped down to it.")
+                elif under:
+                    warn.setText(
+                        f"⚠ Below the minimum this unit can deliver "
+                        f"({self._fmt_bound(lo)}{u}) — the request will be clamped up to it.")
+                warn.setVisible(over or under)
+
+        if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+            widget.valueChanged.connect(update)
+        elif isinstance(widget, QLineEdit):
+            widget.textChanged.connect(update)
+        rail.valueChanged.connect(set_widget)                # drag → field value → update
+        update()
 
     def _is_freq_dependent(self) -> bool:
         """True when this signal's --power/gain range actually moves with frequency (a
@@ -701,21 +935,6 @@ class ParamForm(QWidget):
             else:
                 out.append(s)
         return out
-
-    def _mode_label(self) -> QLabel:
-        lbl = QLabel("Power mode")
-        lbl.setStyleSheet(f"font-weight: 600; color: {Palette.TEXT};")
-        return lbl
-
-    def _mode_toggle(self) -> QComboBox:
-        combo = QComboBox()
-        abs_label = "Absolute (dBm, this unit)" if self._cal_bounds else "Absolute (dBm)"
-        names = {"absolute": abs_label, "relative": "Relative (raw gain, dB)"}
-        for m in self._power_modes:
-            combo.addItem(names.get(m, m), m)
-        combo.setCurrentIndex(self._power_modes.index(self._power_mode))
-        combo.currentIndexChanged.connect(self._on_mode_changed)
-        return combo
 
     def _on_mode_changed(self, idx: int) -> None:
         if not (0 <= idx < len(self._power_modes)):
@@ -907,41 +1126,17 @@ class ParamForm(QWidget):
         chk.toggled.connect(lambda _=False: self.changed.emit())
         return chk
 
-    def _label_for(self, spec: dict) -> QLabel:
-        flag = spec["flags"][0] if spec["flags"] else spec["dest"]
-        text: str = flag + (" *" if spec.get("required") else "")
-        if text.startswith("--"):
-            text = text[2:]
-        elif text.startswith("-"):
-            text = text[1:]
-        text = text.replace("-", " ")
-        if spec.get("unit"):
-            text = f"{text}  [{spec['unit']}]"
-        lbl = QLabel(text)
-        if spec.get("live"):
-            # Mark params the script can retune while running. Rich text so the
-            # badge sits inline after the name; the plain name stays the label.
-            from html import escape
-            lbl.setText(
-                f"{escape(text)} "
-                f"<span style='color:{Palette.ACCENT}; font-size:9px; "
-                f"font-weight:600; letter-spacing:0.4px;'>● LIVE</span>")
-            lbl.setToolTip((spec.get("help") + "\n\n" if spec.get("help") else "")
-                           + "Tunable while the task is running.")
-            return lbl
-        if spec.get("help"):
-            lbl.setToolTip(spec["help"])
-        return lbl
-
     def _widget_for(self, spec: dict) -> QWidget:
         default = spec.get("default")
+        numeric = spec.get("type") in ("int", "float")
         if spec.get("is_flag"):
-            w = QCheckBox()
+            # On/Off toggle (a QCheckBox subclass, so value handling is unchanged).
+            w = ToggleSwitch()
             w.setChecked(bool(default))
             w.stateChanged.connect(self.changed.emit)
         elif spec.get("presets"):
-            w = QComboBox()
-            w.setEditable(True)
+            w = Dropdown(editable=True)          # type a value or pick a preset
+            w.setFont(mono_font(14, 500) if numeric else self._sans_input_font())
             for p in spec["presets"]:
                 w.addItem(str(p["label"]))
             if default is not None:
@@ -950,8 +1145,6 @@ class ParamForm(QWidget):
             else:
                 w.setCurrentText("")
             ph = "pick a preset or type a value"
-            if spec.get("unit"):
-                ph += f" [{spec['unit']}]"
             rng = range_hint(spec)
             if rng:
                 ph += f" ({rng})"
@@ -960,20 +1153,23 @@ class ParamForm(QWidget):
             w.currentTextChanged.connect(self.changed.emit)
         elif _use_spinbox(spec):
             w = _make_spinbox(spec)
+            w.setSuffix("")                       # the unit lives in its own chip now
+            w.setButtonSymbols(w.ButtonSymbols.NoButtons)
+            w.setFont(mono_font(15, 500))
             w.valueChanged.connect(self.changed.emit)
         elif spec.get("choices"):
-            w = QComboBox()
+            w = Dropdown(editable=False)         # pick-only
+            w.setFont(self._sans_input_font())
             w.addItems([str(c) for c in spec["choices"]])
             if default is not None and str(default) in [str(c) for c in spec["choices"]]:
                 w.setCurrentText(str(default))
             w.currentTextChanged.connect(self.changed.emit)
         else:
             w = QLineEdit()
+            w.setFont(mono_font(15, 500) if numeric else self._sans_input_font())
             if default is not None:
                 w.setText(fmt_value(default))
             hint = spec.get("type") or "text"
-            if spec.get("unit"):
-                hint += f" [{spec['unit']}]"
             rng = range_hint(spec)
             if rng:
                 hint += f" ({rng})"
@@ -984,3 +1180,11 @@ class ParamForm(QWidget):
         if spec.get("help"):
             w.setToolTip(spec["help"])
         return w
+
+    @staticmethod
+    def _sans_input_font():
+        from PyQt6.QtGui import QFont
+        f = QFont("IBM Plex Sans")
+        f.setPixelSize(14)
+        f.setWeight(QFont.Weight.Medium)
+        return f

@@ -23,10 +23,10 @@ from typing import List, Optional
 
 import yaml
 
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QInputDialog, QLabel, QLineEdit,
-    QPlainTextEdit, QScrollArea, QVBoxLayout,
+    QDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+    QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import models as m
@@ -36,12 +36,44 @@ from .param_form import (
     _POWER_FLAGS, _GAIN_FLAGS,
 )
 from .qt_adapter import DataHub
-from .theme import Palette
+from .theme import Palette, mono_font
 
 
 # The task env key that carries the uncalibrated stop-gap gain (a script uses it only
 # while the unit is uncalibrated for the signal; see the Pi scripts' power precedence).
 FALLBACK_GAIN_ENV = "SDR_CAL_FALLBACK_GAIN"
+
+
+# Card chrome for the dialog — header/body/footer as one elevated surface, matching the
+# Run-task panel design. The parameter form styles its own inputs (ui.param_form).
+_DIALOG_QSS = f"""
+#runCard {{
+    background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER}; border-radius: 14px;
+}}
+#cardHead {{
+    background: {Palette.SURFACE_ALT}; border-bottom: 1px solid {Palette.BORDER};
+    border-top-left-radius: 14px; border-top-right-radius: 14px;
+}}
+#cardFoot {{
+    background: {Palette.SURFACE_ALT}; border-top: 1px solid {Palette.BORDER};
+    border-bottom-left-radius: 14px; border-bottom-right-radius: 14px;
+}}
+#glyph {{
+    background: {Palette.ACCENT_SOFT}; color: {Palette.ACCENT_INK};
+    border-radius: 10px; font-size: 16px;
+}}
+#cardFoot QPushButton {{
+    background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER_STRONG};
+    border-radius: 10px; padding: 9px 16px; font-weight: 600; color: {Palette.TEXT};
+}}
+#cardFoot QPushButton:hover {{ background: {Palette.SURFACE_ALT}; }}
+#cardFoot QPushButton#startBtn {{
+    background: {Palette.ACCENT}; border: 1px solid {Palette.ACCENT}; color: #FFFFFF;
+}}
+#cardFoot QPushButton#startBtn:hover {{
+    background: {Palette.ACCENT_INK}; border-color: {Palette.ACCENT_INK};
+}}
+"""
 
 
 def _fmt_gain(v: float) -> str:
@@ -107,17 +139,17 @@ class RunTaskDialog(QDialog):
     # ── Layout ─────────────────────────────────────────────────────────────────
 
     def _build(self) -> None:
+        self.setStyleSheet(_DIALOG_QSS)
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(10)
+        root.setSpacing(0)
 
-        blurb = QLabel(
-            "Start this task once with the parameters below. This does not change "
-            "the deployed task definition — it only overrides the arguments for "
-            "this run.")
-        blurb.setWordWrap(True)
-        blurb.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-        root.addWidget(blurb)
+        card = QFrame(); card.setObjectName("runCard")
+        cardlay = QVBoxLayout(card)
+        cardlay.setContentsMargins(0, 0, 0, 0)
+        cardlay.setSpacing(0)
+
+        cardlay.addWidget(self._build_header())
 
         # The parameter form (scrolls when a script has many arguments).
         self._form = ParamForm()
@@ -125,44 +157,139 @@ class RunTaskDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setWidget(self._form)
-        scroll.setMinimumHeight(120)
-        root.addWidget(scroll, stretch=1)
+        scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+        scroll.setMinimumHeight(180)
+        body = QWidget(); bodylay = QVBoxLayout(body)
+        bodylay.setContentsMargins(18, 18, 18, 6)
+        bodylay.addWidget(scroll, stretch=1)
+        cardlay.addWidget(body, stretch=1)
 
-        extra_form = QFormLayout()
-        extra_form.setContentsMargins(0, 0, 0, 0)
-        self._extra = QLineEdit()
-        self._extra.setPlaceholderText("--flag value  (anything not in the form above)")
-        self._extra.textChanged.connect(self._update_preview)
-        extra_form.addRow("Additional args", self._extra)
-        root.addLayout(extra_form)
-
-        prev_lbl = QLabel("Command")
-        prev_lbl.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-        root.addWidget(prev_lbl)
-        self._preview = QPlainTextEdit()
-        self._preview.setReadOnly(True)
-        self._preview.setFixedHeight(52)
-        self._preview.setFont(QFont("monospace"))
-        root.addWidget(self._preview)
+        # Collapsible "Additional args" section (hidden until the footer button, or a
+        # prefill the form didn't recognise, reveals it) — Additional args + command.
+        self._extra_section = self._build_extra_section()
+        self._extra_section.setVisible(False)
+        cardlay.addWidget(self._extra_section)
 
         self._status = QLabel("")
         self._status.setWordWrap(True)
+        self._status.setContentsMargins(18, 0, 18, 0)
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-        root.addWidget(self._status)
+        cardlay.addWidget(self._status)
 
-        self._buttons = QDialogButtonBox()
-        self._run_btn = self._buttons.addButton(
-            "Start", QDialogButtonBox.ButtonRole.AcceptRole)
-        self._buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
-        self._buttons.accepted.connect(self._on_run)
-        self._buttons.rejected.connect(self.reject)
-        root.addWidget(self._buttons)
+        cardlay.addWidget(self._build_footer())
+        root.addWidget(card)
 
         self._form.changed.connect(self._update_preview)
         if self._running:
             self._set_status(
                 "This task is already running — stop it first, or starting will "
                 "fail.", error=True)
+
+    def _build_header(self) -> QFrame:
+        head = QFrame(); head.setObjectName("cardHead")
+        lay = QHBoxLayout(head)
+        lay.setContentsMargins(18, 16, 18, 16)
+        lay.setSpacing(12)
+
+        glyph = QLabel("🎛️"); glyph.setObjectName("glyph")
+        glyph.setFixedSize(34, 34)
+        glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(glyph)
+
+        titles = QVBoxLayout(); titles.setContentsMargins(0, 0, 0, 0); titles.setSpacing(1)
+        self._head_title = QLabel(f"Run · {self.task_name}")
+        self._head_title.setStyleSheet(
+            f"font-size: 15px; font-weight: 600; color: {Palette.TEXT};")
+        self._head_sub = QLabel(self.hostname)
+        self._head_sub.setFont(mono_font(11))
+        self._head_sub.setStyleSheet(f"color: {Palette.TEXT_FAINT};")
+        titles.addWidget(self._head_title)
+        titles.addWidget(self._head_sub)
+        lay.addLayout(titles, stretch=1)
+
+        self._cal_pill = QLabel("")
+        self._cal_pill.setVisible(False)
+        lay.addWidget(self._cal_pill)
+        return head
+
+    def _build_extra_section(self) -> QWidget:
+        sec = QWidget()
+        lay = QVBoxLayout(sec)
+        lay.setContentsMargins(18, 4, 18, 10)
+        lay.setSpacing(6)
+        cap = QLabel("ADDITIONAL ARGS")
+        cap.setStyleSheet(
+            f"font-size: 10px; font-weight: 600; letter-spacing: 0.7px; color: {Palette.TEXT_MUTED};")
+        lay.addWidget(cap)
+        self._extra = QLineEdit()
+        self._extra.setPlaceholderText("--flag value  (anything not in the form above)")
+        self._extra.setFont(mono_font(13))
+        self._extra.setStyleSheet(
+            f"background: {Palette.INSET}; border: 1px solid {Palette.BORDER}; "
+            f"border-radius: 10px; min-height: 38px; padding: 0 12px;")
+        self._extra.textChanged.connect(self._update_preview)
+        lay.addWidget(self._extra)
+        self._preview = QPlainTextEdit()
+        self._preview.setReadOnly(True)
+        self._preview.setFixedHeight(52)
+        self._preview.setFont(mono_font(12))
+        self._preview.setStyleSheet(
+            f"background: {Palette.INSET}; border: 1px solid {Palette.BORDER}; "
+            f"border-radius: 10px; color: {Palette.TEXT_MUTED}; padding: 6px 10px;")
+        lay.addWidget(self._preview)
+        return sec
+
+    def _build_footer(self) -> QFrame:
+        foot = QFrame(); foot.setObjectName("cardFoot")
+        lay = QHBoxLayout(foot)
+        lay.setContentsMargins(15, 14, 15, 14)
+        lay.setSpacing(10)
+        self._extra_btn = QPushButton("Additional args…")
+        self._extra_btn.clicked.connect(self._toggle_extra)
+        lay.addWidget(self._extra_btn)
+        lay.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        lay.addWidget(cancel)
+        self._run_btn = QPushButton("Start task")
+        self._run_btn.setObjectName("startBtn")
+        self._run_btn.setDefault(True)
+        self._run_btn.clicked.connect(self._on_run)
+        lay.addWidget(self._run_btn)
+        # Kept as the handle _on_run/_on_task_done enable/disable during a start.
+        self._buttons = foot
+        return foot
+
+    def _toggle_extra(self) -> None:
+        self._extra_section.setVisible(not self._extra_section.isVisible())
+
+    def _reveal_extra(self) -> None:
+        self._extra_section.setVisible(True)
+
+    def _set_pill(self, text: str, kind: str) -> None:
+        """Show the calibration state pill in the header (kind: 'ok'/'warn'/'idle')."""
+        fg, bg = {
+            "ok": (Palette.ONLINE, Palette.ONLINE_SOFT),
+            "warn": (Palette.ARMED, Palette.ARMED_SOFT),
+            "idle": (Palette.IDLE, Palette.IDLE_SOFT),
+        }.get(kind, (Palette.IDLE, Palette.IDLE_SOFT))
+        self._cal_pill.setText("● " + text)
+        self._cal_pill.setStyleSheet(
+            f"color: {fg}; background: {bg}; border-radius: 999px; "
+            f"padding: 3px 10px; font-size: 11px; font-weight: 600;")
+        self._cal_pill.setVisible(True)
+
+    def _refresh_header(self) -> None:
+        """Fill the header subtitle (host · script) and the calibration pill once the
+        task's script and calibration state are known."""
+        if self._script_name:
+            self._head_sub.setText(f"{self.hostname} · {self._script_name}")
+        if self._cal_bounds is not None:
+            self._set_pill("Calibrated", "ok")
+        elif self._cal_signal_id:
+            self._set_pill("Uncalibrated", "warn")
+        else:
+            self._cal_pill.setVisible(False)
 
     # ── Loading ────────────────────────────────────────────────────────────────
 
@@ -256,6 +383,7 @@ class RunTaskDialog(QDialog):
                 "Use “Additional args” to pass options, then Start.", error=False)
             self._current_args = command[1:] if len(command) > 1 else []
             self._extra.setText(" ".join(shlex.quote(a) for a in self._current_args))
+            self._reveal_extra()
             if self._quick:
                 self._quick_plain_start()                # no calibration form — start as-is
             return
@@ -318,6 +446,9 @@ class RunTaskDialog(QDialog):
                 self._form.set_values([_GAIN_FLAGS[0], self._fallback_gain])
         if extra:
             self._extra.setText(" ".join(shlex.quote(e) for e in extra))
+            if not self._quick:
+                self._reveal_extra()
+        self._refresh_header()
         if self._quick:
             self._quick_dispatch()
 

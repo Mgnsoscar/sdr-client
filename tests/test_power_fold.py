@@ -1,6 +1,8 @@
 """Client-side re-fold of a resolved calibration artifact at a chosen transmit
 frequency — the mirror of the agent's calkit PowerMap. Expectations track the agent's
 tests/test_calibration_v2.py fixture so the two stay in step."""
+import pytest
+
 from state.power_fold import PowerFold, refold_bounds, clamp_warning
 
 
@@ -59,6 +61,28 @@ def test_refold_bounds_rewrites_the_power_range():
     assert out["max_power_dbm"] == 28.0 and out["min_power_dbm"] == -2.0
     assert out["quantity"] == "EIRP"                 # non-power fields carried through
     assert bounds["max_power_dbm"] == 27.0           # original dict untouched
+
+
+def test_per_limit_anchor_curve_inverts_the_limit_against_its_own_curve():
+    # A reported operating plane: the operating point reads the main-lobe curve, but the
+    # amp-output limit gauges on the full-band curve, published per-limit as anchor_curve.
+    art = {
+        "anchor_curve": [[40.0, -8.0], [74.0, 21.0]],          # reported (main-lobe) curve
+        "passive_hops": [{"plane": "amp_out",
+                          "delta_db_by_freq": [[1.0e9, 10.0], [2.0e9, 6.0]]}],
+        "freq_dependent_limits": [
+            {"plane": "amp_out", "max_dbm": 5.0,
+             "delta_db_by_freq": [[1.0e9, 10.0], [2.0e9, 6.0]],
+             "anchor_curve": [[40.0, -6.0], [74.0, 24.0]]}],   # limiting (full-band) curve
+        "gain_ceiling_db": None, "min_gain_db": 40.0, "center_freq_hz": 1.5e9,
+    }
+    f = PowerFold.from_artifact(art)
+    assert f.freq_dependent
+    # 5 dBm full-band limit inverted through the full-band curve [[40,-6],[74,24]]:
+    # @1 GHz amp +10 → target -5 → gain 41.133; @2 GHz amp +6 → target -1 → gain 45.667.
+    assert f.max_gain_db(1.0e9) == pytest.approx(40 + 34 / 30, abs=1e-6)
+    assert f.max_gain_db(2.0e9) == pytest.approx(40 + 34 * 5 / 30, abs=1e-6)
+    assert f.max_gain_db(2.0e9) > f.max_gain_db(1.0e9)     # per-limit anchor honoured
 
 
 def test_clamp_warning_fires_when_power_exceeds_the_ceiling_at_a_frequency():

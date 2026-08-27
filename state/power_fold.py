@@ -58,9 +58,22 @@ class PowerFold:
         self._ceiling_const = float(ceiling_const)
         self._gain_step = float(gain_step_db) if gain_step_db and float(gain_step_db) > 0 else None
         self._hops = [([float(f) for f, _ in t], [float(d) for _, d in t]) for t in hops]
-        self._freq_limits = [
-            (float(mx), [float(f) for f, _ in t], [float(d) for _, d in t])
-            for mx, t in freq_limits]
+        # Each freq-dependent limit: (max_dbm, freqs, deltas, anchor_gains, anchor_powers).
+        # anchor_* is None when it inverts against the shared operating anchor, or a separate
+        # LIMITING curve when the operating plane is REPORTED (mirrors calkit.PowerMap).
+        self._freq_limits = []
+        for item in freq_limits:
+            mx, t = item[0], item[1]
+            anchor = item[2] if len(item) > 2 else None
+            fs = [float(f) for f, _ in t]
+            ds = [float(d) for _, d in t]
+            if anchor:
+                pairs = sorted((float(g), float(p)) for g, p in anchor)
+                ag = [g for g, _ in pairs]
+                ap = [p for _, p in pairs]
+            else:
+                ag = ap = None
+            self._freq_limits.append((float(mx), fs, ds, ag, ap))
         self._center_freq = None if center_freq is None else float(center_freq)
 
     # ── the fold, at a frequency ──────────────────────────────────────────────────
@@ -70,13 +83,13 @@ class PowerFold:
     def _op_delta(self, freq: Optional[float]) -> float:
         return sum(_table_at(fs, ds, freq) for fs, ds in self._hops)
 
-    def _invert(self, target_power: float) -> float:
-        return _interp(target_power, self._powers, self._gains)
-
     def _ceiling(self, freq: Optional[float]) -> float:
         cap = self._ceiling_const
-        for max_dbm, fs, ds in self._freq_limits:
-            cap = min(cap, self._invert(max_dbm - _table_at(fs, ds, freq)))
+        for max_dbm, fs, ds, ag, ap in self._freq_limits:
+            target = max_dbm - _table_at(fs, ds, freq)
+            gains = ag if ag is not None else self._gains
+            powers = ap if ap is not None else self._powers
+            cap = min(cap, _interp(target, powers, gains))
         return cap
 
     def _snap(self, gain: float, freq: Optional[float]) -> float:
@@ -116,7 +129,7 @@ class PowerFold:
     def freq_dependent(self) -> bool:
         """True when --power/gain (or the ceiling) actually moves with frequency."""
         return (any(len(fs) > 1 for fs, _ in self._hops)
-                or any(len(fs) > 1 for _, fs, _ in self._freq_limits))
+                or any(len(fs) > 1 for _, fs, _ds, _ag, _ap in self._freq_limits))
 
     # ── constructor ───────────────────────────────────────────────────────────────
     @classmethod
@@ -134,7 +147,8 @@ class PowerFold:
             if not gains:
                 return None
             hops = [h.get("delta_db_by_freq") or [] for h in art.get("passive_hops", [])]
-            freq_limits = [(lim["max_dbm"], lim.get("delta_db_by_freq") or [])
+            freq_limits = [(lim["max_dbm"], lim.get("delta_db_by_freq") or [],
+                            lim.get("anchor_curve"))
                            for lim in art.get("freq_dependent_limits", [])]
             ceiling_const = art.get("gain_ceiling_db")
             if ceiling_const is None:
