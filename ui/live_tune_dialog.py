@@ -22,12 +22,33 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QLabel, QScrollArea, QVBoxLayout,
+    QDialog, QDialogButtonBox, QFrame, QLabel, QScrollArea, QVBoxLayout,
 )
 
 from .param_form import ParamForm, fmt_value, power_mode_of_args
 from .qt_adapter import DataHub
 from .theme import Palette
+
+
+# White card chrome so the Tune dialog sits on a clean surface like the Run dialog.
+_TUNE_QSS = f"""
+#tuneCard {{
+    background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER}; border-radius: 14px;
+}}
+#tuneCard QScrollArea, #tuneCard QScrollArea > QWidget > QWidget {{ background: transparent; }}
+#tuneCard QDialogButtonBox QPushButton {{
+    background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER_STRONG};
+    border-radius: 10px; padding: 8px 16px; font-weight: 600; color: {Palette.TEXT};
+    min-width: 74px;
+}}
+#tuneCard QDialogButtonBox QPushButton:hover {{ background: {Palette.SURFACE_ALT}; }}
+#tuneCard QDialogButtonBox QPushButton:default {{
+    background: {Palette.ACCENT}; border: 1px solid {Palette.ACCENT}; color: #FFFFFF;
+}}
+#tuneCard QDialogButtonBox QPushButton:default:hover {{
+    background: {Palette.ACCENT_INK}; border-color: {Palette.ACCENT_INK};
+}}
+"""
 
 
 class LiveTuneDialog(QDialog):
@@ -59,8 +80,14 @@ class LiveTuneDialog(QDialog):
     # ── Layout ─────────────────────────────────────────────────────────────────
 
     def _build(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
+        self.setStyleSheet(_TUNE_QSS)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.setSpacing(0)
+        card = QFrame(); card.setObjectName("tuneCard")
+        outer.addWidget(card)
+        root = QVBoxLayout(card)
+        root.setContentsMargins(18, 18, 18, 18)
         root.setSpacing(10)
 
         blurb = QLabel(
