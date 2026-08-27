@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
 
 from .theme import Palette, mono_font
 from .param_widgets import (
-    LimitChip, LiveBadge, RangeRail, SegmentedControl, ToggleSwitch,
+    Dropdown, LimitChip, LiveBadge, RangeRail, SegmentedControl, ToggleSwitch,
     field_name_label, unit_chip,
 )
 from state.power_fold import refold_bounds
@@ -63,8 +63,9 @@ _FORM_QSS = f"""
     width: 0; border: none;
 }}
 #paramForm QComboBox::drop-down {{
-    border: none; width: 26px; subcontrol-origin: padding; subcontrol-position: center right;
+    border: none; width: 30px; subcontrol-origin: padding; subcontrol-position: center right;
 }}
+#paramForm QComboBox::down-arrow {{ image: none; width: 0; height: 0; }}
 #paramForm QComboBox QAbstractItemView {{
     background: {Palette.SURFACE};
     border: 1px solid {Palette.BORDER_STRONG};
@@ -685,16 +686,15 @@ class ParamForm(QWidget):
                     f'Range at <span style="color:{Palette.ACCENT_INK}; font-weight:600;">'
                     f'{mhz:.2f} MHz</span> · moves with frequency')
             v.addWidget(rail)
-            warn = self._warn_line(hi, spec.get("unit"))
+            warn = self._warn_line()
             v.addWidget(warn)
-            self._wire_rail(widget, float(hi), rail, chip, warn)
+            self._wire_rail(widget, spec, rail, chip, warn)
         return frame
 
-    def _warn_line(self, hi, unit) -> QLabel:
-        """A hidden clamp warning; shown by _wire_rail when a value exceeds the max."""
-        u = f" {unit}" if unit else ""
-        lbl = QLabel(f"⚠ Above the maximum this unit can deliver "
-                     f"({self._fmt_bound(hi)}{u}) — the request will be clamped down to it.")
+    def _warn_line(self) -> QLabel:
+        """A hidden clamp warning; _wire_rail fills in the message and shows it when a
+        value is above the max or below the min."""
+        lbl = QLabel()
         lbl.setWordWrap(True)
         lbl.setVisible(False)
         lbl.setStyleSheet(
@@ -702,10 +702,14 @@ class ParamForm(QWidget):
             f"border: 1px solid {Palette.ARMED}; border-radius: 9px; padding: 8px 10px;")
         return lbl
 
-    def _wire_rail(self, widget, hi: float, rail: "RangeRail", chip, warn) -> None:
+    def _wire_rail(self, widget, spec: dict, rail: "RangeRail", chip, warn) -> None:
         """Keep a bounded field's rail, limit chip and clamp warning in step with the
-        value the operator types/steps (a bounded spinbox can't exceed its max, so the
-        clamp state only appears on a free-form numeric field)."""
+        value the operator types/steps, and let a drag on the rail set the value back
+        into the field's input widget (which then re-emits and refreshes everything)."""
+        lo, hi = float(spec["min"]), float(spec["max"])
+        is_int = spec.get("type") == "int"
+        u = f" {spec['unit']}" if spec.get("unit") else ""
+
         def read():
             if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
                 return float(widget.value())
@@ -713,19 +717,38 @@ class ParamForm(QWidget):
                 return num_or_none(widget.text().strip())
             return None
 
+        def set_widget(value):
+            value = min(max(value, lo), hi)                  # a drag can't leave the range
+            if isinstance(widget, QSpinBox):
+                widget.setValue(int(round(value)))
+            elif isinstance(widget, QDoubleSpinBox):
+                widget.setValue(value)
+            elif isinstance(widget, QLineEdit):
+                widget.setText(str(int(round(value))) if is_int else f"{value:g}")
+
         def update(*_):
             v = read()
             rail.set_value(v)
             over = v is not None and v > hi + 1e-9
+            under = v is not None and v < lo - 1e-9
             if chip is not None:
-                chip.set_over(over)
+                chip.set_state(over=over, under=under)
             if warn is not None:
-                warn.setVisible(over)
+                if over:
+                    warn.setText(
+                        f"⚠ Above the maximum this unit can deliver "
+                        f"({self._fmt_bound(hi)}{u}) — the request will be clamped down to it.")
+                elif under:
+                    warn.setText(
+                        f"⚠ Below the minimum this unit can deliver "
+                        f"({self._fmt_bound(lo)}{u}) — the request will be clamped up to it.")
+                warn.setVisible(over or under)
 
         if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
             widget.valueChanged.connect(update)
         elif isinstance(widget, QLineEdit):
             widget.textChanged.connect(update)
+        rail.valueChanged.connect(set_widget)                # drag → field value → update
         update()
 
     def _is_freq_dependent(self) -> bool:
@@ -1112,8 +1135,7 @@ class ParamForm(QWidget):
             w.setChecked(bool(default))
             w.stateChanged.connect(self.changed.emit)
         elif spec.get("presets"):
-            w = QComboBox()
-            w.setEditable(True)
+            w = Dropdown(editable=True)          # type a value or pick a preset
             w.setFont(mono_font(14, 500) if numeric else self._sans_input_font())
             for p in spec["presets"]:
                 w.addItem(str(p["label"]))
@@ -1136,7 +1158,7 @@ class ParamForm(QWidget):
             w.setFont(mono_font(15, 500))
             w.valueChanged.connect(self.changed.emit)
         elif spec.get("choices"):
-            w = QComboBox()
+            w = Dropdown(editable=False)         # pick-only
             w.setFont(self._sans_input_font())
             w.addItems([str(c) for c in spec["choices"]])
             if default is not None and str(default) in [str(c) for c in spec["choices"]]:

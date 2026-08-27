@@ -23,7 +23,8 @@ from PyQt6.QtGui import (
     QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen,
 )
 from PyQt6.QtWidgets import (
-    QCheckBox, QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout,
+    QWidget,
 )
 
 from .theme import Palette, mono_font
@@ -200,19 +201,72 @@ class ToggleSwitch(QCheckBox):
         p.end()
 
 
+# ── Dropdown (visually distinct from a plain input) ─────────────────────────────
+
+class Dropdown(QComboBox):
+    """A combo box that reads as a dropdown, not a text field. It paints a chevron on the
+    right; a pick-only (non-editable) dropdown shows the chevron in a tinted chip and takes
+    a pointing cursor, while a type-or-pick (editable) dropdown shows a lighter chevron over
+    a normal text box. A plain input has neither, so the three are tellable apart at a
+    glance. Subclasses QComboBox, so the form's value handling is unchanged."""
+
+    _DROP_W = 30.0                            # matches the ::drop-down width in the form QSS
+
+    def __init__(self, editable: bool = False, parent=None):
+        super().__init__(parent)
+        self.setEditable(editable)
+        if not editable:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def paintEvent(self, ev) -> None:
+        super().paintEvent(ev)                # frame + text (or the editable line edit)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = float(self.width())
+        h = float(self.height())
+        cx = w - self._DROP_W / 2.0
+        cy = h / 2.0
+        if not self.isEditable():
+            chip = QRectF(w - self._DROP_W + 3, (h - 24) / 2, self._DROP_W - 9, 24)
+            path = QPainterPath()
+            path.addRoundedRect(chip, 7, 7)
+            p.fillPath(path, _c(Palette.ACCENT_SOFT))
+            colour = _c(Palette.ACCENT_INK)
+            weight = 1.8
+        else:
+            colour = _c(Palette.TEXT_FAINT)
+            weight = 1.5
+        pen = QPen(colour, weight)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        chev = QPainterPath()
+        chev.moveTo(cx - 4, cy - 2)
+        chev.lineTo(cx, cy + 2.5)
+        chev.lineTo(cx + 4, cy - 2)
+        p.drawPath(chev)
+        p.end()
+
+
 # ── Range rail (track + fill + thumb) ───────────────────────────────────────────
 
 class RailTrack(QWidget):
-    """The painted part of a range rail: a slim track with an accent fill and a thumb
-    at ``fraction`` (0..1). Turns amber in the ``over`` (clamp) state. Purely a
-    read-out — it doesn't accept input (the field's input widget owns the value)."""
+    """The painted part of a range rail: a slim track with an accent fill and a thumb at
+    ``fraction`` (0..1). It's interactive — click or drag anywhere along it to set the
+    value; it emits ``sliderMoved`` with the new fraction and the field's input widget
+    owns the committed value. Turns amber in the ``out`` (clamp) state."""
+
+    sliderMoved = pyqtSignal(float)          # new fraction [0,1] from a click/drag
+
+    _M = 8.0                                  # side margin so the thumb never clips at 0/1
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._fraction = 0.0
-        self._over = False
+        self._out = False
         self.setFixedHeight(16)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def setFraction(self, f: float) -> None:
         f = max(0.0, min(1.0, f))
@@ -220,40 +274,62 @@ class RailTrack(QWidget):
             self._fraction = f
             self.update()
 
-    def setOver(self, over: bool) -> None:
-        if over != self._over:
-            self._over = over
+    def setOut(self, out: bool) -> None:
+        if out != self._out:
+            self._out = out
             self.update()
 
+    # ── interaction ───────────────────────────────────────────────────────────
+    def _frac_at(self, x: float) -> float:
+        usable = self.width() - 2 * self._M
+        if usable <= 0:
+            return 0.0
+        return max(0.0, min(1.0, (x - self._M) / usable))
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.MouseButton.LeftButton:
+            f = self._frac_at(ev.position().x())
+            self.setFraction(f)
+            self.sliderMoved.emit(f)
+
+    def mouseMoveEvent(self, ev) -> None:
+        if ev.buttons() & Qt.MouseButton.LeftButton:
+            f = self._frac_at(ev.position().x())
+            self.setFraction(f)
+            self.sliderMoved.emit(f)
+
+    # ── paint ─────────────────────────────────────────────────────────────────
     def paintEvent(self, _ev) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        m = self._M
         h = 5.0
         y = (self.height() - h) / 2
         w = float(self.width())
-        track = QRectF(0.5, y, w - 1, h)
+        usable = max(0.0, w - 2 * m)
+        track = QRectF(m, y, usable, h)
         tp = QPainterPath()
         tp.addRoundedRect(track, h / 2, h / 2)
         p.fillPath(tp, _c(Palette.INSET))
         p.setPen(QPen(_c(Palette.BORDER), 1))
         p.drawPath(tp)
 
-        accent = _c(Palette.ARMED if self._over else Palette.ACCENT)
-        fill_w = max(0.0, min(w, w * self._fraction))
-        if fill_w > 1:
+        accent = _c(Palette.ARMED if self._out else Palette.ACCENT)
+        fill_w = usable * self._fraction
+        if fill_w > 0.5:
             fp = QPainterPath()
-            fp.addRoundedRect(QRectF(0.5, y, fill_w, h), h / 2, h / 2)
-            if self._over:
+            fp.addRoundedRect(QRectF(m, y, fill_w, h), h / 2, h / 2)
+            if self._out:
                 p.fillPath(fp, accent)
             else:
-                grad = QLinearGradient(0, 0, w, 0)
+                grad = QLinearGradient(m, 0, w - m, 0)
                 soft = _c(Palette.ACCENT)
                 soft.setAlpha(150)
                 grad.setColorAt(0.0, soft)
                 grad.setColorAt(1.0, _c(Palette.ACCENT))
                 p.fillPath(fp, grad)
 
-        cx = max(6.0, min(w - 6.0, w * self._fraction))
+        cx = m + usable * self._fraction
         cy = self.height() / 2
         p.setPen(QPen(accent, 2.5))
         p.setBrush(_c(Palette.SURFACE))
@@ -264,14 +340,18 @@ class RailTrack(QWidget):
 class RangeRail(QWidget):
     """A [lo] ── track ── [hi] row that reflects a value inside its bounds, with an
     optional note beneath it (e.g. the frequency a freq-dependent range was folded at —
-    kept inside the rail so it travels with it). Call ``set_bounds`` once, ``set_value``
-    as the field changes, and ``set_note`` for the caption."""
+    kept inside the rail so it travels with it). Interactive: dragging the track emits
+    ``valueChanged`` with the value under the thumb. Call ``set_bounds`` once,
+    ``set_value`` as the field changes, and ``set_note`` for the caption."""
+
+    valueChanged = pyqtSignal(float)          # value picked by dragging the track
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._lo = 0.0
         self._hi = 1.0
         self.track = RailTrack()
+        self.track.sliderMoved.connect(self._on_drag)
         self._lo_lbl = self._end_label()
         self._hi_lbl = self._end_label()
         self._note = None
@@ -292,6 +372,9 @@ class RangeRail(QWidget):
         lbl.setStyleSheet(f"color: {Palette.TEXT_FAINT};")
         return lbl
 
+    def _on_drag(self, frac: float) -> None:
+        self.valueChanged.emit(self._lo + frac * (self._hi - self._lo))
+
     def set_bounds(self, lo: float, hi: float, fmt=None) -> None:
         self._lo, self._hi = float(lo), float(hi)
         f = fmt or (lambda v: f"{v:g}")
@@ -301,11 +384,11 @@ class RangeRail(QWidget):
     def set_value(self, v: Optional[float]) -> None:
         if v is None or self._hi <= self._lo:
             self.track.setFraction(0.0)
-            self.track.setOver(False)
+            self.track.setOut(False)
             return
         frac = (min(max(v, self._lo), self._hi) - self._lo) / (self._hi - self._lo)
         self.track.setFraction(frac)
-        self.track.setOver(v > self._hi + 1e-9)
+        self.track.setOut(v > self._hi + 1e-9 or v < self._lo - 1e-9)
 
     def set_note(self, text: str) -> None:
         if not text:
@@ -326,13 +409,15 @@ class RangeRail(QWidget):
 class LimitChip(QFrame):
     """The persistent min/max range shown next to a bounded field's input — the
     calibrated limits that stay in view instead of hiding once a value is typed.
-    Turns amber in the clamp (``over``) state."""
+    Turns amber and highlights the breached bound in a clamp state (``over`` → MAX,
+    ``under`` → MIN)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("limitChip")
         self.setFixedHeight(42)
         self._over = False
+        self._under = False
         lay = QHBoxLayout(self)
         lay.setContentsMargins(11, 0, 11, 0)
         lay.setSpacing(6)
@@ -364,24 +449,23 @@ class LimitChip(QFrame):
         self._lo.setText(lo_text)
         self._hi.setText(hi_text)
 
-    def set_over(self, over: bool) -> None:
-        if over != self._over:
-            self._over = over
+    def set_state(self, over: bool = False, under: bool = False) -> None:
+        if over != self._over or under != self._under:
+            self._over, self._under = over, under
             self._apply_style()
 
     def _apply_style(self) -> None:
-        if self._over:
-            self.setStyleSheet(
-                f"#limitChip {{ background: {Palette.ARMED_SOFT}; "
-                f"border: 1px solid {Palette.ARMED}; border-radius: 9px; }}")
-            self._hi.setStyleSheet(f"color: {Palette.ARMED}; font-weight: 600;")
-            self._lo.setStyleSheet(f"color: {Palette.ARMED};")
-        else:
-            self.setStyleSheet(
-                f"#limitChip {{ background: {Palette.SURFACE}; "
-                f"border: 1px solid {Palette.BORDER}; border-radius: 9px; }}")
-            self._hi.setStyleSheet(f"color: {Palette.TEXT}; font-weight: 500;")
-            self._lo.setStyleSheet(f"color: {Palette.TEXT}; font-weight: 500;")
+        out = self._over or self._under
+        bg = Palette.ARMED_SOFT if out else Palette.SURFACE
+        border = Palette.ARMED if out else Palette.BORDER
+        self.setStyleSheet(
+            f"#limitChip {{ background: {bg}; "
+            f"border: 1px solid {border}; border-radius: 9px; }}")
+        # highlight the breached bound; the other stays neutral
+        hi_col = Palette.ARMED if self._over else Palette.TEXT
+        lo_col = Palette.ARMED if self._under else Palette.TEXT
+        self._hi.setStyleSheet(f"color: {hi_col}; font-weight: {'600' if self._over else '500'};")
+        self._lo.setStyleSheet(f"color: {lo_col}; font-weight: {'600' if self._under else '500'};")
 
 
 # ── Small label helpers ─────────────────────────────────────────────────────────
