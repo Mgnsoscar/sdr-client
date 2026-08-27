@@ -204,11 +204,11 @@ class ToggleSwitch(QCheckBox):
 # ── Dropdown (visually distinct from a plain input) ─────────────────────────────
 
 class Dropdown(QComboBox):
-    """A combo box that reads as a dropdown, not a text field. It paints a chevron on the
-    right; a pick-only (non-editable) dropdown shows the chevron in a tinted chip and takes
-    a pointing cursor, while a type-or-pick (editable) dropdown shows a lighter chevron over
-    a normal text box. A plain input has neither, so the three are tellable apart at a
-    glance. Subclasses QComboBox, so the form's value handling is unchanged."""
+    """A combo box that reads as a dropdown, not a text field: it paints a chevron on the
+    right (a plain input has none, so the two are tellable apart). A type-or-pick (editable)
+    and a pick-only (non-editable) dropdown look identical — same chevron — the only
+    difference is whether you can type into it. Subclasses QComboBox, so the form's value
+    handling is unchanged."""
 
     _DROP_W = 30.0                            # matches the ::drop-down width in the form QSS
 
@@ -226,17 +226,7 @@ class Dropdown(QComboBox):
         h = float(self.height())
         cx = w - self._DROP_W / 2.0
         cy = h / 2.0
-        if not self.isEditable():
-            chip = QRectF(w - self._DROP_W + 3, (h - 24) / 2, self._DROP_W - 9, 24)
-            path = QPainterPath()
-            path.addRoundedRect(chip, 7, 7)
-            p.fillPath(path, _c(Palette.ACCENT_SOFT))
-            colour = _c(Palette.ACCENT_INK)
-            weight = 1.8
-        else:
-            colour = _c(Palette.TEXT_FAINT)
-            weight = 1.5
-        pen = QPen(colour, weight)
+        pen = QPen(_c(Palette.TEXT_FAINT), 1.5)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         p.setPen(pen)
