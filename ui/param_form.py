@@ -26,10 +26,11 @@ from __future__ import annotations
 import shlex
 from typing import Any, Dict, List, Optional
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal, Qt, QRectF
+from PyQt6.QtGui import QPainter, QColor, QPen
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QLabel, QLineEdit,
-    QSpinBox, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
+    QLineEdit, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from .theme import Palette
@@ -390,6 +391,96 @@ def _make_spinbox(spec: dict):
     return w
 
 
+# ── Always-visible limit rail ───────────────────────────────────────────────────
+
+def _fmt_bound(v) -> str:
+    """A compact numeric bound for the rail ends (−1.8, 28.2, 61.44) — a proper minus sign."""
+    s = fmt_value(v)
+    return s.replace("-", "−")
+
+
+class _RailTrack(QWidget):
+    """A slim meter: a track, a fill up to the current value, and a thumb — so a bounded
+    field shows WHERE its value sits between min and max at a glance, and the limits stay
+    on screen even with a value typed in."""
+
+    def __init__(self, lo: float, hi: float):
+        super().__init__()
+        self._lo, self._hi = float(lo), float(hi)
+        self._v = float(lo)
+        self.setFixedHeight(14)
+        self.setMinimumWidth(90)
+
+    def set_value(self, v) -> None:
+        try:
+            self._v = float(v)
+        except (TypeError, ValueError):
+            return
+        self.update()
+
+    def _pct(self) -> float:
+        span = self._hi - self._lo
+        if span <= 0:
+            return 0.0
+        return max(0.0, min(1.0, (self._v - self._lo) / span))
+
+    def paintEvent(self, _e) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        cy = h / 2.0
+        th = 5.0
+        usable = w - 2.0
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(Palette.SURFACE_ALT))
+        p.drawRoundedRect(QRectF(1, cy - th / 2, usable, th), th / 2, th / 2)
+        pct = self._pct()
+        fill = usable * pct
+        if fill > 0.5:
+            p.setBrush(QColor(Palette.ACCENT))
+            p.drawRoundedRect(QRectF(1, cy - th / 2, max(th, fill), th), th / 2, th / 2)
+        tx = 1 + usable * pct
+        rad = 5.0
+        pen = QPen(QColor(Palette.ACCENT))
+        pen.setWidthF(2.2)
+        p.setPen(pen)
+        p.setBrush(QColor(Palette.SURFACE))
+        p.drawEllipse(QRectF(tx - rad, cy - rad, 2 * rad, 2 * rad))
+
+
+class RangeRail(QWidget):
+    """The limit affordance placed under a bounded numeric field: the min/max at the ends,
+    a live meter between them, and an optional note (e.g. the frequency the range was folded
+    at). ``set_value`` moves the thumb as the field changes."""
+
+    def __init__(self, lo: float, hi: float, note: str = ""):
+        super().__init__()
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 1, 0, 0)
+        outer.setSpacing(3)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(9)
+        lo_lbl, hi_lbl = QLabel(_fmt_bound(lo)), QLabel(_fmt_bound(hi))
+        for lbl in (lo_lbl, hi_lbl):
+            lbl.setStyleSheet(
+                f"font-size: 10px; color: {Palette.TEXT_FAINT}; "
+                f"font-family: 'IBM Plex Mono', Menlo, Consolas, monospace;")
+        self._track = _RailTrack(lo, hi)
+        row.addWidget(lo_lbl)
+        row.addWidget(self._track, 1)
+        row.addWidget(hi_lbl)
+        outer.addLayout(row)
+        if note:
+            note_lbl = QLabel(note)
+            note_lbl.setWordWrap(True)
+            note_lbl.setStyleSheet(f"font-size: 10px; color: {Palette.TEXT_FAINT};")
+            outer.addWidget(note_lbl)
+
+    def set_value(self, v) -> None:
+        self._track.set_value(v)
+
+
 # ── The form widget ───────────────────────────────────────────────────────────
 
 class ParamForm(QWidget):
@@ -489,6 +580,9 @@ class ParamForm(QWidget):
         self._amp_warn = None
         aidx = find_amplitude_index(self._base_specs)
         amp_dest = self._base_specs[aidx]["dest"] if aidx is not None else None
+        pidx = find_power_index(self._base_specs)
+        gidx = find_gain_index(self._base_specs)
+        pg_dests = {self._base_specs[i]["dest"] for i in (pidx, gidx) if i is not None}
         specs = self._effective_specs()
         if not specs:
             note = QLabel("This script declares no parameters.")
@@ -507,6 +601,7 @@ class ParamForm(QWidget):
                 cap = QLabel(spec["_hint"]); cap.setWordWrap(True)
                 cap.setStyleSheet(f"font-size: 10px; color: {Palette.TEXT_FAINT};")
                 self._form.addRow("", cap)
+            self._maybe_add_rail(spec, widget, pg_dests)
             # Live amplitude-mismatch caption, right under the amplitude field.
             if spec["dest"] == amp_dest and self._cal_amplitude is not None:
                 self._amp_warn = QLabel(""); self._amp_warn.setWordWrap(True)
@@ -516,6 +611,27 @@ class ParamForm(QWidget):
                 self._form.addRow("", self._amp_warn)
         self._wire_freq_refold()
         self.changed.emit()
+
+    def _maybe_add_rail(self, spec: dict, widget, pg_dests: set) -> None:
+        """Add the always-visible limit rail under a bounded numeric field: min/max at the
+        ends and a live thumb between them. For the power/gain field on a frequency-dependent
+        calibration it also notes the frequency the range was folded at (which re-renders,
+        and so re-folds, when the frequency changes)."""
+        lo, hi = spec.get("min"), spec.get("max")
+        if not (_use_spinbox(spec) and isinstance(lo, (int, float))
+                and isinstance(hi, (int, float)) and not isinstance(lo, bool)
+                and not isinstance(hi, bool) and hi > lo):
+            return
+        note = ""
+        if spec["dest"] in pg_dests and self._cal_bounds and self._is_freq_dependent():
+            f = self._render_freq
+            if isinstance(f, (int, float)):
+                note = f"Range at {f / 1e6:.2f} MHz · moves with frequency"
+        rail = RangeRail(lo, hi, note)
+        if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+            rail.set_value(widget.value())
+            widget.valueChanged.connect(rail.set_value)
+        self._form.addRow("", rail)
 
     def _is_freq_dependent(self) -> bool:
         """True when this signal's --power/gain range actually moves with frequency (a
