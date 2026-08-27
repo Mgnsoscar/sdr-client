@@ -41,6 +41,9 @@ Dropdown::down-arrow {{ image: none; width: 0; height: 0; }}
 QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{
     width: 0; height: 0; border: none; margin: 0;
 }}
+/* DurationSpinBox paints its own up/down chevron chip on the right (matching the
+   Dropdown widget), so reserve room for it and keep the value text clear of it. */
+DurationSpinBox {{ padding-right: 30px; }}
 QComboBox QAbstractItemView {{
     background: {Palette.SURFACE};
     border: 1px solid {Palette.BORDER_STRONG};
