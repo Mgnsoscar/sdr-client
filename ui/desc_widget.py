@@ -8,7 +8,7 @@ from typing import Optional
 
 from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtWidgets import (
-    QLabel, QPlainTextEdit, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
+    QLabel, QPlainTextEdit, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from .theme import Palette
@@ -26,8 +26,9 @@ def description_editor(placeholder: str = "optional — multiple lines allowed",
 
 
 class CollapsibleDescription(QWidget):
-    """Shows ``text``; when it spans multiple lines, collapses to the first line with a
-    'Show more / Show less' toggle. Empty text renders nothing."""
+    """Shows ``text``; when it spans multiple lines, it collapses to the first line and
+    clicking the text expands / collapses it (a pointing-hand cursor hints at this).
+    Empty text renders nothing."""
 
     def __init__(self, text: str, color: Optional[str] = None,
                  font_px: int = 11, parent=None):
@@ -53,15 +54,6 @@ class CollapsibleDescription(QWidget):
             self._label.setCursor(Qt.CursorShape.PointingHandCursor)
             self._label.installEventFilter(self)
 
-        self._toggle = QToolButton()
-        self._toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._toggle.setStyleSheet(
-            f"QToolButton {{ border: none; padding: 0; color: {Palette.ACCENT_INK}; "
-            f"font-size: {max(9, font_px - 1)}px; font-weight: 600; }}")
-        self._toggle.clicked.connect(self._flip)
-        self._toggle.setVisible(self._multi)
-        v.addWidget(self._toggle, alignment=Qt.AlignmentFlag.AlignLeft)
-
         self._render()
 
     def _collapsed_to_one_line(self) -> bool:
@@ -81,7 +73,6 @@ class CollapsibleDescription(QWidget):
             # normally instead of collapsing to a sliver and stacking every word.
             self._label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
             self._label.setText(self._full if self._expanded else self._first)
-        self._toggle.setText("Show less ▴" if self._expanded else "Show more ▾")
 
     def _elided(self, text: str) -> str:
         w = self._label.width()
