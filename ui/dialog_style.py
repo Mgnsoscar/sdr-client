@@ -92,7 +92,10 @@ QGroupBox::title {{
     color: {Palette.TEXT_MUTED};
 }}
 
+/* Both the scroll area AND its viewport child must be transparent, or the body shows
+   the grey default viewport instead of the dialog's white SURFACE. */
 QScrollArea {{ border: none; background: transparent; }}
+QScrollArea > QWidget > QWidget {{ background: transparent; }}
 {scrollbar_qss()}
 
 QDialogButtonBox QPushButton {{

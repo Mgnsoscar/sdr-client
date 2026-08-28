@@ -162,7 +162,9 @@ class RunTaskDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setWidget(self._form)
-        scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
+        scroll.setStyleSheet(
+            "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }"
+            + scrollbar_qss())
         scroll.setMinimumHeight(300)
         body = QWidget(); bodylay = QVBoxLayout(body)
         bodylay.setContentsMargins(18, 18, 18, 6)
@@ -250,14 +252,17 @@ class RunTaskDialog(QDialog):
         lay.setContentsMargins(15, 14, 15, 14)
         lay.setSpacing(10)
         self._extra_btn = QPushButton("Additional args…")
+        self._extra_btn.setAutoDefault(False)    # don't let Enter in a field open this
         self._extra_btn.clicked.connect(self._toggle_extra)
         lay.addWidget(self._extra_btn)
         lay.addStretch(1)
         cancel = QPushButton("Cancel")
+        cancel.setAutoDefault(False)
         cancel.clicked.connect(self.reject)
         lay.addWidget(cancel)
         self._run_btn = QPushButton("Start task")
         self._run_btn.setObjectName("startBtn")
+        self._run_btn.setAutoDefault(True)       # Enter in any field runs the task
         self._run_btn.setDefault(True)
         self._run_btn.clicked.connect(self._on_run)
         lay.addWidget(self._run_btn)

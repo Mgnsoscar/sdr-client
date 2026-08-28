@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QFrame, QLabel, QScrollArea, QVBoxLayout,
 )
 
+from .dialog_style import scrollbar_qss
 from .param_form import ParamForm, fmt_value, power_mode_of_args
 from .qt_adapter import DataHub
 from .theme import Palette
@@ -48,6 +49,7 @@ _TUNE_QSS = f"""
 #tuneCard QDialogButtonBox QPushButton:default:hover {{
     background: {Palette.ACCENT_INK}; border-color: {Palette.ACCENT_INK};
 }}
+{scrollbar_qss()}
 """
 
 
@@ -72,6 +74,7 @@ class LiveTuneDialog(QDialog):
         self.setWindowTitle(f"Tune '{task_name}' (live)")
         self.setMinimumWidth(520)
         self._build()
+        self.resize(560, 660)                    # open with generous vertical room
 
         self.hub.task_done.connect(self._on_task_done)
         self.finished.connect(lambda _=0: self._disconnect())
@@ -104,7 +107,7 @@ class LiveTuneDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setWidget(self._form)
-        scroll.setMinimumHeight(120)
+        scroll.setMinimumHeight(260)
         root.addWidget(scroll, stretch=1)
 
         # A warning (not a block) when the current frequency puts --power beyond what the
