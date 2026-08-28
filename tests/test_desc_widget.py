@@ -29,3 +29,20 @@ def test_multi_line_collapses_to_first_line_and_expands():
     assert "less" in d._toggle.text()
     d._flip()                                               # collapse again
     assert d._label.text() == "Summary line."
+
+
+def test_collapsed_first_line_stays_on_one_line():
+    # Collapsed, the first line must not wrap (it's elided to a single line); expanded,
+    # word-wrap is back on so the full text can flow. This is what stopped a long first
+    # line splitting into several stacked lines in a narrow unit-detail column.
+    d = CollapsibleDescription("A long summary line.\nDetail.")
+    assert d._label.wordWrap() is False                     # collapsed → one line
+    d._flip()
+    assert d._label.wordWrap() is True                      # expanded → wraps
+
+
+def test_single_line_keeps_word_wrap():
+    # A single-line description has no toggle, so it must stay wrapped (never elided) —
+    # otherwise long single-line text would be truncated with no way to reveal it.
+    d = CollapsibleDescription("One long line with no explicit breaks in it at all.")
+    assert d._label.wordWrap() is True

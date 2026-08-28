@@ -7,7 +7,9 @@ from __future__ import annotations
 from typing import Optional
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QLabel, QPlainTextEdit, QToolButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QLabel, QPlainTextEdit, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
+)
 
 from .theme import Palette
 
@@ -43,6 +45,9 @@ class CollapsibleDescription(QWidget):
         self._label.setWordWrap(True)
         self._label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._label.setStyleSheet(f"font-size: {font_px}px; color: {color or Palette.TEXT_FAINT};")
+        # Let the label shrink below its text width so a collapsed first line can be
+        # elided to fit a narrow column instead of wrapping onto several lines.
+        self._label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         v.addWidget(self._label)
 
         self._toggle = QToolButton()
@@ -56,9 +61,31 @@ class CollapsibleDescription(QWidget):
 
         self._render()
 
+    def _collapsed_to_one_line(self) -> bool:
+        """Collapsed multi-line descriptions show ONLY the first line — elided to one
+        line. (A single-line description has no toggle and always shows in full.)"""
+        return self._multi and not self._expanded
+
     def _render(self) -> None:
-        self._label.setText(self._full if self._expanded else self._first)
+        if self._collapsed_to_one_line():
+            self._label.setWordWrap(False)          # keep the first line on ONE line
+            self._label.setText(self._elided(self._first))
+        else:
+            self._label.setWordWrap(True)           # full text wraps as needed
+            self._label.setText(self._full if self._expanded else self._first)
         self._toggle.setText("Show less ▴" if self._expanded else "Show more ▾")
+
+    def _elided(self, text: str) -> str:
+        w = self._label.width()
+        if w <= 0:
+            return text                              # not laid out yet; resizeEvent re-elides
+        return self._label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, w)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # Re-elide the collapsed first line whenever the available width changes.
+        if self._collapsed_to_one_line():
+            self._label.setText(self._elided(self._first))
 
     def _flip(self) -> None:
         self._expanded = not self._expanded
