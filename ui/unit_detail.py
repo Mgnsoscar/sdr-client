@@ -65,8 +65,10 @@ class _TaskRow(QFrame):
         if task.description:
             from .desc_widget import CollapsibleDescription
             namebox.addWidget(CollapsibleDescription(task.description))
-        lay.addLayout(namebox)
-        lay.addStretch(1)
+        # Give the name/description column the free width (instead of a spacer), so a
+        # long description wraps at the card's real width like it does in the Library —
+        # rather than staying cramped in a narrow sliver with empty space beside it.
+        lay.addLayout(namebox, 1)
 
         # The right-side controls line up with the task name at the top, so an expanded
         # (multi-line) description grows the row downward without dragging them with it.
