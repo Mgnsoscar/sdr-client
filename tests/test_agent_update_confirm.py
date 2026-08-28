@@ -76,6 +76,41 @@ def test_confirm_detects_rollback():
     assert dlg._current == "1.1.0"
 
 
+def test_restart_phase_detects_rollback_fast():
+    # While still waiting for the new version to boot, an OTA-status poll showing the
+    # unit back on the version we came from (pending cleared) means the new release
+    # failed to start — report it now instead of hanging until the restart deadline.
+    dlg = _dialog(_Client())
+    dlg._phase = "restart"
+    dlg._busy = True
+    dlg._on_restart_status({"current_version": "1.1.0", "previous_version": "1.0.0",
+                            "pending_version": None, "pending_confirmed": False})
+    assert dlg._busy is False
+    assert dlg._current == "1.1.0"
+    assert "failed to start" in dlg._status.text()
+    assert "journalctl" in dlg._status.text()
+
+
+def test_restart_phase_status_keeps_waiting_before_flip():
+    # Right after activation the symlink is on the target with a pending marker — this
+    # is a normal mid-restart state, not a rollback, so keep waiting.
+    dlg = _dialog(_Client())
+    dlg._phase = "restart"
+    dlg._busy = True
+    dlg._on_restart_status({"current_version": "1.1.5", "previous_version": "1.1.0",
+                            "pending_version": "1.1.5", "pending_confirmed": False})
+    assert dlg._busy is True                 # still waiting
+    assert "failed to start" not in dlg._status.text()
+
+
+def test_restart_phase_ignores_unreachable_status():
+    dlg = _dialog(_Client())
+    dlg._phase = "restart"
+    dlg._busy = True
+    dlg._on_restart_status(ConnectionError("unit restarting"))
+    assert dlg._busy is True                 # transient error mid-restart → keep waiting
+
+
 def test_log_accumulates_phase_lines():
     dlg = _dialog(_Client())
     info = m.AgentInfo(hostname="u", unit_id="u", agent_version="1.1.5",

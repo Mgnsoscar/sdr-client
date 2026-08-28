@@ -219,6 +219,10 @@ class AgentUpdateDialog(QDialog):
         self._log_step(f"unit restarting (it briefly goes offline) — waiting for {target}…")
         self._poll.start(POLL_INTERVAL_MS)
 
+    def _supports_ota_status(self) -> bool:
+        return bool(getattr(self.hub.fleet.get(self.hostname), "supports",
+                            lambda _c: False)(CAP_OTA_STATUS))
+
     def _poll_info(self) -> None:
         # In the restart phase watch the version; in the confirm phase watch the OTA
         # status (did the new release confirm healthy, or did it get rolled back?).
@@ -228,6 +232,13 @@ class AgentUpdateDialog(QDialog):
         else:
             self.hub.run_async(f"agentupd_poll:{self.hostname}",
                                lambda: self.hub.fleet.get(self.hostname).info())
+            # A crashing new release never shows the target version, so watching /info
+            # alone means hanging until the restart deadline. Watch the OTA status too:
+            # if the unit auto-rolls back (pending cleared, symlink back on the version
+            # we came from) we can report the failure at once, with the cause.
+            if self._supports_ota_status():
+                self.hub.run_async(f"agentupd_rbcheck:{self.hostname}",
+                                   lambda: self.hub.fleet.get(self.hostname).update_status())
 
     # ── Results (marshalled from worker threads via task_done) ─────────────────
 
@@ -248,6 +259,8 @@ class AgentUpdateDialog(QDialog):
             self._on_apply(result, rolling_back=True)
         elif label == f"agentupd_poll:{host}":
             self._on_poll(result)
+        elif label == f"agentupd_rbcheck:{host}":
+            self._on_restart_status(result)
         elif label == f"agentupd_confirm:{host}":
             self._on_confirm(result)
 
@@ -296,6 +309,31 @@ class AgentUpdateDialog(QDialog):
                 "timed out waiting for the new version — the unit may have rolled "
                 "back to the previous release. Re-check its version.")
             self._refresh_info()
+            self._sync_buttons()
+
+    def _on_restart_status(self, result) -> None:
+        # Only meaningful while we're still waiting for the new version to come up.
+        if self._phase != "restart" or not self._busy:
+            return
+        if not isinstance(result, dict):
+            return                                    # unreachable mid-restart — keep waiting
+        cur = result.get("current_version")
+        pending = result.get("pending_version")
+        # Auto-rollback: the pending marker is gone and the unit is back on the version
+        # we updated FROM (not the target). The new release failed to boot healthy.
+        if pending is None and cur and cur == self._from_version and cur != self._target:
+            self._poll.stop()
+            self._busy = False
+            self._current = cur
+            self._cur_lbl.setText(f"current: {cur}"
+                                  + (f"  (rollback → {self._previous})" if self._previous else ""))
+            self._log_step(
+                f"the new release {self._target} failed to start — unit rolled back to "
+                f"{cur}. Check `journalctl -u sdr-agent` on the unit for why.", "error")
+            self._status.setText(
+                f"⚠ the new release {self._target} failed to start; the unit rolled back "
+                f"to {cur}. Check `journalctl -u sdr-agent` on the unit for why it "
+                f"failed to boot.")
             self._sync_buttons()
 
     def _begin_confirm(self) -> None:
