@@ -195,6 +195,42 @@ def preset_label_for_value(spec: dict, val: str):
     return None
 
 
+def choice_token(w) -> str:
+    """The CLI token for a fixed-choice combo's selection. Each item stores its token
+    as itemData (the value the script receives, as a string); a labelled choice shows
+    the label as text but sends the token. Falls back to the visible text for a plain
+    choice whose text *is* its token."""
+    data = w.currentData()
+    return str(data) if data is not None else w.currentText().strip()
+
+
+def choice_typed_value(spec: dict, token: str):
+    """The typed value a choice token maps to (float/int/str) for live-tune JSON.
+    For a labelled choice this is choice_values[token]; a plain choice sends the token
+    itself."""
+    values = spec.get("choice_values") or {}
+    return values.get(token, token)
+
+
+def choice_default_index(spec: dict, default) -> int:
+    """Index of the option matching `default` — accepting the typed value, its token,
+    or its display label — or -1 if none match (or there's no default)."""
+    if default is None:
+        return -1
+    choices = [str(c) for c in (spec.get("choices") or [])]
+    labels = spec.get("choice_labels") or {}
+    values = spec.get("choice_values") or {}
+    dstr = str(default).strip()
+    for i, tok in enumerate(choices):
+        if dstr == tok:
+            return i
+        if tok in values and (default == values[tok] or dstr == str(values[tok])):
+            return i
+        if tok in labels and dstr.lower() == str(labels[tok]).strip().lower():
+            return i
+    return -1
+
+
 def range_hint(spec: dict) -> str:
     lo, hi = spec.get("min"), spec.get("max")
     if lo is None and hi is None:
@@ -1018,12 +1054,16 @@ class ParamForm(QWidget):
                     if n is not None:
                         w.setValue(int(n) if isinstance(w, QSpinBox) else n)
                 elif isinstance(w, QComboBox):
-                    # Fixed-choice combo: setCurrentText is a no-op for a value not in
-                    # the list, which would silently snap to the first choice and send
-                    # THAT instead. Add the stored value so it's preserved and visible.
-                    if w.findText(val) < 0:
-                        w.addItem(val)
-                    w.setCurrentText(val)
+                    # Fixed-choice combo: the stored CLI value is the option token, but
+                    # the combo shows labels, so match on itemData first. Selecting a
+                    # value not in the list would silently snap to the first choice and
+                    # send THAT instead, so add the stored value to preserve it.
+                    idx = w.findData(val)
+                    if idx < 0:
+                        idx = w.findText(val)          # plain choice: text == token
+                    if idx < 0:
+                        w.addItem(val, val); idx = w.count() - 1
+                    w.setCurrentIndex(idx)
                 elif isinstance(w, QLineEdit):
                     w.setText(val)
                 i += 2
@@ -1052,7 +1092,7 @@ class ParamForm(QWidget):
                 elif isinstance(w, (QSpinBox, QDoubleSpinBox)):
                     val = fmt_value(w.value())
                 elif isinstance(w, QComboBox):
-                    val = w.currentText().strip()
+                    val = choice_token(w)         # the value the script receives
                 else:
                     val = w.text().strip()
                 if val == "":
@@ -1083,7 +1123,7 @@ class ParamForm(QWidget):
             elif isinstance(w, (QSpinBox, QDoubleSpinBox)):
                 out[dest] = w.value()
             elif isinstance(w, QComboBox):
-                out[dest] = w.currentText().strip()
+                out[dest] = choice_typed_value(spec, choice_token(w))
             else:
                 txt = w.text().strip()
                 if txt != "":
@@ -1186,9 +1226,13 @@ class ParamForm(QWidget):
         elif spec.get("choices"):
             w = Dropdown(editable=False)         # pick-only
             w.setFont(self._sans_input_font())
-            w.addItems([str(c) for c in spec["choices"]])
-            if default is not None and str(default) in [str(c) for c in spec["choices"]]:
-                w.setCurrentText(str(default))
+            labels = spec.get("choice_labels") or {}
+            for c in spec["choices"]:
+                tok = str(c)
+                w.addItem(labels.get(tok, tok), tok)   # show label, carry token as data
+            idx = choice_default_index(spec, default)
+            if idx >= 0:
+                w.setCurrentIndex(idx)
             w.currentTextChanged.connect(self.changed.emit)
             self._guard_scroll(w)
         else:
