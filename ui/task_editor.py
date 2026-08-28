@@ -84,8 +84,19 @@ class TaskEditorDialog(QDialog):
     def _build(self) -> None:
         from .dialog_style import editor_qss
         from .param_widgets import Dropdown
+        from PyQt6.QtWidgets import QScrollArea
         self.setStyleSheet(editor_qss())
-        outer = QVBoxLayout(self)
+        # One shared scroll for the WHOLE form: the body (including the embedded parameter
+        # form) lives in a single scroll area, so one wheel scrolls everything instead of
+        # the parameter part trapping its own scroll. The buttons stay pinned below it.
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        body = QScrollArea()
+        body.setWidgetResizable(True)
+        body.setFrameShape(QScrollArea.Shape.NoFrame)
+        content = QWidget()
+        outer = QVBoxLayout(content)
         outer.setContentsMargins(16, 16, 16, 12)
         outer.setSpacing(10)
 
@@ -119,19 +130,16 @@ class TaskEditorDialog(QDialog):
             form.addRow("Applies to", self._scope)
         outer.addLayout(form)
 
-        # Dynamic parameter form (from the script's argparse/paramkit spec)
+        # Dynamic parameter form (from the script's argparse/paramkit spec). It sits
+        # directly in the shared scroll — no inner scroll of its own — so the whole form
+        # scrolls as one.
         params_box = QGroupBox("Parameters")
         pb = QVBoxLayout(params_box)
         pb.setContentsMargins(8, 8, 8, 8)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setMinimumHeight(160)
         self._form = ParamForm()
         self._form.changed.connect(self._update_preview)
-        scroll.setWidget(self._form)
-        pb.addWidget(scroll)
-        outer.addWidget(params_box, stretch=1)
+        pb.addWidget(self._form)
+        outer.addWidget(params_box)
 
         # Calibration signal — shown only for calibration-capable scripts (those that
         # declare CAL_SIGNAL_ID). It's a friendlier front-end for the SDR_CAL_SIGNAL_ID
@@ -203,6 +211,11 @@ class TaskEditorDialog(QDialog):
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         outer.addWidget(self._status)
 
+        # The scrollable body is done; mount it, then pin the buttons below it so they
+        # stay visible while the form scrolls.
+        body.setWidget(content)
+        root.addWidget(body, 1)
+
         self._buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -211,7 +224,11 @@ class TaskEditorDialog(QDialog):
         save_btn = self._buttons.button(QDialogButtonBox.StandardButton.Save)
         if save_btn is not None:
             save_btn.setDefault(True)            # renders as the accent primary
-        outer.addWidget(self._buttons)
+        footer = QWidget()
+        foot = QVBoxLayout(footer)
+        foot.setContentsMargins(16, 8, 16, 12)
+        foot.addWidget(self._buttons)
+        root.addWidget(footer)
 
     @staticmethod
     def _wrap(layout) -> QWidget:

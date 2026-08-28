@@ -46,7 +46,7 @@ from typing import Dict, List, Optional, Tuple
 from PyQt6.QtCore import QEvent, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout,
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -947,6 +947,7 @@ class StepEditorDialog(QDialog):
         self.setWindowTitle("New step" if new else "Edit step")
         self.setMinimumWidth(440)
         self._build(item)
+        self.resize(540, 660)                    # open with room; the body scrolls if taller
         self._built = True
 
         if editor._hub is not None:
@@ -962,7 +963,16 @@ class StepEditorDialog(QDialog):
         from .dialog_style import editor_qss
         from .param_widgets import Dropdown
         self.setStyleSheet(editor_qss())
-        outer = QVBoxLayout(self)
+        # One shared scroll for the whole dialog: the body (with the embedded parameter
+        # form) scrolls as one, buttons pinned below. See TaskEditorDialog._build.
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        body = QScrollArea()
+        body.setWidgetResizable(True)
+        body.setFrameShape(QScrollArea.Shape.NoFrame)
+        content = QWidget()
+        outer = QVBoxLayout(content)
         outer.setContentsMargins(16, 16, 16, 12)
         outer.setSpacing(10)
 
@@ -1039,15 +1049,16 @@ class StepEditorDialog(QDialog):
         # frequency/power — refresh the clamp warning. (Wired here, after _clamp_warn exists.)
         self._anchor.currentIndexChanged.connect(lambda *_: self._update_clamp_warning())
         self._run_off.valueChanged.connect(lambda *_: self._update_clamp_warning())
-        pscroll = QScrollArea()
-        pscroll.setWidgetResizable(True)
-        pscroll.setWidget(self._form)
-        pscroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        pscroll.setMinimumHeight(150)
-        pscroll.setStyleSheet(
-            f"QScrollArea {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER}; "
-            f"border-radius: 8px; }}")
-        outer.addWidget(pscroll, stretch=1)
+        # The parameter form sits directly in the shared scroll (no inner scroll), so
+        # the whole dialog scrolls as one and the form reads white like the Run dialog.
+        pcard = QFrame()
+        pcard.setStyleSheet(
+            f"background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER}; "
+            f"border-radius: 8px;")
+        pcl = QVBoxLayout(pcard)
+        pcl.setContentsMargins(1, 1, 1, 1)
+        pcl.addWidget(self._form)
+        outer.addWidget(pcard)
 
         self._extra = QLineEdit()
         self._extra.setPlaceholderText("extra args not covered by the form (optional)")
@@ -1063,6 +1074,10 @@ class StepEditorDialog(QDialog):
         self._hint.setWordWrap(True)
         outer.addWidget(self._hint)
 
+        # Mount the scrollable body, then pin the buttons below it.
+        body.setWidget(content)
+        root.addWidget(body, 1)
+
         buttons = QDialogButtonBox()
         if not self._new:
             remove = QPushButton("Remove")
@@ -1074,7 +1089,11 @@ class StepEditorDialog(QDialog):
         ok_btn.setDefault(True)                  # accent primary
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
-        outer.addWidget(buttons)
+        footer = QWidget()
+        foot = QVBoxLayout(footer)
+        foot.setContentsMargins(16, 8, 16, 12)
+        foot.addWidget(buttons)
+        root.addWidget(footer)
 
         self._sync_type()
 

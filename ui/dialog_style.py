@@ -10,6 +10,30 @@ from __future__ import annotations
 from .theme import Palette
 
 
+def scrollbar_qss() -> str:
+    """A slim, subtle scrollbar held a few px off the right/bottom edge so it doesn't sit
+    flush against the form (a flush bar read as claustrophobic). Shared by the editor
+    dialogs and the Run dialog so every scrollable form matches."""
+    return f"""
+QScrollBar:vertical {{
+    background: transparent; width: 12px; margin: 2px 3px 2px 0;
+}}
+QScrollBar::handle:vertical {{
+    background: {Palette.BORDER_STRONG}; border-radius: 4px; min-height: 28px;
+}}
+QScrollBar::handle:vertical:hover {{ background: {Palette.TEXT_FAINT}; }}
+QScrollBar:horizontal {{
+    background: transparent; height: 12px; margin: 0 2px 3px 2px;
+}}
+QScrollBar::handle:horizontal {{
+    background: {Palette.BORDER_STRONG}; border-radius: 4px; min-width: 28px;
+}}
+QScrollBar::handle:horizontal:hover {{ background: {Palette.TEXT_FAINT}; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+"""
+
+
 def editor_qss() -> str:
     return f"""
 QDialog {{ background: {Palette.SURFACE}; }}
@@ -69,6 +93,7 @@ QGroupBox::title {{
 }}
 
 QScrollArea {{ border: none; background: transparent; }}
+{scrollbar_qss()}
 
 QDialogButtonBox QPushButton {{
     background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER_STRONG};

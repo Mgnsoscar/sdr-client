@@ -35,6 +35,7 @@ from .param_form import (
     ParamForm, power_mode_of_args, find_power_index, find_gain_index,
     _POWER_FLAGS, _GAIN_FLAGS,
 )
+from .dialog_style import scrollbar_qss
 from .qt_adapter import DataHub
 from .theme import Palette, mono_font
 
@@ -73,6 +74,7 @@ _DIALOG_QSS = f"""
 #cardFoot QPushButton#startBtn:hover {{
     background: {Palette.ACCENT_INK}; border-color: {Palette.ACCENT_INK};
 }}
+{scrollbar_qss()}
 """
 
 
@@ -132,6 +134,9 @@ class RunTaskDialog(QDialog):
         self.setWindowTitle(f"Run '{task_name}' with parameters")
         self.setMinimumWidth(560)
         self._build()
+        # Open with generous vertical room — the parameter list is usually several
+        # fields tall, and opening compact meant resizing it by hand every time.
+        self.resize(620, 760)
         self.hub.task_done.connect(self._on_task_done)
         self.finished.connect(lambda _=0: self._disconnect())
         self._load()
@@ -158,7 +163,7 @@ class RunTaskDialog(QDialog):
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setWidget(self._form)
         scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }")
-        scroll.setMinimumHeight(180)
+        scroll.setMinimumHeight(300)
         body = QWidget(); bodylay = QVBoxLayout(body)
         bodylay.setContentsMargins(18, 18, 18, 6)
         bodylay.addWidget(scroll, stretch=1)

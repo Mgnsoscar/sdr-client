@@ -28,8 +28,9 @@ from typing import Any, Dict, List, Optional
 
 from PyQt6.QtCore import QEvent, QLocale, QObject, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QAbstractSpinBox, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
+    QAbstractScrollArea, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
+    QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QSizePolicy, QSpinBox,
+    QVBoxLayout, QWidget,
 )
 
 from .theme import Palette, mono_font
@@ -44,6 +45,7 @@ from state.power_fold import refold_bounds
 # control (rounded inset, accent focus ring) without restyling QLineEdit/QComboBox
 # app-wide. Applied to the ParamForm (objectName paramForm); it cascades to children.
 _FORM_QSS = f"""
+#paramForm {{ background: {Palette.SURFACE}; }}
 #paramForm QLineEdit, #paramForm QComboBox, #paramForm QAbstractSpinBox {{
     background: {Palette.INSET};
     border: 1px solid {Palette.BORDER};
@@ -80,15 +82,30 @@ _FORM_QSS = f"""
 
 class _WheelGuard(QObject):
     """Stops the mouse wheel from changing (or focusing) a spinbox / dropdown the pointer
-    merely scrolls past: a wheel event is swallowed unless the field already has focus, so
-    scrolling the form never nudges a value or steals focus. One shared instance is installed
-    on each numeric/choice widget."""
+    merely scrolls past: a wheel event over an unfocused field is not applied to the field
+    but FORWARDED to the enclosing scroll area, so scrolling past a field scrolls the whole
+    form (rather than nudging a value, stealing focus, or dead-stopping the scroll). One
+    shared instance is installed on each numeric/choice widget."""
 
     def eventFilter(self, obj, event) -> bool:
         if event.type() == QEvent.Type.Wheel and not obj.hasFocus():
+            area = _enclosing_scroll_area(obj)
+            if area is not None:
+                # Hand the scroll to the surrounding view so the form still scrolls.
+                QApplication.sendEvent(area.viewport(), event)
             event.ignore()
             return True
         return super().eventFilter(obj, event)
+
+
+def _enclosing_scroll_area(w):
+    """The nearest QAbstractScrollArea ancestor of `w`, or None."""
+    p = w.parent()
+    while p is not None:
+        if isinstance(p, QAbstractScrollArea):
+            return p
+        p = p.parent()
+    return None
 
 
 # ── Schema helpers (paramkit superset over the classic argparse schema) ───────
@@ -512,6 +529,10 @@ class ParamForm(QWidget):
         self._power_mode = None
         self._wheel_guard = _WheelGuard(self)   # eats stray wheel events over unfocused fields
         self.setObjectName("paramForm")
+        # WA_StyledBackground lets the #paramForm { background } rule actually paint the
+        # form's own surface (a plain QWidget otherwise ignores a stylesheet background),
+        # so an embedded form reads white like the Run dialog instead of the grey viewport.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(_FORM_QSS)
         self._body = QVBoxLayout(self)
         self._body.setContentsMargins(0, 0, 0, 0)
