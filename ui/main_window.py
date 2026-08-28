@@ -218,6 +218,11 @@ class MainWindow(QMainWindow):
             self._report_state_sync(result)
             return
         if isinstance(result, Exception):
+            # The Update-agent dialog owns its whole flow (agentupd_*) and shows its own
+            # status/log. Its restart-phase polls are EXPECTED to time out while the unit
+            # reboots, so don't also raise a global "action failed" banner for them.
+            if label.startswith("agentupd_"):
+                return
             logger.error("Action '%s' failed: %s", label, result)
             self.statusBar().showMessage(self._format_action_error(label, result), 6000)
 
