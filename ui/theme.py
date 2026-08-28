@@ -72,9 +72,11 @@ class Fonts:
 
 
 def _load_fonts() -> None:
-    """Register the bundled IBM Plex woff2 faces with Qt so the app renders in the
-    same typography as the design mockups regardless of what's installed on the host.
-    Best-effort: a missing/failed file just leaves the fallback stack in Fonts."""
+    """Register the bundled IBM Plex faces with Qt so the app renders in the same
+    typography as the design mockups regardless of what's installed on the host. The
+    faces ship as TTF: Qt's font loader handles TTF/OTF but NOT woff2 (a web-only
+    format Qt rejects with 'Failed to create DirectWrite face'). Best-effort: a
+    missing/failed file just leaves the fallback stack in Fonts."""
     global _FONTS_LOADED
     if _FONTS_LOADED:
         return
@@ -83,7 +85,7 @@ def _load_fonts() -> None:
         logger.info("Bundled fonts not found at %s — using fallback families", _FONT_DIR)
         return
     loaded = 0
-    for path in sorted(_FONT_DIR.glob("*.woff2")):
+    for path in sorted(p for ext in ("*.ttf", "*.otf") for p in _FONT_DIR.glob(ext)):
         if QFontDatabase.addApplicationFont(str(path)) == -1:
             logger.warning("Could not load bundled font %s", path.name)
         else:
