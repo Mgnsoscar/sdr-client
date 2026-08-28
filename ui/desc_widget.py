@@ -45,9 +45,6 @@ class CollapsibleDescription(QWidget):
         self._label.setWordWrap(True)
         self._label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._label.setStyleSheet(f"font-size: {font_px}px; color: {color or Palette.TEXT_FAINT};")
-        # Let the label shrink below its text width so a collapsed first line can be
-        # elided to fit a narrow column instead of wrapping onto several lines.
-        self._label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         v.addWidget(self._label)
 
         self._toggle = QToolButton()
@@ -69,9 +66,14 @@ class CollapsibleDescription(QWidget):
     def _render(self) -> None:
         if self._collapsed_to_one_line():
             self._label.setWordWrap(False)          # keep the first line on ONE line
+            # Let the label shrink below its text width so the line can be elided to fit.
+            self._label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             self._label.setText(self._elided(self._first))
         else:
-            self._label.setWordWrap(True)           # full text wraps as needed
+            self._label.setWordWrap(True)           # full text wraps at the column width
+            # Preferred (not Ignored) so the label fills the available width and wraps
+            # normally instead of collapsing to a sliver and stacking every word.
+            self._label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
             self._label.setText(self._full if self._expanded else self._first)
         self._toggle.setText("Show less ▴" if self._expanded else "Show more ▾")
 

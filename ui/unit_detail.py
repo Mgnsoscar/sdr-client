@@ -68,14 +68,18 @@ class _TaskRow(QFrame):
         lay.addLayout(namebox)
         lay.addStretch(1)
 
+        # The right-side controls line up with the task name at the top, so an expanded
+        # (multi-line) description grows the row downward without dragging them with it.
+        top = Qt.AlignmentFlag.AlignTop
+
         # PID / exit info (small, muted)
         self._info = QLabel("")
         self._info.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-        lay.addWidget(self._info)
+        lay.addWidget(self._info, alignment=top)
 
         # State pill
         self._pill = StatusPill(task.state.value, task.state.value)
-        lay.addWidget(self._pill)
+        lay.addWidget(self._pill, alignment=top)
 
         # Buttons — run controls only. Task definitions are edited in the Library
         # and deployed; the unit card just runs what's deployed.
@@ -96,7 +100,7 @@ class _TaskRow(QFrame):
         self._start.clicked.connect(self._on_start)
         self._stop.clicked.connect(self._on_stop)
         for b in (self._tune, self._run, self._start, self._stop, self._logs):
-            lay.addWidget(b)
+            lay.addWidget(b, alignment=top)
 
         self.update_status(task)
 

@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QLabel
+from PyQt6.QtWidgets import QLabel, QSizePolicy
 
 from .theme import status_color
 
@@ -25,6 +25,10 @@ class StatusPill(QLabel):
     def __init__(self, text: str = "", status: str | None = None, parent=None):
         super().__init__(parent)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Keep the badge at its natural height — otherwise, in a row made tall by a
+        # neighbour (e.g. an expanded description), the label's coloured background
+        # stretches to the full row height and the pill balloons.
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self.set_status(text, status or text)
 
     def set_status(self, text: str, status: str | None = None) -> None:
