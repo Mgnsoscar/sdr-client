@@ -1029,10 +1029,12 @@ class StepEditorDialog(QDialog):
 
         outer.addLayout(form)
 
-        # The full parameter form for the task's script.
+        # The full parameter form for the task's script. (_params_status is created here
+        # but mounted in the pinned footer below, so a validation error stays visible even
+        # when the form is scrolled.)
         self._params_status = QLabel("")
+        self._params_status.setWordWrap(True)
         self._params_status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-        outer.addWidget(self._params_status)
 
         # A warning (not a block) when this step's effective frequency puts the running
         # --power beyond what the unit can deliver there — the runtime clamps it safely.
@@ -1052,9 +1054,12 @@ class StepEditorDialog(QDialog):
         # The parameter form sits directly in the shared scroll (no inner scroll), so
         # the whole dialog scrolls as one and the form reads white like the Run dialog.
         pcard = QFrame()
+        pcard.setObjectName("stepParamCard")
+        # Scope the border to the frame itself — a bare "border: …" stylesheet cascades
+        # onto every child widget (each label would get its own box), so use an id selector.
         pcard.setStyleSheet(
-            f"background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER}; "
-            f"border-radius: 8px;")
+            f"#stepParamCard {{ background: {Palette.SURFACE}; "
+            f"border: 1px solid {Palette.BORDER}; border-radius: 8px; }}")
         pcl = QVBoxLayout(pcard)
         pcl.setContentsMargins(1, 1, 1, 1)
         pcl.addWidget(self._form)
@@ -1092,6 +1097,8 @@ class StepEditorDialog(QDialog):
         footer = QWidget()
         foot = QVBoxLayout(footer)
         foot.setContentsMargins(16, 8, 16, 12)
+        foot.setSpacing(6)
+        foot.addWidget(self._params_status)      # pinned, so validation errors are always seen
         foot.addWidget(buttons)
         root.addWidget(footer)
 
@@ -1183,7 +1190,7 @@ class StepEditorDialog(QDialog):
         if not script:
             self._form.set_params([])
             self._apply_prefill()
-            self._params_status.setText(
+            self._set_status(
                 "this task has no script parameter schema — use extra args" if task else "")
             return
 
@@ -1191,7 +1198,7 @@ class StepEditorDialog(QDialog):
         if script in cache:
             self._build_form(script)
             return
-        self._params_status.setText(f"loading parameters for {script}…")
+        self._set_status(f"loading parameters for {script}…")
         self._form.set_params([])
         if self._editor._hub is None:
             return
@@ -1213,7 +1220,7 @@ class StepEditorDialog(QDialog):
         self._editor._params_inflight.discard(script)
         if isinstance(result, Exception):
             if script == self._current_script:
-                self._params_status.setText(f"could not load parameters: {result}")
+                self._set_status(f"could not load parameters: {result}", error=True)
             return
         self._editor.param_cache()[script] = (result or {}).get("params", [])
         self._editor._script_cal_signals[script] = (result or {}).get("calibration_signal")
@@ -1255,7 +1262,7 @@ class StepEditorDialog(QDialog):
                                   absolute_allowed=abs_allowed, default_power_mode=mode,
                                   hint_bounds=hint, caution=caution,
                                   cal_freq_param=freq_param, cal_freq_default=carried_freq)
-            self._params_status.setText(
+            self._set_status(
                 "tick the parameters to set at this offset" if specs
                 else "this task's script declares no live parameters")
             self._seed_from_params()
@@ -1264,12 +1271,12 @@ class StepEditorDialog(QDialog):
                                   absolute_allowed=abs_allowed, default_power_mode=mode,
                                   hint_bounds=hint, caution=caution,
                                   cal_freq_param=freq_param, cal_freq_default=carried_freq)
-            self._params_status.setText(
+            self._set_status(
                 "" if specs else "this script declares no parameters — use extra args")
             self._apply_prefill()
         self._update_clamp_warning()
         if bounds and self._editor.cal_is_stale():
-            self._params_status.setText("absolute power uses last-known calibration "
+            self._set_status("absolute power uses last-known calibration "
                                         "(unit offline) — refreshes when it reconnects")
 
     def _current_order_key(self):
@@ -1353,21 +1360,30 @@ class StepEditorDialog(QDialog):
                 args = args + raw.split()
         return args
 
+    def _set_status(self, msg: str, error: bool = False) -> None:
+        """Set the pinned status line. Errors show in the crash colour and bold so a
+        failed OK (invalid values) is obvious instead of the button seeming to do nothing."""
+        colour = Palette.CRASH if error else Palette.TEXT_FAINT
+        weight = "600" if error else "400"
+        self._params_status.setStyleSheet(
+            f"font-size: 11px; color: {colour}; font-weight: {weight};")
+        self._params_status.setText(msg)
+
     def _accept(self) -> None:
         task = self._task.currentText().strip()
         if not task:
-            self._params_status.setText("pick a task first")
+            self._set_status("pick a task first", error=True)
             return
         err = self._form.validate()
         if err:
-            self._params_status.setText(err)
+            self._set_status(err, error=True)
             return
         uid = self._src.uid
         mode = self._type.currentData()
         if mode == "tune":
             params = self._form.values()
             if not params:
-                self._params_status.setText("set at least one live parameter to tune")
+                self._set_status("set at least one live parameter to tune", error=True)
                 return
             anchor = self._anchor.currentData()
             offset = round(self._run_off.value(), 1)
@@ -1375,7 +1391,7 @@ class StepEditorDialog(QDialog):
             if spans_getter is not None:
                 err = tlm.step_within_task_error(spans_getter(task), anchor, offset, kind="tune")
                 if err:
-                    self._params_status.setText(err)
+                    self._set_status(err, error=True)
                     return
             self.result_item = tlm.RunItem(
                 task_name=task, action="tune", params=params,

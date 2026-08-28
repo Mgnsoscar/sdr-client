@@ -154,6 +154,27 @@ def test_invalid_stored_document():
     assert "INVALID" in p._status.text()
 
 
+def test_resolved_power_ranges_survive_navigation():
+    # The resolved --power column must not revert to "validate to resolve" on an unrelated
+    # interaction (navigation re-reads the form) — only after a value is actually edited.
+    cal = {"unit_type": "broadcaster", "valid": True, "document": _doc(),
+           "signals": {"mock": {"operating_plane": "sdr_output",
+                                 "quantity": "total in-band power",
+                                 "min_gain_db": 0.0, "max_gain_db": 74.0,
+                                 "min_power_dbm": -36.0, "max_power_dbm": -2.5}}}
+    p = CalibrationPanel("u", FakeHub(FakeClient(cal=cal)))
+    p.on_shown()
+    resolved = p._table.item(0, 2).text()
+    assert resolved not in ("validate to resolve", "", "—")
+
+    p._select_plane("sdr_output")                    # navigation: re-reads the form
+    assert p._table.item(0, 2).text() == resolved    # ranges preserved
+
+    p._f["max_gain"].setText("50")                   # an actual edit
+    p._select_plane("sdr_output")
+    assert p._table.item(0, 2).text() == "validate to resolve"
+
+
 # ── save paths ───────────────────────────────────────────────────────────────────
 
 def test_save_after_json_rejection_surfaces_reason(monkeypatch):

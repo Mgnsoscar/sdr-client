@@ -187,10 +187,18 @@ class RunTaskDialog(QDialog):
         root.addWidget(card)
 
         self._form.changed.connect(self._update_preview)
+        self._rest_status()
+
+    def _rest_status(self) -> None:
+        """The status line's resting state once the form is ready: a warning if the task
+        is already running, otherwise blank — so the transient 'loading parameters…'
+        message doesn't linger forever after the form loads."""
         if self._running:
             self._set_status(
                 "This task is already running — stop it first, or starting will "
                 "fail.", error=True)
+        else:
+            self._set_status("")
 
     def _build_header(self) -> QFrame:
         head = QFrame(); head.setObjectName("cardHead")
@@ -459,6 +467,7 @@ class RunTaskDialog(QDialog):
             if not self._quick:
                 self._reveal_extra()
         self._refresh_header()
+        self._rest_status()          # form is ready — drop the 'loading parameters…' message
         if self._quick:
             self._quick_dispatch()
 

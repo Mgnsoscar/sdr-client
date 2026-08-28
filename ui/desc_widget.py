@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtWidgets import (
     QLabel, QPlainTextEdit, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
@@ -46,6 +46,12 @@ class CollapsibleDescription(QWidget):
         self._label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._label.setStyleSheet(f"font-size: {font_px}px; color: {color or Palette.TEXT_FAINT};")
         v.addWidget(self._label)
+        # Clicking the text itself expands/collapses (a common, natural pattern) — while
+        # still allowing drag-to-select. Only meaningful when there's more to reveal.
+        self._press_pos = None
+        if self._multi:
+            self._label.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._label.installEventFilter(self)
 
         self._toggle = QToolButton()
         self._toggle.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -88,6 +94,23 @@ class CollapsibleDescription(QWidget):
         # Re-elide the collapsed first line whenever the available width changes.
         if self._collapsed_to_one_line():
             self._label.setText(self._elided(self._first))
+
+    def eventFilter(self, obj, event) -> bool:
+        # Toggle on a plain click of the text; a drag (which selects text) is left alone.
+        if obj is self._label and self._multi:
+            if (event.type() == QEvent.Type.MouseButtonPress
+                    and event.button() == Qt.MouseButton.LeftButton):
+                self._press_pos = event.position()
+            elif (event.type() == QEvent.Type.MouseButtonRelease
+                    and event.button() == Qt.MouseButton.LeftButton
+                    and self._press_pos is not None):
+                moved = (event.position().toPoint()
+                         - self._press_pos.toPoint()).manhattanLength()
+                self._press_pos = None
+                if moved < 4 and not self._label.hasSelectedText():
+                    self._flip()
+                    return True
+        return super().eventFilter(obj, event)
 
     def _flip(self) -> None:
         self._expanded = not self._expanded

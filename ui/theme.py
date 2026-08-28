@@ -260,10 +260,13 @@ QScrollBar::handle:vertical:hover {{ background: {Palette.TEXT_FAINT}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
 
 /* ── Tooltips ─────────────────────────────────────────────────────────────── */
+/* An explicit border is required: with `border: none` Qt on Windows falls back to
+   the native (white) tooltip background while still applying the white text, so the
+   tooltip renders as a blank white box. A real border forces the styled background. */
 QToolTip {{
-    background: {Palette.TEXT};
+    background-color: {Palette.TEXT};
     color: #FFFFFF;
-    border: none;
+    border: 1px solid {Palette.BORDER_STRONG};
     padding: 5px 8px;
     border-radius: 4px;
 }}

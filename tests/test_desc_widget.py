@@ -46,3 +46,30 @@ def test_single_line_keeps_word_wrap():
     # otherwise long single-line text would be truncated with no way to reveal it.
     d = CollapsibleDescription("One long line with no explicit breaks in it at all.")
     assert d._label.wordWrap() is True
+
+
+def test_clicking_the_text_toggles_expansion():
+    # Clicking the description text itself expands/collapses it (like the toggle link).
+    from PyQt6.QtCore import QEvent, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+
+    d = CollapsibleDescription("Summary line.\nDetail line.")
+    assert d._expanded is False
+
+    def click():
+        pos = QPointF(2, 2)
+        for etype in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+            ev = QMouseEvent(etype, pos, Qt.MouseButton.LeftButton,
+                             Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+            _app.sendEvent(d._label, ev)
+
+    click()
+    assert d._expanded is True                              # a plain click expands
+    click()
+    assert d._expanded is False                             # and collapses again
+
+
+def test_single_line_text_is_not_click_toggle():
+    # A single-line description has nothing to reveal, so its text isn't a toggle target.
+    d = CollapsibleDescription("Only one line.")
+    assert d._press_pos is None

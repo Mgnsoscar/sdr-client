@@ -1010,6 +1010,12 @@ class CalibrationPanel(QWidget):
         # (get/template/upload/save-refresh). has_unsaved_changes() compares the live form
         # against it, so the host can warn before the user leaves with unsaved edits.
         self._baseline: Optional[str] = None
+        # The resolved per-signal --power ranges from the last Validate/Get, and a snapshot
+        # of the document they were resolved from. While the document is unchanged, a form
+        # rebuild keeps showing these ranges instead of reverting the table to "validate to
+        # resolve" — that placeholder should appear only after a value is actually edited.
+        self._resolved_signals: dict = {}
+        self._resolved_key: Optional[str] = None
         # plane id → set of signal ids opened on a NON-source measured stage that don't
         # yet have data there (so the user can enter points). Reset on a fresh document.
         self._stage_extra: dict = {}
@@ -1326,6 +1332,13 @@ class CalibrationPanel(QWidget):
         except Exception:  # noqa: BLE001 — a mid-edit form that won't read is treated as dirty
             return None
 
+    def _remember_resolved(self, signals: dict) -> None:
+        """Cache the resolved --power ranges against a snapshot of the current form (the
+        same read_form basis as has_unsaved_changes), so a later rebuild that leaves the
+        form unchanged keeps showing them instead of reverting to 'validate to resolve'."""
+        self._resolved_signals = dict(signals or {})
+        self._resolved_key = self._canonical_form()
+
     def has_unsaved_changes(self) -> bool:
         """True when the editor holds edits not yet saved to the unit. Compares the live
         form to the baseline captured at the last load/save. Used by the host to warn
@@ -1400,14 +1413,22 @@ class CalibrationPanel(QWidget):
         if self._selected_plane not in names:
             self._selected_plane = op if op in names else (names[0] if names else None)
 
-        # Show the document's signals so they're always clickable (the resolved --power
-        # column fills in after a Validate/Save; until then it reads "validate to resolve").
-        self._populate_table({sid: {} for sid in ((doc or {}).get("signals") or {})},
-                             resolved=False)
-
         self._render_chain()
         self._render_detail()
         self._render_library()
+
+        # Show the document's signals so they're always clickable. Keep the resolved --power
+        # ranges from the last Validate/Get as long as the form is unchanged from when they
+        # were resolved (compared on the same read_form basis as has_unsaved_changes, so
+        # navigation that re-reads the form doesn't count) — only a real edit reverts the
+        # column to "validate to resolve". Populated last, once the whole form is built.
+        cur_sigs = (doc or {}).get("signals") or {}
+        key = self._canonical_form()
+        if (self._resolved_key is not None and key is not None and key == self._resolved_key
+                and set(self._resolved_signals) >= set(cur_sigs)):
+            self._populate_table(self._resolved_signals, resolved=True)
+        else:
+            self._populate_table({sid: {} for sid in cur_sigs}, resolved=False)
         self._update_issues()
         self._sync_validate_button()
 
@@ -3026,6 +3047,7 @@ class CalibrationPanel(QWidget):
             return
         if result.get("valid"):
             self._populate_table(result.get("signals") or {})
+            self._remember_resolved(result.get("signals") or {})
             n = len(result.get("signals") or {})
             self._set_status(
                 f"valid ✓ (dry run) · {n} signal(s) resolve — NOT saved yet", kind="ok")
@@ -3074,6 +3096,7 @@ class CalibrationPanel(QWidget):
             from state.calibration_cache import get_calibration_cache
             get_calibration_cache().put(self.hostname, result)   # remember for offline
             self._populate_table(result.get("signals") or {})
+            self._remember_resolved(result.get("signals") or {})
             n = len(result.get("signals") or {})
             self._set_status(f"calibrated ✓  ·  type {utype}  ·  {n} signal(s) resolve", kind="ok")
         else:
