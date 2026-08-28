@@ -166,6 +166,37 @@ def _curve_issues(sid: str, plane: str, pts) -> list:
     return out
 
 
+def _control_issues(name: str, control) -> list:
+    """Structural check of an active component's ``control`` block, mirroring the agent's
+    _parse_control (agent/calibration.py): task/param set, a positive step, a valid range,
+    a sense, and a 0..100 engage percentage."""
+    if not isinstance(control, dict):
+        return [f"active plane '{name}': control must be an object"]
+    out = []
+    if not str(control.get("task") or "").strip():
+        out.append(f"active plane '{name}': set the task that controls it")
+    if not str(control.get("param") or "").strip():
+        out.append(f"active plane '{name}': set the task parameter it drives")
+    if control.get("sense", "attenuation") not in ("attenuation", "gain"):
+        out.append(f"active plane '{name}': sense must be attenuation or gain")
+    try:
+        lo, hi, step = (float(control["min_db"]), float(control["max_db"]),
+                        float(control["step_db"]))
+        if not hi > lo:
+            out.append(f"active plane '{name}': max must exceed min")
+        if not step > 0:
+            out.append(f"active plane '{name}': step must be greater than 0")
+    except (KeyError, TypeError, ValueError):
+        out.append(f"active plane '{name}': needs numeric min, max and step")
+    try:
+        eng = float(control.get("engage_pct", 0.0))
+        if not 0.0 <= eng <= 100.0:
+            out.append(f"active plane '{name}': engage % must be between 0 and 100")
+    except (TypeError, ValueError):
+        out.append(f"active plane '{name}': engage % must be numeric")
+    return out
+
+
 def _upstream_plane_name(planes: dict, name: str):
     """The plane feeding INTO ``name``'s stage — one hop upstream in the cascade, mirroring
     the agent (agent/calibration.py:_upstream_plane): a derived plane's parent is its
@@ -212,6 +243,9 @@ def local_calibration_issues(doc) -> list:
             # when it has NEITHER.
             if p.get("delta_db") is None and not p.get("component"):
                 issues.append(f"derived plane '{name}' has no Δ dB or component")
+            # An ACTIVE component adds a `control` block on top of that baseline.
+            if p.get("control") is not None:
+                issues.extend(_control_issues(name, p.get("control")))
         elif t != "measured":
             issues.append(f"plane '{name}' has an unknown type")
 
@@ -2436,6 +2470,10 @@ class CalibrationPanel(QWidget):
                 for k in ("description", "quantity"):
                     if old.get(k):
                         p[k] = old[k]
+                # Preserve an active component's control block across form round-trips
+                # (the dedicated editor lands in a later phase; until then, don't drop it).
+                if p.get("type") == "derived" and old.get("control") is not None:
+                    p["control"] = old["control"]
             # A measured stage may be marked reported (report-only). `of` — the limiting
             # curve its limits gauge through — is derived automatically from chain position
             # (nearest limiting stage upstream), never picked by the user. If none is
