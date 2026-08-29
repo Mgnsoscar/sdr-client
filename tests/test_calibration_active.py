@@ -1,6 +1,6 @@
 """Active components (client side): local_calibration_issues validates a plane's
-``control`` block, and an active stage's control survives a form round-trip (before the
-dedicated editor lands)."""
+``control`` block, and the calibration panel's active-stage editor creates, edits, renders
+and round-trips it."""
 import os
 
 import pytest
@@ -9,7 +9,7 @@ pytest.importorskip("PyQt6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QObject, pyqtSignal
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QInputDialog
 
 from state import ComponentCatalog
 from ui.calibration_panel import CalibrationPanel, local_calibration_issues
@@ -77,11 +77,76 @@ def test_bad_active_control_is_flagged(bad, frag):
 
 
 def test_control_survives_form_round_trip():
-    # Loading an active-component doc and reading the form back must not drop `control`
-    # (the dedicated editor lands later; until then, don't lose the data).
+    # Loading an active-component doc and reading the form back must not drop `control`.
     p = CalibrationPanel("u", FakeHub())
     p._set_doc(_doc(_control(engage_pct=25.0)))
     back = p._read_form(strict=False)
     ctrl = back["chain"]["planes"]["atten_out"].get("control")
     assert ctrl is not None
     assert ctrl["task"] == "atten_set" and ctrl["engage_pct"] == 25.0
+
+
+# ── the dedicated active-stage editor ───────────────────────────────────────────────
+
+def _active_row(p):
+    return next(r for r in p._f["planes"] if r.get("role") == "active")
+
+
+def test_loaded_active_plane_has_active_role_and_control():
+    p = CalibrationPanel("u", FakeHub())
+    p._set_doc(_doc(_control(max_db=60.0)))
+    row = _active_row(p)
+    assert row["control"]["task"] == "atten_set"
+    assert row["control"]["max_db"] == 60.0
+
+
+def test_add_active_stage_seeds_a_control_block(monkeypatch):
+    p = CalibrationPanel("u", FakeHub())
+    p._set_doc(_doc(_control()))                      # start from a valid chain
+    monkeypatch.setattr(QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: ("pad_out", True)))
+    p._add_active_stage()
+    doc = p._read_form(strict=False)
+    plane = doc["chain"]["planes"]["pad_out"]
+    assert plane["type"] == "derived" and plane.get("control") is not None
+    assert plane["control"]["sense"] == "attenuation"
+
+
+def test_editing_the_control_reads_back():
+    p = CalibrationPanel("u", FakeHub())
+    p._set_doc(_doc(_control()))
+    row = _active_row(p)
+    row["control"]["max_db"] = 50.0                   # as the editor's spinbox would
+    row["control"]["param"] = "att"
+    back = p._read_form(strict=False)
+    ctrl = back["chain"]["planes"]["atten_out"]["control"]
+    assert ctrl["max_db"] == 50.0 and ctrl["param"] == "att"
+
+
+def test_active_detail_renders_without_error():
+    p = CalibrationPanel("u", FakeHub())
+    p._set_doc(_doc(_control()))
+    p._select_plane("atten_out")                      # renders _detail_active
+    assert p._selected_plane == "atten_out"
+
+
+def test_doc_uses_active_components_detects_control():
+    assert CalibrationPanel._doc_uses_active_components(_doc(_control())) is True
+    passive = _doc(_control()); del passive["chain"]["planes"]["atten_out"]["control"]
+    assert CalibrationPanel._doc_uses_active_components(passive) is False
+
+
+def test_task_and_param_pickers_read_from_fetched_data():
+    p = CalibrationPanel("u", FakeHub())
+    p._tasks_yaml = (
+        "tasks:\n"
+        "  - name: atten_set\n"
+        "    command: [python3, atten.py, --attenuation, \"0\"]\n"
+        "  - name: chirp\n"
+        "    command: [python3, chirp.py]\n")
+    assert p._all_task_names() == ["atten_set", "chirp"]
+    assert p._task_script("atten_set") == "atten.py"
+    p._task_params["atten.py"] = [
+        {"dest": "attenuation", "type": "float", "flags": ["--attenuation"]},
+        {"dest": "label", "type": "str", "flags": ["--label"]}]
+    assert p._numeric_params_for("atten_set") == ["attenuation"]   # numeric only

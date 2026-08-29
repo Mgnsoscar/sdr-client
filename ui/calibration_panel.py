@@ -37,8 +37,8 @@ from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QRect, Qt
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractItemDelegate, QAbstractItemView, QAbstractScrollArea, QApplication,
-    QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
-    QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
+    QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
+    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
     QPushButton, QScrollArea, QSizePolicy, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
@@ -82,6 +82,11 @@ _FREQ_OPTIONAL_CENTER_NEEDS_NEWER = (
     "this unit's agent is too old to leave the centre frequency blank on a frequency-dependent "
     "chain (needs 1.7.1+). It requires a centre frequency to fold the operating point. Update "
     "the agent, or fill in each signal's centre frequency.")
+
+CAL_ACTIVE_COMPONENTS_CAPABILITY = "calibration-active-components"  # agent >= 1.8.0
+_ACTIVE_COMPONENTS_NEEDS_NEWER = (
+    "this unit's agent is too old for active components (a task-controlled attenuator/gain "
+    "stage — needs 1.8.0+). Update the agent, or remove the active stage before saving.")
 
 # The baseband amplitude every broadcaster script transmits at is a FIXED constant (the
 # scripts' baked AMPLITUDE), not an operator control — so calibration is always measured at
@@ -144,6 +149,14 @@ def _to_float(s: str, field: str) -> float:
         return float(s)
     except ValueError:
         raise ValueError(f"{field}: '{s}' is not a number")
+
+
+def _numeric(v, default: float) -> float:
+    """A JSON value coerced to float, falling back to ``default`` for None/bad values."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
 
 
 def _curve_issues(sid: str, plane: str, pts) -> list:
@@ -425,6 +438,7 @@ _KIND_COLORS = {
     "source":   (Palette.TEXT_MUTED, Palette.IDLE_SOFT),
     "measured": (Palette.ACCENT, Palette.ACCENT_SOFT),
     "passive":  (Palette.ARMED, Palette.ARMED_SOFT),
+    "active":   (Palette.ONLINE, Palette.ONLINE_SOFT),
     "cable":    (Palette.ACCENT, Palette.ACCENT_SOFT),
     "antenna":  (Palette.ONLINE, Palette.ONLINE_SOFT),
     "pad":      (Palette.TEXT_MUTED, Palette.IDLE_SOFT),
@@ -1039,6 +1053,10 @@ class CalibrationPanel(QWidget):
         self._task_signal_ids: list = []       # signal ids this unit's tasks reference (hints)
         self._task_signals: dict = {}          # task name → SDR_CAL_SIGNAL_ID it references
         self._tasks_yaml: str = ""             # last-fetched tasks.yaml (for task renames)
+        # Active-component editor: a script's numeric params, fetched per task on demand so the
+        # control's "set param" picker can offer the linked task's parameters.
+        self._task_params: dict = {}           # script basename → list[param spec]
+        self._task_params_inflight: set = set()
         self._saved_doc: Optional[dict] = None  # the unit's last-persisted calibration doc
         # Canonical form snapshot taken whenever a whole document is loaded into the editor
         # (get/template/upload/save-refresh). has_unsaved_changes() compares the live form
@@ -1588,7 +1606,12 @@ class CalibrationPanel(QWidget):
         stage and remove the old one, then drag/move it into place."""
         spec = spec or {}
         if spec.get("type") == "derived":
-            role = "component" if spec.get("component") else "constant"
+            if spec.get("control") is not None:
+                role = "active"
+            elif spec.get("component"):
+                role = "component"
+            else:
+                role = "constant"
         else:
             role = "measured"
         name_e = QLineEdit(name); name_e.setPlaceholderText("plane id (e.g. antenna_eirp)")
@@ -1607,6 +1630,14 @@ class CalibrationPanel(QWidget):
         row = {"name": name_e, "role": role, "comp_id": spec.get("component") or "",
                "delta": delta_e, "orig": name,
                "cal_role": cal_role if cal_role == "reported" else "limiting"}
+        if role == "active":
+            c = spec.get("control") or {}
+            row["control"] = {
+                "task": str(c.get("task", "")), "param": str(c.get("param", "")),
+                "sense": c.get("sense", "attenuation"),
+                "min_db": _numeric(c.get("min_db"), 0.0), "max_db": _numeric(c.get("max_db"), 0.0),
+                "step_db": _numeric(c.get("step_db"), 0.0),
+                "engage_pct": _numeric(c.get("engage_pct"), 0.0)}
         name_e.editingFinished.connect(lambda r=row: self._on_plane_name_changed(r))
         return row
 
@@ -1677,7 +1708,8 @@ class CalibrationPanel(QWidget):
     def _stage_card(self, row, index: int, total: int, rep_freq: float) -> QWidget:
         name = row["name"].text().strip()
         role = row.get("role", "measured")
-        kind = "source" if index == 0 else ("passive" if role != "measured" else "measured")
+        kind = ("source" if index == 0 else "active" if role == "active"
+                else "passive" if role != "measured" else "measured")
         selected = (name == self._selected_plane)
         # The operating plane (always the last stage) is marked by a callout to the RIGHT
         # of the chain, not by styling this card — so a card doesn't flash "operating"
@@ -1709,7 +1741,7 @@ class CalibrationPanel(QWidget):
 
         fg, kbg = _KIND_COLORS[kind]
         badge_text = {"source": "SOURCE", "measured": "MEASURED",
-                      "passive": "Passive · from library"}[kind]
+                      "passive": "Passive · from library", "active": "ACTIVE"}[kind]
         if kind == "measured" and row.get("cal_role") == "reported":
             badge_text = "REPORTED"           # report-only: invisible to safety limits
         v.addWidget(_badge(badge_text, fg, kbg), alignment=Qt.AlignmentFlag.AlignLeft)
@@ -1733,6 +1765,18 @@ class CalibrationPanel(QWidget):
             val = QLabel(f"{d or '0'} dB · constant")
             val.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
             v.addWidget(val)
+        elif role == "active":
+            c = row.get("control") or {}
+            task, param = c.get("task", ""), c.get("param", "")
+            cn = QLabel(f"{task}·{param}" if task or param else "(set task · param)")
+            cn.setStyleSheet(f"font-size:12px;font-weight:500;color:{Palette.TEXT};")
+            cn.setWordWrap(True)
+            v.addWidget(cn)
+            lo, hi, st = (_numeric(c.get("min_db"), 0.0), _numeric(c.get("max_db"), 0.0),
+                          _numeric(c.get("step_db"), 0.0))
+            val = QLabel(f"{lo:g}…{hi:g} dB · {st:g} step")
+            val.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+            v.addWidget(val)
         else:
             spark = _Sparkline(); spark.setFixedHeight(30)
             spark.set_points(self._first_curve_points(name))
@@ -1752,6 +1796,7 @@ class CalibrationPanel(QWidget):
         menu.addAction("Component from library…", lambda: self._add_component_stage())
         menu.addAction("Measured plane…", lambda: self._add_measured_stage())
         menu.addAction("Constant Δ dB…", lambda: self._add_constant_stage())
+        menu.addAction("Active component (attenuator…)…", lambda: self._add_active_stage())
         menu.exec(self.cursor().pos())
 
     def _prepare_add(self):
@@ -1811,6 +1856,24 @@ class CalibrationPanel(QWidget):
         planes = self._prepare_add()
         name = self._unique_plane_id(name, planes)
         planes[name] = {"type": "derived", "from": "", "delta_db": 0.0}
+        self._selected_plane = name
+        self._doc_to_form()
+
+    def _add_active_stage(self) -> None:
+        """Add an ACTIVE component — a derived stage whose baseline Δ dB is dynamically
+        adjusted by a controllable parameter of a task (e.g. a step attenuator). It extends
+        the achievable power range and participates automatically in power calculations."""
+        name, ok = QInputDialog.getText(self, "Add active component",
+                                        "Plane id (e.g. attenuator_out):")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        planes = self._prepare_add()
+        name = self._unique_plane_id(name, planes)
+        planes[name] = {"type": "derived", "from": "", "delta_db": 0.0,
+                        "control": {"task": "", "param": "", "sense": "attenuation",
+                                    "min_db": 0.0, "max_db": 0.0, "step_db": 0.0,
+                                    "engage_pct": 0.0}}
         self._selected_plane = name
         self._doc_to_form()
 
@@ -2057,10 +2120,13 @@ class CalibrationPanel(QWidget):
             else:
                 idx = rows.index(row)
                 role = row.get("role", "measured")
-                knd = ("Source" if idx == 0 else
-                       "Measured" if role == "measured" else "Passive")
-                desc = ("measured gain→power on this box" if role == "measured"
-                        else "loss evaluated at each signal's frequency")
+                if idx == 0 or role == "measured":
+                    knd = "Source" if idx == 0 else "Measured"
+                    desc = "measured gain→power on this box"
+                elif role == "active":
+                    knd, desc = "Active", "a task-controlled gain/attenuation stage"
+                else:
+                    knd, desc = "Passive", "loss evaluated at each signal's frequency"
                 self._detail_hdr.setText(
                     f"<span style='color:{Palette.TEXT};font-weight:600;'>{knd} · {name}</span>"
                     f" <span style='color:{Palette.TEXT_FAINT};'>— {desc}</span>")
@@ -2069,8 +2135,11 @@ class CalibrationPanel(QWidget):
             ph.setStyleSheet(f"color:{Palette.TEXT_FAINT};font-size:12px;padding:16px 0;")
             self._detail_body.addWidget(ph)
             return
-        if row.get("role", "measured") == "measured":
+        role = row.get("role", "measured")
+        if role == "measured":
             self._detail_measured(row)
+        elif role == "active":
+            self._detail_active(row)
         else:
             self._detail_passive(row)
         self._detail_body.addWidget(self._stage_advanced(row))
@@ -2124,6 +2193,168 @@ class CalibrationPanel(QWidget):
         note.setWordWrap(True)
         note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
         self._detail_body.addWidget(note)
+
+    # ── active component (task-controlled gain/attenuation) ──────────────────────
+    def _all_task_names(self) -> list:
+        """Every task deployed on this unit (from the last-fetched tasks.yaml), so the
+        control's set-task picker can offer them. Empty until the tasks are fetched."""
+        import yaml
+        try:
+            doc = yaml.safe_load(self._tasks_yaml) or {}
+        except yaml.YAMLError:
+            return []
+        return [t["name"] for t in doc.get("tasks", [])
+                if isinstance(t, dict) and t.get("name")]
+
+    def _task_script(self, task_name: str) -> str:
+        """The script basename a task runs (for fetching its params), or ''."""
+        import yaml
+        try:
+            doc = yaml.safe_load(self._tasks_yaml) or {}
+        except yaml.YAMLError:
+            return ""
+        entry = next((t for t in doc.get("tasks", [])
+                      if isinstance(t, dict) and t.get("name") == task_name), None)
+        if not entry:
+            return ""
+        for a in entry.get("command", []):
+            if isinstance(a, str) and a.endswith(".py"):
+                return a.rsplit("/", 1)[-1]
+        return ""
+
+    def _fetch_task_params(self, task_name: str) -> None:
+        """Fetch a task's script params (numeric ones feed the set-param picker), once per
+        script. Best-effort — the param field stays free-text until they arrive."""
+        script = self._task_script(task_name)
+        if not script or script in self._task_params or script in self._task_params_inflight:
+            return
+        self._task_params_inflight.add(script)
+        self.hub.run_async(
+            f"cal_taskparams:{self.hostname}:{script}",
+            lambda: self.hub.fleet.get(self.hostname).get_script_params(script))
+
+    def _numeric_params_for(self, task_name: str) -> list:
+        """The numeric parameter names of a task's script (once fetched) — the candidates
+        for a gain/attenuation control param."""
+        script = self._task_script(task_name)
+        out = []
+        for s in self._task_params.get(script, []):
+            if s.get("type") in ("int", "float"):
+                out.append(s.get("dest") or (s.get("flags") or [""])[0].lstrip("-"))
+        return [p for p in out if p]
+
+    def _handle_taskparams(self, script: str, result) -> None:
+        """Cache a script's params and, if the active stage that asked is on screen, re-render
+        so its set-param picker populates."""
+        self._task_params_inflight.discard(script)
+        if isinstance(result, dict):
+            self._task_params[script] = result.get("params", []) or []
+            self._render_detail()
+
+    def _control_from_row(self, row) -> dict:
+        """The control block for an active stage, read from its live editor state."""
+        c = row.get("control") or {}
+        sense = c.get("sense", "attenuation")
+        return {"task": str(c.get("task", "")).strip(),
+                "param": str(c.get("param", "")).strip(),
+                "sense": sense if sense in ("attenuation", "gain") else "attenuation",
+                "min_db": _numeric(c.get("min_db"), 0.0),
+                "max_db": _numeric(c.get("max_db"), 0.0),
+                "step_db": _numeric(c.get("step_db"), 0.0),
+                "engage_pct": _numeric(c.get("engage_pct"), 0.0)}
+
+    def _detail_active(self, row) -> None:
+        """Detail editor for an ACTIVE component: a passive baseline Δ dB plus a control block
+        that links a task's parameter (e.g. a step attenuator's ``attenuation``) so the engine
+        can dynamically apply gain/attenuation — extending the achievable power range and
+        participating automatically in every power calculation."""
+        c = row.setdefault("control", {})
+
+        def _commit():
+            self._sync_from(strict=False)
+
+        # Baseline Δ dB — the stage's behaviour at 0 dB applied (usually 0 for an attenuator).
+        dr = QHBoxLayout()
+        dl = QLabel("Baseline Δ dB (at 0 applied)")
+        dl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+        dr.addWidget(dl); row["delta"].setFixedWidth(90); dr.addWidget(row["delta"]); dr.addStretch(1)
+        self._detail_body.addLayout(dr)
+
+        box = QFrame(); box.setObjectName("ctrlbox")
+        box.setStyleSheet(f"#ctrlbox {{ border:1px solid {Palette.BORDER}; border-radius:8px; }}")
+        v = QVBoxLayout(box); v.setContentsMargins(10, 8, 10, 8); v.setSpacing(8)
+
+        # Set task + set param.
+        self._fetch_task_params(c.get("task", ""))
+        trow = QHBoxLayout()
+        tl = QLabel("Set task"); tl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+        task_combo = QComboBox(); task_combo.setEditable(True)
+        for t in self._all_task_names():
+            task_combo.addItem(t)
+        task_combo.setCurrentText(c.get("task", ""))
+        pl = QLabel("param"); pl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+        param_combo = QComboBox(); param_combo.setEditable(True)
+        for pn in self._numeric_params_for(c.get("task", "")):
+            param_combo.addItem(pn)
+        param_combo.setCurrentText(c.get("param", ""))
+        trow.addWidget(tl); trow.addWidget(task_combo, 2)
+        trow.addWidget(pl); trow.addWidget(param_combo, 1)
+        v.addLayout(trow)
+
+        def _task_changed(_=0):
+            c["task"] = task_combo.currentText().strip()
+            self._fetch_task_params(c["task"])
+            _commit()
+        task_combo.currentTextChanged.connect(_task_changed)
+        param_combo.currentTextChanged.connect(
+            lambda _=0: (c.__setitem__("param", param_combo.currentText().strip()), _commit()))
+
+        # Sense.
+        srow = QHBoxLayout()
+        sl = QLabel("Sense"); sl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+        sense = QComboBox()
+        sense.addItem("Attenuation — the param subtracts (0 = full power)", "attenuation")
+        sense.addItem("Gain — the param adds", "gain")
+        sense.setCurrentIndex(1 if c.get("sense") == "gain" else 0)
+        sense.currentIndexChanged.connect(
+            lambda _=0: (c.__setitem__("sense", sense.currentData()), _commit()))
+        srow.addWidget(sl); srow.addWidget(sense, 1)
+        v.addLayout(srow)
+
+        # min / max / step / engage.
+        def _spin(key, lo, hi, step, decimals, default):
+            sp = QDoubleSpinBox(); sp.setRange(lo, hi); sp.setSingleStep(step)
+            sp.setDecimals(decimals); sp.setValue(_numeric(c.get(key), default))
+            sp.valueChanged.connect(lambda val, k=key: (c.__setitem__(k, float(val)), _commit()))
+            return sp
+
+        grid = QHBoxLayout()
+        for label, key, lo, hi, step, dec, dflt in [
+                ("min dB", "min_db", -200.0, 200.0, 0.25, 3, 0.0),
+                ("max dB", "max_db", -200.0, 200.0, 0.25, 3, 0.0),
+                ("step dB", "step_db", 0.0, 200.0, 0.05, 3, 0.0),
+                ("engage %", "engage_pct", 0.0, 100.0, 1.0, 1, 0.0)]:
+            lab = QLabel(label); lab.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_MUTED};")
+            cell = QVBoxLayout(); cell.setSpacing(2); cell.addWidget(lab); cell.addWidget(_spin(
+                key, lo, hi, step, dec, dflt))
+            grid.addLayout(cell)
+        v.addLayout(grid)
+        self._detail_body.addWidget(box)
+
+        note = QLabel(
+            "The task's parameter dynamically applies gain/attenuation on top of this stage's "
+            "baseline — so requesting a calibrated power drives both the SDR and this "
+            "component. min/max/step are the parameter's own range and resolution; engage % "
+            "is where, as a fraction of the SDR's dynamic range, it starts contributing "
+            "(0 = only below the SDR's own floor).")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+        self._detail_body.addWidget(note)
+        for msg in _control_issues(row["name"].text().strip() or "stage", self._control_from_row(row)):
+            warn = QLabel("⚠ " + msg.split(": ", 1)[-1])
+            warn.setWordWrap(True)
+            warn.setStyleSheet(f"font-size:11px;color:{Palette.ARMED};")
+            self._detail_body.addWidget(warn)
 
     def _auto_of(self, plane: str) -> Optional[str]:
         """The limiting curve a reported stage at ``plane`` gauges its limits through,
@@ -2456,6 +2687,11 @@ class CalibrationPanel(QWidget):
                 p = {"type": "measured"}
             elif role == "component":
                 p = {"type": "derived", "from": prev_name or "", "component": row.get("comp_id", "")}
+            elif role == "active":                    # baseline Δ dB + a dynamic control block
+                p = {"type": "derived", "from": prev_name or ""}
+                d = row["delta"].text().strip()
+                p["delta_db"] = _to_float(d, f"stage '{name}' Δ dB") if d else 0.0
+                p["control"] = self._control_from_row(row)
             else:                                     # constant Δ dB
                 p = {"type": "derived", "from": prev_name or ""}
                 d = row["delta"].text().strip()
@@ -2470,10 +2706,6 @@ class CalibrationPanel(QWidget):
                 for k in ("description", "quantity"):
                     if old.get(k):
                         p[k] = old[k]
-                # Preserve an active component's control block across form round-trips
-                # (the dedicated editor lands in a later phase; until then, don't drop it).
-                if p.get("type") == "derived" and old.get("control") is not None:
-                    p["control"] = old["control"]
             # A measured stage may be marked reported (report-only). `of` — the limiting
             # curve its limits gauge through — is derived automatically from chain position
             # (nearest limiting stage upstream), never picked by the user. If none is
@@ -2789,7 +3021,7 @@ class CalibrationPanel(QWidget):
         if (self._blocks_on_components() or self._blocks_on_partial_stages()
                 or self._blocks_on_no_signals() or self._blocks_on_limit_side()
                 or self._blocks_on_plane_roles() or self._blocks_on_gain_step()
-                or self._blocks_on_freq_optional_center()):
+                or self._blocks_on_freq_optional_center() or self._blocks_on_active_components()):
             return False
         self._send(json.dumps(self._doc).encode("utf-8"))
         return True
@@ -2803,6 +3035,20 @@ class CalibrationPanel(QWidget):
     def _doc_uses_components(doc) -> bool:
         return any(isinstance(p, dict) and p.get("component")
                    for p in (((doc or {}).get("chain") or {}).get("planes") or {}).values())
+
+    @staticmethod
+    def _doc_uses_active_components(doc) -> bool:
+        return any(isinstance(p, dict) and p.get("control") is not None
+                   for p in (((doc or {}).get("chain") or {}).get("planes") or {}).values())
+
+    def _blocks_on_active_components(self) -> bool:
+        """Guard: don't push an active-component document to an agent that predates the
+        feature (it would reject the control block). Returns True (and says why) when blocked."""
+        if (self._doc_uses_active_components(self._doc)
+                and not self._supports(CAL_ACTIVE_COMPONENTS_CAPABILITY)):
+            self._set_status(_ACTIVE_COMPONENTS_NEEDS_NEWER, kind="error")
+            return True
+        return False
 
     def _blocks_on_components(self) -> bool:
         """Guard: don't push a component-referencing document to an agent that can't
@@ -3042,6 +3288,8 @@ class CalibrationPanel(QWidget):
             self._handle_components(result)
         elif parts[0] == "cal_tasks":
             self._handle_tasks(result)
+        elif parts[0] == "cal_taskparams":
+            self._handle_taskparams(parts[2] if len(parts) > 2 else "", result)
         elif parts[0] == "cal_taskrename":
             self._handle_task_rename(parts[2] if len(parts) > 2 else "", result)
         elif parts[0] == "cal_rename_save":
