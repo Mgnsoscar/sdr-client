@@ -161,6 +161,15 @@ class LiveTuneDialog(QDialog):
             self._show_set_result(result)
             return
 
+        if op == "livetune_active":
+            # A linked active-component retune (e.g. the attenuator). Non-fatal — the running
+            # transmit task maps its own SDR gain; only note a failure.
+            if isinstance(result, Exception):
+                self._set_result(
+                    f"note: couldn't set the linked component task ({result}) — check it "
+                    f"is running.", error=True)
+            return
+
         if op == "livetune_cal":
             # 404 (uncalibrated) → schema range; offline → last-known cached bounds.
             from api.client import AgentConnectionError
@@ -306,11 +315,31 @@ class LiveTuneDialog(QDialog):
         self._applying = True
         self._dirty = False
         self._set_result("applying…")
+        self._command_active(values)                     # retune the attenuator first
         self.hub.run_async(
             f"livetune_set:{self.hostname}",
             lambda: self.hub.fleet.get(self.hostname).set_task_params(
                 self.task_name, values, 1.0),
         )
+
+    def _command_active(self, values: Dict[str, Any]) -> None:
+        """Retune each linked active-component task (e.g. the step attenuator) for the
+        --power in ``values``, so tuning a calibrated power live drives BOTH the SDR (the
+        running transmit task) and the component. Best-effort; a failure is only noted."""
+        from state.power_fold import active_settings
+        from .param_form import find_power_index
+        if self._cal_bounds is None:
+            return
+        pidx = find_power_index(self._live_specs)
+        power_dest = self._live_specs[pidx]["dest"] if pidx is not None else None
+        power = values.get(power_dest) if power_dest else None
+        freq = values.get(self._script_cal_freq_param) if self._script_cal_freq_param else None
+        for s in active_settings(self._cal_bounds, power, freq):
+            task, vals = s["task"], {s["param"]: s["value"]}
+            self.hub.run_async(
+                f"livetune_active:{self.hostname}:{task}",
+                lambda t=task, v=vals: self.hub.fleet.get(self.hostname)
+                    .set_task_params(t, v, 1.0))
 
     def _show_set_result(self, result) -> None:
         if isinstance(result, Exception):
