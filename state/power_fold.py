@@ -287,20 +287,3 @@ def refold_bounds(bounds: dict, freq_hz: Optional[float]) -> dict:
     out = dict(bounds)
     out.update(fold.bounds_at(float(freq_hz)))
     return out
-
-
-def active_settings(bounds: dict, power: Optional[float],
-                    freq_hz: Optional[float] = None) -> list:
-    """The active-component task commands to issue alongside a calibrated absolute ``power``
-    (dBm) on a transmit task — a list of ``{plane, task, param, applied_db, value}``, each
-    naming a linked control task (e.g. a step attenuator), the parameter to set on it, and
-    the value the SDR-first realization needs there so the SDR + the component together
-    deliver ``power``. Empty when the chain has no active components, the artifact is missing,
-    or ``power`` is None (relative-gain mode) — i.e. exactly when there is nothing to command
-    beyond the transmit task's own SDR gain."""
-    if power is None:
-        return []
-    fold = PowerFold.from_artifact((bounds or {}).get("artifact") or {})
-    if fold is None or not fold.has_active:
-        return []
-    return fold.realize(float(power), freq_hz)["settings"]

@@ -99,19 +99,6 @@ def _without_flag(args: List[str], flags) -> List[str]:
     return out
 
 
-def _flag_value(args: List[str], flags) -> Optional[float]:
-    """The float value following the last occurrence of any of ``flags`` in ``args``,
-    or None if the flag is absent or its value isn't numeric."""
-    val = None
-    for i, a in enumerate(args):
-        if a in flags and i + 1 < len(args):
-            try:
-                val = float(args[i + 1])
-            except (TypeError, ValueError):
-                pass
-    return val
-
-
 class RunTaskDialog(QDialog):
     def __init__(self, hub: DataHub, hostname: str, task_name: str,
                  running: bool = False, parent=None, quick: bool = False):
@@ -349,16 +336,6 @@ class RunTaskDialog(QDialog):
                 self.accept()
             return
 
-        if op == "runtask_active":
-            # An active-component command (e.g. the attenuator). Non-fatal: the transmit
-            # task drives its own SDR gain regardless — surface a failure but never block
-            # or trigger the quick-mode plain-start fallback below.
-            if isinstance(result, Exception):
-                self._set_status(
-                    f"note: couldn't set the linked component task ({result}) — check it "
-                    f"is running.", error=True)
-            return
-
         if op == "runtask_cal":
             # 404 (uncalibrated) → schema range; offline → last-known cached bounds.
             from api.client import AgentConnectionError
@@ -565,7 +542,6 @@ class RunTaskDialog(QDialog):
         self._starting = True
         self._set_status("starting…")
         req = m.StartRequest(args=args, replace_args=True)
-        self._command_active(args)                       # position the attenuator first
         self.hub.run_async(
             f"runtask_start:{self.hostname}",
             lambda: self.hub.fleet.get(self.hostname).start_task(self.task_name, req),
@@ -578,7 +554,6 @@ class RunTaskDialog(QDialog):
             return
         self._starting = True
         self._set_status("starting…")
-        self._command_active(self._current_args)         # stored --power → position attenuator
         self.hub.run_async(
             f"runtask_start:{self.hostname}",
             lambda: self.hub.fleet.get(self.hostname).start_task(self.task_name),
@@ -607,38 +582,6 @@ class RunTaskDialog(QDialog):
             except ValueError:
                 pass
         return args
-
-    def _active_settings_for_args(self, args: List[str]) -> List[dict]:
-        """The active-component commands (attenuator, …) implied by an absolute --power in
-        ``args``: each names a linked control task, its parameter and the value to set so the
-        SDR + the component together deliver the requested power. Empty unless the unit is
-        calibrated for the signal, the chain has active components, and ``args`` set --power."""
-        if self._cal_bounds is None:
-            return []
-        power = _flag_value(args, _POWER_FLAGS)
-        if power is None:
-            return []
-        freq = None
-        if self._script_cal_freq_param:
-            fspec = next((s for s in self._param_specs
-                          if s.get("dest") == self._script_cal_freq_param), None)
-            flags = fspec.get("flags") if isinstance(fspec, dict) else None
-            if flags:
-                freq = _flag_value(args, flags)
-        from state.power_fold import active_settings
-        return active_settings(self._cal_bounds, power, freq)
-
-    def _command_active(self, args: List[str]) -> None:
-        """Command each linked active-component task (e.g. the step attenuator) for the
-        --power in ``args``, so requesting a calibrated power drives BOTH the SDR (via the
-        transmit script) and the component. Issued before the transmit start so the component
-        is in position first. Best-effort: a failure is reported, never fatal."""
-        for s in self._active_settings_for_args(args):
-            task, values = s["task"], {s["param"]: s["value"]}
-            self.hub.run_async(
-                f"runtask_active:{self.hostname}:{task}",
-                lambda t=task, v=values: self.hub.fleet.get(self.hostname)
-                    .set_task_params(t, v, 1.0))
 
     def _update_preview(self, *_) -> None:
         if not self._script_path:
@@ -679,7 +622,6 @@ class RunTaskDialog(QDialog):
         self._starting = True
         self._buttons.setEnabled(False)
         self._set_status("starting…")
-        self._command_active(args)                       # position the attenuator first
         self.hub.run_async(
             f"runtask_start:{self.hostname}",
             lambda: self.hub.fleet.get(self.hostname).start_task(self.task_name, req),
