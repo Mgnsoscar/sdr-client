@@ -38,7 +38,7 @@ from .param_widgets import (
     Dropdown, LimitChip, LiveBadge, RangeRail, SegmentedControl, ToggleSwitch,
     field_name_label, unit_chip,
 )
-from state.power_fold import refold_bounds
+from state.power_fold import PowerFold, refold_bounds
 
 
 # Scoped styling for the value inputs, so a field looks like the mockup's recessed
@@ -409,6 +409,14 @@ def apply_power_bounds(specs: List[dict], bounds) -> List[dict]:
     sp["min"], sp["max"] = lo, hi
     sp["type"] = "float"
     sp.setdefault("step", 0.5)                 # render as a bounded spinbox → can't overshoot
+    # A resolved artifact lets the field step through the chain's *true* achievable power
+    # levels (non-uniform: attenuator-only at the bottom, SDR-only at the top). Mark the
+    # field so the widget wires the resolver, and set its display resolution to the finest
+    # achievable increment so a snapped level like −55.25 dBm renders exactly.
+    fold = PowerFold.from_artifact((bounds.get("artifact") or {}))
+    if fold is not None:
+        sp["snap_role"] = "power"
+        sp["step"] = fold.finest_step()
     d = sp.get("default")
     if isinstance(d, (int, float)) and not isinstance(d, bool):
         sp["default"] = min(max(float(d), lo), hi)
@@ -436,7 +444,10 @@ def apply_gain_bounds(specs: List[dict], bounds) -> List[dict]:
     sp = out[i]
     sp["min"], sp["max"] = lo, hi
     sp["type"] = "float"
-    sp.setdefault("step", 0.25)                # bounded spinbox → can't breach the limit
+    # Step on the SDR's real gain grid when the artifact gives one, so the field lands on
+    # commandable gains (SDR-only chains snap to the true grid too); else a sensible default.
+    gs = ((bounds.get("artifact") or {}).get("gain_step_db"))
+    sp["step"] = float(gs) if isinstance(gs, (int, float)) and gs > 0 else sp.get("step", 0.25)
     d = sp.get("default")
     if isinstance(d, (int, float)) and not isinstance(d, bool):
         sp["default"] = min(max(float(d), lo), hi)
@@ -472,6 +483,41 @@ def _use_spinbox(spec: dict) -> bool:
     return True
 
 
+class _AchievableSpin(QDoubleSpinBox):
+    """A calibrated-power spinbox whose up/down steps land on the chain's *true* achievable
+    power levels (non-uniform across the range — attenuator-only at the bottom, SDR-only at
+    the top) and whose typed value snaps to the nearest achievable level on commit. With no
+    snappers attached it behaves like a plain ``QDoubleSpinBox``."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._snap = self._qup = self._qdown = None
+        self.editingFinished.connect(self._snap_typed)
+
+    def set_snappers(self, snap, qup, qdown) -> None:
+        self._snap, self._qup, self._qdown = snap, qup, qdown
+
+    def stepBy(self, steps: int) -> None:                # arrows / scroll / page keys
+        if not self._qup or not self._qdown or not steps:
+            return super().stepBy(steps)
+        v = float(self.value())
+        nxt = self._qup if steps > 0 else self._qdown
+        for _ in range(abs(int(steps))):
+            nv = float(nxt(v))
+            if abs(nv - v) < 1e-9:                       # already at the rail's end
+                break
+            v = nv
+        self.setValue(v)
+
+    def _snap_typed(self) -> None:
+        if self._snap is None:
+            return
+        v = float(self.value())
+        sv = float(self._snap(v))
+        if abs(sv - v) > 1e-9:
+            self.setValue(sv)
+
+
 def _make_spinbox(spec: dict):
     is_int = spec.get("type") == "int"
     step = spec.get("step") or (1 if is_int else 1.0)
@@ -482,7 +528,7 @@ def _make_spinbox(spec: dict):
                    int(hi) if hi is not None else _INT32)
         w.setSingleStep(max(1, int(step)))
     else:
-        w = QDoubleSpinBox()
+        w = _AchievableSpin() if spec.get("snap_role") == "power" else QDoubleSpinBox()
         w.setDecimals(_decimals_for(step))
         w.setRange(float(lo) if lo is not None else -1e12,
                    float(hi) if hi is not None else 1e12)
@@ -785,6 +831,10 @@ class ParamForm(QWidget):
         step = spec.get("step")
         step = float(step) if isinstance(step, (int, float)) and step > 0 else None
         u = f" {spec['unit']}" if spec.get("unit") else ""
+        # On the calibrated power field a rail drag snaps to a true achievable level (the same
+        # non-uniform grid the arrows step), not the decoupled uniform step.
+        _sn = self._power_snappers() if spec.get("snap_role") == "power" else None
+        psnap = _sn[0] if _sn else None
 
         def read():
             if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
@@ -795,7 +845,9 @@ class ParamForm(QWidget):
 
         def set_widget(value):
             value = min(max(value, lo), hi)                  # a drag can't leave the range
-            if step:                                         # snap to the script's step grid
+            if psnap is not None:                            # snap to a real achievable level
+                value = min(max(psnap(value), lo), hi)
+            elif step:                                       # snap to the script's step grid
                 value = min(max(lo + round((value - lo) / step) * step, lo), hi)
             if isinstance(widget, QSpinBox):
                 widget.setValue(int(round(value)))
@@ -833,9 +885,21 @@ class ParamForm(QWidget):
         """True when this signal's --power/gain range actually moves with frequency (a
         frequency-dependent cable/antenna or per-frequency limit in the embedded artifact).
         A constant chain never re-folds, so no wiring / re-render churn."""
-        from state.power_fold import PowerFold
         fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
         return fold is not None and fold.freq_dependent
+
+    def _power_snappers(self):
+        """``(snap, quantize_up, quantize_down)`` for the calibrated --power field, bound to
+        the resolved artifact and the frequency this render folds at, so the widget steps
+        through only achievable power levels (universal — SDR-only chains snap to the real
+        gain grid too). None when there's no usable fold."""
+        fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
+        if fold is None:
+            return None
+        f = self._render_freq
+        return (lambda p: fold.snap_power(p, f),
+                lambda p: fold.quantize_up(p, f),
+                lambda p: fold.quantize_down(p, f))
 
     def _wire_freq_refold(self) -> None:
         """Connect the frequency field's change signal so the power/gain bounds re-fold at
@@ -1242,6 +1306,11 @@ class ParamForm(QWidget):
             w.setSuffix("")                       # the unit lives in its own chip now
             w.setButtonSymbols(w.ButtonSymbols.NoButtons)
             w.setFont(mono_font(13, 500))
+            if isinstance(w, _AchievableSpin):
+                sn = self._power_snappers()
+                if sn:
+                    w.set_snappers(*sn)
+                    w.setValue(sn[0](float(w.value())))   # land the default on the grid
             w.valueChanged.connect(self.changed.emit)
             self._guard_scroll(w)
         elif spec.get("choices"):

@@ -113,3 +113,65 @@ def test_refold_bounds_is_a_noop_without_frequency_or_artifact():
                          "max_gain_db": 74.0}}
     assert refold_bounds(flat, 2.0e9) is flat              # constant chain → unchanged
     assert refold_bounds({"min_power_dbm": 1.0}, 2.0e9) == {"min_power_dbm": 1.0}  # no artifact
+
+
+# ── active components: the fold mirrors the agent's achievable-level resolver ──────
+
+# SDR: 1 dB gain ⇒ 1 dB power over 0..40 dB (−40..0 dBm), then a 0..95 dB / 0.25 dB step
+# attenuator (an active component) ⇒ effective −135..0 dBm. Matches the agent's
+# tests/test_calibration_active.py so the client fold and the resolver stay in step.
+def _active_artifact(**over):
+    ac = {"plane": "atten_out", "task": "atten_set", "param": "attenuation",
+          "sense": "attenuation", "min_db": 0.0, "max_db": 95.0, "step_db": 0.25,
+          "engage_pct": 0.0}
+    ac.update(over)
+    return {"curve": [[0.0, -40.0], [40.0, 0.0]], "min_gain_db": 0.0, "max_gain_db": 40.0,
+            "gain_step_db": 1.0, "active_components": [ac]}
+
+
+def test_active_component_extends_the_range():
+    fold = PowerFold.from_artifact(_active_artifact())
+    assert fold.has_active
+    b = fold.bounds_at(None)
+    assert b["min_power_dbm"] == pytest.approx(-135.0)
+    assert b["max_power_dbm"] == pytest.approx(0.0)
+
+
+def test_active_snap_and_quantize_match_the_resolver():
+    fold = PowerFold.from_artifact(_active_artifact())
+    assert fold.snap_power(-19.1) == pytest.approx(-19.0)
+    assert fold.snap_power(-55.3) == pytest.approx(-55.25)
+    assert fold.quantize_down(0.0) == pytest.approx(-0.25)
+    assert fold.quantize_up(-55.0) == pytest.approx(-54.75)
+    assert fold.finest_step() == pytest.approx(0.25)
+
+
+def test_active_realize_commands_the_attenuator_sdr_first():
+    fold = PowerFold.from_artifact(_active_artifact())
+    # SDR carries the signal down to the floor; the attenuator stays at rest above it.
+    r = fold.realize(-20.0)
+    assert r["sdr_gain_db"] == pytest.approx(20.0)
+    assert r["settings"][0]["task"] == "atten_set" and r["settings"][0]["param"] == "attenuation"
+    assert r["settings"][0]["value"] == pytest.approx(0.0)
+    # Below the floor the SDR pins at min gain and the attenuator fills the rest.
+    r = fold.realize(-100.0)
+    assert r["sdr_gain_db"] == pytest.approx(0.0)
+    assert r["settings"][0]["value"] == pytest.approx(60.0)          # 60 dB attenuation
+
+
+def test_engage_threshold_keeps_the_sdr_higher():
+    fold = PowerFold.from_artifact(_active_artifact(engage_pct=50.0))
+    assert fold.bounds_at(None)["min_power_dbm"] == pytest.approx(-115.0)   # −20 − 95
+    r = fold.realize(-60.0)
+    assert r["sdr_gain_db"] == pytest.approx(20.0)
+    assert r["settings"][0]["value"] == pytest.approx(40.0)
+
+
+def test_no_active_component_keeps_the_plain_gain_grid():
+    art = {"curve": [[0.0, -40.0], [40.0, 0.0]], "min_gain_db": 0.0, "max_gain_db": 40.0,
+           "gain_step_db": 1.0}
+    fold = PowerFold.from_artifact(art)
+    assert not fold.has_active
+    assert fold.bounds_at(None)["min_power_dbm"] == pytest.approx(-40.0)
+    assert fold.quantize_down(0.0) == pytest.approx(-1.0)            # the SDR's 1 dB grid
+    assert fold.finest_step() == pytest.approx(1.0)
