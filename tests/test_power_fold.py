@@ -175,3 +175,22 @@ def test_no_active_component_keeps_the_plain_gain_grid():
     assert fold.bounds_at(None)["min_power_dbm"] == pytest.approx(-40.0)
     assert fold.quantize_down(0.0) == pytest.approx(-1.0)            # the SDR's 1 dB grid
     assert fold.finest_step() == pytest.approx(1.0)
+
+
+def test_non_commensurate_steps_snap_and_quantize_to_true_levels():
+    # SDR 1 dB gain grid (1 dB power) + a 0.3 dB attenuator — NOT multiples, so the true
+    # achievable grid is a 0.1 dB vernier. snap/quantize must land on real levels, not skip
+    # to the next attenuator step.
+    art = {"curve": [[0.0, -40.0], [40.0, 0.0]], "min_gain_db": 0.0, "max_gain_db": 40.0,
+           "gain_step_db": 1.0,
+           "active_components": [{"plane": "atten_out", "task": "atten_set",
+                                  "param": "attenuation", "sense": "attenuation",
+                                  "min_db": 0.0, "max_db": 30.0, "step_db": 0.3,
+                                  "engage_pct": 0.0}]}
+    fold = PowerFold.from_artifact(art)
+    assert fold.snap_power(-50.0) == pytest.approx(-50.0)            # exact level exists
+    assert fold.quantize_down(-50.0) == pytest.approx(-50.1)         # true vernier neighbour
+    assert fold.quantize_up(-50.2) == pytest.approx(-50.1)
+    # the attenuator value commanded for a snapped level is a real 0.3 dB multiple
+    val = fold.realize(-50.1)["settings"][0]["value"]
+    assert abs(round(val / 0.3) - val / 0.3) < 1e-6

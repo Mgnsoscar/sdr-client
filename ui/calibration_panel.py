@@ -742,7 +742,11 @@ class _CurveTable(QTableWidget):
                         "current cell · Ctrl+Z / Ctrl+Y undo/redo · Esc or click away "
                         "to deselect · paste (Ctrl+V) a \"gain, power\" block from a "
                         "spreadsheet — it lands at the selected cell (or appends), and a "
-                        "single column fills just that column.")
+                        "single column fills just that column · right-click to paste or "
+                        "clear the whole table.")
+        # Right-click menu: paste a measured sweep, or clear the whole table.
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._context_menu)
         # Undo/redo history of row snapshots (see _record_history / undo / redo).
         self._history: list = [[]]
         self._hist_idx = 0
@@ -942,6 +946,29 @@ class _CurveTable(QTableWidget):
         self._fit_height()
         self._changed()
         return True
+
+    def clear_rows(self) -> None:
+        """Empty the whole table (undoable). Fires the change hook so the sparkline and the
+        owning form update. Used by the right-click 'Clear table' action, cross-program."""
+        if self.rowCount() == 0:
+            return
+        self.blockSignals(True)
+        self.setRowCount(0)
+        self.blockSignals(False)
+        self._fit_height()
+        self._changed()
+
+    def _context_menu(self, pos) -> None:
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        paste = menu.addAction("Paste (Ctrl+V)")
+        clear = menu.addAction("Clear table")
+        clear.setEnabled(self.rowCount() > 0)
+        chosen = menu.exec(self.viewport().mapToGlobal(pos))
+        if chosen is paste:
+            self._paste_csv()
+        elif chosen is clear:
+            self.clear_rows()
 
     def _fit_height(self) -> None:
         """Size the table to its rows (with a sensible min and max), so it expands as
