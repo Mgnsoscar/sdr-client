@@ -251,10 +251,11 @@ def local_calibration_issues(doc) -> list:
                 issues.append(f"derived plane '{name}' has no parent plane")
             elif frm not in planes:
                 issues.append(f"derived plane '{name}' points at unknown plane '{frm}'")
-            # A passive hop's Δ dB comes from either an inline constant (delta_db) OR a
-            # library component (component, possibly frequency-dependent) — v2. Only flag
-            # when it has NEITHER.
-            if p.get("delta_db") is None and not p.get("component"):
+            # A hop's Δ dB comes from an inline constant (delta_db), a library component
+            # (component, possibly frequency-dependent), OR — for an active component — its
+            # own inline Δ dB(f) table (delta_db_by_freq). Only flag when it has NONE.
+            if (p.get("delta_db") is None and not p.get("component")
+                    and not p.get("delta_db_by_freq")):
                 issues.append(f"derived plane '{name}' has no Δ dB or component")
             # An ACTIVE component adds a `control` block on top of that baseline.
             if p.get("control") is not None:
@@ -1638,6 +1639,9 @@ class CalibrationPanel(QWidget):
                 "min_db": _numeric(c.get("min_db"), 0.0), "max_db": _numeric(c.get("max_db"), 0.0),
                 "step_db": _numeric(c.get("step_db"), 0.0),
                 "engage_pct": _numeric(c.get("engage_pct"), 0.0)}
+            # The active component's OWN baseline insertion loss: a frequency table it owns
+            # inline (not a shared library part). Empty ⇒ a flat constant (row["delta"]).
+            row["baseline_table"] = [list(p) for p in (spec.get("delta_db_by_freq") or [])]
         name_e.editingFinished.connect(lambda r=row: self._on_plane_name_changed(r))
         return row
 
@@ -2273,38 +2277,36 @@ class CalibrationPanel(QWidget):
         def _commit():
             self._sync_from(strict=False)
 
-        # Baseline — the stage's behaviour at 0 dB applied, i.e. a real attenuator's fixed
-        # INSERTION LOSS. Flat (a constant Δ dB) or frequency-dependent (a component's Δ dB(f)
-        # table). The programmable range below is layered on top of this baseline.
-        ids = self._catalog.ids()
-        has_comp = bool(row.get("comp_id"))
+        # Baseline — the component's behaviour at 0 dB applied, i.e. its fixed INSERTION LOSS.
+        # It belongs to THIS active component: a flat constant Δ dB, or its own inline Δ dB(f)
+        # table (frequency-dependent). The programmable range below is layered on top.
+        base_tbl = row.get("baseline_table") or []
+        has_tbl = bool(base_tbl)
         brow = QHBoxLayout()
         bl = QLabel("Baseline"); bl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
         kind = QComboBox()
         kind.addItem("Constant Δ dB (flat insertion loss)", "constant")
-        kind.addItem("Component — Δ dB(f) table (frequency-dependent)", "component")
-        kind.setCurrentIndex(1 if has_comp else 0)
+        kind.addItem("Δ dB(f) table (frequency-dependent insertion loss)", "table")
+        kind.setCurrentIndex(1 if has_tbl else 0)
         brow.addWidget(bl); brow.addWidget(kind, 1)
         self._detail_body.addLayout(brow)
 
         def _base_kind_changed(_=0):
-            if kind.currentData() == "component":
-                if not row.get("comp_id"):
-                    if not ids:
-                        self._set_status("no components in the library yet — characterize the "
-                                         "attenuator's insertion loss (Δ dB vs frequency) first",
-                                         kind="warn")
-                        kind.setCurrentIndex(0)
-                        self._open_components()
-                        return
-                    row["comp_id"] = ids[0]
+            if kind.currentData() == "table":
+                if not row.get("baseline_table"):
+                    # Seed a one-row table from the current constant so the switch is lossless.
+                    try:
+                        d = float(row["delta"].text().strip())
+                    except (TypeError, ValueError):
+                        d = 0.0
+                    row["baseline_table"] = [[1.0e9, d]]
             else:
-                row["comp_id"] = ""
+                row["baseline_table"] = []
             _commit()
             self._render_detail()
         kind.currentIndexChanged.connect(_base_kind_changed)
 
-        if not has_comp:
+        if not has_tbl:
             dr = QHBoxLayout()
             dl = QLabel("Δ dB (at 0 applied)")
             dl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
@@ -2312,35 +2314,24 @@ class CalibrationPanel(QWidget):
             dr.addWidget(dl); dr.addWidget(row["delta"]); dr.addStretch(1)
             self._detail_body.addLayout(dr)
         else:
-            cr = QHBoxLayout()
-            cl = QLabel("Component")
-            cl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
-            comp_combo = QComboBox()
-            for cid in ids:
-                comp_combo.addItem(cid)
-            if row.get("comp_id") in ids:
-                comp_combo.setCurrentText(row["comp_id"])
-            elif ids:
-                row["comp_id"] = comp_combo.currentText()
-            editb = QPushButton("Library…"); editb.setStyleSheet("font-size:11px;")
-            editb.clicked.connect(
-                lambda _=False, r=row: self._open_components(r.get("comp_id") or None))
-            cr.addWidget(cl); cr.addWidget(comp_combo, 1); cr.addWidget(editb)
-            self._detail_body.addLayout(cr)
-            comp_combo.currentTextChanged.connect(
-                lambda _=0: (row.__setitem__("comp_id", comp_combo.currentText()),
-                             _commit(), self._render_detail()))
-            table = self._comp_table(row.get("comp_id", ""))
-            if table:
-                plot = _FreqResponsePlot()
-                plot.set_data(table, self._signal_markers())
-                self._detail_body.addWidget(plot)
-                span = _fmt_ghz_span(table)
-                cap = QLabel(f"Insertion loss Δ dB across {span} — folded into the range at each "
-                             f"signal's frequency; the programmable range below adds on top.")
-                cap.setWordWrap(True)
-                cap.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
-                self._detail_body.addWidget(cap)
+            hint = QLabel("This component's insertion loss vs frequency (signed dB, negative = "
+                          "loss). Folded into the range at each signal's frequency; the "
+                          "programmable range below adds on top.")
+            hint.setWordWrap(True)
+            hint.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+            self._detail_body.addWidget(hint)
+            spark = _FreqSparkline()
+            spark.set_table(base_tbl)
+            grid = _CurveTable(on_changed=None, headers=("freq (Hz)", "Δ dB"))
+            grid.set_rows(base_tbl)
+
+            def _table_changed():
+                row["baseline_table"] = grid.rows(strict=False)
+                spark.set_table(row["baseline_table"])
+                _commit()
+            grid._on_changed = _table_changed             # _CurveTable calls this on edit
+            self._detail_body.addWidget(spark)
+            self._detail_body.addWidget(grid)
 
         box = QFrame(); box.setObjectName("ctrlbox")
         box.setStyleSheet(f"#ctrlbox {{ border:1px solid {Palette.BORDER}; border-radius:8px; }}")
@@ -2749,11 +2740,12 @@ class CalibrationPanel(QWidget):
                 p = {"type": "measured"}
             elif role == "component":
                 p = {"type": "derived", "from": prev_name or "", "component": row.get("comp_id", "")}
-            elif role == "active":                    # baseline (Δ dB or component) + control
+            elif role == "active":                    # baseline (constant Δ dB or Δ dB(f)) + control
                 p = {"type": "derived", "from": prev_name or ""}
-                comp = row.get("comp_id", "")
-                if comp:                              # frequency-dependent baseline table
-                    p["component"] = comp
+                tbl = [pt for pt in (row.get("baseline_table") or [])
+                       if len(pt) == 2 and all(isinstance(x, (int, float)) for x in pt)]
+                if tbl:                               # the component's own frequency table
+                    p["delta_db_by_freq"] = [[float(f), float(db)] for f, db in tbl]
                 else:                                 # flat constant insertion loss
                     d = row["delta"].text().strip()
                     p["delta_db"] = _to_float(d, f"stage '{name}' Δ dB") if d else 0.0
