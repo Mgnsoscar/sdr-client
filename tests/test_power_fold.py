@@ -177,6 +177,23 @@ def test_no_active_component_keeps_the_plain_gain_grid():
     assert fold.finest_step() == pytest.approx(1.0)
 
 
+def test_no_active_nonlinear_curve_snaps_to_the_real_gain_grid():
+    # NO active components: a nonlinear curve with fractional powers. The universal slider must
+    # snap/quantize to the real (non-uniform) SDR gain grid, with the minimum-gain level
+    # present — the same resolver fixes apply here as with an attenuator.
+    art = {"curve": [[0.0, -63.7], [20.0, -41.7], [40.0, -24.7], [80.0, -6.7], [89.75, -3.7]],
+           "min_gain_db": 0.0, "max_gain_db": 89.75, "gain_step_db": 0.25}
+    fold = PowerFold.from_artifact(art)
+    assert not fold.has_active
+    b = fold.bounds_at(None)
+    assert b["min_power_dbm"] == pytest.approx(-63.7)     # min-gain level present (not dropped)
+    assert b["max_power_dbm"] == pytest.approx(-3.7)
+    s = fold.snap_power(-30.3)
+    assert fold.snap_power(s) == pytest.approx(s)         # snapped value is itself achievable
+    assert fold.quantize_up(-63.7) > -63.7               # steps up the real grid from the floor
+    assert fold.quantize_down(-3.7) < -3.7               # and down from the ceiling
+
+
 def test_non_commensurate_steps_snap_and_quantize_to_true_levels():
     # SDR 1 dB gain grid (1 dB power) + a 0.3 dB attenuator — NOT multiples, so the true
     # achievable grid is a 0.1 dB vernier. snap/quantize must land on real levels, not skip
