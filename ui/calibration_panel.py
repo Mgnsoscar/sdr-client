@@ -2273,12 +2273,74 @@ class CalibrationPanel(QWidget):
         def _commit():
             self._sync_from(strict=False)
 
-        # Baseline Δ dB — the stage's behaviour at 0 dB applied (usually 0 for an attenuator).
-        dr = QHBoxLayout()
-        dl = QLabel("Baseline Δ dB (at 0 applied)")
-        dl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
-        dr.addWidget(dl); row["delta"].setFixedWidth(90); dr.addWidget(row["delta"]); dr.addStretch(1)
-        self._detail_body.addLayout(dr)
+        # Baseline — the stage's behaviour at 0 dB applied, i.e. a real attenuator's fixed
+        # INSERTION LOSS. Flat (a constant Δ dB) or frequency-dependent (a component's Δ dB(f)
+        # table). The programmable range below is layered on top of this baseline.
+        ids = self._catalog.ids()
+        has_comp = bool(row.get("comp_id"))
+        brow = QHBoxLayout()
+        bl = QLabel("Baseline"); bl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+        kind = QComboBox()
+        kind.addItem("Constant Δ dB (flat insertion loss)", "constant")
+        kind.addItem("Component — Δ dB(f) table (frequency-dependent)", "component")
+        kind.setCurrentIndex(1 if has_comp else 0)
+        brow.addWidget(bl); brow.addWidget(kind, 1)
+        self._detail_body.addLayout(brow)
+
+        def _base_kind_changed(_=0):
+            if kind.currentData() == "component":
+                if not row.get("comp_id"):
+                    if not ids:
+                        self._set_status("no components in the library yet — characterize the "
+                                         "attenuator's insertion loss (Δ dB vs frequency) first",
+                                         kind="warn")
+                        kind.setCurrentIndex(0)
+                        self._open_components()
+                        return
+                    row["comp_id"] = ids[0]
+            else:
+                row["comp_id"] = ""
+            _commit()
+            self._render_detail()
+        kind.currentIndexChanged.connect(_base_kind_changed)
+
+        if not has_comp:
+            dr = QHBoxLayout()
+            dl = QLabel("Δ dB (at 0 applied)")
+            dl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+            row["delta"].setFixedWidth(90)
+            dr.addWidget(dl); dr.addWidget(row["delta"]); dr.addStretch(1)
+            self._detail_body.addLayout(dr)
+        else:
+            cr = QHBoxLayout()
+            cl = QLabel("Component")
+            cl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+            comp_combo = QComboBox()
+            for cid in ids:
+                comp_combo.addItem(cid)
+            if row.get("comp_id") in ids:
+                comp_combo.setCurrentText(row["comp_id"])
+            elif ids:
+                row["comp_id"] = comp_combo.currentText()
+            editb = QPushButton("Library…"); editb.setStyleSheet("font-size:11px;")
+            editb.clicked.connect(
+                lambda _=False, r=row: self._open_components(r.get("comp_id") or None))
+            cr.addWidget(cl); cr.addWidget(comp_combo, 1); cr.addWidget(editb)
+            self._detail_body.addLayout(cr)
+            comp_combo.currentTextChanged.connect(
+                lambda _=0: (row.__setitem__("comp_id", comp_combo.currentText()),
+                             _commit(), self._render_detail()))
+            table = self._comp_table(row.get("comp_id", ""))
+            if table:
+                plot = _FreqResponsePlot()
+                plot.set_data(table, self._signal_markers())
+                self._detail_body.addWidget(plot)
+                span = _fmt_ghz_span(table)
+                cap = QLabel(f"Insertion loss Δ dB across {span} — folded into the range at each "
+                             f"signal's frequency; the programmable range below adds on top.")
+                cap.setWordWrap(True)
+                cap.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+                self._detail_body.addWidget(cap)
 
         box = QFrame(); box.setObjectName("ctrlbox")
         box.setStyleSheet(f"#ctrlbox {{ border:1px solid {Palette.BORDER}; border-radius:8px; }}")
@@ -2687,10 +2749,14 @@ class CalibrationPanel(QWidget):
                 p = {"type": "measured"}
             elif role == "component":
                 p = {"type": "derived", "from": prev_name or "", "component": row.get("comp_id", "")}
-            elif role == "active":                    # baseline Δ dB + a dynamic control block
+            elif role == "active":                    # baseline (Δ dB or component) + control
                 p = {"type": "derived", "from": prev_name or ""}
-                d = row["delta"].text().strip()
-                p["delta_db"] = _to_float(d, f"stage '{name}' Δ dB") if d else 0.0
+                comp = row.get("comp_id", "")
+                if comp:                              # frequency-dependent baseline table
+                    p["component"] = comp
+                else:                                 # flat constant insertion loss
+                    d = row["delta"].text().strip()
+                    p["delta_db"] = _to_float(d, f"stage '{name}' Δ dB") if d else 0.0
                 p["control"] = self._control_from_row(row)
             else:                                     # constant Δ dB
                 p = {"type": "derived", "from": prev_name or ""}

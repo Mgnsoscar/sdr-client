@@ -136,6 +136,47 @@ def test_doc_uses_active_components_detects_control():
     assert CalibrationPanel._doc_uses_active_components(passive) is False
 
 
+def _doc_component(control, comp="atten_loss"):
+    d = _doc(control)
+    d["chain"]["planes"]["atten_out"] = {
+        "type": "derived", "from": "sdr_output", "component": comp, "control": control}
+    return d
+
+
+def test_active_component_baseline_round_trips():
+    # A frequency-dependent insertion loss is a component (Δ dB(f) table) baseline, kept on
+    # round-trip and written as `component` (not a constant delta_db) with the control on top.
+    p = CalibrationPanel("u", FakeHub())
+    p._catalog.put("atten_loss", "attenuator", [[1.0e9, -4.0], [2.0e9, -6.0]])
+    p._set_doc(_doc_component(_control()))
+    row = _active_row(p)
+    assert row["comp_id"] == "atten_loss"
+    plane = p._read_form(strict=False)["chain"]["planes"]["atten_out"]
+    assert plane.get("component") == "atten_loss"
+    assert "delta_db" not in plane                    # component baseline, not a flat constant
+    assert plane["control"]["task"] == "atten_set"
+
+
+def test_active_baseline_switch_to_component_reads_back():
+    # The baseline-kind picker sets comp_id; reading back then emits a component baseline.
+    p = CalibrationPanel("u", FakeHub())
+    p._catalog.put("atten_loss", "attenuator", [[1.0e9, -4.0]])
+    p._set_doc(_doc(_control()))                      # starts flat (constant)
+    row = _active_row(p)
+    assert not row.get("comp_id")
+    row["comp_id"] = "atten_loss"                     # as the picker would set it
+    plane = p._read_form(strict=False)["chain"]["planes"]["atten_out"]
+    assert plane.get("component") == "atten_loss" and "delta_db" not in plane
+
+
+def test_active_detail_renders_with_component_baseline():
+    p = CalibrationPanel("u", FakeHub())
+    p._catalog.put("atten_loss", "attenuator", [[1.0e9, -4.0], [2.0e9, -6.0]])
+    p._set_doc(_doc_component(_control()))
+    p._select_plane("atten_out")                      # renders _detail_active + the Δ dB(f) plot
+    assert p._selected_plane == "atten_out"
+
+
 def test_task_and_param_pickers_read_from_fetched_data():
     p = CalibrationPanel("u", FakeHub())
     p._tasks_yaml = (
