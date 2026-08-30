@@ -445,15 +445,6 @@ class _DayPlanner(QWidget):
                            int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop),
                            f"{h:02d}:00")
 
-        # "now" marker when viewing today
-        if self._date == date.today():
-            y = int(self._to_y(datetime.now()))
-            p.setPen(QPen(QColor(Palette.CRASH), 1))
-            p.drawLine(self.AXIS_W, y, w, y)
-            p.setBrush(QBrush(QColor(Palette.CRASH)))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawEllipse(QRectF(self.AXIS_W - 3, y - 3, 6, 6))
-
         self._rects = {}
         self._btn_rects = {}
         avail = max(60, w - self.AXIS_W - 10)
@@ -468,6 +459,15 @@ class _DayPlanner(QWidget):
             rect = QRectF(x, y_top, colw - 6, max(float(self.MIN_BLK_PX), y_bot - y_top))
             self._rects[b["id"]] = rect
             self._paint_block(p, b, rect, name_font, meta_font, desc_font)
+
+        # "now" marker when viewing today — drawn last so it stays in front of the blocks
+        if self._date == date.today():
+            y = int(self._to_y(datetime.now()))
+            p.setPen(QPen(QColor(Palette.CRASH), 1))
+            p.drawLine(self.AXIS_W, y, w, y)
+            p.setBrush(QBrush(QColor(Palette.CRASH)))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(QRectF(self.AXIS_W - 3, y - 3, 6, 6))
         p.end()
 
     def _paint_block(self, p, b, rect, name_font, meta_font, desc_font) -> None:
