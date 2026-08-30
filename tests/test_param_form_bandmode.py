@@ -89,6 +89,56 @@ def test_derived_readout_tracks_sources_and_blocks_over_range():
     assert f.validate() is None
 
 
+def _comb_specs():
+    """A first/spacing + range-vs-count comb schema, exercising the arithmetic-progression
+    derived ops (count / span_to / term / extent)."""
+    def p(name, flag, **kw):
+        base = {"name": name, "dest": name, "flags": [flag], "type": "float",
+                "kind": "number", "show_when": None, "formula": None, "is_freq": False}
+        base.update(kw)
+        return base
+    return [
+        {"name": "comb_mode", "dest": "comb_mode", "flags": ["--comb-mode"], "kind": "choice",
+         "type": "str", "choices": ["range", "count"],
+         "choice_labels": {"range": "First → last", "count": "First + count"},
+         "choice_values": {"range": "range", "count": "count"},
+         "default": "range", "show_when": None, "formula": None, "is_freq": False},
+        p("first", "--first", unit="MHz", default=1560.0),
+        p("spacing", "--spacing", unit="MHz", default=2.0, min=0.01, max=50.0, step=0.1),
+        p("last", "--last", unit="MHz", default=1590.0, min=70.0, max=6000.0, step=0.1,
+          show_when={"comb_mode": "range"}),
+        p("comb_count", "-Knife-count", kind="derived", unit="knives",
+          formula={"count": ["first", "last", "spacing"]}, show_when={"comb_mode": "range"}),
+        p("count", "--count", type="int", kind="integer", default=16, min=1, max=512, step=1,
+          show_when={"comb_mode": "count"}),
+        p("comb_last", "-Last-knife", kind="derived", unit="MHz",
+          formula={"term": ["first", "count", "spacing"]}, show_when={"comb_mode": "count"}),
+        p("comb_span", "-Span", kind="derived", unit="MHz", min=0.0, max=50.0,
+          formula={"extent": ["count", "spacing"]}, show_when={"comb_mode": "count"}),
+    ]
+
+
+def test_comb_range_and_count_modes_derive_the_other():
+    f = ParamForm()
+    f.set_params(_comb_specs())
+    # range: first 1560, spacing 2, last 1590 → 16 knives.
+    assert "last" in f._widgets and "count" not in f._widgets
+    assert f._derived["comb_count"]["value_lbl"].text().startswith("16")
+
+    w = f._widgets["comb_mode"][0]
+    w.setCurrentIndex(w.findData("count"))
+    # count: first 1560, spacing 2, count 16 → last 1590, span 30.
+    assert "count" in f._widgets and "last" not in f._widgets
+    assert f._derived["comb_last"]["value_lbl"].text().startswith("1590")
+    assert f._derived["comb_span"]["value_lbl"].text().startswith("30")
+    assert f.validate() is None
+
+    # too many knives for the band → span over the 50 MHz max blocks submission.
+    f._widgets["count"][0].setValue(100)          # span (100-1)*2 = 198 MHz
+    err = f.validate()
+    assert err is not None and "50" in err
+
+
 def test_fold_frequency_falls_back_to_derived_midpoint_when_centre_hidden():
     f = ParamForm()
     f.set_params(_band_specs())

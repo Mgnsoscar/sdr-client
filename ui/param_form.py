@@ -23,6 +23,7 @@ Public API:
 """
 from __future__ import annotations
 
+import math
 import shlex
 from typing import Any, Dict, List, Optional
 
@@ -1266,6 +1267,23 @@ class ParamForm(QWidget):
             return sum(vals)
         if op == "diff":
             return vals[0] - vals[1] if len(vals) >= 2 else vals[0]
+        # Arithmetic-progression helpers (a comb's first/spacing/last ↔ count).
+        if op == "count":                      # [a, b, s] terms of a..b step s
+            a, b, s = vals[0], vals[1], vals[2]
+            if s <= 0 or b < a:
+                return None
+            return float(math.floor((b - a) / s + 1e-9) + 1)
+        if op == "span_to":                    # [a, b, s] extent covered a..b step s
+            a, b, s = vals[0], vals[1], vals[2]
+            if s <= 0 or b < a:
+                return None
+            return float(math.floor((b - a) / s + 1e-9) * s)
+        if op == "term":                       # [a, n, s] the n-th term: a + (n-1)s
+            a, n, s = vals[0], vals[1], vals[2]
+            return a + (n - 1) * s
+        if op == "extent":                     # [n, s] span of n terms: (n-1)s
+            n, s = vals[0], vals[1]
+            return (n - 1) * s
         return None
 
     def _derived_frame(self, spec: dict, top_sep: bool) -> QWidget:
