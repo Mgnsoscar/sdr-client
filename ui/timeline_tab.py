@@ -62,6 +62,17 @@ _WDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday
 _DOT_COLOR = {"idle": Palette.ACCENT, "armed": Palette.ARMED, "on air": Palette.ONLINE,
               "onair": Palette.ONLINE, "missing": Palette.IDLE}
 
+# A slim, modern overlay scrollbar (no arrows, rounded thumb) for the scroll areas.
+_SLIM_SCROLLBAR = (
+    "QScrollBar:vertical { background: transparent; width: 8px; margin: 3px 2px; }"
+    f"QScrollBar::handle:vertical {{ background: {Palette.BORDER_STRONG}; border-radius: 4px;"
+    " min-height: 28px; }"
+    f"QScrollBar::handle:vertical:hover {{ background: {Palette.TEXT_FAINT}; }}"
+    "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+    "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
+    "QScrollBar:horizontal { height: 0px; }"
+)
+
 
 def _parse(s: str) -> Optional[datetime]:
     try:
@@ -517,20 +528,25 @@ class _DayPlanner(QWidget):
                            Qt.TextFlag.TextWordWrap), b["desc"])
 
     def _paint_action(self, p, b, rect, state, meta_font) -> int:
-        """Draw the block's Arm/Stop button (if any) at the top-right; register its
-        hit rect. Returns the horizontal space it reserves on the first row."""
+        """Draw the block's Arm / Unarm / Stop pill (always present, like the mockup —
+        greyed and inert when an idle plan can no longer be armed), centred on a short
+        block. Registers a hit rect only when it's actionable. Returns the horizontal
+        space it reserves."""
         if state == "on air":
-            action, text, col = "stop", "Stop", Palette.CRASH
+            action, text, col, live = "stop", "Stop", Palette.CRASH, True
         elif state == "armed":
-            action, text, col = "stop", "Unarm", Palette.ARMED   # cancel a pending arm
-        elif state == "idle" and b.get("armable"):
-            action, text, col = "arm", "Arm", Palette.ACCENT
+            action, text, col, live = "stop", "Unarm", Palette.ARMED, True
+        elif state == "idle":
+            live = bool(b.get("armable"))
+            action, text = "arm", "Arm"
+            col = Palette.ACCENT if live else Palette.IDLE   # past idle: shown but inert
         else:
             return 0
-        if rect.width() < self.BTN_W + 24 or rect.height() < 20:
-            # too small to host a button inline — skip (block can still be edited)
-            return 0
-        br = QRectF(rect.right() - self.BTN_W - 6, rect.top() + 5, self.BTN_W, self.BTN_H)
+        if rect.width() < self.BTN_W + 12 or rect.height() < 18:
+            return 0            # genuinely no room — the block is still clickable to edit
+        # Centre the pill vertically on a short (single-line) block; top-align on a tall one.
+        by = (rect.center().y() - self.BTN_H / 2) if rect.height() < 40 else (rect.top() + 5)
+        br = QRectF(rect.right() - self.BTN_W - 6, by, self.BTN_W, self.BTN_H)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(QColor(col)))
         p.drawRoundedRect(br, self.BTN_H / 2, self.BTN_H / 2)
@@ -538,7 +554,8 @@ class _DayPlanner(QWidget):
         p.setFont(f)
         p.setPen(QColor(Palette.SURFACE))
         p.drawText(br, int(Qt.AlignmentFlag.AlignCenter), text)
-        self._btn_rects[b["id"]] = (br, action)
+        if live:
+            self._btn_rects[b["id"]] = (br, action)
         return self.BTN_W + 10
 
     # ── Interaction ────────────────────────────────────────────────────────────
@@ -590,6 +607,24 @@ class _Dot(QWidget):
         p.setBrush(QBrush(c))
         p.setPen(Qt.PenStyle.NoPen)
         p.drawEllipse(self.rect())
+
+
+class _CornerSwatch(QWidget):
+    """A miniature day-cell with a corner dot — the legend key for 'on the timeline'."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(14, 14)
+
+    def paintEvent(self, _e):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(Palette.BORDER_STRONG), 1.5))
+        p.drawRoundedRect(QRectF(1, 1, 12, 12), 4, 4)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(Palette.ACCENT_INK))
+        p.drawEllipse(QRectF(8.5, 2.5, 4, 4))
 
 
 class _MonthGrid(QWidget):
@@ -814,13 +849,19 @@ class _MonthCalendar(QFrame):
         sep.setStyleSheet(f"background:{Palette.BORDER}; border:none;")
         v.addWidget(sep)
         v.addSpacing(9)
-        legend = QLabel(
-            f"<span style='color:{Palette.ACCENT}'>&#9679;</span> Scheduled"
-            f"&nbsp;&nbsp;&nbsp;<span style='color:{Palette.ARMED}'>&#9679;</span> Armed"
-            f"&nbsp;&nbsp;&nbsp;<span style='color:{Palette.ONLINE}'>&#9679;</span> On air")
-        legend.setTextFormat(Qt.TextFormat.RichText)
-        legend.setStyleSheet(f"font-size:11px; color:{Palette.TEXT_MUTED};")
-        v.addWidget(legend)
+        leg = QHBoxLayout(); leg.setContentsMargins(0, 0, 0, 0); leg.setSpacing(12)
+        for swatch, text in ((_Dot(Palette.ACCENT), "Scheduled"),
+                             (_Dot(Palette.ARMED), "Armed"),
+                             (_Dot(Palette.ONLINE), "On air"),
+                             (_CornerSwatch(), "On the timeline")):
+            item = QHBoxLayout(); item.setContentsMargins(0, 0, 0, 0); item.setSpacing(6)
+            item.addWidget(swatch)
+            lab = QLabel(text); lab.setStyleSheet(f"font-size:11px; color:{Palette.TEXT_MUTED};")
+            item.addWidget(lab)
+            box = QWidget(); box.setLayout(item)
+            leg.addWidget(box)
+        leg.addStretch(1)
+        v.addLayout(leg)
         hint = QLabel("A day’s dots show what’s scheduled and its state. Single-click a day to "
                       "preview it below; double-click to open it on the timeline. A dot in a "
                       "day’s corner marks the day shown on the timeline.")
@@ -893,7 +934,7 @@ class _CompactDayList(QFrame):
         self._scroll = QScrollArea(); self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setStyleSheet("QScrollArea{ background:transparent; border:none; }")
+        self._scroll.setStyleSheet("QScrollArea{ background:transparent; border:none; }" + _SLIM_SCROLLBAR)
         self._body = QWidget(); self._body.setStyleSheet("background:transparent;")
         self._bv = QVBoxLayout(self._body)
         self._bv.setContentsMargins(0, 11, 0, 0); self._bv.setSpacing(7)
@@ -931,7 +972,10 @@ class _CompactDayList(QFrame):
         h.addWidget(_Dot(_DOT_COLOR.get(state, Palette.IDLE),
                          pulse=state in ("on air", "onair"), diam=8))
         name = QLabel(r["name"]); name.setStyleSheet("font-size:13px; font-weight:500;")
-        name.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        name.setToolTip(r["name"])
+        # Ignored (not Expanding) so the label can shrink below its text width and clip
+        # instead of forcing the row — and the whole list — into a horizontal scroll.
+        name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         h.addWidget(name, 1)
         t = QLabel(f"{r['start'].strftime('%H:%M')}–{r['stop'].strftime('%H:%M')}")
         t.setFont(mono_font(11, 500)); t.setStyleSheet(f"color:{Palette.TEXT_MUTED};")
@@ -1013,8 +1057,12 @@ class TimelineTab(QWidget):
         sub.setStyleSheet(f"font-size:12.5px; color:{Palette.TEXT_MUTED};")
         tbox.addWidget(h1); tbox.addWidget(sub)
         top.addLayout(tbox, 1)
-        self._add_btn = QPushButton("＋  Add plan")
-        self._add_btn.setObjectName("primary")
+        self._add_btn = QPushButton("+   Add plan")
+        self._add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._add_btn.setStyleSheet(
+            f"QPushButton {{ background:{Palette.ACCENT}; color:#fff; border:none; border-radius:10px;"
+            f" padding:9px 18px; font-size:13.5px; font-weight:600; }}"
+            f"QPushButton:hover {{ background:{Palette.ACCENT_INK}; }}")
         self._add_btn.clicked.connect(self._on_add)
         abox = QVBoxLayout(); abox.addStretch(1); abox.addWidget(self._add_btn)
         top.addLayout(abox)
@@ -1088,7 +1136,7 @@ class TimelineTab(QWidget):
         self._tl_scroll = QScrollArea(); self._tl_scroll.setWidgetResizable(True)
         self._tl_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         self._tl_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._tl_scroll.setStyleSheet("QScrollArea{ background:transparent; border:none; }")
+        self._tl_scroll.setStyleSheet("QScrollArea{ background:transparent; border:none; }" + _SLIM_SCROLLBAR)
         self._tl_scroll.setWidget(self._planner)
         cv.addWidget(self._tl_scroll, 1)
         return card
