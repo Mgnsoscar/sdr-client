@@ -31,15 +31,17 @@ are resolved live from the PlanStore.
 """
 from __future__ import annotations
 
+import calendar as _calmod
+import math
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QDate, QDateTime, QSize, Qt, QRectF, QTimer, QTime, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen, QTextCharFormat
+from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QCalendarWidget, QComboBox, QDateTimeEdit, QDialog, QDialogButtonBox,
+    QComboBox, QDateTimeEdit, QDialog, QDialogButtonBox, QFrame,
     QFormLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from api import Fleet
@@ -47,10 +49,18 @@ from api import models as m
 from state import PlanStore, ScheduleStore, new_scheduled_id
 from .plan_editor import PlanEditorDialog
 from .qt_adapter import DataHub
-from .theme import Palette
+from .theme import Palette, mono_font
 
 _ACTIVE = (m.SequenceState.ARMED, m.SequenceState.RUNNING)
 CLOCK_WARN_SKEW_S = 1.0
+
+# Human names (used by the calendar, compact list and timeline header).
+_MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July",
+                "August", "September", "October", "November", "December")
+_WDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+# Run-state → the day-dot / indicator colour convention shown in the legend.
+_DOT_COLOR = {"idle": Palette.ACCENT, "armed": Palette.ARMED, "on air": Palette.ONLINE,
+              "onair": Palette.ONLINE, "missing": Palette.IDLE}
 
 
 def _parse(s: str) -> Optional[datetime]:
@@ -308,8 +318,9 @@ class _DayPlanner(QWidget):
     AXIS_W = 58
     TOP_PAD = 10
     BOT_PAD = 12
-    BTN_W = 46
+    BTN_W = 54
     BTN_H = 18
+    MIN_BLK_PX = 24          # floor height so 5–15 min plans stay readable/clickable
 
     # state -> (border, fill)
     _TINT = {
@@ -358,14 +369,19 @@ class _DayPlanner(QWidget):
 
     def _layout(self, blocks: List[dict]) -> None:
         day_start, day_end = self._day_bounds()
+        min_dur = timedelta(minutes=self.MIN_BLK_PX / self.HOUR_PX * 60)
         vis: List[dict] = []
         for b in blocks:
             s, e = b["start"], b["stop"]
             if e <= day_start or s >= day_end:
                 continue
+            vs, ve = max(s, day_start), min(e, day_end)
+            # ve_eff = the block's *drawn* end (true end, or start+floor for very short
+            # plans), so column packing matches what's painted: a clamped 5-min block that
+            # would visually overlap a neighbour is placed side-by-side, not on top of it.
+            ve_eff = min(day_end, max(ve, vs + min_dur))
             vis.append({
-                **b,
-                "vs": max(s, day_start), "ve": min(e, day_end),
+                **b, "vs": vs, "ve": ve, "ve_eff": ve_eff,
                 "clip_top": s < day_start, "clip_bot": e > day_end,
             })
         vis.sort(key=lambda b: b["vs"])
@@ -379,22 +395,22 @@ class _DayPlanner(QWidget):
         i, n = 0, len(vis)
         while i < n:
             cluster = [vis[i]]
-            cluster_end = vis[i]["ve"]
+            cluster_end = vis[i]["ve_eff"]
             j = i + 1
             while j < n and vis[j]["vs"] < cluster_end:
                 cluster.append(vis[j])
-                cluster_end = max(cluster_end, vis[j]["ve"])
+                cluster_end = max(cluster_end, vis[j]["ve_eff"])
                 j += 1
             col_ends: List[datetime] = []
             for b in cluster:
                 for c, end in enumerate(col_ends):
                     if b["vs"] >= end:
-                        col_ends[c] = b["ve"]
+                        col_ends[c] = b["ve_eff"]
                         b["col"] = c
                         break
                 else:
                     b["col"] = len(col_ends)
-                    col_ends.append(b["ve"])
+                    col_ends.append(b["ve_eff"])
             for b in cluster:
                 b["ncols"] = len(col_ends)
             i = j
@@ -438,7 +454,7 @@ class _DayPlanner(QWidget):
             x = self.AXIS_W + b["col"] * colw + 3
             y_top = self._to_y(b["vs"])
             y_bot = self._to_y(b["ve"])
-            rect = QRectF(x, y_top + 1, colw - 6, max(24.0, y_bot - y_top - 2))
+            rect = QRectF(x, y_top, colw - 6, max(float(self.MIN_BLK_PX), y_bot - y_top))
             self._rects[b["id"]] = rect
             self._paint_block(p, b, rect, name_font, meta_font, desc_font)
         p.end()
@@ -503,13 +519,15 @@ class _DayPlanner(QWidget):
     def _paint_action(self, p, b, rect, state, meta_font) -> int:
         """Draw the block's Arm/Stop button (if any) at the top-right; register its
         hit rect. Returns the horizontal space it reserves on the first row."""
-        if state in ("armed", "on air"):
+        if state == "on air":
             action, text, col = "stop", "Stop", Palette.CRASH
+        elif state == "armed":
+            action, text, col = "stop", "Unarm", Palette.ARMED   # cancel a pending arm
         elif state == "idle" and b.get("armable"):
             action, text, col = "arm", "Arm", Palette.ACCENT
         else:
             return 0
-        if rect.width() < self.BTN_W + 40 or rect.height() < 22:
+        if rect.width() < self.BTN_W + 24 or rect.height() < 20:
             # too small to host a button inline — skip (block can still be edited)
             return 0
         br = QRectF(rect.right() - self.BTN_W - 6, rect.top() + 5, self.BTN_W, self.BTN_H)
@@ -543,6 +561,411 @@ class _DayPlanner(QWidget):
                 return
 
 
+# ── Sleek month calendar + compact day list ──────────────────────────────────
+
+class _Dot(QWidget):
+    """A small filled state dot; pulses when it marks a running plan."""
+
+    def __init__(self, color: str, pulse: bool = False, diam: int = 8, parent=None):
+        super().__init__(parent)
+        self._color = color
+        self._alpha = 1.0
+        self.setFixedSize(diam, diam)
+        if pulse:
+            self._up = False
+            self._t = QTimer(self)
+            self._t.timeout.connect(self._step)
+            self._t.start(650)
+
+    def _step(self) -> None:
+        self._up = not self._up
+        self._alpha = 0.4 if self._up else 1.0
+        self.update()
+
+    def paintEvent(self, _e):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        c = QColor(self._color)
+        c.setAlphaF(self._alpha)
+        p.setBrush(QBrush(c))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(self.rect())
+
+
+class _MonthGrid(QWidget):
+    """The painted 7-column day grid. Today wears a persistent accent ring; the
+    selected day is a filled cell; a dot in a cell's corner marks the day shown on
+    the big timeline; each day carries up to three state-coloured plan dots. A single
+    click previews a day, a double click opens it on the timeline."""
+
+    previewed = pyqtSignal(object)   # date
+    opened = pyqtSignal(object)      # date
+
+    WEEK_H = 24
+    CELL_H = 52
+    GAP = 5
+    _DOW = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        t = date.today()
+        self._year, self._month = t.year, t.month
+        self._today = t
+        self._selected = t
+        self._timeline = t
+        self._states: Dict[date, List[str]] = {}
+        self._hover: Optional[date] = None
+        self._ignore_release = False
+        self._pending: Optional[date] = None
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._fire_preview)
+        self.setMouseTracking(True)
+        self._apply_height()
+
+    # ── data ──
+    def month(self) -> Tuple[int, int]:
+        return (self._year, self._month)
+
+    def set_month(self, y: int, mo: int) -> None:
+        self._year, self._month = y, mo
+        self._apply_height()
+
+    def set_states(self, s) -> None:
+        self._states = s or {}
+        self.update()
+
+    def set_selected(self, d) -> None:
+        self._selected = d
+        self.update()
+
+    def set_timeline(self, d) -> None:
+        self._timeline = d
+        self.update()
+
+    def set_today(self, d) -> None:
+        self._today = d
+        self.update()
+
+    def _rows(self) -> int:
+        first = date(self._year, self._month, 1)
+        dim = _calmod.monthrange(self._year, self._month)[1]
+        return math.ceil((first.weekday() + dim) / 7)
+
+    def _apply_height(self) -> None:
+        self.setFixedHeight(self.WEEK_H + self._rows() * self.CELL_H)
+        self.update()
+
+    def _dates(self) -> List[date]:
+        first = date(self._year, self._month, 1)
+        start = first - timedelta(days=first.weekday())      # back to Monday
+        return [start + timedelta(days=i) for i in range(self._rows() * 7)]
+
+    def _cell_rect(self, idx: int) -> QRectF:
+        cw = self.width() / 7.0
+        c, r = idx % 7, idx // 7
+        g = self.GAP
+        return QRectF(c * cw + g / 2, self.WEEK_H + r * self.CELL_H + g / 2,
+                      cw - g, self.CELL_H - g)
+
+    def _hit(self, pos) -> Optional[date]:
+        for idx, d in enumerate(self._dates()):
+            if d.month == self._month and d.year == self._year and self._cell_rect(idx).contains(pos):
+                return d
+        return None
+
+    # ── painting ──
+    def paintEvent(self, _e):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        cw = self.width() / 7.0
+        f = QFont(); f.setPointSize(8); f.setBold(True)
+        p.setFont(f); p.setPen(QColor(Palette.TEXT_FAINT))
+        for c, lbl in enumerate(self._DOW):
+            p.drawText(QRectF(c * cw, 0, cw, self.WEEK_H), int(Qt.AlignmentFlag.AlignCenter), lbl)
+        num_font = QFont(); num_font.setPointSize(11)
+        for idx, d in enumerate(self._dates()):
+            self._paint_cell(p, self._cell_rect(idx), d, num_font)
+        p.end()
+
+    def _paint_cell(self, p, rect, d, num_font) -> None:
+        in_month = (d.month == self._month and d.year == self._year)
+        is_sel = in_month and d == self._selected
+        is_today = in_month and d == self._today
+        is_tl = in_month and d == self._timeline
+        if is_sel:
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(Palette.ACCENT))
+            p.drawRoundedRect(rect, 12, 12)
+            if is_today:                                      # filled + halo = today & selected
+                p.setBrush(Qt.BrushStyle.NoBrush); p.setPen(QPen(QColor(Palette.ACCENT), 2))
+                p.drawRoundedRect(rect.adjusted(-3, -3, 3, 3), 13, 13)
+        elif is_today:
+            p.setBrush(Qt.BrushStyle.NoBrush); p.setPen(QPen(QColor(Palette.ACCENT), 2))
+            p.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 11, 11)
+        elif in_month and self._hover == d:
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(Palette.INSET))
+            p.drawRoundedRect(rect, 12, 12)
+        # number
+        if is_sel:
+            nc, bold = Palette.SURFACE, True
+        elif is_today:
+            nc, bold = Palette.ACCENT_INK, True
+        elif not in_month:
+            nc, bold = "#B7BEC9", False
+        elif d.weekday() >= 5:
+            nc, bold = Palette.TEXT_MUTED, False
+        else:
+            nc, bold = Palette.TEXT, False
+        nf = QFont(num_font); nf.setBold(bold)
+        p.setFont(nf); p.setPen(QColor(nc))
+        p.drawText(QRectF(rect.left(), rect.top() + 6, rect.width(), 18),
+                   int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop), str(d.day))
+        if in_month and self._states.get(d):
+            self._paint_dots(p, rect, self._states[d], is_sel)
+        if is_tl:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(Palette.SURFACE if is_sel else Palette.ACCENT_INK))
+            p.drawEllipse(QRectF(rect.right() - 12, rect.top() + 6, 6, 6))
+
+    def _paint_dots(self, p, rect, states, is_sel) -> None:
+        shown = states[:3]
+        extra = len(states) - len(shown)
+        dot, gap = 6, 3
+        width = len(shown) * dot + (len(shown) - 1) * gap + (14 if extra else 0)
+        x = rect.center().x() - width / 2
+        y = rect.bottom() - 13
+        for st in shown:
+            col = "#FFFFFF" if is_sel else _DOT_COLOR.get(st, Palette.IDLE)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(col))
+            p.drawEllipse(QRectF(x, y, dot, dot)); x += dot + gap
+        if extra:
+            f = QFont(); f.setPointSize(7); f.setBold(True); p.setFont(f)
+            p.setPen(QColor("#FFFFFF" if is_sel else Palette.TEXT_FAINT))
+            p.drawText(QRectF(x, y - 3, 16, 12),
+                       int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), f"+{extra}")
+
+    # ── mouse (single-click preview vs double-click open) ──
+    def mouseMoveEvent(self, e):  # noqa: N802
+        d = self._hit(e.position())
+        if d != self._hover:
+            self._hover = d; self.update()
+        self.setCursor(Qt.CursorShape.PointingHandCursor if d else Qt.CursorShape.ArrowCursor)
+
+    def leaveEvent(self, _e):  # noqa: N802
+        if self._hover is not None:
+            self._hover = None; self.update()
+
+    def mouseReleaseEvent(self, e):  # noqa: N802
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._ignore_release:      # trailing release of a double-click
+            self._ignore_release = False
+            return
+        d = self._hit(e.position())
+        if d is not None:
+            self._pending = d
+            self._timer.start(220)    # wait to see if a double-click follows
+
+    def mouseDoubleClickEvent(self, e):  # noqa: N802
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        self._timer.stop()
+        self._ignore_release = True
+        d = self._hit(e.position())
+        if d is not None:
+            self.opened.emit(d)
+
+    def _fire_preview(self) -> None:
+        if self._pending is not None:
+            self.previewed.emit(self._pending)
+
+
+class _MonthCalendar(QFrame):
+    """Card wrapping the month grid with a header (month + Today + nav) and a legend
+    that explains the day-dot colour convention."""
+
+    previewed = pyqtSignal(object)
+    opened = pyqtSignal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("calCard")
+        self.setStyleSheet(f"#calCard {{ background:{Palette.SURFACE}; "
+                           f"border:1px solid {Palette.BORDER}; border-radius:16px; }}")
+        v = QVBoxLayout(self); v.setContentsMargins(18, 16, 18, 15); v.setSpacing(0)
+
+        head = QHBoxLayout(); head.setContentsMargins(0, 0, 0, 12); head.setSpacing(6)
+        self._title = QLabel(); self._title.setTextFormat(Qt.TextFormat.RichText)
+        head.addWidget(self._title); head.addStretch(1)
+        self._today_btn = self._nav("Today", wide=True); self._today_btn.clicked.connect(self._go_today)
+        self._prev = self._nav("‹"); self._prev.clicked.connect(lambda: self._shift(-1))
+        self._next = self._nav("›"); self._next.clicked.connect(lambda: self._shift(1))
+        for b in (self._today_btn, self._prev, self._next):
+            head.addWidget(b)
+        v.addLayout(head)
+
+        self._grid = _MonthGrid()
+        self._grid.previewed.connect(self.previewed)
+        self._grid.opened.connect(self.opened)
+        v.addWidget(self._grid)
+
+        v.addSpacing(12)
+        sep = QFrame(); sep.setFixedHeight(1)
+        sep.setStyleSheet(f"background:{Palette.BORDER}; border:none;")
+        v.addWidget(sep)
+        v.addSpacing(9)
+        legend = QLabel(
+            f"<span style='color:{Palette.ACCENT}'>&#9679;</span> Scheduled"
+            f"&nbsp;&nbsp;&nbsp;<span style='color:{Palette.ARMED}'>&#9679;</span> Armed"
+            f"&nbsp;&nbsp;&nbsp;<span style='color:{Palette.ONLINE}'>&#9679;</span> On air")
+        legend.setTextFormat(Qt.TextFormat.RichText)
+        legend.setStyleSheet(f"font-size:11px; color:{Palette.TEXT_MUTED};")
+        v.addWidget(legend)
+        hint = QLabel("A day’s dots show what’s scheduled and its state. Single-click a day to "
+                      "preview it below; double-click to open it on the timeline. A dot in a "
+                      "day’s corner marks the day shown on the timeline.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"font-size:11px; color:{Palette.TEXT_FAINT};")
+        v.addSpacing(6); v.addWidget(hint)
+        self._sync_title()
+
+    def _nav(self, text: str, wide: bool = False) -> QPushButton:
+        b = QPushButton(text); b.setCursor(Qt.CursorShape.PointingHandCursor)
+        size = "padding:0 12px;" if wide else "min-width:30px; max-width:30px;"
+        b.setStyleSheet(
+            f"QPushButton {{ height:30px; {size} border:1px solid {Palette.BORDER}; border-radius:9px;"
+            f" background:{Palette.SURFACE}; color:{Palette.ACCENT_INK}; font-size:13px; font-weight:600; }}"
+            f"QPushButton:hover {{ background:{Palette.INSET}; }}")
+        return b
+
+    def _sync_title(self) -> None:
+        y, mo = self._grid.month()
+        self._title.setText(
+            f"<span style='font-size:18px; font-weight:600; color:{Palette.TEXT}'>{_MONTH_NAMES[mo - 1]}</span>"
+            f" <span style='font-size:14px; color:{Palette.TEXT_FAINT}'>{y}</span>")
+
+    def _shift(self, delta: int) -> None:
+        y, mo = self._grid.month(); mo += delta
+        if mo < 1:
+            mo, y = 12, y - 1
+        elif mo > 12:
+            mo, y = 1, y + 1
+        self._grid.set_month(y, mo); self._sync_title()
+
+    def _go_today(self) -> None:
+        t = date.today()
+        self._grid.set_month(t.year, t.month)
+        self._grid.set_selected(t)
+        self._sync_title()
+        self.previewed.emit(t)          # calendar Today = calendar + preview only (not the timeline)
+
+    # proxied API
+    def set_states(self, s) -> None: self._grid.set_states(s)
+    def set_selected(self, d) -> None: self._grid.set_selected(d)
+    def set_timeline(self, d) -> None: self._grid.set_timeline(d)
+    def set_today(self, d) -> None: self._grid.set_today(d)
+    def set_month(self, y, mo) -> None: self._grid.set_month(y, mo); self._sync_title()
+
+
+class _CompactDayList(QFrame):
+    """The compact preview of one day's plans (follows single clicks). Each row shows a
+    state dot, the plan, its window, and an Arm / Unarm / Stop action of one fixed width
+    so the time stamps line up."""
+
+    arm_requested = pyqtSignal(str)
+    stop_requested = pyqtSignal(str)     # Unarm (armed) or Stop (on air)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("compactCard")
+        self.setStyleSheet(f"#compactCard {{ background:{Palette.SURFACE}; "
+                           f"border:1px solid {Palette.BORDER}; border-radius:16px; }}")
+        v = QVBoxLayout(self); v.setContentsMargins(16, 14, 16, 14); v.setSpacing(0)
+        head = QHBoxLayout(); head.setContentsMargins(0, 0, 0, 11); head.setSpacing(8)
+        self._title = QLabel(); self._title.setTextFormat(Qt.TextFormat.RichText)
+        self._title.setStyleSheet("font-size:14px; font-weight:600;")
+        self._sub = QLabel(); self._sub.setStyleSheet(f"font-size:11.5px; color:{Palette.TEXT_FAINT};")
+        head.addWidget(self._title); head.addStretch(1); head.addWidget(self._sub)
+        v.addLayout(head)
+        sep = QFrame(); sep.setFixedHeight(1)
+        sep.setStyleSheet(f"background:{Palette.BORDER}; border:none;")
+        v.addWidget(sep)
+        self._scroll = QScrollArea(); self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet("QScrollArea{ background:transparent; border:none; }")
+        self._body = QWidget(); self._body.setStyleSheet("background:transparent;")
+        self._bv = QVBoxLayout(self._body)
+        self._bv.setContentsMargins(0, 11, 0, 0); self._bv.setSpacing(7)
+        self._bv.addStretch(1)
+        self._scroll.setWidget(self._body)
+        v.addWidget(self._scroll, 1)
+
+    def set_day(self, d, rows: List[dict]) -> None:
+        self._title.setText(
+            f"{d.day} {_MONTH_NAMES[d.month - 1]} "
+            f"<span style='color:{Palette.TEXT_FAINT}; font-weight:500'>· {_WDAY_NAMES[d.weekday()]}</span>")
+        self._sub.setText(f"{len(rows)} plan{'s' if len(rows) != 1 else ''}" if rows else "")
+        while self._bv.count() > 1:      # clear rows, keep the trailing stretch
+            item = self._bv.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None); w.deleteLater()
+        if not rows:
+            e = QLabel("Nothing scheduled this day.\nDouble-click the day to open it on the timeline.")
+            e.setAlignment(Qt.AlignmentFlag.AlignCenter); e.setWordWrap(True)
+            e.setStyleSheet(f"font-size:12.5px; color:{Palette.TEXT_FAINT}; padding:18px 8px;")
+            self._bv.insertWidget(0, e)
+            return
+        for i, r in enumerate(rows):
+            self._bv.insertWidget(i, self._row(r))
+
+    def _row(self, r: dict) -> QWidget:
+        state = r["state"]
+        row = QFrame(); row.setObjectName("crow")
+        # Scope to #crow: a bare `QFrame` rule would also style child QLabels (QLabel is a
+        # QFrame subclass), boxing the name and time.
+        row.setStyleSheet(f"QFrame#crow {{ background:{Palette.SURFACE_ALT}; border:1px solid "
+                          f"{Palette.BORDER}; border-radius:10px; }}")
+        h = QHBoxLayout(row); h.setContentsMargins(10, 7, 8, 7); h.setSpacing(9)
+        h.addWidget(_Dot(_DOT_COLOR.get(state, Palette.IDLE),
+                         pulse=state in ("on air", "onair"), diam=8))
+        name = QLabel(r["name"]); name.setStyleSheet("font-size:13px; font-weight:500;")
+        name.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        h.addWidget(name, 1)
+        t = QLabel(f"{r['start'].strftime('%H:%M')}–{r['stop'].strftime('%H:%M')}")
+        t.setFont(mono_font(11, 500)); t.setStyleSheet(f"color:{Palette.TEXT_MUTED};")
+        h.addWidget(t)
+        h.addWidget(self._action(r))
+        return row
+
+    def _action(self, r: dict) -> QPushButton:
+        state, eid = r["state"], r["id"]
+        if state in ("on air", "onair"):
+            b = self._btn("Stop", Palette.CRASH, "#A82F2F")
+            b.clicked.connect(lambda _=False, i=eid: self.stop_requested.emit(i))
+        elif state == "armed":
+            b = self._btn("Unarm", Palette.ARMED, "#9C6113")
+            b.clicked.connect(lambda _=False, i=eid: self.stop_requested.emit(i))
+        else:
+            b = self._btn("Arm", Palette.ACCENT, Palette.ACCENT_INK)
+            if r.get("armable"):
+                b.clicked.connect(lambda _=False, i=eid: self.arm_requested.emit(i))
+            else:
+                b.setEnabled(False)
+        return b
+
+    @staticmethod
+    def _btn(text: str, bg: str, hover: str) -> QPushButton:
+        b = QPushButton(text); b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setStyleSheet(
+            f"QPushButton {{ min-width:64px; height:24px; padding:0 10px; border:none; border-radius:12px;"
+            f" background:{bg}; color:#fff; font-size:10.5px; font-weight:700; }}"
+            f"QPushButton:hover {{ background:{hover}; }}"
+            f"QPushButton:disabled {{ background:{Palette.IDLE}; }}")
+        return b
+
+
 # ── The tab ──────────────────────────────────────────────────────────────────
 
 class TimelineTab(QWidget):
@@ -551,10 +974,13 @@ class TimelineTab(QWidget):
         self.hub = hub
         self._store = ScheduleStore()
         self._plans = PlanStore()
-        self._marked: List[QDate] = []
         self._runs_by_host: Dict[str, List[m.SequenceRun]] = {}
         self._runs_pending = False
         self._runs_sig: object = None   # last-rendered active-run signature
+        # Two independent days: the calendar/compact preview (single-click) and the big
+        # timeline (double-click / defaults to today).
+        self._selected_day: date = date.today()
+        self._timeline_day: date = date.today()
         self._build()
         if self.hub is not None:
             self.hub.task_done.connect(self._on_task_done)
@@ -572,60 +998,100 @@ class TimelineTab(QWidget):
 
     def _build(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 12, 16, 12)
-        outer.setSpacing(10)
+        outer.setContentsMargins(20, 16, 20, 14)
+        outer.setSpacing(16)
 
-        body = QHBoxLayout()
-        body.setSpacing(14)
-
-        # Left: calendar + add.
-        left = QVBoxLayout()
-        left.setSpacing(8)
-        self._cal = QCalendarWidget()
-        self._cal.setGridVisible(True)
-        self._cal.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
-        self._cal.setFixedWidth(300)
-        self._cal.selectionChanged.connect(self._on_date_changed)
-        left.addWidget(self._cal)
-
-        legend = QLabel("Highlighted dates have plans scheduled.")
-        legend.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-        legend.setWordWrap(True)
-        left.addWidget(legend)
-
-        self._add_btn = QPushButton("Add plan…")
+        # ── top bar: title + Add plan ──
+        top = QHBoxLayout(); top.setSpacing(16)
+        tbox = QVBoxLayout(); tbox.setSpacing(3)
+        h1 = QLabel("Schedule")
+        h1.setStyleSheet(f"font-size:21px; font-weight:700; color:{Palette.TEXT};")
+        sub = QLabel("Single-click a day to preview it below; double-click to open its full "
+                     "timeline on the right. The timeline opens on today and holds a day until "
+                     "you open another.")
+        sub.setWordWrap(True)
+        sub.setStyleSheet(f"font-size:12.5px; color:{Palette.TEXT_MUTED};")
+        tbox.addWidget(h1); tbox.addWidget(sub)
+        top.addLayout(tbox, 1)
+        self._add_btn = QPushButton("＋  Add plan")
         self._add_btn.setObjectName("primary")
         self._add_btn.clicked.connect(self._on_add)
-        left.addWidget(self._add_btn)
-        left.addStretch(1)
-        body.addLayout(left)
+        abox = QVBoxLayout(); abox.addStretch(1); abox.addWidget(self._add_btn)
+        top.addLayout(abox)
+        outer.addLayout(top)
 
-        # Right: day header + scrollable day-planner.
-        right = QVBoxLayout()
-        right.setSpacing(6)
-        self._day_lbl = QLabel("")
-        self._day_lbl.setStyleSheet(f"font-size: 15px; font-weight: 600; color: {Palette.TEXT};")
-        right.addWidget(self._day_lbl)
+        # ── split: [calendar + compact list] | [big timeline] ──
+        split = QHBoxLayout(); split.setSpacing(20)
+
+        self._cal = _MonthCalendar()
+        self._cal.previewed.connect(self._on_preview)
+        self._cal.opened.connect(self._on_open)
+        self._compact = _CompactDayList()
+        self._compact.arm_requested.connect(self._on_arm)
+        self._compact.stop_requested.connect(self._on_stop)
+        left = QVBoxLayout(); left.setSpacing(16); left.setContentsMargins(0, 0, 0, 0)
+        left.addWidget(self._cal)
+        left.addWidget(self._compact, 1)
+        left_w = QWidget(); left_w.setFixedWidth(392); left_w.setLayout(left)
+        split.addWidget(left_w)
 
         self._planner = _DayPlanner()
         self._planner.block_activated.connect(self._on_block)
         self._planner.arm_requested.connect(self._on_arm)
         self._planner.stop_requested.connect(self._on_stop)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self._planner)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setStyleSheet(
-            f"QScrollArea {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER}; "
-            f"border-radius: 8px; }}")
-        right.addWidget(scroll, stretch=1)
+        split.addWidget(self._build_timeline_card(), 1)
+        outer.addLayout(split, 1)
 
+        # ── status line (arm/stop progress + totals) ──
         self._status = QLabel("")
-        self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-        right.addWidget(self._status)
-        body.addLayout(right, stretch=1)
+        self._status.setStyleSheet(f"font-size:11px; color:{Palette.TEXT_FAINT};")
+        outer.addWidget(self._status)
 
-        outer.addLayout(body)
+    def _build_timeline_card(self) -> QWidget:
+        """The right pane: a header naming the day on the timeline (with a Today badge /
+        Back-to-today) above the scrollable day-planner."""
+        card = QFrame(); card.setObjectName("tlCard")
+        card.setStyleSheet(f"#tlCard {{ background:{Palette.SURFACE}; "
+                           f"border:1px solid {Palette.BORDER}; border-radius:16px; }}")
+        cv = QVBoxLayout(card); cv.setContentsMargins(0, 0, 0, 0); cv.setSpacing(0)
+
+        head = QWidget()
+        hh = QHBoxLayout(head); hh.setContentsMargins(20, 16, 18, 14); hh.setSpacing(12)
+        hbox = QVBoxLayout(); hbox.setSpacing(3)
+        eb = QLabel("ON THE TIMELINE")
+        eb.setStyleSheet(f"font-size:10px; font-weight:700; letter-spacing:1px; color:{Palette.TEXT_FAINT};")
+        drow = QHBoxLayout(); drow.setSpacing(9)
+        self._tl_date = QLabel("—")
+        self._tl_date.setStyleSheet(f"font-size:19px; font-weight:600; color:{Palette.TEXT};")
+        self._tl_badge = QLabel("TODAY")
+        self._tl_badge.setStyleSheet(f"font-size:10px; font-weight:700; color:#fff; "
+                                     f"background:{Palette.ACCENT}; border-radius:8px; padding:2px 8px;")
+        drow.addWidget(self._tl_date); drow.addWidget(self._tl_badge); drow.addStretch(1)
+        self._tl_sub = QLabel("")
+        self._tl_sub.setStyleSheet(f"font-size:12.5px; color:{Palette.TEXT_MUTED};")
+        hbox.addWidget(eb); hbox.addLayout(drow); hbox.addWidget(self._tl_sub)
+        hh.addLayout(hbox, 1)
+        self._tl_back = QPushButton("Back to today")
+        self._tl_back.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tl_back.setStyleSheet(
+            f"QPushButton {{ height:30px; padding:0 13px; border:1px solid {Palette.BORDER};"
+            f" border-radius:9px; background:{Palette.SURFACE}; color:{Palette.ACCENT_INK};"
+            f" font-size:12px; font-weight:600; }}"
+            f"QPushButton:hover {{ background:{Palette.ACCENT_SOFT}; border-color:{Palette.ACCENT_SOFT}; }}")
+        self._tl_back.clicked.connect(self._go_timeline_today)
+        hh.addWidget(self._tl_back, 0, Qt.AlignmentFlag.AlignTop)
+        cv.addWidget(head)
+        sep = QFrame(); sep.setFixedHeight(1)
+        sep.setStyleSheet(f"background:{Palette.BORDER}; border:none;")
+        cv.addWidget(sep)
+
+        self._tl_scroll = QScrollArea(); self._tl_scroll.setWidgetResizable(True)
+        self._tl_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._tl_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._tl_scroll.setStyleSheet("QScrollArea{ background:transparent; border:none; }")
+        self._tl_scroll.setWidget(self._planner)
+        cv.addWidget(self._tl_scroll, 1)
+        return card
 
     # ── Shown / reload ─────────────────────────────────────────────────────────
 
@@ -635,13 +1101,20 @@ class TimelineTab(QWidget):
 
     def _tick(self) -> None:
         self._refresh_runs()
-        self._refresh_day()   # 'armable' + the now-line depend on the wall clock
+        self._refresh_state_views()   # 'armable' + the now-line depend on the wall clock
 
     def _reload(self) -> None:
         self._store.load()
         self._plans.load()
         self._refresh_calendar()
-        self._refresh_day()
+        self._refresh_compact()
+        self._refresh_planner(scroll=True)
+
+    def _refresh_state_views(self) -> None:
+        """Repaint the dot/action states everywhere without disturbing the timeline scroll."""
+        self._refresh_calendar()
+        self._refresh_compact()
+        self._refresh_planner(scroll=False)
 
     def _refresh_runs(self) -> None:
         if self.hub is None or self._runs_pending or len(self.hub.fleet) == 0:
@@ -650,8 +1123,7 @@ class TimelineTab(QWidget):
         self.hub.run_async("tl_runs", lambda: self.hub.fleet.list_runs_all())
 
     def _selected_date(self) -> date:
-        qd = self._cal.selectedDate()
-        return date(qd.year(), qd.month(), qd.day())
+        return self._selected_day
 
     def _plan_for(self, entry: m.ScheduledPlan) -> Optional[m.Plan]:
         """This slot's effective plan: its own edited copy if it has one, else the
@@ -667,59 +1139,95 @@ class TimelineTab(QWidget):
     # ── Calendar highlighting ──────────────────────────────────────────────────
 
     def _refresh_calendar(self) -> None:
-        default = QTextCharFormat()
-        for qd in self._marked:
-            self._cal.setDateTextFormat(qd, default)
-        self._marked = []
-
-        fmt = QTextCharFormat()
-        fmt.setBackground(QColor(Palette.ACCENT_SOFT))
-        fmt.setForeground(QColor(Palette.ACCENT))
-        f = fmt.font(); f.setBold(True); fmt.setFont(f)
-        seen: set = set()
+        """Recompute each day's plan states (for the dots) and push the today/selected/
+        timeline markers to the calendar."""
+        states: Dict[date, List[str]] = {}
         for entry in self._store.entries():
             s, e = _parse(entry.start), _parse(entry.stop)
             if s is None or e is None:
                 continue
+            st = self._entry_state(entry)
             d, last = s.date(), e.date()
             while d <= last:
-                key = (d.year, d.month, d.day)
-                if key not in seen:
-                    qd = QDate(d.year, d.month, d.day)
-                    self._cal.setDateTextFormat(qd, fmt)
-                    self._marked.append(qd)
-                    seen.add(key)
+                states.setdefault(d, []).append(st)
                 d += timedelta(days=1)
+        self._cal.set_states(states)
+        self._cal.set_today(date.today())
+        self._cal.set_selected(self._selected_day)
+        self._cal.set_timeline(self._timeline_day)
 
     # ── Day view ────────────────────────────────────────────────────────────────
 
-    def _refresh_day(self) -> None:
-        d = self._selected_date()
-        self._day_lbl.setText(d.strftime("%A, %d %B %Y"))
+    def _entries_on(self, d: date) -> List[dict]:
+        """Rows for the plans that touch day `d`, sorted by start."""
         day_start = datetime.combine(d, time(0, 0))
         day_end = day_start + timedelta(days=1)
         now = datetime.now()
-        blocks = []
+        rows = []
         for entry in self._store.entries():
             s, e = _parse(entry.start), _parse(entry.stop)
             if s is None or e is None or e <= day_start or s >= day_end:
                 continue
             name, desc = self._resolve(entry)
-            blocks.append({
+            rows.append({
                 "id": entry.id, "name": name, "desc": desc, "start": s, "stop": e,
                 "state": self._entry_state(entry),
                 "armable": self._plan_for(entry) is not None and now < s,
             })
+        rows.sort(key=lambda r: r["start"])
+        return rows
+
+    def _refresh_compact(self) -> None:
+        self._compact.set_day(self._selected_day, self._entries_on(self._selected_day))
+
+    def _refresh_planner(self, scroll: bool = False) -> None:
+        d = self._timeline_day
+        blocks = self._entries_on(d)
         self._planner.set_day(d, blocks)
 
+        is_today = (d == date.today())
+        self._tl_date.setText(f"{_WDAY_NAMES[d.weekday()]}, {d.day} {_MONTH_NAMES[d.month - 1]} {d.year}")
+        self._tl_badge.setVisible(is_today)
+        self._tl_back.setVisible(not is_today)
+        self._tl_sub.setText(
+            f"{len(blocks)} plan{'s' if len(blocks) != 1 else ''}" if blocks else "No plans scheduled")
         total = len(self._store.entries())
-        self._status.setText(
-            f"{len(blocks)} plan(s) on this day · {total} scheduled in total" if total
-            else "No plans scheduled yet. Click “Add plan…” to place one.")
+        self._status.setText(f"{total} plan(s) scheduled in total" if total
+                             else "No plans scheduled yet. Click “Add plan” to place one.")
         self._runs_sig = self._runs_signature()   # view now matches this run picture
 
-    def _on_date_changed(self) -> None:
-        self._refresh_day()
+        if scroll:
+            if is_today:
+                anchor = self._planner._to_y(datetime.now())
+            elif blocks:
+                anchor = min(self._planner._to_y(b["start"]) for b in blocks)
+            else:
+                anchor = self._planner._to_y(datetime.combine(d, time(8, 0)))
+            QTimer.singleShot(0, lambda a=anchor: self._tl_scroll.verticalScrollBar()
+                              .setValue(max(0, int(a) - 90)))
+
+    # ── Preview / open / today ───────────────────────────────────────────────────
+
+    def _on_preview(self, d: date) -> None:
+        """Single click: move only the calendar selection + compact preview."""
+        self._selected_day = d
+        self._cal.set_selected(d)
+        self._refresh_compact()
+
+    def _on_open(self, d: date) -> None:
+        """Double click: load the day onto the big timeline (and preview it too)."""
+        self._selected_day = d
+        self._timeline_day = d
+        self._cal.set_selected(d)
+        self._cal.set_timeline(d)
+        self._refresh_compact()
+        self._refresh_planner(scroll=True)
+
+    def _go_timeline_today(self) -> None:
+        """Back-to-today: reset only the big timeline (the calendar keeps its day)."""
+        self._timeline_day = date.today()
+        self._cal.set_timeline(self._timeline_day)
+        self._refresh_planner(scroll=True)
 
     # ── Run-state matching ──────────────────────────────────────────────────────
 
@@ -796,9 +1304,14 @@ class TimelineTab(QWidget):
             self.hub.sync_state_to_units()
 
     def _jump_to(self, entry: m.ScheduledPlan) -> None:
+        """After an add/edit, focus the plan's day on the calendar, compact list and the
+        big timeline (the subsequent _reload repaints them)."""
         s = _parse(entry.start)
         if s is not None:
-            self._cal.setSelectedDate(QDate(s.year, s.month, s.day))
+            d = s.date()
+            self._selected_day = d
+            self._timeline_day = d
+            self._cal.set_month(d.year, d.month)
 
     # ── Arm / stop ──────────────────────────────────────────────────────────────
 
@@ -889,7 +1402,7 @@ class TimelineTab(QWidget):
         for host, val in runs.items():
             self._runs_by_host[host] = val if isinstance(val, list) else []
         if self._runs_signature() != self._runs_sig and self.isVisible():
-            self._refresh_day()   # recomputes and stores the signature
+            self._refresh_state_views()   # recomputes and stores the signature
 
     def _on_task_done(self, label: str, result) -> None:
         if label == "tl_runs":
@@ -899,7 +1412,7 @@ class TimelineTab(QWidget):
                 for host, val in result.items():
                     by_host[host] = val if isinstance(val, list) else []
             self._runs_by_host = by_host
-            self._refresh_day()
+            self._refresh_state_views()
             return
         if ":" not in label or not label.startswith("tl_"):
             return
