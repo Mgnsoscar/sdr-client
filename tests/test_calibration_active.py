@@ -225,6 +225,27 @@ def test_active_inline_table_edit_updates_the_row():
     assert any(abs(v[1] + 5.0) < 1e-9 for v in row["baseline_table"]), row["baseline_table"]
 
 
+def test_table_baseline_then_emptied_does_not_crash():
+    # Regression (crash: "click a cell with a value and press Del"). Switching the baseline
+    # Constant→Table used to delete the persistent row["delta"] with the old constant wrapper
+    # (the table branch never re-placed it). Emptying the table then makes _read_planes fall
+    # back to row["delta"].text() — a deleted QLineEdit — which aborts PyQt6 inside the cell's
+    # change slot. row["delta"] must now survive the switch (kept, hidden, in table mode).
+    from PyQt6.QtWidgets import QComboBox, QTableWidget
+    p = CalibrationPanel("u", FakeHub())
+    p._set_doc(_doc(_control()))                       # CONSTANT baseline (delta_db 0.0)
+    p._select_plane("atten_out")                       # constant editor places row["delta"]
+    kind = next(cb for cb in p.findChildren(QComboBox)
+                if cb.count() >= 2 and cb.itemData(0) == "constant" and cb.itemData(1) == "table")
+    kind.setCurrentIndex(1)                            # Constant → Table (seeds a 1-row table)
+    _flush_deletes()                                   # destroy the old wrapper (would kill row["delta"])
+    base = next(t for t in p.findChildren(QTableWidget) if t.columnCount() == 2)
+    base.clear_rows()                                  # empty it → _read_planes falls back to row["delta"]
+    _flush_deletes()
+    plane = p._read_form(strict=False)["chain"]["planes"]["atten_out"]
+    assert "delta_db" in plane                         # read the constant fallback without crashing
+
+
 def test_task_and_param_pickers_read_from_fetched_data():
     p = CalibrationPanel("u", FakeHub())
     p._tasks_yaml = (

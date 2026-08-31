@@ -2448,22 +2448,26 @@ class CalibrationPanel(QWidget):
             self._render_detail()
         kind.currentIndexChanged.connect(_base_kind_changed)
 
-        if not has_tbl:
-            # row["delta"] is a PERSISTENT model widget (created once in _make_plane_row and
-            # read by _read_planes). Nest it inside a WRAPPER widget, never a bare sub-layout:
-            # _clear_layout recurses into sub-layouts and would deleteLater() the model widget
-            # on a direct re-render (_handle_taskparams fires one after a task's params arrive),
-            # leaving the row holding a deleted QLineEdit that crashes the next form read. A
-            # wrapper widget is not recursed into, so a re-render only reparents the widget into
-            # the new wrapper — exactly how _stage_advanced keeps row["name"] alive.
-            holder = QWidget()
-            dr = QHBoxLayout(holder); dr.setContentsMargins(0, 0, 0, 0)
-            dl = QLabel("Δ dB (at 0 applied)")
-            dl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
-            row["delta"].setFixedWidth(90)
-            dr.addWidget(dl); dr.addWidget(row["delta"]); dr.addStretch(1)
-            self._detail_body.addWidget(holder)
-        else:
+        # row["delta"] is a PERSISTENT model widget (created once in _make_plane_row) that
+        # _read_planes reads for the constant baseline AND for the empty-table fallback. Place
+        # it on EVERY render — even in table mode, where it's hidden — inside a WRAPPER widget:
+        #   • _clear_layout recurses into bare sub-layouts and would deleteLater() a model widget
+        #     placed directly in one (a direct re-render fires e.g. from _handle_taskparams);
+        #     a wrapper widget is not recursed into, so a re-render just reparents it (as
+        #     _stage_advanced does for row["name"]).
+        #   • If table mode SKIPPED placing it, a constant→table switch would delete it with its
+        #     old wrapper, and then emptying the table (Del) would read a dead QLineEdit in
+        #     _read_planes and abort. Always re-homing it keeps it alive regardless of the kind.
+        holder = QWidget()
+        dr = QHBoxLayout(holder); dr.setContentsMargins(0, 0, 0, 0)
+        dl = QLabel("Δ dB (at 0 applied)")
+        dl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+        row["delta"].setFixedWidth(90)
+        dr.addWidget(dl); dr.addWidget(row["delta"]); dr.addStretch(1)
+        holder.setVisible(not has_tbl)                # shown for a constant baseline, else hidden
+        self._detail_body.addWidget(holder)
+
+        if has_tbl:
             hint = QLabel("This component's insertion loss vs frequency (signed dB, negative = "
                           "loss). Folded into the range at each signal's frequency; the "
                           "programmable range below adds on top.")
