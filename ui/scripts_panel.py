@@ -1,12 +1,21 @@
 """
-ScriptsPanel — the Scripts sub-tab of the unit detail view.
+ScriptsPanel — the Scripts sub-tab of the Library (and unit detail).
 
-Lists the .py scripts in the unit's scripts directory, shows a selected script in
-an EDITABLE viewer (edit + Save writes it back via upload, which overwrites), and
-lets you upload one or many scripts, download one, download all, or delete.
+A light, IDE-style editor for the unit's / library's .py scripts:
 
-All network calls go through the DataHub's run_async (off the GUI thread); their
-results arrive on the shared task_done signal, filtered here to this host + ops.
+  • a file list (double-click, or right-click → Open, to open a script; single-click
+    just selects it; right-click for actions),
+  • editor tabs — several scripts open at once, each with a close ✕ and an unsaved
+    dot; closing one with unsaved edits prompts to save,
+  • a syntax-highlighted code editor (ui/code_editor) with a line-number gutter,
+  • the library's per-unit-type scope ("Applies to") for the active script,
+  • Upload one/many, Download one/all, Delete, and Save (writes the active tab back).
+
+Leaving the Scripts sub-tab, or changing the unit-type library, with unsaved edits
+prompts first (see `can_leave`, called by LibraryTab).
+
+All network calls go through DataHub.run_async (off the GUI thread); results arrive
+on the shared task_done signal, filtered here to this host + ops.
 
 Operation labels (parsed back in _on_task_done):
     scripts_list:<host>
@@ -20,20 +29,22 @@ Operation labels (parsed back in _on_task_done):
 from __future__ import annotations
 
 import os
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QFontMetricsF
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMenu, QMessageBox, QPushButton, QSplitter, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from api import models as m
 from api.fleet import LIBRARY_HOST
 from config import DEFAULT_UNIT_TYPE, UNIT_TYPE_LABELS
+from .code_editor import CodeEditor
 from .qt_adapter import DataHub
-from .scope_selector import ScopeSelector, confirm_delete
+from .scope_selector import ScopeSelector, confirm_delete, scope_label
 from .theme import Palette
 from .widgets import natural_key
 
@@ -70,6 +81,47 @@ def _download_many(client, dest_dir: str) -> List[Result]:
     return out
 
 
+# ── editor tab strip ─────────────────────────────────────────────────────────────
+
+class _EditorTab(QFrame):
+    """One open-file tab: filename, an unsaved dot, and an always-present close ✕."""
+    activated = pyqtSignal(str)
+    closed = pyqtSignal(str)
+
+    def __init__(self, name: str, active: bool, dirty: bool, parent=None):
+        super().__init__(parent)
+        self._name = name
+        self.setObjectName("etab")
+        self.setProperty("active", active)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(11, 0, 7, 0)
+        row.setSpacing(7)
+        self._label = QLabel(name)
+        self._label.setObjectName("etabname")
+        f = QFont("IBM Plex Mono"); f.setStyleHint(QFont.StyleHint.Monospace); f.setPointSize(9)
+        self._label.setFont(f)
+        row.addWidget(self._label)
+        self._dot = QLabel("●")
+        self._dot.setObjectName("etabdot")
+        self._dot.setVisible(dirty)
+        row.addWidget(self._dot)
+        self._close = QToolButton()
+        self._close.setObjectName("etabx")
+        self._close.setText("✕")
+        self._close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._close.clicked.connect(lambda: self.closed.emit(self._name))
+        row.addWidget(self._close)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_dirty(self, dirty: bool) -> None:
+        self._dot.setVisible(dirty)
+
+    def mousePressEvent(self, e):  # noqa: N802
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.activated.emit(self._name)
+        super().mousePressEvent(e)
+
+
 class ScriptsPanel(QWidget):
     def __init__(self, hostname: str, hub: DataHub, parent=None):
         super().__init__(parent)
@@ -78,108 +130,159 @@ class ScriptsPanel(QWidget):
         self._active_type = DEFAULT_UNIT_TYPE   # library view: set by the unit-type selector
         self._upload_new: set = set()           # names uploaded that didn't exist before
         self._all_names: List[str] = []         # last listing, re-filtered as you search
-        self._selected: Optional[str] = None
+        self._selected: Optional[str] = None    # file highlighted in the list (single-click)
         self._pending_download: Optional[str] = None
-        self._dirty = False           # unsaved edits in the viewer?
-        self._loading = False         # suppress dirty while setting text programmatically
-        self._clean_text = ""         # last saved/loaded content (dirty = differs from this)
-        self._pending_save_text = ""  # content sent to the last save, applied on success
+
+        # ── open editor tabs (several scripts open at once) ──
+        self._tabs: List[str] = []                     # open file names, in tab order
+        self._active: Optional[str] = None             # file shown in the editor
+        self._clean: Dict[str, str] = {}               # last saved/loaded content per open file
+        self._buf: Dict[str, str] = {}                 # current editor content per open file
+        self._loaded: Dict[str, bool] = {}             # content fetched for this open file?
+        self._pending_save: Dict[str, str] = {}        # text sent to the in-flight save
+        self._tab_widgets: Dict[str, _EditorTab] = {}
+        self._loading_editor = False                   # suppress dirty while swapping content
+
         self._build()
         self.hub.task_done.connect(self._on_task_done)
 
+    # ── build ────────────────────────────────────────────────────────────────────
     def _build(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 12, 16, 12)
+        outer.setContentsMargins(14, 12, 14, 10)
         outer.setSpacing(8)
 
-        row = QHBoxLayout()
-        row.setSpacing(8)
-
-        self._refresh_btn = QPushButton("Refresh")
-        self._refresh_btn.clicked.connect(self._refresh)
-        row.addWidget(self._refresh_btn)
-
-        self._upload_btn = QPushButton("Upload…")
-        self._upload_btn.setObjectName("primary")
-        self._upload_btn.clicked.connect(self._on_upload)
-        row.addWidget(self._upload_btn)
-
-        self._save_btn = QPushButton("Save")
-        self._save_btn.clicked.connect(self._on_save)
-        self._save_btn.setEnabled(False)
-        row.addWidget(self._save_btn)
-
-        self._download_btn = QPushButton("Download…")
-        self._download_btn.clicked.connect(self._on_download)
-        self._download_btn.setEnabled(False)
-        row.addWidget(self._download_btn)
-
-        self._download_all_btn = QPushButton("Download all…")
-        self._download_all_btn.clicked.connect(self._on_download_all)
-        row.addWidget(self._download_all_btn)
-
-        self._delete_btn = QPushButton("Delete")
-        self._delete_btn.clicked.connect(self._on_delete)
-        self._delete_btn.setEnabled(False)
-        row.addWidget(self._delete_btn)
-
-        # Library-only: the selected script's unit-type scope, applied immediately.
-        self._scope: Optional[ScopeSelector] = None
-        if self.hostname == LIBRARY_HOST:
-            row.addSpacing(8)
-            row.addWidget(QLabel("Applies to"))
-            self._scope = ScopeSelector()
-            self._scope.setEnabled(False)
-            self._scope.currentIndexChanged.connect(self._on_scope_changed)
-            row.addWidget(self._scope)
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.addWidget(self._build_file_panel())
+        split.addWidget(self._build_editor_panel())
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setSizes([250, 560])
+        outer.addWidget(split, stretch=1)
 
         self._status = QLabel("")
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
-        row.addWidget(self._status)
-        row.addStretch(1)
+        outer.addWidget(self._status)
+
+        self.setStyleSheet(self._QSS)
+
+    def _build_file_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("filepanel")
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(12, 10, 8, 8)
+        eyebrow = QLabel("SCRIPTS")
+        eyebrow.setObjectName("eyebrow")
+        head.addWidget(eyebrow)
+        self._count = QLabel("")
+        self._count.setObjectName("count")
+        head.addWidget(self._count)
+        head.addStretch(1)
+        self._upload_btn = QToolButton()
+        self._upload_btn.setText("⬆")
+        self._upload_btn.setObjectName("headbtn")
+        self._upload_btn.setToolTip("Upload script(s)…")
+        self._upload_btn.clicked.connect(self._on_upload)
+        head.addWidget(self._upload_btn)
+        self._refresh_btn = QToolButton()
+        self._refresh_btn.setText("⟳")
+        self._refresh_btn.setObjectName("headbtn")
+        self._refresh_btn.setToolTip("Refresh")
+        self._refresh_btn.clicked.connect(self._refresh)
+        head.addWidget(self._refresh_btn)
+        v.addLayout(head)
+
         self._search = QLineEdit()
+        self._search.setObjectName("search")
         self._search.setPlaceholderText("Search scripts…")
         self._search.setClearButtonEnabled(True)
-        self._search.setFixedWidth(200)
         self._search.textChanged.connect(lambda _=0: self._populate(self._all_names))
-        row.addWidget(self._search)
-        outer.addLayout(row)
-
-        split = QSplitter(Qt.Orientation.Horizontal)
+        srow = QHBoxLayout(); srow.setContentsMargins(12, 0, 12, 8); srow.addWidget(self._search)
+        v.addLayout(srow)
 
         self._list = QListWidget()
-        self._list.setMinimumWidth(200)
-        self._list.currentItemChanged.connect(self._on_select)
-        self._list.setStyleSheet(
-            f"QListWidget {{ background: {Palette.SURFACE}; "
-            f"border: 1px solid {Palette.BORDER}; border-radius: 8px; padding: 4px; }}"
-        )
-        split.addWidget(self._list)
+        self._list.setObjectName("filelist")
+        self._list.setFrameShape(QFrame.Shape.NoFrame)
+        self._list.currentItemChanged.connect(self._on_list_select)
+        self._list.itemDoubleClicked.connect(self._on_list_open)   # open only on double-click
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._list_context_menu)
+        v.addWidget(self._list, stretch=1)
 
-        self._view = QPlainTextEdit()
-        self._view.setReadOnly(False)          # editable — Save writes it back
-        self._view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self._view.textChanged.connect(self._on_text_changed)
-        mono = QFont("Consolas")
-        mono.setStyleHint(QFont.StyleHint.Monospace)
-        mono.setPointSize(10)
-        self._view.setFont(mono)
-        # Render a Tab as four characters wide (Qt's default is a fixed 80px,
-        # which looks far wider than four spaces in a monospace font).
-        self._view.setTabStopDistance(QFontMetricsF(mono).horizontalAdvance(" ") * 4)
-        self._view.setPlaceholderText("Select a script to view or edit its contents.")
-        self._view.setStyleSheet(
-            f"QPlainTextEdit {{ background: #1E2530; color: #D6DCE5; "
-            f"border: 1px solid {Palette.BORDER}; border-radius: 8px; padding: 8px; }}"
-        )
-        split.addWidget(self._view)
-        split.setStretchFactor(0, 0)
-        split.setStretchFactor(1, 1)
-        split.setSizes([220, 520])
-        outer.addWidget(split, stretch=1)
+        panel.setMinimumWidth(210)
+        return panel
 
-    # ── Shown / refresh ──────────────────────────────────────────────────────
+    def _build_editor_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("editorpanel")
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
 
+        # tab strip + actions
+        tabrow = QHBoxLayout()
+        tabrow.setContentsMargins(0, 0, 6, 0)
+        tabrow.setSpacing(0)
+        self._tabbar = QWidget()
+        self._tabbar.setObjectName("tabbar")
+        self._tabbar_layout = QHBoxLayout(self._tabbar)
+        self._tabbar_layout.setContentsMargins(0, 0, 0, 0)
+        self._tabbar_layout.setSpacing(0)
+        self._tabbar_layout.addStretch(1)
+        tabrow.addWidget(self._tabbar, stretch=1)
+
+        self._save_btn = QPushButton("Save")
+        self._save_btn.setObjectName("savebtn")
+        self._save_btn.clicked.connect(self._on_save)
+        self._save_btn.setEnabled(False)
+        tabrow.addWidget(self._save_btn)
+        self._download_btn = QToolButton()
+        self._download_btn.setText("⬇"); self._download_btn.setObjectName("actbtn")
+        self._download_btn.setToolTip("Download the active script…")
+        self._download_btn.clicked.connect(lambda: self._download(self._active))
+        tabrow.addWidget(self._download_btn)
+        self._delete_btn = QToolButton()
+        self._delete_btn.setText("🗑"); self._delete_btn.setObjectName("actbtn")
+        self._delete_btn.setToolTip("Delete the active script")
+        self._delete_btn.clicked.connect(lambda: self._delete(self._active))
+        tabrow.addWidget(self._delete_btn)
+        v.addWidget(self._wrap_row(tabrow, "tabstrip"))
+
+        # scope row (library mode only): which unit types receive the active script
+        self._scope: Optional[ScopeSelector] = None
+        if self.hostname == LIBRARY_HOST:
+            scoperow = QHBoxLayout()
+            scoperow.setContentsMargins(12, 6, 12, 6)
+            self._crumb = QLabel("")
+            self._crumb.setObjectName("crumb")
+            scoperow.addWidget(self._crumb)
+            scoperow.addStretch(1)
+            lbl = QLabel("Applies to")
+            lbl.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+            scoperow.addWidget(lbl)
+            self._scope = ScopeSelector()
+            self._scope.setEnabled(False)
+            self._scope.currentIndexChanged.connect(self._on_scope_changed)
+            scoperow.addWidget(self._scope)
+            v.addWidget(self._wrap_row(scoperow, "scoperow"))
+
+        self._editor = CodeEditor()
+        self._editor.setPlaceholderText("Double-click a script to open it.")
+        self._editor.textChanged.connect(self._on_editor_changed)
+        v.addWidget(self._editor, stretch=1)
+
+        self._set_actions_enabled(False)
+        return panel
+
+    def _wrap_row(self, layout, objname: str) -> QWidget:
+        w = QFrame(); w.setObjectName(objname); w.setLayout(layout)
+        return w
+
+    # ── shown / refresh ──────────────────────────────────────────────────────────
     def on_shown(self) -> None:
         self._refresh()
 
@@ -195,107 +298,236 @@ class ScriptsPanel(QWidget):
             return []
 
     def _refresh(self) -> None:
-        if not self._confirm_discard():
-            return
         self._set_status("loading…")
         self.hub.run_async(
             f"scripts_list:{self.hostname}",
             lambda: self.hub.fleet.get(self.hostname).list_scripts(),
         )
 
-    # ── Selection / view / edit ──────────────────────────────────────────────
+    # ── list selection / open ────────────────────────────────────────────────────
+    def _on_list_select(self, cur: Optional[QListWidgetItem], _prev=None) -> None:
+        self._selected = cur.text() if cur is not None else None
 
-    def _on_select(self, cur: Optional[QListWidgetItem],
-                   prev: Optional[QListWidgetItem] = None) -> None:
-        if self._dirty and prev is not None and cur is not prev:
-            if not self._confirm_discard():
-                self._list.blockSignals(True)
-                self._list.setCurrentItem(prev)
-                self._list.blockSignals(False)
-                return
-        self._dirty = False
-        has = cur is not None
-        self._delete_btn.setEnabled(has)
-        self._download_btn.setEnabled(has)
-        self._save_btn.setEnabled(has)
-        if not has:
-            self._selected = None
-            if self._scope is not None:
-                self._scope.setEnabled(False)
+    def _on_list_open(self, item: Optional[QListWidgetItem]) -> None:
+        if item is not None:
+            self._open_tab(item.text())
+
+    def _list_context_menu(self, pos) -> None:
+        item = self._list.itemAt(pos)
+        if item is None:                       # empty area — library-wide actions
+            menu = QMenu(self)
+            menu.addAction("Upload script(s)…", self._on_upload)
+            menu.addAction("Download all…", self._on_download_all)
+            menu.addAction("Refresh", self._refresh)
+            menu.exec(self._list.mapToGlobal(pos))
             return
-        name = cur.text()
+        name = item.text()
         self._selected = name
-        self._loading = True
-        self._view.setPlainText(f"# loading {name} …")
-        self._loading = False
+        menu = QMenu(self)
+        menu.addAction("Open", lambda: self._open_tab(name))
+        menu.addAction("Download…", lambda: self._download(name))
+        if self._scope is not None:
+            sub = menu.addMenu(f"Applies to: {scope_label(self._types_for(name))}")
+            from config import UNIT_TYPES
+            sub.addAction("Shared (all units)", lambda: self._set_scope(name, []))
+            for t in UNIT_TYPES:
+                sub.addAction(f"{UNIT_TYPE_LABELS.get(t, t)} only",
+                              lambda _c=False, ut=t: self._set_scope(name, [ut]))
+        menu.addSeparator()
+        menu.addAction("Delete", lambda: self._delete(name))
+        menu.exec(self._list.mapToGlobal(pos))
+
+    # ── tabs ─────────────────────────────────────────────────────────────────────
+    def _open_tab(self, name: str) -> None:
+        if name not in self._tabs:
+            self._tabs.append(name)
+            self._buf.setdefault(name, "")
+            self._clean.setdefault(name, "")
+            self._loaded[name] = False
+        self._active = name
+        self._render_tabs()
+        if not self._loaded.get(name):
+            self._loading_editor = True
+            self._editor.setPlainText(f"# loading {name} …")
+            self._loading_editor = False
+            self.hub.run_async(
+                f"scripts_get:{self.hostname}:{name}",
+                lambda: self.hub.fleet.get(self.hostname).get_script(name),
+            )
+        else:
+            self._load_editor(name)
         self._load_scope(name)
-        self.hub.run_async(
-            f"scripts_get:{self.hostname}:{name}",
-            lambda: self.hub.fleet.get(self.hostname).get_script(name),
-        )
+        self._set_actions_enabled(True)
 
-    def _on_text_changed(self) -> None:
-        if self._loading:
+    def _activate_tab(self, name: str) -> None:
+        if name == self._active or name not in self._tabs:
             return
-        dirty = self._view.toPlainText() != self._clean_text
-        if dirty == self._dirty:
-            return
-        self._dirty = dirty
-        self._set_status("unsaved changes" if dirty else (self._selected or ""), warn=dirty)
+        self._active = name
+        self._render_tabs()
+        if self._loaded.get(name):
+            self._load_editor(name)
+        else:
+            self._loading_editor = True
+            self._editor.setPlainText(f"# loading {name} …")
+            self._loading_editor = False
+        self._load_scope(name)
 
+    def _close_tab(self, name: str) -> None:
+        if self._is_dirty(name) and not self._confirm_save([name], "close"):
+            return
+        i = self._tabs.index(name) if name in self._tabs else -1
+        for d in (self._buf, self._clean, self._loaded, self._pending_save):
+            d.pop(name, None)
+        if i >= 0:
+            self._tabs.pop(i)
+        if self._active == name:
+            if self._tabs:
+                self._active = self._tabs[max(0, i - 1)]
+                self._render_tabs()
+                self._load_editor(self._active)
+                self._load_scope(self._active)
+            else:
+                self._active = None
+                self._loading_editor = True
+                self._editor.clear()
+                self._loading_editor = False
+                self._render_tabs()
+                self._set_actions_enabled(False)
+        else:
+            self._render_tabs()
+
+    def _render_tabs(self) -> None:
+        # rebuild the strip (cheap — a handful of tabs)
+        while self._tabbar_layout.count() > 1:      # keep the trailing stretch
+            item = self._tabbar_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._tab_widgets = {}
+        for name in self._tabs:
+            tab = _EditorTab(name, name == self._active, self._is_dirty(name))
+            tab.activated.connect(self._activate_tab)
+            tab.closed.connect(self._close_tab)
+            self._tab_widgets[name] = tab
+            self._tabbar_layout.insertWidget(self._tabbar_layout.count() - 1, tab)
+        self._refresh_save_button()
+
+    def _is_dirty(self, name: str) -> bool:
+        return bool(self._loaded.get(name)) and self._buf.get(name, "") != self._clean.get(name, "")
+
+    def _load_editor(self, name: str) -> None:
+        self._loading_editor = True
+        self._editor.setPlainText(self._buf.get(name, ""))
+        self._loading_editor = False
+        self._refresh_save_button()
+
+    def _on_editor_changed(self) -> None:
+        if self._loading_editor or self._active is None:
+            return
+        self._buf[self._active] = self._editor.toPlainText()
+        tab = self._tab_widgets.get(self._active)
+        if tab is not None:
+            tab.set_dirty(self._is_dirty(self._active))
+        self._refresh_save_button()
+
+    def _refresh_save_button(self) -> None:
+        dirty = self._active is not None and self._is_dirty(self._active)
+        self._save_btn.setEnabled(dirty)
+        self._save_btn.setText("Save" if dirty else "Saved")
+
+    def _set_actions_enabled(self, on: bool) -> None:
+        self._download_btn.setEnabled(on)
+        self._delete_btn.setEnabled(on)
+
+    # ── save ─────────────────────────────────────────────────────────────────────
     def _on_save(self) -> None:
-        name = self._selected
-        if not name:
+        name = self._active
+        if not name or not self._is_dirty(name):
             return
-        self._pending_save_text = self._view.toPlainText()
-        content = self._pending_save_text.encode("utf-8")
+        text = self._buf.get(name, "")
+        self._pending_save[name] = text
         self._set_status(f"saving {name}…")
         self.hub.run_async(
             f"scripts_save:{self.hostname}:{name}",
-            lambda: self.hub.fleet.get(self.hostname).upload_script(name, content),
+            lambda: self.hub.fleet.get(self.hostname).upload_script(name, text.encode("utf-8")),
         )
 
-    # ── Unit-type scope (library mode only) ──────────────────────────────────
-
+    # ── scope (library mode) ─────────────────────────────────────────────────────
     def _load_scope(self, name: str) -> None:
         if self._scope is None:
             return
-        try:
-            types = self.hub.fleet.get(self.hostname).get_script_types(name)
-        except Exception:  # noqa: BLE001
-            types = []
+        if hasattr(self, "_crumb"):
+            self._crumb.setText(f"library  ›  {UNIT_TYPE_LABELS.get(self._active_type, self._active_type)}  ›  {name or ''}")
+        types = self._types_for(name) if name else []
         self._scope.blockSignals(True)
         self._scope.set_from_types(types)
-        self._scope.setEnabled(True)
+        self._scope.setEnabled(name is not None)
         self._scope.blockSignals(False)
 
     def _on_scope_changed(self, *_) -> None:
-        if self._scope is None or not self._selected:
+        if self._scope is None or not self._active:
             return
+        self._set_scope(self._active, self._scope.types())
+
+    def _set_scope(self, name: str, types: list) -> None:
         try:
-            self.hub.fleet.get(self.hostname).set_script_types(
-                self._selected, self._scope.types())
+            self.hub.fleet.get(self.hostname).set_script_types(name, list(types))
         except Exception as exc:  # noqa: BLE001
             self._set_status(f"could not set scope: {exc}", error=True)
+            return
+        if name == self._active and self._scope is not None:
+            self._scope.blockSignals(True)
+            self._scope.set_from_types(types)
+            self._scope.blockSignals(False)
 
-    def _confirm_discard(self) -> bool:
-        """True if it's OK to discard the current unsaved edits."""
-        if not self._dirty:
+    # ── leaving guard (called by LibraryTab before switching sub-tab / type) ──────
+    def can_leave(self) -> bool:
+        """True if it's OK to leave the Scripts view (no unsaved edits, or the user
+        chose to save / discard). Prompts once for all dirty tabs."""
+        dirty = [n for n in self._tabs if self._is_dirty(n)]
+        if not dirty:
             return True
-        resp = QMessageBox.question(
-            self, "Unsaved changes",
-            f"Discard unsaved changes to '{self._selected}'?",
-            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        return resp == QMessageBox.StandardButton.Discard
+        return self._confirm_save(dirty, "leave")
 
-    # ── Upload / download / delete ───────────────────────────────────────────
+    def _confirm_save(self, names: List[str], why: str) -> bool:
+        """Save / Don't save / Cancel for `names`. Returns True to proceed."""
+        listing = ", ".join(names) if len(names) <= 3 else f"{len(names)} scripts"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Unsaved changes")
+        box.setText(f"{listing} {'has' if len(names) == 1 else 'have'} unsaved changes.")
+        box.setInformativeText("Do you want to save them before continuing?")
+        save = box.addButton("Save", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Don't save", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(save)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is cancel:
+            return False
+        if clicked is save:
+            for n in names:
+                text = self._buf.get(n, "")
+                self._pending_save[n] = text
+                self.hub.run_async(
+                    f"scripts_save:{self.hostname}:{n}",
+                    lambda nn=n, tt=text: self.hub.fleet.get(self.hostname).upload_script(
+                        nn, tt.encode("utf-8")))
+        else:  # Don't save — drop the edits (revert to last clean)
+            for n in names:
+                self._buf[n] = self._clean.get(n, "")
+                if n == self._active:
+                    self._load_editor(n)
+                tab = self._tab_widgets.get(n)
+                if tab is not None:
+                    tab.set_dirty(False)
+        self._refresh_save_button()
+        return True
 
+    # ── upload / download / delete ───────────────────────────────────────────────
     def _on_upload(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Upload script(s)", "", "Python scripts (*.py)"
-        )
+            self, "Upload script(s)", "", "Python scripts (*.py)")
         if not paths:
             return
         files: List[Tuple[str, bytes]] = []
@@ -307,8 +539,6 @@ class ScriptsPanel(QWidget):
                 self._set_status(f"could not read {os.path.basename(p)}: {exc}", error=True)
                 return
         client = self.hub.fleet.get(self.hostname)
-        # Remember which of these are NEW, so we can scope them to the active unit
-        # type after upload (an overwrite of an existing script keeps its scope).
         if self._scope is not None:
             try:
                 existing = set(client.list_scripts())
@@ -318,13 +548,11 @@ class ScriptsPanel(QWidget):
         self._set_status(f"uploading {len(files)} file(s)…")
         self.hub.run_async(f"scripts_upload:{self.hostname}", lambda: _upload_many(client, files))
 
-    def _on_download(self) -> None:
-        name = self._selected
+    def _download(self, name: Optional[str]) -> None:
         if not name:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Download script", name, "Python scripts (*.py)"
-        )
+            self, "Download script", name, "Python scripts (*.py)")
         if not path:
             return
         self._pending_download = path
@@ -343,12 +571,9 @@ class ScriptsPanel(QWidget):
         self.hub.run_async(f"scripts_download_all:{self.hostname}",
                            lambda: _download_many(client, dest))
 
-    def _on_delete(self) -> None:
-        name = self._selected
+    def _delete(self, name: Optional[str]) -> None:
         if not name:
             return
-        # Library (per-type view): a shared script can be removed from just this type;
-        # otherwise a plain confirm.
         if self._scope is not None:
             action = confirm_delete(self, "script", name, self._types_for(name),
                                     self._active_type, self._unshare_script)
@@ -372,11 +597,9 @@ class ScriptsPanel(QWidget):
         )
 
     def _unshare_script(self, name: str, new_types: list) -> None:
-        """Re-scope a shared script off the active type (keep it on the others)."""
         self.hub.fleet.get(self.hostname).set_script_types(name, list(new_types))
 
-    # ── Result routing ───────────────────────────────────────────────────────
-
+    # ── result routing ───────────────────────────────────────────────────────────
     def _on_task_done(self, label: str, result) -> None:
         if not label.startswith("scripts_"):
             return
@@ -393,20 +616,27 @@ class ScriptsPanel(QWidget):
             self._populate(result if isinstance(result, list) else [])
         elif op == "scripts_get":
             name = ":".join(parts[2:])
-            if name == self._selected:
+            if name in self._tabs:
                 content = result if isinstance(result, str) else str(result)
-                self._clean_text = content
-                self._loading = True
-                self._view.setPlainText(content)
-                self._loading = False
-                self._dirty = False
+                self._clean[name] = content
+                self._buf[name] = content
+                self._loaded[name] = True
+                if name == self._active:
+                    self._load_editor(name)
+                tab = self._tab_widgets.get(name)
+                if tab is not None:
+                    tab.set_dirty(False)
                 self._set_status(name)
         elif op == "scripts_save":
             name = ":".join(parts[2:])
-            self._clean_text = self._pending_save_text
-            self._dirty = self._view.toPlainText() != self._clean_text
-            self._set_status(f"saved {name}" if not self._dirty else "unsaved changes",
-                             warn=self._dirty)
+            if name in self._pending_save:
+                self._clean[name] = self._pending_save.pop(name)
+            if name == self._active:
+                self._refresh_save_button()
+            tab = self._tab_widgets.get(name)
+            if tab is not None:
+                tab.set_dirty(self._is_dirty(name))
+            self._set_status(f"saved {name}")
         elif op == "scripts_download":
             target = self._pending_download
             self._pending_download = None
@@ -424,17 +654,23 @@ class ScriptsPanel(QWidget):
             self._report("Download all", result)
         elif op == "scripts_delete":
             deleted = result.get("deleted", "") if isinstance(result, dict) else ""
+            # close its tab if open
+            for n in list(self._tabs):
+                if n == deleted or (not deleted and n == self._selected):
+                    for d in (self._buf, self._clean, self._loaded, self._pending_save):
+                        d.pop(n, None)
+                    self._tabs.remove(n)
+                    if self._active == n:
+                        self._active = self._tabs[-1] if self._tabs else None
+            if self._active:
+                self._load_editor(self._active)
+            else:
+                self._loading_editor = True; self._editor.clear(); self._loading_editor = False
+                self._set_actions_enabled(False)
+            self._render_tabs()
             self._set_status(f"deleted {deleted}")
-            self._selected = None
-            self._dirty = False
-            self._loading = True
-            self._view.clear()
-            self._loading = False
             self._refresh()
         elif op == "scripts_upload":
-            # Scope newly-uploaded scripts to the active unit type (library mode), so
-            # uploading in a type view needs no manual assignment. Only files that
-            # succeeded and didn't previously exist are scoped.
             if self._scope is not None and self._upload_new:
                 ok = {n for n, e in result if e is None} if isinstance(result, list) else set()
                 client = self.hub.fleet.get(self.hostname)
@@ -447,8 +683,7 @@ class ScriptsPanel(QWidget):
             self._report("Upload", result)
             self._refresh()
 
-    # ── Helpers ──────────────────────────────────────────────────────────────
-
+    # ── helpers ──────────────────────────────────────────────────────────────────
     def _report(self, title: str, results) -> None:
         if not isinstance(results, list):
             self._set_status(f"{title.lower()} done")
@@ -466,20 +701,18 @@ class ScriptsPanel(QWidget):
         self._all_names = list(names)
         total = len(names)
         query = self._search.text().strip().lower()
-        # Library mode: show only the scripts a unit of the active type would receive
-        # (its own + shared). A plain unit view (no scope control) shows everything.
         if self._scope is not None:
             names = [n for n in names
                      if m.applies_to_type(self._types_for(n), self._active_type)]
         if query:
             names = [n for n in names if query in n.lower()]
-        # Stable alphanumeric order — so editing a script never reorders the list.
         names = sorted(names, key=natural_key)
         self._list.blockSignals(True)
         self._list.clear()
         for n in names:
             self._list.addItem(n)
         self._list.blockSignals(False)
+        self._count.setText(f"{len(names)} file(s)")
 
         if not names:
             if query:
@@ -490,17 +723,6 @@ class ScriptsPanel(QWidget):
                                  + (f" ({total} in the library for other types)" if total else ""))
             else:
                 self._set_status("no scripts on this unit")
-            self._loading = True
-            self._view.clear()
-            self._loading = False
-            self._clean_text = ""
-            self._dirty = False
-            self._selected = None
-            self._delete_btn.setEnabled(False)
-            self._download_btn.setEnabled(False)
-            self._save_btn.setEnabled(False)
-            if self._scope is not None:
-                self._scope.setEnabled(False)
             return
 
         if query:
@@ -513,9 +735,55 @@ class ScriptsPanel(QWidget):
         if keep in names:
             items = self._list.findItems(keep, Qt.MatchFlag.MatchExactly)
             if items:
+                self._list.blockSignals(True)
                 self._list.setCurrentItem(items[0])
+                self._list.blockSignals(False)
 
     def _set_status(self, text: str, error: bool = False, warn: bool = False) -> None:
         color = Palette.CRASH if error else (Palette.ARMED if warn else Palette.TEXT_FAINT)
         self._status.setText(text)
         self._status.setStyleSheet(f"font-size: 11px; color: {color};")
+
+    # ── styling ──────────────────────────────────────────────────────────────────
+    _QSS = f"""
+    QFrame#filepanel {{ background: {Palette.SURFACE_ALT};
+        border: 1px solid {Palette.BORDER}; border-radius: 10px; }}
+    QFrame#editorpanel {{ background: {Palette.SURFACE};
+        border: 1px solid {Palette.BORDER}; border-radius: 10px; }}
+    QLabel#eyebrow {{ font-size: 11px; font-weight: 600; letter-spacing: 1px;
+        color: {Palette.TEXT_MUTED}; }}
+    QLabel#count {{ font-size: 10px; color: {Palette.TEXT_FAINT}; margin-left: 6px; }}
+    QToolButton#headbtn, QToolButton#actbtn {{ border: none; background: transparent;
+        color: {Palette.TEXT_MUTED}; font-size: 15px; padding: 3px 6px; border-radius: 6px; }}
+    QToolButton#headbtn:hover, QToolButton#actbtn:hover {{ background: {Palette.INSET};
+        color: {Palette.TEXT}; }}
+    QLineEdit#search {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER};
+        border-radius: 7px; padding: 6px 9px; color: {Palette.TEXT}; }}
+    QListWidget#filelist {{ background: transparent; border: none; padding: 2px 6px 8px; }}
+    QListWidget#filelist::item {{ padding: 6px 8px; border-radius: 7px;
+        color: {Palette.TEXT}; }}
+    QListWidget#filelist::item:hover {{ background: {Palette.INSET}; }}
+    QListWidget#filelist::item:selected {{ background: {Palette.ACCENT_SOFT};
+        color: {Palette.ACCENT_INK}; }}
+    QFrame#tabstrip {{ background: {Palette.SURFACE_ALT};
+        border-bottom: 1px solid {Palette.BORDER}; }}
+    QFrame#scoperow {{ background: {Palette.SURFACE};
+        border-bottom: 1px solid {Palette.BORDER}; }}
+    QLabel#crumb {{ font-family: "IBM Plex Mono"; font-size: 11px; color: {Palette.TEXT_MUTED}; }}
+    QWidget#tabbar {{ background: {Palette.SURFACE_ALT}; }}
+    QFrame#etab {{ background: {Palette.SURFACE_ALT}; border-right: 1px solid {Palette.BORDER};
+        min-height: 30px; }}
+    QFrame#etab[active="true"] {{ background: {Palette.SURFACE};
+        border-top: 2px solid {Palette.ACCENT}; }}
+    QLabel#etabname {{ color: {Palette.TEXT_MUTED}; }}
+    QFrame#etab[active="true"] QLabel#etabname {{ color: {Palette.TEXT}; }}
+    QLabel#etabdot {{ color: {Palette.ARMED}; font-size: 12px; }}
+    QToolButton#etabx {{ border: none; background: transparent; color: {Palette.TEXT_FAINT};
+        font-size: 12px; padding: 0 3px; border-radius: 4px; }}
+    QToolButton#etabx:hover {{ background: {Palette.INSET}; color: {Palette.TEXT}; }}
+    QPushButton#savebtn {{ background: {Palette.ACCENT}; color: #fff; border: none;
+        border-radius: 6px; padding: 6px 14px; font-weight: 500; }}
+    QPushButton#savebtn:hover {{ background: #25597E; }}
+    QPushButton#savebtn:disabled {{ background: {Palette.SURFACE_ALT};
+        color: {Palette.TEXT_FAINT}; border: 1px solid {Palette.BORDER}; }}
+    """
