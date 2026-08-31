@@ -470,16 +470,20 @@ class ScheduledPlan(BaseModel):
 # and those live in plans, not here.
 
 class LibraryScript(BaseModel):
-    name: str                          # script filename, e.g. "freq.py"
+    name: str                          # script filename, e.g. "freq.py" — its identity
     content: str = ""                  # the script's source (for upload/edit/deploy)
     params: List[dict] = []            # argparse param schema (/scripts/{name}/params)
     types: List[str] = []              # unit types this script targets; empty = shared/all
+    folder: str = ""                   # organizational folder (a real subdir on the unit at
+                                       # deploy); "" = library root. The name stays the
+                                       # identity, so moving folders never changes references.
 
 
 class Library(BaseModel):
     scripts: List[LibraryScript] = []
     tasks: List[TaskConfig] = []
     sequences: List[Sequence] = []
+    folders: List[str] = []            # declared folder paths, so an empty folder persists
 
 
 class DeployLibraryResult(BaseModel):
@@ -513,4 +517,5 @@ def scoped_library(library: "Library", unit_type: str) -> "Library":
         scripts=[s for s in library.scripts if applies_to_type(s.types, unit_type)],
         tasks=[t for t in library.tasks if applies_to_type(t.types, unit_type)],
         sequences=[q for q in library.sequences if applies_to_type(q.types, unit_type)],
+        folders=list(library.folders),   # folders are cross-type; keep empty ones too
     )

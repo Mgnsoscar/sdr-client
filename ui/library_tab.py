@@ -197,6 +197,13 @@ class LibraryTab(QWidget):
     def _set_active_type(self, unit_type: str) -> None:
         """Point the type-scoped sub-tabs (Tasks / Sequences / Scripts) at one unit
         kind: they show that type's slice and default new items to it."""
+        # Changing the device library with unsaved script edits prompts first; a
+        # cancel leaves the current type selected.
+        if (unit_type != self._active_type and hasattr(self._scripts_panel, "can_leave")
+                and not self._scripts_panel.can_leave()):
+            for b, t in zip(self._type_buttons, UNIT_TYPES):
+                b.setChecked(t == self._active_type)
+            return
         self._active_type = unit_type
         for b, t in zip(self._type_buttons, UNIT_TYPES):
             b.setChecked(t == unit_type)
@@ -205,6 +212,14 @@ class LibraryTab(QWidget):
                 panel.set_active_type(unit_type)
 
     def _select_subtab(self, idx: int) -> None:
+        # Leaving the Scripts sub-tab with unsaved edits prompts first; a cancel
+        # keeps the Scripts tab selected.
+        cur = self._stack.currentWidget()
+        if (cur is self._scripts_panel and self._stack.currentIndex() != idx
+                and hasattr(cur, "can_leave") and not cur.can_leave()):
+            for i, b in enumerate(self._subtab_buttons):
+                b.setChecked(i == self._stack.currentIndex())
+            return
         self._stack.setCurrentIndex(idx)
         for i, b in enumerate(self._subtab_buttons):
             b.setChecked(i == idx)

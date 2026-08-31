@@ -248,20 +248,44 @@ class LiveTuneDialog(QDialog):
         )
 
     def _seed_values(self, snapshot: Dict[str, Any]) -> None:
-        # Prefer the value the device actually took; fall back to the requested.
-        current = {}
-        current.update(snapshot.get("current") or {})
-        current.update(snapshot.get("applied") or {})
+        # Prefer the value the device actually took (applied) over the requested (current) —
+        # e.g. a gain quantised to the SDR's step. EXCEPTION: on a chain with ACTIVE components
+        # the running script reports --power from its SDR gain alone (power_for_gain), which
+        # omits the attenuator's reduction, so `applied` power reads HIGH by the attenuation.
+        # There the accepted request (`current`) is the true delivered power — trust it, so
+        # opening Tune doesn't silently stage a power tens of dB above what's actually set.
+        cur = snapshot.get("current") or {}
+        app = snapshot.get("applied") or {}
+        merged: Dict[str, Any] = {**cur, **app}
+        pkey = self._power_key()
+        if pkey and self._chain_has_active() and cur.get(pkey) is not None:
+            merged[pkey] = cur[pkey]
         args: List[str] = []
         for spec in self._live_specs:
             name = spec.get("name") or spec.get("dest")
-            if name in current and current[name] is not None:
+            if name in merged and merged[name] is not None:
                 flag = spec["flags"][0] if spec.get("flags") else None
                 if flag:
-                    args += [flag, fmt_value(current[name])]
+                    args += [flag, fmt_value(merged[name])]
         self._loading = True
         self._form.set_values(args)
         self._loading = False
+
+    def _power_key(self) -> Optional[str]:
+        """The snapshot key of the absolute --power live param (its name/dest), or None."""
+        from .param_form import find_power_index
+        pidx = find_power_index(self._live_specs)
+        if pidx is None:
+            return None
+        sp = self._live_specs[pidx]
+        return sp.get("name") or sp.get("dest")
+
+    def _chain_has_active(self) -> bool:
+        """True when this signal's calibration has active components (a task-driven
+        attenuator/gain stage), so the script's gain-derived --power report reads high."""
+        from state.power_fold import PowerFold
+        fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
+        return bool(fold is not None and fold.has_active)
         self._dirty = False
         self._set_result("Ready — adjust a value and press Update to apply it.")
 

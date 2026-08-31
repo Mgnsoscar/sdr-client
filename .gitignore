@@ -223,3 +223,6 @@ unit_ledger.json.tmp
 
 # runtime caches
 calibration_cache.json
+
+# Local ComponentCatalog store (per-machine, not project state)
+components.json

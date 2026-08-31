@@ -1,6 +1,7 @@
 """The always-visible limit rail under a bounded numeric field: it renders for a bounded
 field, tracks the value, carries the frequency note on a frequency-dependent power field,
-and re-folds (via the form re-render) when the frequency changes."""
+and re-folds (via the form re-render) when the frequency changes. Its handle position is
+value-proportional (a mid-range value sits at the middle, whatever the step distribution)."""
 import os
 
 import pytest
@@ -98,3 +99,42 @@ def test_no_frequency_note_without_a_freq_dependent_calibration():
     notes = [l.text() for rail in _rails(f) for l in rail.findChildren(QLabel)]
     assert not any("moves with frequency" in t for t in notes)
     assert len(_rails(f)) == 2                                    # rails still present
+
+
+# ── handle position is value-proportional (not step-index) ───────────────────────────
+
+def _rail(lo, hi):
+    r = RangeRail(); r.set_bounds(lo, hi); return r
+
+
+def test_handle_position_is_value_proportional():
+    r = _rail(-135.0, 0.0)                    # the SDR+attenuator extended range
+    r.set_value(-67.5)                        # exact middle
+    assert r.track._fraction == pytest.approx(0.5)
+    r.set_value(-135.0); assert r.track._fraction == pytest.approx(0.0)
+    r.set_value(0.0);    assert r.track._fraction == pytest.approx(1.0)
+    r.set_value(-33.75); assert r.track._fraction == pytest.approx(0.75)   # value, not step index
+
+
+def test_position_ignores_step_distribution():
+    # An asymmetric range where far more achievable steps live below the midpoint than above
+    # must STILL place a mid-range value at the middle — position tracks value, not step count.
+    r = _rail(-184.75, 0.0)
+    r.set_value((-184.75 + 0.0) / 2)          # -92.375
+    assert r.track._fraction == pytest.approx(0.5)
+
+
+def test_drag_maps_position_back_to_value_linearly():
+    got = []
+    r = _rail(-135.0, 0.0)
+    r.valueChanged.connect(got.append)
+    r._on_drag(0.5)                           # thumb dragged to the middle
+    assert got[-1] == pytest.approx(-67.5)
+    r._on_drag(0.25)
+    assert got[-1] == pytest.approx(-101.25)
+
+
+def test_out_of_range_value_clamps_the_handle():
+    r = _rail(-135.0, 0.0)
+    r.set_value(10.0);   assert r.track._fraction == pytest.approx(1.0)   # above max → full
+    r.set_value(-200.0); assert r.track._fraction == pytest.approx(0.0)   # below min → empty

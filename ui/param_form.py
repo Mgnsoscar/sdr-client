@@ -23,6 +23,7 @@ Public API:
 """
 from __future__ import annotations
 
+import math
 import shlex
 from typing import Any, Dict, List, Optional
 
@@ -38,7 +39,7 @@ from .param_widgets import (
     Dropdown, LimitChip, LiveBadge, RangeRail, SegmentedControl, ToggleSwitch,
     field_name_label, unit_chip,
 )
-from state.power_fold import refold_bounds
+from state.power_fold import PowerFold, refold_bounds
 
 
 # Scoped styling for the value inputs, so a field looks like the mockup's recessed
@@ -409,6 +410,14 @@ def apply_power_bounds(specs: List[dict], bounds) -> List[dict]:
     sp["min"], sp["max"] = lo, hi
     sp["type"] = "float"
     sp.setdefault("step", 0.5)                 # render as a bounded spinbox → can't overshoot
+    # A resolved artifact lets the field step through the chain's *true* achievable power
+    # levels (non-uniform: attenuator-only at the bottom, SDR-only at the top). Mark the
+    # field so the widget wires the resolver, and set its display resolution to the finest
+    # achievable increment so a snapped level like −55.25 dBm renders exactly.
+    fold = PowerFold.from_artifact((bounds.get("artifact") or {}))
+    if fold is not None:
+        sp["snap_role"] = "power"
+        sp["step"] = fold.finest_step()
     d = sp.get("default")
     if isinstance(d, (int, float)) and not isinstance(d, bool):
         sp["default"] = min(max(float(d), lo), hi)
@@ -436,7 +445,10 @@ def apply_gain_bounds(specs: List[dict], bounds) -> List[dict]:
     sp = out[i]
     sp["min"], sp["max"] = lo, hi
     sp["type"] = "float"
-    sp.setdefault("step", 0.25)                # bounded spinbox → can't breach the limit
+    # Step on the SDR's real gain grid when the artifact gives one, so the field lands on
+    # commandable gains (SDR-only chains snap to the true grid too); else a sensible default.
+    gs = ((bounds.get("artifact") or {}).get("gain_step_db"))
+    sp["step"] = float(gs) if isinstance(gs, (int, float)) and gs > 0 else sp.get("step", 0.25)
     d = sp.get("default")
     if isinstance(d, (int, float)) and not isinstance(d, bool):
         sp["default"] = min(max(float(d), lo), hi)
@@ -472,6 +484,41 @@ def _use_spinbox(spec: dict) -> bool:
     return True
 
 
+class _AchievableSpin(QDoubleSpinBox):
+    """A calibrated-power spinbox whose up/down steps land on the chain's *true* achievable
+    power levels (non-uniform across the range — attenuator-only at the bottom, SDR-only at
+    the top) and whose typed value snaps to the nearest achievable level on commit. With no
+    snappers attached it behaves like a plain ``QDoubleSpinBox``."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._snap = self._qup = self._qdown = None
+        self.editingFinished.connect(self._snap_typed)
+
+    def set_snappers(self, snap, qup, qdown) -> None:
+        self._snap, self._qup, self._qdown = snap, qup, qdown
+
+    def stepBy(self, steps: int) -> None:                # arrows / scroll / page keys
+        if not self._qup or not self._qdown or not steps:
+            return super().stepBy(steps)
+        v = float(self.value())
+        nxt = self._qup if steps > 0 else self._qdown
+        for _ in range(abs(int(steps))):
+            nv = float(nxt(v))
+            if abs(nv - v) < 1e-9:                       # already at the rail's end
+                break
+            v = nv
+        self.setValue(v)
+
+    def _snap_typed(self) -> None:
+        if self._snap is None:
+            return
+        v = float(self.value())
+        sv = float(self._snap(v))
+        if abs(sv - v) > 1e-9:
+            self.setValue(sv)
+
+
 def _make_spinbox(spec: dict):
     is_int = spec.get("type") == "int"
     step = spec.get("step") or (1 if is_int else 1.0)
@@ -482,7 +529,7 @@ def _make_spinbox(spec: dict):
                    int(hi) if hi is not None else _INT32)
         w.setSingleStep(max(1, int(step)))
     else:
-        w = QDoubleSpinBox()
+        w = _AchievableSpin() if spec.get("snap_role") == "power" else QDoubleSpinBox()
         w.setDecimals(_decimals_for(step))
         w.setRange(float(lo) if lo is not None else -1e12,
                    float(hi) if hi is not None else 1e12)
@@ -511,6 +558,10 @@ class ParamForm(QWidget):
         self._widgets: Dict[str, tuple] = {}   # dest -> (widget, spec)
         self._checks: Dict[str, QCheckBox] = {}  # dest -> include-checkbox (selectable mode)
         self._selectable = False
+        # Conditional visibility (show_when) + derived (read-only computed) fields.
+        self._cond_values: Dict[str, Any] = {}   # controller dest -> current value (for show_when)
+        self._derived: Dict[str, dict] = {}       # dest -> {spec, value_lbl, chip, warn}
+        self._rebuilding_cond = False             # re-entrancy guard for a show_when rebuild
         # Power mode (relative gain vs absolute dBm) — see _compute_power_modes.
         self._base_specs: List[dict] = []
         self._cal_bounds = None
@@ -576,12 +627,19 @@ class ParamForm(QWidget):
             self._power_mode = default_power_mode
         elif self._power_mode not in self._power_modes:
             self._power_mode = self._power_modes[0] if self._power_modes else None
+        # Seed show_when controller values from the controlling fields' defaults, so the
+        # first render shows the right mode's fields (a controller is any dest named as a
+        # key in some field's show_when).
+        controllers = {k for s in specs for k in (s.get("show_when") or {})}
+        self._cond_values = {s["dest"]: s.get("default")
+                             for s in specs if s.get("dest") in controllers}
         self._render()
 
     def _render(self) -> None:
         self._clear_layout(self._body)
         self._widgets.clear()
         self._checks.clear()
+        self._derived.clear()
 
         # No-safeguard caution: raw power/gain with no calibration behind it (an
         # uncalibrated unit, or a task with no calibration signal). Only shown when there
@@ -606,6 +664,12 @@ class ParamForm(QWidget):
             self._body.addWidget(note)
         first = True
         for spec in specs:
+            if spec.get("kind") == "derived":
+                # A read-only computed readout (e.g. the carrier / sweep width a
+                # start/stop pair implies). Never an input — not in self._widgets.
+                self._body.addWidget(self._derived_frame(spec, top_sep=not first))
+                first = False
+                continue
             widget = self._widget_for(spec)
             self._widgets[spec["dest"]] = (widget, spec)
             chk = None
@@ -620,13 +684,15 @@ class ParamForm(QWidget):
                 self._body.addWidget(cap)
             # Live amplitude-mismatch caption, right under the amplitude field.
             if spec["dest"] == amp_dest and self._cal_amplitude is not None:
-                self._amp_warn = QLabel(""); self._amp_warn.setWordWrap(True)
-                self._amp_warn.setVisible(False)
+                self._amp_warn = QLabel(""); self._amp_warn.setVisible(False)
+                self._amp_warn.setWordWrap(True)
                 self._amp_warn.setStyleSheet(
                     f"font-size: 10px; color: {Palette.ARMED}; font-weight: 600; padding: 2px 2px 0;")
                 self._body.addWidget(self._amp_warn)
         self._body.addStretch(1)          # keep fields compact + top-aligned
+        self._wire_conditional()          # controllers rebuild the form; derived sources recompute
         self._wire_freq_refold()
+        self._recompute_derived()
         self.changed.emit()
 
     # ── Layout building blocks (mockup field frames) ───────────────────────────
@@ -785,6 +851,10 @@ class ParamForm(QWidget):
         step = spec.get("step")
         step = float(step) if isinstance(step, (int, float)) and step > 0 else None
         u = f" {spec['unit']}" if spec.get("unit") else ""
+        # On the calibrated power field a rail drag snaps to a true achievable level (the same
+        # non-uniform grid the arrows step), not the decoupled uniform step.
+        _sn = self._power_snappers() if spec.get("snap_role") == "power" else None
+        psnap = _sn[0] if _sn else None
 
         def read():
             if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
@@ -795,7 +865,9 @@ class ParamForm(QWidget):
 
         def set_widget(value):
             value = min(max(value, lo), hi)                  # a drag can't leave the range
-            if step:                                         # snap to the script's step grid
+            if psnap is not None:                            # snap to a real achievable level
+                value = min(max(psnap(value), lo), hi)
+            elif step:                                       # snap to the script's step grid
                 value = min(max(lo + round((value - lo) / step) * step, lo), hi)
             if isinstance(widget, QSpinBox):
                 widget.setValue(int(round(value)))
@@ -833,27 +905,50 @@ class ParamForm(QWidget):
         """True when this signal's --power/gain range actually moves with frequency (a
         frequency-dependent cable/antenna or per-frequency limit in the embedded artifact).
         A constant chain never re-folds, so no wiring / re-render churn."""
-        from state.power_fold import PowerFold
         fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
         return fold is not None and fold.freq_dependent
 
-    def _wire_freq_refold(self) -> None:
-        """Connect the frequency field's change signal so the power/gain bounds re-fold at
-        the new frequency. Only wired when the calibration is frequency-dependent."""
-        dest = self._freq_dest()
-        if dest is None or dest not in self._widgets or not self._is_freq_dependent():
-            return
-        # Re-fold on COMMIT (preset pick, Enter, or focus-out), never per keystroke — a
-        # re-render mid-typing would steal focus. A preset dropdown fires currentIndexChanged
-        # on a pick and its inner line edit fires editingFinished on a typed value; a spinbox
-        # / line edit fire editingFinished.
-        w, _spec = self._widgets[dest]
+    def _power_snappers(self):
+        """``(snap, quantize_up, quantize_down)`` for the calibrated --power field, bound to
+        the resolved artifact and the frequency this render folds at, so the widget steps
+        through only achievable power levels (universal — SDR-only chains snap to the real
+        gain grid too). None when there's no usable fold."""
+        fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
+        if fold is None:
+            return None
+        f = self._render_freq
+        return (lambda p: fold.snap_power(p, f),
+                lambda p: fold.quantize_up(p, f),
+                lambda p: fold.quantize_down(p, f))
+
+    @staticmethod
+    def _connect_commit(w, cb) -> None:
+        """Re-fold on COMMIT (preset pick, Enter, or focus-out), never per keystroke — a
+        re-render mid-typing would steal focus."""
         if isinstance(w, QComboBox):
-            w.currentIndexChanged.connect(self._on_freq_changed)
+            w.currentIndexChanged.connect(cb)
             if w.isEditable() and w.lineEdit() is not None:
-                w.lineEdit().editingFinished.connect(self._on_freq_changed)
+                w.lineEdit().editingFinished.connect(cb)
         elif isinstance(w, (QSpinBox, QDoubleSpinBox, QLineEdit)):
-            w.editingFinished.connect(self._on_freq_changed)
+            w.editingFinished.connect(cb)
+
+    def _wire_freq_refold(self) -> None:
+        """Connect the frequency source's change signal so the power/gain bounds re-fold at
+        the new frequency. Only wired when the calibration is frequency-dependent. When the
+        source is a derived midpoint (start/stop mode), its input fields drive the re-fold."""
+        if not self._is_freq_dependent():
+            return
+        dest = self._freq_source_dest()
+        if dest is None:
+            return
+        if dest in self._derived:
+            for src in self._formula_sources(self._derived[dest]["spec"]):
+                if src in self._widgets:
+                    self._connect_commit(self._widgets[src][0], self._on_freq_changed)
+            return
+        if dest not in self._widgets:
+            return
+        self._connect_commit(self._widgets[dest][0], self._on_freq_changed)
         # In tune (selectable) mode, ticking the freq param on/off changes whether it
         # overrides the carried-forward frequency, so re-fold on that too.
         if self._selectable and dest in self._checks:
@@ -876,8 +971,7 @@ class ParamForm(QWidget):
             return
         if self._power_mode not in ("absolute", "relative"):
             return
-        dest = self._freq_dest()
-        if dest is None or dest not in self._widgets or not self._is_freq_dependent():
+        if not self._is_freq_dependent() or self._freq_source_dest() is None:
             return
         if self._fold_freq_now() == self._folded_at:
             return
@@ -929,24 +1023,39 @@ class ParamForm(QWidget):
             return None
         return next((s["dest"] for s in self._base_specs if s.get("dest") == fp), None)
 
+    def _freq_source_dest(self) -> Optional[str]:
+        """The dest of the currently-RENDERED field that carries the fold frequency: the
+        CAL_FREQ_PARAM field when it's visible, else a visible derived field flagged
+        is_freq (e.g. a start/stop midpoint when the centre field is hidden by a mode)."""
+        fp = self._cal_freq_param
+        if fp and fp in self._widgets:
+            return fp
+        for dest, info in self._derived.items():
+            if info["spec"].get("is_freq"):
+                return dest
+        return None
+
     def _current_freq_hz(self) -> Optional[float]:
-        """The transmit frequency currently entered in the freq field (Hz), or None when
-        there's no freq field, no widget yet, or the field is blank/unparseable."""
-        dest = self._freq_dest()
-        if dest is None or dest not in self._widgets:
+        """The transmit frequency the form is currently at, from the active freq source
+        (the freq field, or a derived is_freq midpoint), or None when unset/unparseable."""
+        dest = self._freq_source_dest()
+        if dest is None:
             return None
+        if dest in self._derived:
+            return self._eval_formula(self._derived[dest]["spec"].get("formula"))
         val = self.values().get(dest)
         if isinstance(val, (int, float)) and not isinstance(val, bool):
             return float(val)
         return None
 
     def _fold_freq_now(self) -> Optional[float]:
-        """The frequency to fold the power/gain range at right now: the freq field's value
-        when it is actively set (in selectable/tune mode that means its checkbox is ticked),
-        otherwise the carried-forward frequency (a sequence step's effective freq)."""
-        dest = self._freq_dest()
-        if dest and dest in self._widgets:
-            active = (not self._selectable
+        """The frequency to fold the power/gain range at right now: the active freq
+        source's value when set (in selectable/tune mode a plain freq field must be
+        ticked; a derived source is always active), else the carried-forward frequency."""
+        dest = self._freq_source_dest()
+        if dest is not None:
+            active = (dest in self._derived
+                      or not self._selectable
                       or (dest in self._checks and self._checks[dest].isChecked()))
             if active:
                 v = self._current_freq_hz()
@@ -987,6 +1096,8 @@ class ParamForm(QWidget):
         cal_bounds = self._effective_cal_bounds()
         out: List[dict] = []
         for i, s in enumerate(self._base_specs):
+            if not self._show_when_visible(s):
+                continue                    # hidden by its mode → not rendered/emitted
             if i == aidx and self._cal_amplitude is not None:
                 # Default the baseband amplitude to the value the calibration was measured
                 # at, so a fresh form matches the curve (an override is flagged live).
@@ -1026,6 +1137,230 @@ class ParamForm(QWidget):
 
     def has_params(self) -> bool:
         return bool(self._widgets)
+
+    # ── Conditional visibility (show_when) + derived (computed) fields ──────────
+
+    def _show_when_visible(self, spec: dict) -> bool:
+        """True if `spec` should be rendered given the current controller values. A
+        field with no show_when is always shown; otherwise EVERY named controller's
+        current value must be (one of) the listed value(s)."""
+        cond = spec.get("show_when")
+        if not cond:
+            return True
+        for ctrl, allowed in cond.items():
+            cur = self._cond_values.get(ctrl)
+            allow = allowed if isinstance(allowed, (list, tuple, set)) else [allowed]
+            if cur in allow or str(cur) in [str(a) for a in allow]:
+                continue
+            return False
+        return True
+
+    def _control_value(self, dest: str):
+        """The current value of a controller field (for show_when comparison)."""
+        if dest not in self._widgets:
+            return self._cond_values.get(dest)
+        w, spec = self._widgets[dest]
+        if spec.get("is_flag"):
+            return bool(w.isChecked()) if hasattr(w, "isChecked") else False
+        if isinstance(w, QComboBox):
+            return choice_token(w)
+        if isinstance(w, (QSpinBox, QDoubleSpinBox)):
+            return w.value()
+        if isinstance(w, QLineEdit):
+            return w.text().strip()
+        return None
+
+    def _wire_conditional(self) -> None:
+        """After a render: rebuild the form when a controller (a dest named in some
+        show_when) changes, and recompute the derived readouts when their source
+        fields change."""
+        controllers = {k for s in self._base_specs for k in (s.get("show_when") or {})}
+        for dest in controllers:
+            if dest not in self._widgets:
+                continue
+            w, spec = self._widgets[dest]
+            cb = lambda *a, d=dest: self._on_condition_changed(d)
+            if isinstance(w, QComboBox):
+                w.currentIndexChanged.connect(cb)
+            elif spec.get("is_flag") and hasattr(w, "toggled"):
+                w.toggled.connect(cb)
+            elif isinstance(w, (QSpinBox, QDoubleSpinBox)):
+                w.valueChanged.connect(cb)
+            elif isinstance(w, QLineEdit):
+                w.editingFinished.connect(cb)
+        srcs = set()
+        for info in self._derived.values():
+            srcs |= set(self._formula_sources(info["spec"]))
+        for dest in srcs:
+            if dest not in self._widgets:
+                continue
+            w, _spec = self._widgets[dest]
+            if isinstance(w, (QSpinBox, QDoubleSpinBox)):
+                w.valueChanged.connect(self._recompute_derived)
+            elif isinstance(w, QLineEdit):
+                w.textChanged.connect(self._recompute_derived)
+            elif isinstance(w, QComboBox):
+                w.currentTextChanged.connect(self._recompute_derived)
+
+    def _on_condition_changed(self, dest: str) -> None:
+        """A controller changed → rebuild the form for the new mode, preserving the
+        other fields' values (the same rebuild-and-restore the power-mode toggle uses)."""
+        if self._rebuilding_cond or self._loading:
+            return
+        newv = self._control_value(dest)
+        if self._cond_values.get(dest) == newv:
+            return
+        self._cond_values[dest] = newv
+        self._render_freq = self._fold_freq_now()      # capture before the widgets clear
+        self._rebuilding_cond = True
+        try:
+            keep = self.build_args()
+            self._render()
+            self._set_values(keep)
+        finally:
+            self._rebuilding_cond = False
+        self.changed.emit()
+
+    @staticmethod
+    def _formula_sources(spec: dict) -> List[str]:
+        """The field names a derived spec's formula reads from."""
+        out: List[str] = []
+        for args in (spec.get("formula") or {}).values():
+            if isinstance(args, (list, tuple)):
+                out.extend(str(a) for a in args)
+        return out
+
+    def _source_num(self, dest: str) -> Optional[float]:
+        """The current numeric value of a field a derived formula reads, or None."""
+        if dest not in self._widgets:
+            return None
+        w, spec = self._widgets[dest]
+        if isinstance(w, (QSpinBox, QDoubleSpinBox)):
+            return float(w.value())
+        if isinstance(w, QLineEdit):
+            return num_or_none(w.text().strip())
+        if isinstance(w, QComboBox):
+            if spec.get("presets"):
+                return num_or_none(resolve_preset_value(spec, w.currentText()))
+            return num_or_none(choice_token(w))
+        return None
+
+    def _eval_formula(self, formula) -> Optional[float]:
+        """Evaluate a small derived formula over other fields' current values, or None
+        if any source is missing. Ops: center=(a+b)/2, span=|last-first|, sum, diff."""
+        if not formula:
+            return None
+        try:
+            op, args = next(iter(formula.items()))
+        except StopIteration:
+            return None
+        if not isinstance(args, (list, tuple)):
+            return None
+        vals = [self._source_num(str(a)) for a in args]
+        if any(v is None for v in vals):
+            return None
+        if op == "center":
+            return sum(vals) / len(vals)
+        if op == "span":
+            return abs(vals[-1] - vals[0]) if len(vals) >= 2 else 0.0
+        if op == "sum":
+            return sum(vals)
+        if op == "diff":
+            return vals[0] - vals[1] if len(vals) >= 2 else vals[0]
+        # Arithmetic-progression helpers (a comb's first/spacing/last ↔ count).
+        if op == "count":                      # [a, b, s] terms of a..b step s
+            a, b, s = vals[0], vals[1], vals[2]
+            if s <= 0 or b < a:
+                return None
+            return float(math.floor((b - a) / s + 1e-9) + 1)
+        if op == "span_to":                    # [a, b, s] extent covered a..b step s
+            a, b, s = vals[0], vals[1], vals[2]
+            if s <= 0 or b < a:
+                return None
+            return float(math.floor((b - a) / s + 1e-9) * s)
+        if op == "term":                       # [a, n, s] the n-th term: a + (n-1)s
+            a, n, s = vals[0], vals[1], vals[2]
+            return a + (n - 1) * s
+        if op == "extent":                     # [n, s] span of n terms: (n-1)s
+            n, s = vals[0], vals[1]
+            return (n - 1) * s
+        return None
+
+    def _derived_frame(self, spec: dict, top_sep: bool) -> QWidget:
+        """A read-only field showing a value computed from other fields — a dashed
+        inset readout with a limit chip + warning when it has bounds."""
+        dest = spec["dest"]
+        frame = QWidget()
+        frame.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        v = QVBoxLayout(frame)
+        v.setContentsMargins(0, 2 if not top_sep else 0, 0, 9)
+        v.setSpacing(5)
+        if top_sep:
+            v.addWidget(self._hairline())
+        lrow = QHBoxLayout(); lrow.setContentsMargins(0, 0, 0, 0); lrow.setSpacing(8)
+        lrow.addWidget(field_name_label(self._display_name(spec)))
+        if spec.get("unit"):
+            lrow.addWidget(unit_chip(spec["unit"].replace(" ", " · ")))
+        lrow.addStretch(1)
+        tag = QLabel("computed")
+        tag.setStyleSheet(f"font-size: 9px; letter-spacing: .08em; color: {Palette.TEXT_FAINT};")
+        lrow.addWidget(tag)
+        v.addLayout(lrow)
+        crow = QHBoxLayout(); crow.setContentsMargins(0, 0, 0, 0); crow.setSpacing(8)
+        val_lbl = QLabel("—")
+        val_lbl.setFont(mono_font(13, 600))
+        val_lbl.setStyleSheet(
+            f"background: {Palette.INSET}; border: 1px dashed {Palette.BORDER}; "
+            f"border-radius: 9px; min-height: 34px; padding: 0 11px; color: {Palette.TEXT};")
+        val_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        crow.addWidget(val_lbl, 1)
+        lo, hi = spec.get("min"), spec.get("max")
+        chip = None
+        if lo is not None and hi is not None:
+            chip = LimitChip()
+            chip.set_range(self._fmt_bound(lo), self._fmt_bound(hi))
+            crow.addWidget(chip)
+        v.addLayout(crow)
+        warn = self._warn_line()
+        v.addWidget(warn)
+        if spec.get("help"):
+            val_lbl.setToolTip(spec["help"])
+        self._derived[dest] = {"spec": spec, "value_lbl": val_lbl, "chip": chip,
+                               "warn": warn, "error": None}
+        return frame
+
+    def _recompute_derived(self, *_) -> None:
+        """Refresh every derived readout from its sources, flagging (and recording) an
+        out-of-range value so validate() can block it."""
+        for info in self._derived.values():
+            spec = info["spec"]
+            val = self._eval_formula(spec.get("formula"))
+            unit = f" {spec['unit']}" if spec.get("unit") else ""
+            lo, hi = spec.get("min"), spec.get("max")
+            warn = info["warn"]
+            info["error"] = None
+            if val is None:
+                info["value_lbl"].setText("—")
+                if info["chip"] is not None:
+                    info["chip"].set_state(over=False, under=False)
+                warn.setVisible(False)
+                continue
+            info["value_lbl"].setText(f"{val:g}{unit}")
+            over = hi is not None and val > hi + 1e-9
+            under = lo is not None and val < lo - 1e-9
+            if info["chip"] is not None:
+                info["chip"].set_state(over=over, under=under)
+            name = self._display_name(spec).rstrip(" *")
+            if over:
+                info["error"] = (f"{name} {val:g}{unit} exceeds the maximum "
+                                 f"{self._fmt_bound(hi)}{unit}.")
+                warn.setText("⚠ " + info["error"]); warn.setVisible(True)
+            elif under:
+                info["error"] = (f"{name} {val:g}{unit} is below the minimum "
+                                 f"{self._fmt_bound(lo)}{unit}.")
+                warn.setText("⚠ " + info["error"]); warn.setVisible(True)
+            else:
+                warn.setVisible(False)
 
     # ── Values ───────────────────────────────────────────────────────────────
 
@@ -1191,6 +1526,10 @@ class ParamForm(QWidget):
             return "invalid value for: " + ", ".join(bad_type)
         if bad_range:
             return "out of range: " + ", ".join(bad_range)
+        # A derived readout (e.g. a start/stop-implied sweep width) out of its bounds.
+        for info in self._derived.values():
+            if info.get("error"):
+                return info["error"]
         return None
 
     # ── Widgets ──────────────────────────────────────────────────────────────
@@ -1242,6 +1581,11 @@ class ParamForm(QWidget):
             w.setSuffix("")                       # the unit lives in its own chip now
             w.setButtonSymbols(w.ButtonSymbols.NoButtons)
             w.setFont(mono_font(13, 500))
+            if isinstance(w, _AchievableSpin):
+                sn = self._power_snappers()
+                if sn:
+                    w.set_snappers(*sn)
+                    w.setValue(sn[0](float(w.value())))   # land the default on the grid
             w.valueChanged.connect(self.changed.emit)
             self._guard_scroll(w)
         elif spec.get("choices"):

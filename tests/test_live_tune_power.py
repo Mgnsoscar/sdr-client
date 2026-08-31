@@ -31,8 +31,9 @@ CAL = {"unit_type": "broadcaster", "valid": True, "signals": {"mock": {
 
 
 class FakeClient:
-    def __init__(self, cal=CAL):
+    def __init__(self, cal=CAL, snapshot=None):
         self._cal = cal
+        self._snapshot = snapshot if snapshot is not None else {"current": {}, "applied": {}}
 
     def get_tasks_yaml(self):
         return YAML
@@ -46,7 +47,7 @@ class FakeClient:
         return self._cal
 
     def get_task_params(self, name):
-        return {"current": {}, "applied": {}}
+        return self._snapshot
 
 
 class FakeHub(QObject):
@@ -79,3 +80,37 @@ def test_livetune_keeps_schema_when_uncalibrated():
     dlg = LiveTuneDialog(FakeHub(FakeClient(cal=AgentHTTPError("u", 404, "none"))), "u", "mocktask")
     sp = _power_spec(dlg)
     assert (sp["min"], sp["max"]) == (-140.0, 60.0)
+
+
+# ── seeding the running task's current --power ──────────────────────────────────────
+
+_ACTIVE_ARTIFACT = {
+    "curve": [[0.0, -40.0], [40.0, 0.0]], "min_gain_db": 0.0, "max_gain_db": 40.0,
+    "gain_step_db": 1.0,
+    "active_components": [{"plane": "atten_out", "task": "atten_set", "param": "attenuation",
+                           "sense": "attenuation", "min_db": 0.0, "max_db": 95.0,
+                           "step_db": 0.25, "engage_pct": 0.0, "baseline_delta_by_freq": []}],
+}
+_ACTIVE_CAL = {"unit_type": "broadcaster", "valid": True, "signals": {"mock": {
+    "operating_plane": "atten_out", "quantity": "EIRP",
+    "min_power_dbm": -135.0, "max_power_dbm": 0.0, "artifact": _ACTIVE_ARTIFACT}}}
+
+
+def test_livetune_active_seeds_requested_power_not_the_gain_derived_value():
+    # On an active chain the script reports --power from its SDR gain alone (attenuator
+    # omitted), so `applied` reads high. The dialog must seed the accepted request (`current`),
+    # or opening Tune would stage a power tens of dB above what's actually set.
+    client = FakeClient(cal=_ACTIVE_CAL,
+                        snapshot={"current": {"power": -100.0}, "applied": {"power": -80.0}})
+    dlg = LiveTuneDialog(FakeHub(client), "u", "mocktask")
+    assert dlg._form.values()["power"] == pytest.approx(-100.0)
+
+
+def test_livetune_nonactive_seeds_the_applied_power():
+    # With no active components `applied` is the real (gain-quantised) power, so it still wins.
+    cal = {"unit_type": "broadcaster", "valid": True, "signals": {"mock": {
+        "operating_plane": "antenna_eirp", "quantity": "EIRP",
+        "min_power_dbm": -1.8, "max_power_dbm": 28.2}}}
+    client = FakeClient(cal=cal, snapshot={"current": {"power": 5.0}, "applied": {"power": 10.0}})
+    dlg = LiveTuneDialog(FakeHub(client), "u", "mocktask")
+    assert dlg._form.values()["power"] == pytest.approx(10.0)

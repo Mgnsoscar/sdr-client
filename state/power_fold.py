@@ -45,12 +45,29 @@ def _table_at(freqs: list, deltas: list, freq: Optional[float]) -> float:
     return _interp(freq, freqs, deltas)
 
 
+def _active_applied(a: dict) -> tuple:
+    """(applied_hi, applied_lo) — the applied gain range of an active component (matches
+    calkit._active_applied)."""
+    lo, hi = float(a["min_db"]), float(a["max_db"])
+    if a.get("sense", "attenuation") == "attenuation":
+        return (-lo, -hi)
+    return (hi, lo)
+
+
+def _active_param_value(a: dict, applied: float) -> float:
+    """The parameter value to command on the component's task for a given applied gain."""
+    lo, hi = float(a["min_db"]), float(a["max_db"])
+    v = -applied if a.get("sense", "attenuation") == "attenuation" else applied
+    return min(max(v, lo), hi)
+
+
 class PowerFold:
     """The range read-outs of a resolved artifact at a frequency. Mirrors the relevant
     parts of calkit.PowerMap so the client shows exactly the range the script will map."""
 
     def __init__(self, gains, powers, min_gain_db, ceiling_const,
-                 hops=(), freq_limits=(), center_freq=None, gain_step_db=None):
+                 hops=(), freq_limits=(), center_freq=None, gain_step_db=None,
+                 actives=()):
         pairs = sorted(zip((float(g) for g in gains), (float(p) for p in powers)))
         self._gains = [g for g, _ in pairs]
         self._powers = [p for _, p in pairs]
@@ -75,10 +92,59 @@ class PowerFold:
                 ag = ap = None
             self._freq_limits.append((float(mx), fs, ds, ag, ap))
         self._center_freq = None if center_freq is None else float(center_freq)
+        # Active components (programmable gain/attenuation) — empty for a plain passive chain.
+        self._actives = [dict(a) for a in (actives or [])]
 
     # ── the fold, at a frequency ──────────────────────────────────────────────────
     def _eff(self, freq: Optional[float]) -> Optional[float]:
         return freq if freq is not None else self._center_freq
+
+    @property
+    def has_active(self) -> bool:
+        return bool(self._actives)
+
+    def _achievable(self, freq: Optional[float]):
+        """Build the shared achievable-power resolver at ``freq`` (grid + active descriptors).
+        The SDR power map (components at baseline — the active baseline is already folded into
+        the passive hops) feeds it; the grid adds each component's applied-gain range."""
+        from state.achievable import AchievableGrid, Active
+        f = self._eff(freq)
+        od = self._op_delta(f)
+        actives = []
+        for a in self._actives:
+            hi, lo = _active_applied(a)
+            actives.append(Active(hi, lo, a["step_db"], a.get("engage_pct", 0.0), meta=a))
+        grid = AchievableGrid(
+            power_for_gain=lambda g: _interp(g, self._gains, self._powers) + od,
+            gain_for_power=lambda p: _interp(p - od, self._powers, self._gains),
+            min_gain=self.min_gain_db, ceiling=self._ceiling(f),
+            gain_step=self._gain_step, actives=actives)
+        return grid, actives
+
+    def snap_power(self, power: float, freq: Optional[float] = None) -> float:
+        """The nearest achievable delivered power to ``power`` (drives the slider's snap)."""
+        return self._achievable(freq)[0].snap(float(power))
+
+    def quantize_up(self, power: float, freq: Optional[float] = None) -> float:
+        return self._achievable(freq)[0].quantize_up(float(power))
+
+    def quantize_down(self, power: float, freq: Optional[float] = None) -> float:
+        return self._achievable(freq)[0].quantize_down(float(power))
+
+    def realize(self, power: float, freq: Optional[float] = None) -> dict:
+        """SDR-first realization: ``{power_dbm, sdr_gain_db, settings}`` where settings names
+        each active component's task, parameter and the value to command on it — the client
+        commands those alongside the transmit task's --power."""
+        grid, actives = self._achievable(freq)
+        res = grid.realize(float(power))
+        settings = []
+        for act, applied in zip(actives, res["applied"]):
+            a = act.meta
+            settings.append({"plane": a.get("plane"), "task": a["task"], "param": a["param"],
+                             "applied_db": applied,
+                             "value": round(_active_param_value(a, applied), 6)})
+        return {"power_dbm": res["power_dbm"], "sdr_gain_db": res["sdr_gain_db"],
+                "settings": settings}
 
     def _op_delta(self, freq: Optional[float]) -> float:
         return sum(_table_at(fs, ds, freq) for fs, ds in self._hops)
@@ -118,12 +184,30 @@ class PowerFold:
         artifact's representative frequency when ``freq`` is None)."""
         f = self._eff(freq)
         hi_gain = self.max_gain_db(f)
-        return {
+        out = {
             "min_gain_db": self.min_gain_db,
             "max_gain_db": hi_gain,
             "min_power_dbm": self.power_for_gain(self.min_gain_db, f),
             "max_power_dbm": self.power_for_gain(hi_gain, f),
         }
+        if self._actives:                              # active components extend the range
+            lo, hi = self._achievable(f)[0].bounds()
+            out["min_power_dbm"], out["max_power_dbm"] = lo, hi
+        return out
+
+    def finest_step(self, freq: Optional[float] = None) -> float:
+        """The finest achievable power increment across the range — the smallest of the active
+        components' device steps and the SDR grid's own power step. Used for the power field's
+        display resolution (decimals) so a snapped level like −55.25 renders exactly."""
+        f = self._eff(freq)
+        cands = [a["step_db"] for a in self._actives
+                 if isinstance(a.get("step_db"), (int, float)) and a["step_db"] > 0]
+        if self._gain_step:
+            g = self.max_gain_db(f)
+            d = abs(self.power_for_gain(g, f) - self.power_for_gain(g - self._gain_step, f))
+            if d > 1e-12:
+                cands.append(round(d, 6))
+        return min(cands) if cands else 0.5
 
     @property
     def freq_dependent(self) -> bool:
@@ -140,6 +224,7 @@ class PowerFold:
         if not isinstance(art, dict):
             return None
         step = art.get("gain_step_db")
+        actives = art.get("active_components") or ()
         anchor = art.get("anchor_curve")
         if anchor:                                    # v2: fold passive hops at frequency
             gains = [pt[0] for pt in anchor]
@@ -155,7 +240,8 @@ class PowerFold:
                 ceiling_const = float("inf")          # ceiling comes purely from limits
             return cls(gains, powers, art.get("min_gain_db"), ceiling_const,
                        hops=hops, freq_limits=freq_limits,
-                       center_freq=art.get("center_freq_hz"), gain_step_db=step)
+                       center_freq=art.get("center_freq_hz"), gain_step_db=step,
+                       actives=actives)
 
         curve = art.get("curve") or []                # v1: pre-flattened operating curve
         gains = [pt[0] for pt in curve]
@@ -163,7 +249,7 @@ class PowerFold:
         if not gains:
             return None
         return cls(gains, powers, art.get("min_gain_db"), art.get("max_gain_db"),
-                   gain_step_db=step)
+                   gain_step_db=step, actives=actives)
 
 
 def clamp_warning(artifact: Optional[dict], freq_hz: Optional[float],
