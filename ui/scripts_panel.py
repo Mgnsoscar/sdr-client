@@ -31,15 +31,63 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import QByteArray, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
     QMessageBox, QPushButton, QSplitter, QToolButton, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
+from .theme import Palette
+
 _ROLE = Qt.ItemDataRole.UserRole      # tree item payload: ("file", name) | ("folder", path)
+
+# ── file-tree icons (the Python logo on scripts, a folder outline on folders) ────
+try:
+    from PyQt6.QtSvg import QSvgRenderer
+    _HAVE_SVG = True
+except Exception:  # noqa: BLE001 — icons degrade to none if QtSvg is unavailable
+    _HAVE_SVG = False
+
+_PY_SVG = (
+    b'<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">'
+    b'<path fill="#4B8BBE" d="M11.9 2c-2.5 0-4.4.5-4.4 2.6v2.2h4.5v.6H5.6C3.3 7.4 2 8.9 2 12'
+    b's1.3 4.6 3.6 4.6h1.6v-2.4c0-2 1.6-3.6 3.6-3.6h3.9c1.9 0 3.4-1.5 3.4-3.4V4.6C18.1 2.7 16 2 '
+    b'13.9 2h-2zM9.2 4.1c.5 0 .8.4.8.9s-.3.9-.8.9-.9-.4-.9-.9.4-.9.9-.9z"/>'
+    b'<path fill="#FFD43B" d="M12.1 22c2.5 0 4.4-.5 4.4-2.6v-2.2H12v-.6h6.4c2.3 0 3.6-1.5 3.6-4.6'
+    b's-1.3-4.6-3.6-4.6h-1.6v2.4c0 2-1.6 3.6-3.6 3.6H9.3c-1.9 0-3.4 1.5-3.4 3.4v2.6C5.9 19.3 8 22 '
+    b'10.1 22h2zM14.8 19.9c-.5 0-.8-.4-.8-.9s.3-.9.8-.9.9.4.9.9-.4.9-.9.9z"/></svg>')
+_FOLDER_SVG = (
+    b'<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="'
+    + Palette.TEXT_MUTED.encode()
+    + b'" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">'
+    b'<path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>')
+
+_ICON_CACHE: dict = {}
+
+
+def _svg_icon(key: str, svg: bytes) -> QIcon:
+    if not _HAVE_SVG:
+        return QIcon()
+    ic = _ICON_CACHE.get(key)
+    if ic is None:
+        pm = QPixmap(32, 32)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        QSvgRenderer(QByteArray(svg)).render(p)
+        p.end()
+        ic = QIcon(pm)
+        _ICON_CACHE[key] = ic
+    return ic
+
+
+def _py_icon() -> QIcon:
+    return _svg_icon("py", _PY_SVG)
+
+
+def _folder_icon() -> QIcon:
+    return _svg_icon("folder", _FOLDER_SVG)
 
 from api import models as m
 from api.fleet import LIBRARY_HOST
@@ -47,7 +95,6 @@ from config import DEFAULT_UNIT_TYPE, UNIT_TYPE_LABELS
 from .code_editor import CodeEditor
 from .qt_adapter import DataHub
 from .scope_selector import ScopeSelector, confirm_delete, scope_label
-from .theme import Palette
 from .widgets import natural_key
 
 Result = Tuple[str, Optional[str]]   # (name, error-or-None)
@@ -218,6 +265,7 @@ class ScriptsPanel(QWidget):
         self._tree.setHeaderHidden(True)
         self._tree.setFrameShape(QFrame.Shape.NoFrame)
         self._tree.setIndentation(14)
+        self._tree.setIconSize(QSize(15, 15))
         self._tree.setExpandsOnDoubleClick(False)   # double-click a file opens it
         self._tree.currentItemChanged.connect(self._on_tree_select)
         self._tree.itemDoubleClicked.connect(self._on_tree_open)
@@ -817,6 +865,7 @@ class ScriptsPanel(QWidget):
             it = QTreeWidgetItem([f])
             it.setData(0, _ROLE, ("folder", f))
             it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsSelectable)   # folders don't "select"
+            it.setIcon(0, _folder_icon())
             fnt = it.font(0); fnt.setBold(True); it.setFont(0, fnt)
             self._tree.addTopLevelItem(it)
             it.setExpanded(True)
@@ -825,6 +874,7 @@ class ScriptsPanel(QWidget):
         for n in names:
             node = QTreeWidgetItem([n])
             node.setData(0, _ROLE, ("file", n))
+            node.setIcon(0, _py_icon())
             parent = folder_items.get(folder_of[n])
             (parent.addChild(node) if parent is not None
              else self._tree.addTopLevelItem(node))

@@ -33,7 +33,7 @@ SELECTION     = "#CFE4F6"
 FOLD_MARGIN   = "#EEF2F6"
 
 try:
-    from PyQt6.Qsci import QsciScintilla, QsciLexerPython
+    from PyQt6.Qsci import QsciScintilla, QsciLexerPython, QsciScintillaBase
     _HAVE_QSCI = True
 except Exception:  # noqa: BLE001 — optional dependency
     _HAVE_QSCI = False
@@ -44,6 +44,12 @@ def _editor_font() -> QFont:
     f.setStyleHint(QFont.StyleHint.Monospace)
     f.setPointSize(10)
     return f
+
+
+def _sci_color(hex_str: str) -> int:
+    """A #RRGGBB colour as Scintilla's 0xBBGGRR integer."""
+    c = QColor(hex_str)
+    return c.red() | (c.green() << 8) | (c.blue() << 16)
 
 
 # ── QScintilla implementation (preferred) ────────────────────────────────────────
@@ -99,8 +105,20 @@ if _HAVE_QSCI:
             self.setMarginsForegroundColor(QColor(GUTTER_TEXT))
             self.setMarginsBackgroundColor(QColor(Palette.SURFACE))
             self.setMarginsFont(font)
-            self.setFolding(QsciScintilla.FoldStyle.BoxedTreeFoldStyle, 2)
-            self.setFoldMarginColors(QColor(FOLD_MARGIN), QColor(FOLD_MARGIN))
+            self.setFolding(QsciScintilla.FoldStyle.PlainFoldStyle, 2)
+            self.setFoldMarginColors(QColor(Palette.SURFACE), QColor(Palette.SURFACE))
+            # PyCharm-style fold markers: a sleek arrow (▶ collapsed / ▼ expanded),
+            # no boxed tree lines, in a muted grey that brightens the arrow only.
+            B = QsciScintillaBase
+            self.SendScintilla(B.SCI_MARKERDEFINE, B.SC_MARKNUM_FOLDER, B.SC_MARK_ARROW)
+            self.SendScintilla(B.SCI_MARKERDEFINE, B.SC_MARKNUM_FOLDEROPEN, B.SC_MARK_ARROWDOWN)
+            for _n in (B.SC_MARKNUM_FOLDERSUB, B.SC_MARKNUM_FOLDERTAIL, B.SC_MARKNUM_FOLDEREND,
+                       B.SC_MARKNUM_FOLDEROPENMID, B.SC_MARKNUM_FOLDERMIDTAIL):
+                self.SendScintilla(B.SCI_MARKERDEFINE, _n, B.SC_MARK_EMPTY)
+            _grey = _sci_color(GUTTER_ACTIVE)
+            for _n in (B.SC_MARKNUM_FOLDER, B.SC_MARKNUM_FOLDEROPEN):
+                self.SendScintilla(B.SCI_MARKERSETFORE, _n, _grey)
+                self.SendScintilla(B.SCI_MARKERSETBACK, _n, _grey)
 
             self.setCaretLineVisible(True)
             self.setCaretLineBackgroundColor(QColor(CURRENT_LINE))
