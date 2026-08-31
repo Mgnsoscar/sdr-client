@@ -128,13 +128,14 @@ def diff_library(canonical: m.Library, unit: m.Library) -> StateDiff:
     only). Pure — no I/O."""
     d = StateDiff()
 
-    # Scripts — compare by filename on content, ignoring line-ending noise.
-    can_s = {s.name: _norm_script(s.content) for s in canonical.scripts}
-    unit_s = {s.name: _norm_script(s.content) for s in unit.scripts}
-    for name, content in can_s.items():
+    # Scripts — compare by filename on content (line-ending noise ignored) AND
+    # folder, so filing a script into a folder shows as drift until it's deployed.
+    can_s = {s.name: (_norm_script(s.content), (s.folder or "")) for s in canonical.scripts}
+    unit_s = {s.name: (_norm_script(s.content), (s.folder or "")) for s in unit.scripts}
+    for name, fp in can_s.items():
         if name not in unit_s:
             d.scripts_add.append(name)
-        elif unit_s[name] != content:
+        elif unit_s[name] != fp:
             d.scripts_change.append(name)
     d.scripts_remove = [n for n in unit_s if n not in can_s]
 
