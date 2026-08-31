@@ -31,6 +31,7 @@ GUTTER_ACTIVE = "#5C6675"
 CURRENT_LINE  = "#F1F6FB"
 SELECTION     = "#CFE4F6"
 FOLD_MARGIN   = "#EEF2F6"
+FOLD_ARROW    = "#A6AEBA"   # small, light fold arrow (▶/▼)
 
 try:
     from PyQt6.Qsci import QsciScintilla, QsciLexerPython, QsciScintillaBase
@@ -106,16 +107,17 @@ if _HAVE_QSCI:
             self.setMarginsBackgroundColor(QColor(Palette.SURFACE))
             self.setMarginsFont(font)
             self.setFolding(QsciScintilla.FoldStyle.PlainFoldStyle, 2)
+            self.setMarginWidth(2, 9)     # a narrow fold margin → a small, unobtrusive arrow
             self.setFoldMarginColors(QColor(Palette.SURFACE), QColor(Palette.SURFACE))
-            # PyCharm-style fold markers: a sleek arrow (▶ collapsed / ▼ expanded),
-            # no boxed tree lines, in a muted grey that brightens the arrow only.
+            # PyCharm-style fold markers: a small, light arrow (▶ collapsed / ▼ expanded),
+            # no boxed tree lines.
             B = QsciScintillaBase
             self.SendScintilla(B.SCI_MARKERDEFINE, B.SC_MARKNUM_FOLDER, B.SC_MARK_ARROW)
             self.SendScintilla(B.SCI_MARKERDEFINE, B.SC_MARKNUM_FOLDEROPEN, B.SC_MARK_ARROWDOWN)
             for _n in (B.SC_MARKNUM_FOLDERSUB, B.SC_MARKNUM_FOLDERTAIL, B.SC_MARKNUM_FOLDEREND,
                        B.SC_MARKNUM_FOLDEROPENMID, B.SC_MARKNUM_FOLDERMIDTAIL):
                 self.SendScintilla(B.SCI_MARKERDEFINE, _n, B.SC_MARK_EMPTY)
-            _grey = _sci_color(GUTTER_ACTIVE)
+            _grey = _sci_color(FOLD_ARROW)
             for _n in (B.SC_MARKNUM_FOLDER, B.SC_MARKNUM_FOLDEROPEN):
                 self.SendScintilla(B.SCI_MARKERSETFORE, _n, _grey)
                 self.SendScintilla(B.SCI_MARKERSETBACK, _n, _grey)
