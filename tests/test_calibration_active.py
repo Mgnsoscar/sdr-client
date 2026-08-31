@@ -239,3 +239,50 @@ def test_task_and_param_pickers_read_from_fetched_data():
         {"dest": "attenuation", "type": "float", "flags": ["--attenuation"]},
         {"dest": "label", "type": "str", "flags": ["--label"]}]
     assert p._numeric_params_for("atten_set") == ["attenuation"]   # numeric only
+
+
+# ── constant params (e.g. a serial port passed on every set) ─────────────────────────
+
+def _seed_atten_params(p):
+    p._tasks_yaml = ("tasks:\n  - name: atten_set\n"
+                     "    command: [python3, atten.py, --attenuation, \"0\"]\n")
+    p._task_params["atten.py"] = [
+        {"dest": "attenuation", "type": "float", "flags": ["--attenuation"]},
+        {"dest": "port", "type": "str", "flags": ["--port"]}]
+
+
+def test_control_consts_round_trip():
+    # A control block with constant params (port) loads and reads back with them intact.
+    p = CalibrationPanel("u", FakeHub())
+    p._set_doc(_doc(_control(consts={"port": "/dev/ttyACM0"})))
+    row = _active_row(p)
+    assert row["control"]["consts"] == {"port": "/dev/ttyACM0"}
+    ctrl = p._read_form(strict=False)["chain"]["planes"]["atten_out"]["control"]
+    assert ctrl["consts"] == {"port": "/dev/ttyACM0"} and ctrl["param"] == "attenuation"
+
+
+def test_active_param_form_sets_a_constant():
+    # With the task's params fetched, the form lists port; giving it a value writes consts.
+    p = CalibrationPanel("u", FakeHub())
+    p._set_doc(_doc(_control(task="atten_set", param="attenuation")))
+    _seed_atten_params(p)
+    p._select_plane("atten_out")                       # renders the per-parameter form
+    from PyQt6.QtWidgets import QLineEdit, QRadioButton
+    # attenuation (numeric) → an enabled driver radio; port (str) → a disabled radio.
+    radios = [r for r in p.findChildren(QRadioButton)]
+    assert any(r.isEnabled() and r.isChecked() for r in radios)     # a driver is selected
+    assert any(not r.isEnabled() for r in radios)                   # the str param can't drive
+    port_field = next(le for le in p.findChildren(QLineEdit)
+                      if le.isEnabled() and le.placeholderText() == "constant value")
+    port_field.setText("/dev/ttyACM0")
+    _app.processEvents()
+    ctrl = p._read_form(strict=False)["chain"]["planes"]["atten_out"]["control"]
+    assert ctrl["consts"] == {"port": "/dev/ttyACM0"}
+
+
+def test_control_issues_flags_the_driver_as_a_constant():
+    from ui.calibration_panel import _control_issues
+    bad = _control(consts={"attenuation": "10"})       # driver duplicated as a constant
+    assert any("constant" in i for i in _control_issues("atten_out", bad))
+    ok = _control(consts={"port": "/dev/ttyACM0"})
+    assert _control_issues("atten_out", ok) == []

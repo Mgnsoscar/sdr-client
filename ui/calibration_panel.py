@@ -33,14 +33,14 @@ import copy
 import json
 from typing import Optional
 
-from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QRect, Qt
+from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QRect, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractItemDelegate, QAbstractItemView, QAbstractScrollArea, QApplication,
-    QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
-    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
-    QPushButton, QScrollArea, QSizePolicy, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QButtonGroup, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox,
+    QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from api.client import AgentHTTPError
@@ -207,6 +207,12 @@ def _control_issues(name: str, control) -> list:
             out.append(f"active plane '{name}': engage % must be between 0 and 100")
     except (TypeError, ValueError):
         out.append(f"active plane '{name}': engage % must be numeric")
+    consts = control.get("consts")
+    if consts is not None:
+        if not isinstance(consts, dict):
+            out.append(f"active plane '{name}': constant params must be an object")
+        elif str(control.get("param") or "").strip() in consts:
+            out.append(f"active plane '{name}': the driving param can't also be a constant")
     return out
 
 
@@ -1665,7 +1671,10 @@ class CalibrationPanel(QWidget):
                 "sense": c.get("sense", "attenuation"),
                 "min_db": _numeric(c.get("min_db"), 0.0), "max_db": _numeric(c.get("max_db"), 0.0),
                 "step_db": _numeric(c.get("step_db"), 0.0),
-                "engage_pct": _numeric(c.get("engage_pct"), 0.0)}
+                "engage_pct": _numeric(c.get("engage_pct"), 0.0),
+                # Other params of the set-task sent unchanged on every set (e.g. an attenuator's
+                # serial port): {dest: value_string}. The driving param is not among them.
+                "consts": {str(k): str(v) for k, v in (c.get("consts") or {}).items()}}
             # The active component's OWN baseline insertion loss: a frequency table it owns
             # inline (not a shared library part). Empty ⇒ a flat constant (row["delta"]).
             row["baseline_table"] = [list(p) for p in (spec.get("delta_db_by_freq") or [])]
@@ -2270,12 +2279,107 @@ class CalibrationPanel(QWidget):
     def _numeric_params_for(self, task_name: str) -> list:
         """The numeric parameter names of a task's script (once fetched) — the candidates
         for a gain/attenuation control param."""
+        return [p["dest"] for p in self._params_for(task_name)
+                if p["type"] in ("int", "float")]
+
+    def _params_for(self, task_name: str) -> list:
+        """Every parameter of a task's script (once fetched) as ``{dest, type, numeric}`` —
+        the set-param form lists them all: a numeric one can DRIVE the attenuation, the rest
+        can be given constant values (e.g. a serial ``port``). Empty until the fetch returns."""
         script = self._task_script(task_name)
         out = []
         for s in self._task_params.get(script, []):
-            if s.get("type") in ("int", "float"):
-                out.append(s.get("dest") or (s.get("flags") or [""])[0].lstrip("-"))
-        return [p for p in out if p]
+            dest = s.get("dest") or (s.get("flags") or [""])[0].lstrip("-")
+            if not dest:
+                continue
+            typ = s.get("type") or "str"
+            out.append({"dest": dest, "type": typ, "numeric": typ in ("int", "float")})
+        return out
+
+    def _build_active_param_form(self, c: dict, v, commit) -> None:
+        """The set-task's parameter form for an active component. One numeric param is the
+        DRIVER (set automatically from the requested power → control.param); the rest can be
+        given constant values sent on every set (control.consts), e.g. a serial ``port``.
+        Falls back to a free-text driver picker until the task's params are fetched."""
+        params = self._params_for(c.get("task", ""))
+        if not params:                                   # not fetched yet / offline
+            prow = QHBoxLayout()
+            pl = QLabel("param"); pl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+            combo = QComboBox(); combo.setEditable(True)
+            for pn in self._numeric_params_for(c.get("task", "")):
+                combo.addItem(pn)
+            combo.setCurrentText(c.get("param", ""))
+            combo.currentTextChanged.connect(
+                lambda _=0, cb=combo: (c.__setitem__("param", cb.currentText().strip()), commit()))
+            prow.addWidget(pl); prow.addWidget(combo, 1)
+            v.addLayout(prow)
+            hint = QLabel("Connect to this unit to load the task's parameters — then you can "
+                          "pick the driving param and set constants (e.g. a serial port).")
+            hint.setWordWrap(True)
+            hint.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+            v.addWidget(hint)
+            return
+
+        numeric = [p["dest"] for p in params if p["numeric"]]
+        driver = (c.get("param") or "").strip()
+        if driver not in numeric:                        # default to the first numeric param
+            driver = numeric[0] if numeric else ""
+            c["param"] = driver
+        consts = c.setdefault("consts", {})
+        consts.pop(driver, None)                         # the driver is never also a constant
+
+        hdr = QLabel("Parameters — ● drives the attenuation from the requested power; the "
+                     "others are sent as constants on every set.")
+        hdr.setWordWrap(True)
+        hdr.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+        v.addWidget(hdr)
+
+        group = QButtonGroup(v.parentWidget() or self)   # exclusive driver selection
+        val_fields: dict = {}
+        form = QFormLayout(); form.setContentsMargins(0, 0, 0, 0); form.setSpacing(6)
+        for p in params:
+            dest = p["dest"]
+            cell = QHBoxLayout(); cell.setContentsMargins(0, 0, 0, 0)
+            radio = QRadioButton("drives")
+            radio.setEnabled(p["numeric"])
+            radio.setChecked(p["numeric"] and dest == driver)
+            radio.setToolTip("Drive this parameter automatically from the requested power."
+                             if p["numeric"] else
+                             "Only a numeric parameter can drive the power — set a constant.")
+            group.addButton(radio)
+            field = QLineEdit(consts.get(dest, ""))
+            field.setEnabled(dest != driver)
+            field.setPlaceholderText("set at runtime" if dest == driver else "constant value")
+            val_fields[dest] = field
+
+            def _on_drive(checked, d=dest):
+                if not checked:
+                    return
+                c["param"] = d
+                (c.get("consts") or {}).pop(d, None)     # a driver can't also be a constant
+                for dd, f in val_fields.items():
+                    f.setEnabled(dd != d)
+                    if dd == d:
+                        f.blockSignals(True); f.clear(); f.blockSignals(False)
+                        f.setPlaceholderText("set at runtime")
+                    else:
+                        f.setPlaceholderText("constant value")
+                commit()
+            radio.toggled.connect(_on_drive)
+
+            def _on_const(text, d=dest):
+                cc = c.setdefault("consts", {})
+                if text.strip():
+                    cc[d] = text
+                else:
+                    cc.pop(d, None)
+            field.textChanged.connect(_on_const)
+            field.editingFinished.connect(commit)
+
+            cell.addWidget(radio); cell.addWidget(field, 1)
+            holder = QWidget(); holder.setLayout(cell)
+            form.addRow(dest, holder)
+        v.addLayout(form)
 
     def _handle_taskparams(self, script: str, result) -> None:
         """Cache a script's params and, if the active stage that asked is on screen, re-render
@@ -2289,13 +2393,21 @@ class CalibrationPanel(QWidget):
         """The control block for an active stage, read from its live editor state."""
         c = row.get("control") or {}
         sense = c.get("sense", "attenuation")
-        return {"task": str(c.get("task", "")).strip(),
-                "param": str(c.get("param", "")).strip(),
-                "sense": sense if sense in ("attenuation", "gain") else "attenuation",
-                "min_db": _numeric(c.get("min_db"), 0.0),
-                "max_db": _numeric(c.get("max_db"), 0.0),
-                "step_db": _numeric(c.get("step_db"), 0.0),
-                "engage_pct": _numeric(c.get("engage_pct"), 0.0)}
+        param = str(c.get("param", "")).strip()
+        # Constant params sent on every set: {dest: value}. Drop empties and never let the
+        # driving param double as a constant.
+        consts = {str(k).strip(): str(v) for k, v in (c.get("consts") or {}).items()
+                  if str(k).strip() and str(k).strip() != param and str(v).strip() != ""}
+        out = {"task": str(c.get("task", "")).strip(),
+               "param": param,
+               "sense": sense if sense in ("attenuation", "gain") else "attenuation",
+               "min_db": _numeric(c.get("min_db"), 0.0),
+               "max_db": _numeric(c.get("max_db"), 0.0),
+               "step_db": _numeric(c.get("step_db"), 0.0),
+               "engage_pct": _numeric(c.get("engage_pct"), 0.0)}
+        if consts:
+            out["consts"] = consts
+        return out
 
     def _detail_active(self, row) -> None:
         """Detail editor for an ACTIVE component: a passive baseline Δ dB plus a control block
@@ -2375,7 +2487,7 @@ class CalibrationPanel(QWidget):
         box.setStyleSheet(f"#ctrlbox {{ border:1px solid {Palette.BORDER}; border-radius:8px; }}")
         v = QVBoxLayout(box); v.setContentsMargins(10, 8, 10, 8); v.setSpacing(8)
 
-        # Set task + set param.
+        # Set task.
         self._fetch_task_params(c.get("task", ""))
         trow = QHBoxLayout()
         tl = QLabel("Set task"); tl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
@@ -2383,22 +2495,24 @@ class CalibrationPanel(QWidget):
         for t in self._all_task_names():
             task_combo.addItem(t)
         task_combo.setCurrentText(c.get("task", ""))
-        pl = QLabel("param"); pl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
-        param_combo = QComboBox(); param_combo.setEditable(True)
-        for pn in self._numeric_params_for(c.get("task", "")):
-            param_combo.addItem(pn)
-        param_combo.setCurrentText(c.get("param", ""))
-        trow.addWidget(tl); trow.addWidget(task_combo, 2)
-        trow.addWidget(pl); trow.addWidget(param_combo, 1)
+        trow.addWidget(tl); trow.addWidget(task_combo, 1)
         v.addLayout(trow)
 
         def _task_changed(_=0):
             c["task"] = task_combo.currentText().strip()
             self._fetch_task_params(c["task"])
             _commit()
+            # Re-render so the parameter form matches the new task. Deferred: rebuilding the
+            # detail from inside the combo's own signal would delete the live combo mid-signal
+            # (a Qt slot touching a freed widget aborts the process).
+            QTimer.singleShot(0, self._render_detail)
         task_combo.currentTextChanged.connect(_task_changed)
-        param_combo.currentTextChanged.connect(
-            lambda _=0: (c.__setitem__("param", param_combo.currentText().strip()), _commit()))
+
+        # Parameters. Every param of the set-task is listed: pick the ONE numeric param that
+        # drives the attenuation from the requested power, and give the others (e.g. a serial
+        # ``port``) constant values that ride along on every set. Until the task's params are
+        # fetched (offline), fall back to a free-text driver picker so the field still works.
+        self._build_active_param_form(c, v, _commit)
 
         # Sense.
         srow = QHBoxLayout()
