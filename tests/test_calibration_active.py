@@ -184,6 +184,47 @@ def test_active_constant_baseline_still_supported():
     assert plane.get("delta_db") == 0.0 and "delta_db_by_freq" not in plane
 
 
+# ── the detail editor survives a re-render (widget-lifetime regressions) ──────────────
+
+def _flush_deletes():
+    # deleteLater() posts a DeferredDelete event that a plain processEvents() may not flush;
+    # force it so a widget the re-render orphaned is actually destroyed (as it is in the app).
+    from PyQt6.QtCore import QCoreApplication, QEvent
+    _app.processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    _app.processEvents()
+
+
+def test_active_constant_baseline_survives_a_detail_rerender():
+    # Regression (crash: "set the task parameter after choosing a task"). Fetching a task's
+    # params triggers a direct _render_detail() of the active editor. The constant Δ dB field
+    # is a PERSISTENT model widget (row["delta"], read by _read_planes); when it was placed in
+    # a bare sub-layout, _clear_layout deleteLater()'d it on the re-render, and the next form
+    # read raised "wrapped C/C++ object ... deleted" inside a Qt slot — which aborts PyQt6.
+    p = CalibrationPanel("u", FakeHub())
+    p._set_doc(_doc(_control()))                       # constant baseline (delta_db 0.0)
+    p._select_plane("atten_out")                       # renders _detail_active, places row["delta"]
+    p._handle_taskparams("atten.py", {"params": []})   # a fetched task's params → re-renders detail
+    _flush_deletes()                                   # actually destroy any orphaned widget
+    plane = p._read_form(strict=False)["chain"]["planes"]["atten_out"]
+    assert plane.get("delta_db") == 0.0                # row["delta"] still alive & readable
+
+
+def test_active_inline_table_edit_updates_the_row():
+    # Regression (crash: "add values to the frequency-gain-delta table"). Editing a cell of the
+    # Δ dB(f) baseline grid fires its on-change callback; it must update the row's table, not
+    # raise — the callback must bind the grid, not a later local of the same name.
+    from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem
+    p = CalibrationPanel("u", FakeHub())
+    p._set_doc(_doc_table(_control(), [[1.0e9, -4.0], [2.0e9, -6.0]]))
+    p._select_plane("atten_out")                       # renders the Δ dB(f) grid
+    tbl = next(t for t in p.findChildren(QTableWidget) if t.columnCount() == 2)
+    tbl.setItem(0, 1, QTableWidgetItem("-5.0"))         # live edit → cellChanged → on-change
+    _flush_deletes()
+    row = _active_row(p)
+    assert any(abs(v[1] + 5.0) < 1e-9 for v in row["baseline_table"]), row["baseline_table"]
+
+
 def test_task_and_param_pickers_read_from_fetched_data():
     p = CalibrationPanel("u", FakeHub())
     p._tasks_yaml = (

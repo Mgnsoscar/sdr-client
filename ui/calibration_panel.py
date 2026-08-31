@@ -2213,12 +2213,15 @@ class CalibrationPanel(QWidget):
                           "fleet. To swap the part, add a new stage and remove this one — "
                           "then drag it into place.")
         else:                                          # constant Δ dB stage
-            dr = QHBoxLayout()
+            # Wrap the persistent row["delta"] in a container widget, not a bare sub-layout, so a
+            # re-render can't deleteLater() it out from under _read_planes — see _detail_active.
+            holder = QWidget()
+            dr = QHBoxLayout(holder); dr.setContentsMargins(0, 0, 0, 0)
             dl = QLabel("Constant Δ dB")
             dl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
             dr.addWidget(dl); row["delta"].setFixedWidth(90); dr.addWidget(row["delta"])
             dr.addStretch(1)
-            self._detail_body.addLayout(dr)
+            self._detail_body.addWidget(holder)
             note = QLabel("A fixed, frequency-independent offset from the previous stage "
                           "(negative = loss, positive = gain).")
         note.setWordWrap(True)
@@ -2334,12 +2337,20 @@ class CalibrationPanel(QWidget):
         kind.currentIndexChanged.connect(_base_kind_changed)
 
         if not has_tbl:
-            dr = QHBoxLayout()
+            # row["delta"] is a PERSISTENT model widget (created once in _make_plane_row and
+            # read by _read_planes). Nest it inside a WRAPPER widget, never a bare sub-layout:
+            # _clear_layout recurses into sub-layouts and would deleteLater() the model widget
+            # on a direct re-render (_handle_taskparams fires one after a task's params arrive),
+            # leaving the row holding a deleted QLineEdit that crashes the next form read. A
+            # wrapper widget is not recursed into, so a re-render only reparents the widget into
+            # the new wrapper — exactly how _stage_advanced keeps row["name"] alive.
+            holder = QWidget()
+            dr = QHBoxLayout(holder); dr.setContentsMargins(0, 0, 0, 0)
             dl = QLabel("Δ dB (at 0 applied)")
             dl.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
             row["delta"].setFixedWidth(90)
             dr.addWidget(dl); dr.addWidget(row["delta"]); dr.addStretch(1)
-            self._detail_body.addLayout(dr)
+            self._detail_body.addWidget(holder)
         else:
             hint = QLabel("This component's insertion loss vs frequency (signed dB, negative = "
                           "loss). Folded into the range at each signal's frequency; the "
@@ -2349,16 +2360,16 @@ class CalibrationPanel(QWidget):
             self._detail_body.addWidget(hint)
             spark = _FreqSparkline()
             spark.set_table(base_tbl)
-            grid = _CurveTable(on_changed=None, headers=("freq (Hz)", "Δ dB"))
-            grid.set_rows(base_tbl)
+            base_grid = _CurveTable(on_changed=None, headers=("freq (Hz)", "Δ dB"))
+            base_grid.set_rows(base_tbl)
 
-            def _table_changed():
-                row["baseline_table"] = grid.rows(strict=False)
-                spark.set_table(row["baseline_table"])
+            def _table_changed(_grid=base_grid, _spark=spark):
+                row["baseline_table"] = _grid.rows(strict=False)
+                _spark.set_table(row["baseline_table"])
                 _commit()
-            grid._on_changed = _table_changed             # _CurveTable calls this on edit
+            base_grid._on_changed = _table_changed        # _CurveTable calls this on edit
             self._detail_body.addWidget(spark)
-            self._detail_body.addWidget(grid)
+            self._detail_body.addWidget(base_grid)
 
         box = QFrame(); box.setObjectName("ctrlbox")
         box.setStyleSheet(f"#ctrlbox {{ border:1px solid {Palette.BORDER}; border-radius:8px; }}")
