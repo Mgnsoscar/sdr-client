@@ -517,4 +517,5 @@ def scoped_library(library: "Library", unit_type: str) -> "Library":
         scripts=[s for s in library.scripts if applies_to_type(s.types, unit_type)],
         tasks=[t for t in library.tasks if applies_to_type(t.types, unit_type)],
         sequences=[q for q in library.sequences if applies_to_type(q.types, unit_type)],
+        folders=list(library.folders),   # folders are cross-type; keep empty ones too
     )
