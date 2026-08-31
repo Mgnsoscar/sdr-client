@@ -140,12 +140,14 @@ class LibraryClient:
             params = (extract_params(text) or {}).get("params", [])
         except Exception:  # noqa: BLE001 — a script we can't parse still uploads
             params = []
-        # Preserve an existing script's unit-type scope across a content edit —
-        # re-uploading (Save) would otherwise reset it to shared.
+        # Preserve an existing script's unit-type scope AND folder across a content
+        # edit — re-uploading (Save) would otherwise reset them.
         prev = self._store.get_script(filename)
         types = list(prev.types) if prev is not None else []
+        folder = prev.folder if prev is not None else ""
         self._store.upsert_script(
-            m.LibraryScript(name=filename, content=text, params=params, types=types))
+            m.LibraryScript(name=filename, content=text, params=params,
+                            types=types, folder=folder))
         return {"uploaded": filename}
 
     def get_script_types(self, name: str) -> List[str]:
@@ -173,6 +175,33 @@ class LibraryClient:
         lib.scripts = [s for s in lib.scripts if s.name != name]
         self._store.replace(lib)
         return {"deleted": name}
+
+    # ── Folders (organizational; a real subdir on the unit at deploy) ───────────
+
+    def list_folders(self) -> List[str]:
+        return self._store.folders()
+
+    def get_script_folder(self, name: str) -> str:
+        s = self._store.get_script(name)
+        return s.folder if s is not None else ""
+
+    def set_script_folder(self, name: str, folder: str) -> dict:
+        if self._store.get_script(name) is None:
+            raise LibraryError(f"unknown script: {name}")
+        self._store.set_script_folder(name, folder)
+        return {"name": name, "folder": folder.strip().strip("/")}
+
+    def create_folder(self, path: str) -> dict:
+        self._store.add_folder(path)
+        return {"folder": path.strip().strip("/")}
+
+    def rename_folder(self, old: str, new: str) -> dict:
+        self._store.rename_folder(old, new)
+        return {"old": old, "new": new.strip().strip("/")}
+
+    def delete_folder(self, path: str, move_to: str = "") -> dict:
+        self._store.delete_folder(path, move_to)
+        return {"deleted": path}
 
     def get_script_params(self, name: str) -> dict:
         # Re-extract from the stored source so the schema always reflects the

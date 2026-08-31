@@ -34,10 +34,12 @@ from typing import Dict, List, Optional, Tuple
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMenu, QMessageBox, QPushButton, QSplitter, QToolButton,
-    QVBoxLayout, QWidget,
+    QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
+    QMessageBox, QPushButton, QSplitter, QToolButton, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
+
+_ROLE = Qt.ItemDataRole.UserRole      # tree item payload: ("file", name) | ("folder", path)
 
 from api import models as m
 from api.fleet import LIBRARY_HOST
@@ -182,6 +184,12 @@ class ScriptsPanel(QWidget):
         self._count.setObjectName("count")
         head.addWidget(self._count)
         head.addStretch(1)
+        self._newfolder_btn = QToolButton()
+        self._newfolder_btn.setText("🗀+")
+        self._newfolder_btn.setObjectName("headbtn")
+        self._newfolder_btn.setToolTip("New folder")
+        self._newfolder_btn.clicked.connect(lambda: self._new_folder())
+        head.addWidget(self._newfolder_btn)
         self._upload_btn = QToolButton()
         self._upload_btn.setText("⬆")
         self._upload_btn.setObjectName("headbtn")
@@ -194,6 +202,7 @@ class ScriptsPanel(QWidget):
         self._refresh_btn.setToolTip("Refresh")
         self._refresh_btn.clicked.connect(self._refresh)
         head.addWidget(self._refresh_btn)
+        self._newfolder_btn.setVisible(self.hostname == LIBRARY_HOST)
         v.addLayout(head)
 
         self._search = QLineEdit()
@@ -204,17 +213,39 @@ class ScriptsPanel(QWidget):
         srow = QHBoxLayout(); srow.setContentsMargins(12, 0, 12, 8); srow.addWidget(self._search)
         v.addLayout(srow)
 
-        self._list = QListWidget()
-        self._list.setObjectName("filelist")
-        self._list.setFrameShape(QFrame.Shape.NoFrame)
-        self._list.currentItemChanged.connect(self._on_list_select)
-        self._list.itemDoubleClicked.connect(self._on_list_open)   # open only on double-click
-        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._list.customContextMenuRequested.connect(self._list_context_menu)
-        v.addWidget(self._list, stretch=1)
+        self._tree = QTreeWidget()
+        self._tree.setObjectName("filetree")
+        self._tree.setHeaderHidden(True)
+        self._tree.setFrameShape(QFrame.Shape.NoFrame)
+        self._tree.setIndentation(14)
+        self._tree.setExpandsOnDoubleClick(False)   # double-click a file opens it
+        self._tree.currentItemChanged.connect(self._on_tree_select)
+        self._tree.itemDoubleClicked.connect(self._on_tree_open)
+        self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._tree_context_menu)
+        v.addWidget(self._tree, stretch=1)
 
         panel.setMinimumWidth(210)
         return panel
+
+    # ── folder helpers (library mode) ────────────────────────────────────────────
+    def _folder_for(self, name: str) -> str:
+        client = self.hub.fleet.get(self.hostname)
+        if hasattr(client, "get_script_folder"):
+            try:
+                return client.get_script_folder(name)
+            except Exception:  # noqa: BLE001
+                return ""
+        return ""
+
+    def _all_folders(self) -> List[str]:
+        client = self.hub.fleet.get(self.hostname)
+        if hasattr(client, "list_folders"):
+            try:
+                return client.list_folders()
+            except Exception:  # noqa: BLE001
+                return []
+        return []
 
     def _build_editor_panel(self) -> QWidget:
         panel = QFrame()
@@ -304,38 +335,102 @@ class ScriptsPanel(QWidget):
             lambda: self.hub.fleet.get(self.hostname).list_scripts(),
         )
 
-    # ── list selection / open ────────────────────────────────────────────────────
-    def _on_list_select(self, cur: Optional[QListWidgetItem], _prev=None) -> None:
-        self._selected = cur.text() if cur is not None else None
+    # ── tree selection / open / context ──────────────────────────────────────────
+    @staticmethod
+    def _payload(item):
+        return item.data(0, _ROLE) if item is not None else None
 
-    def _on_list_open(self, item: Optional[QListWidgetItem]) -> None:
-        if item is not None:
-            self._open_tab(item.text())
+    def _on_tree_select(self, cur, _prev=None) -> None:
+        p = self._payload(cur)
+        self._selected = p[1] if p and p[0] == "file" else None
 
-    def _list_context_menu(self, pos) -> None:
-        item = self._list.itemAt(pos)
-        if item is None:                       # empty area — library-wide actions
-            menu = QMenu(self)
+    def _on_tree_open(self, item, _col=0) -> None:
+        p = self._payload(item)
+        if p and p[0] == "file":
+            self._open_tab(p[1])
+        elif p and p[0] == "folder":
+            item.setExpanded(not item.isExpanded())
+
+    def _tree_context_menu(self, pos) -> None:
+        item = self._tree.itemAt(pos)
+        p = self._payload(item)
+        menu = QMenu(self)
+        if p is None:                                   # empty area
+            if self._scope is not None:
+                menu.addAction("New folder…", self._new_folder)
             menu.addAction("Upload script(s)…", self._on_upload)
             menu.addAction("Download all…", self._on_download_all)
             menu.addAction("Refresh", self._refresh)
-            menu.exec(self._list.mapToGlobal(pos))
-            return
-        name = item.text()
-        self._selected = name
-        menu = QMenu(self)
-        menu.addAction("Open", lambda: self._open_tab(name))
-        menu.addAction("Download…", lambda: self._download(name))
-        if self._scope is not None:
-            sub = menu.addMenu(f"Applies to: {scope_label(self._types_for(name))}")
-            from config import UNIT_TYPES
-            sub.addAction("Shared (all units)", lambda: self._set_scope(name, []))
-            for t in UNIT_TYPES:
-                sub.addAction(f"{UNIT_TYPE_LABELS.get(t, t)} only",
-                              lambda _c=False, ut=t: self._set_scope(name, [ut]))
-        menu.addSeparator()
-        menu.addAction("Delete", lambda: self._delete(name))
-        menu.exec(self._list.mapToGlobal(pos))
+        elif p[0] == "folder":
+            folder = p[1]
+            menu.addAction("New folder…", self._new_folder)
+            menu.addAction("Rename folder…", lambda: self._rename_folder(folder))
+            menu.addSeparator()
+            menu.addAction("Delete folder", lambda: self._delete_folder(folder))
+        else:                                           # a file
+            name = p[1]
+            self._selected = name
+            menu.addAction("Open", lambda: self._open_tab(name))
+            menu.addAction("Download…", lambda: self._download(name))
+            if self._scope is not None:
+                self._add_move_menu(menu, name)
+                sub = menu.addMenu(f"Applies to: {scope_label(self._types_for(name))}")
+                from config import UNIT_TYPES
+                sub.addAction("Shared (all units)", lambda: self._set_scope(name, []))
+                for t in UNIT_TYPES:
+                    sub.addAction(f"{UNIT_TYPE_LABELS.get(t, t)} only",
+                                  lambda _c=False, ut=t: self._set_scope(name, [ut]))
+            menu.addSeparator()
+            menu.addAction("Delete", lambda: self._delete(name))
+        menu.exec(self._tree.mapToGlobal(pos))
+
+    def _add_move_menu(self, menu, name: str) -> None:
+        sub = menu.addMenu("Move to folder")
+        cur = self._folder_for(name)
+        if cur:
+            sub.addAction("Root (no folder)", lambda: self._move_to_folder(name, ""))
+        for f in self._all_folders():
+            if f != cur:
+                sub.addAction(f, lambda _c=False, ff=f: self._move_to_folder(name, ff))
+        sub.addSeparator()
+        sub.addAction("New folder…", lambda: self._move_to_new_folder(name))
+
+    # ── folder operations (library mode; LibraryClient is synchronous) ───────────
+    def _client(self):
+        return self.hub.fleet.get(self.hostname)
+
+    def _new_folder(self) -> None:
+        name, ok = QInputDialog.getText(self, "New folder", "Folder name:")
+        if ok and name.strip() and hasattr(self._client(), "create_folder"):
+            self._client().create_folder(name.strip())
+            self._populate(self._all_names)
+
+    def _rename_folder(self, path: str) -> None:
+        name, ok = QInputDialog.getText(self, "Rename folder", "New name:", text=path)
+        if ok and name.strip() and hasattr(self._client(), "rename_folder"):
+            self._client().rename_folder(path, name.strip())
+            self._populate(self._all_names)
+
+    def _delete_folder(self, path: str) -> None:
+        resp = QMessageBox.question(
+            self, "Delete folder",
+            f"Delete folder '{path}'?\nIts scripts move to the library root — "
+            f"the scripts themselves are not deleted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if resp == QMessageBox.StandardButton.Yes and hasattr(self._client(), "delete_folder"):
+            self._client().delete_folder(path)
+            self._populate(self._all_names)
+
+    def _move_to_folder(self, name: str, folder: str) -> None:
+        if hasattr(self._client(), "set_script_folder"):
+            self._client().set_script_folder(name, folder)
+            self._populate(self._all_names)
+
+    def _move_to_new_folder(self, name: str) -> None:
+        folder, ok = QInputDialog.getText(self, "Move to new folder", "Folder name:")
+        if ok and folder.strip():
+            self._move_to_folder(name, folder.strip())
 
     # ── tabs ─────────────────────────────────────────────────────────────────────
     def _open_tab(self, name: str) -> None:
@@ -707,12 +802,40 @@ class ScriptsPanel(QWidget):
         if query:
             names = [n for n in names if query in n.lower()]
         names = sorted(names, key=natural_key)
-        self._list.blockSignals(True)
-        self._list.clear()
+
+        # Group into folders. Declared (possibly empty) folders show too, unless a
+        # search is narrowing the view.
+        folder_of = {n: self._folder_for(n) for n in names}
+        folders = {f for f in folder_of.values() if f}
+        if not query:
+            folders |= {f for f in self._all_folders() if f}
+
+        self._tree.blockSignals(True)
+        self._tree.clear()
+        folder_items: Dict[str, QTreeWidgetItem] = {}
+        for f in sorted(folders):
+            it = QTreeWidgetItem([f])
+            it.setData(0, _ROLE, ("folder", f))
+            it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsSelectable)   # folders don't "select"
+            fnt = it.font(0); fnt.setBold(True); it.setFont(0, fnt)
+            self._tree.addTopLevelItem(it)
+            it.setExpanded(True)
+            folder_items[f] = it
+        keep_item = None
         for n in names:
-            self._list.addItem(n)
-        self._list.blockSignals(False)
+            node = QTreeWidgetItem([n])
+            node.setData(0, _ROLE, ("file", n))
+            parent = folder_items.get(folder_of[n])
+            (parent.addChild(node) if parent is not None
+             else self._tree.addTopLevelItem(node))
+            if n == keep:
+                keep_item = node
+        for f, it in folder_items.items():
+            it.setToolTip(0, f"{it.childCount()} script(s)")
+        self._tree.blockSignals(False)
         self._count.setText(f"{len(names)} file(s)")
+        if keep_item is not None:
+            self._tree.setCurrentItem(keep_item)
 
         if not names:
             if query:
@@ -732,12 +855,6 @@ class ScriptsPanel(QWidget):
             self._set_status(f"{len(names)} script(s) for {lbl} · {total} total")
         else:
             self._set_status(f"{len(names)} script(s)")
-        if keep in names:
-            items = self._list.findItems(keep, Qt.MatchFlag.MatchExactly)
-            if items:
-                self._list.blockSignals(True)
-                self._list.setCurrentItem(items[0])
-                self._list.blockSignals(False)
 
     def _set_status(self, text: str, error: bool = False, warn: bool = False) -> None:
         color = Palette.CRASH if error else (Palette.ARMED if warn else Palette.TEXT_FAINT)
@@ -759,11 +876,11 @@ class ScriptsPanel(QWidget):
         color: {Palette.TEXT}; }}
     QLineEdit#search {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER};
         border-radius: 7px; padding: 6px 9px; color: {Palette.TEXT}; }}
-    QListWidget#filelist {{ background: transparent; border: none; padding: 2px 6px 8px; }}
-    QListWidget#filelist::item {{ padding: 6px 8px; border-radius: 7px;
+    QTreeWidget#filetree {{ background: transparent; border: none; padding: 2px 4px 8px; }}
+    QTreeWidget#filetree::item {{ padding: 5px 4px; border-radius: 7px;
         color: {Palette.TEXT}; }}
-    QListWidget#filelist::item:hover {{ background: {Palette.INSET}; }}
-    QListWidget#filelist::item:selected {{ background: {Palette.ACCENT_SOFT};
+    QTreeWidget#filetree::item:hover {{ background: {Palette.INSET}; }}
+    QTreeWidget#filetree::item:selected {{ background: {Palette.ACCENT_SOFT};
         color: {Palette.ACCENT_INK}; }}
     QFrame#tabstrip {{ background: {Palette.SURFACE_ALT};
         border-bottom: 1px solid {Palette.BORDER}; }}

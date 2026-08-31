@@ -97,6 +97,8 @@ class LibraryStore:
             if q.id not in have_q:
                 self._lib.sequences.append(q.model_copy(deep=True))
                 added["sequences"] += 1
+        # Union declared folders so an empty folder from either side survives a merge.
+        self._lib.folders = sorted({f for f in (self._lib.folders + list(other.folders)) if f})
         self._save()
         return added
 
@@ -139,6 +141,49 @@ class LibraryStore:
     def upsert_script(self, script: m.LibraryScript) -> None:
         self._lib.scripts = [s for s in self._lib.scripts if s.name != script.name]
         self._lib.scripts.append(script)
+        self._save()
+
+    # ── Folders (organizational; a real subdir on the unit at deploy) ───────────
+
+    def folders(self) -> List[str]:
+        """Every folder that exists: those declared (so an empty one persists) plus
+        any a script sits in. Sorted, blanks dropped (root has no folder name)."""
+        used = {s.folder for s in self._lib.scripts if s.folder}
+        return sorted(used | {f for f in self._lib.folders if f})
+
+    def add_folder(self, path: str) -> None:
+        path = path.strip().strip("/")
+        if path and path not in self._lib.folders:
+            self._lib.folders.append(path)
+            self._save()
+
+    def rename_folder(self, old: str, new: str) -> None:
+        new = new.strip().strip("/")
+        if not new or new == old:
+            return
+        for s in self._lib.scripts:
+            if s.folder == old:
+                s.folder = new
+        self._lib.folders = sorted({new if f == old else f
+                                    for f in self._lib.folders if f} | {new})
+        self._save()
+
+    def delete_folder(self, path: str, move_to: str = "") -> None:
+        """Remove a folder; its scripts move to `move_to` (root by default) — the
+        scripts themselves are never deleted here."""
+        for s in self._lib.scripts:
+            if s.folder == path:
+                s.folder = move_to
+        self._lib.folders = [f for f in self._lib.folders if f and f != path]
+        self._save()
+
+    def set_script_folder(self, name: str, folder: str) -> None:
+        folder = folder.strip().strip("/")
+        for s in self._lib.scripts:
+            if s.name == name:
+                s.folder = folder
+        if folder and folder not in self._lib.folders:
+            self._lib.folders.append(folder)
         self._save()
 
     def upsert_task(self, task: m.TaskConfig) -> None:

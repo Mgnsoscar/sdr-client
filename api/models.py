@@ -470,16 +470,20 @@ class ScheduledPlan(BaseModel):
 # and those live in plans, not here.
 
 class LibraryScript(BaseModel):
-    name: str                          # script filename, e.g. "freq.py"
+    name: str                          # script filename, e.g. "freq.py" — its identity
     content: str = ""                  # the script's source (for upload/edit/deploy)
     params: List[dict] = []            # argparse param schema (/scripts/{name}/params)
     types: List[str] = []              # unit types this script targets; empty = shared/all
+    folder: str = ""                   # organizational folder (a real subdir on the unit at
+                                       # deploy); "" = library root. The name stays the
+                                       # identity, so moving folders never changes references.
 
 
 class Library(BaseModel):
     scripts: List[LibraryScript] = []
     tasks: List[TaskConfig] = []
     sequences: List[Sequence] = []
+    folders: List[str] = []            # declared folder paths, so an empty folder persists
 
 
 class DeployLibraryResult(BaseModel):
