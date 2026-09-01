@@ -821,6 +821,11 @@ class ParamForm(QWidget):
             item = layout.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.hide()              # hide BEFORE reparenting: setParent(None) makes a
+                                      # visible child a top-level widget, which flashes as a
+                                      # window for one event loop tick until deleteLater runs
+                                      # (very visible on a re-render of an already-shown form,
+                                      # e.g. a param-dependent chirp folding at load).
                 w.setParent(None)     # drop from the tree now (deleteLater is deferred),
                 w.deleteLater()       # so findChildren / a re-render never see the old one
                 continue
