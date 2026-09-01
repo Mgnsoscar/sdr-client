@@ -99,3 +99,19 @@ def test_calibrated_unit_shows_dbm_and_bounds_in_message():
     err = dlg._range_error()
     assert err is not None
     assert "dBm" in err and "28.2" in err and "power" in err
+
+
+def test_range_hint_is_always_visible_and_calibrated():
+    # The allowed range shows even before you type an out-of-range value, narrowed to the
+    # unit's calibrated dBm range and flagged as calibrated.
+    dlg = _dialog(_CAL_BOUNDS)
+    txt = dlg._range_lbl.text()
+    assert "Allowed range: -1.8..28.2 dBm EIRP" in txt
+    assert "calibrated for this unit" in txt
+
+
+def test_range_hint_falls_back_to_script_range_without_calibration():
+    dlg = _dialog(None)                  # uncalibrated / no bounds
+    txt = dlg._range_lbl.text()
+    assert "Allowed range: -140..60 dBm" in txt
+    assert "calibrated" not in txt

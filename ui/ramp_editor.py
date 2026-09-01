@@ -33,7 +33,9 @@ from state.power_fold import refold_bounds
 
 from . import timeline_model as tlm
 from .duration_spin import DurationSpinBox
-from .param_form import ParamForm, apply_power_bounds, fmt_duration, fmt_value, range_hint
+from .param_form import (
+    ParamForm, apply_power_bounds, find_power_index, fmt_duration, fmt_value, range_hint,
+)
 from .theme import Palette
 
 
@@ -207,6 +209,14 @@ class RampEditorDialog(QDialog):
         self._stop = QLineEdit(_fmt(r.get("stop")));    self._stop.setPlaceholderText("stop value")
         form.addRow("From", self._start)
         form.addRow("To", self._stop)
+        # Always-visible allowed range for the swept parameter — narrowed to the unit's
+        # calibrated (and frequency-folded) --power range when it applies, so From/To have
+        # the same bound in view that the Run and step forms show, not just a warning if
+        # you overshoot.
+        self._range_lbl = QLabel("")
+        self._range_lbl.setWordWrap(True)
+        self._range_lbl.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
+        form.addRow("", self._range_lbl)
 
         self._anchor = Dropdown()
         self._anchor.addItem("On-air (T0)", "start")
@@ -601,9 +611,31 @@ class RampEditorDialog(QDialog):
         return _ramp_range_error(self._ramped_spec(),
                                  _num(self._start.text()), _num(self._stop.text()))
 
+    def _refresh_range_hint(self) -> None:
+        """Show the swept parameter's allowed range under From/To — narrowed to the unit's
+        calibrated (frequency-folded) --power range when it applies, so the bound is always
+        in view (the Run/step forms show it as a slider; a ramp's From/To are typed, so it
+        reads as a caption). Blank when the parameter declares no min/max."""
+        if not hasattr(self, "_range_lbl"):
+            return
+        spec = self._ramped_spec()
+        if not spec or (spec.get("min") is None and spec.get("max") is None):
+            self._range_lbl.clear()
+            return
+        unit = spec.get("unit") or ""
+        text = f"Allowed range: {range_hint(spec)}" + (f" {unit}" if unit else "")
+        task = self._task.currentText().strip()
+        getter = getattr(self._editor, "cal_bounds_for_task", None)
+        if getter is not None and find_power_index([spec]) is not None and getter(task):
+            freq_hz = self._op_freq_hz(task)
+            at = f" at {freq_hz / 1e6:.3f} MHz" if freq_hz is not None else ""
+            text += f"  ·  calibrated for this unit{at}"
+        self._range_lbl.setText(text)
+
     def _update_preview(self, *_) -> None:
         if not self._ready:
             return
+        self._refresh_range_hint()
         spec = self._spec_from_form()
         self._update_warning()
         if not self._active_params():
