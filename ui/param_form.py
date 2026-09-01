@@ -612,11 +612,15 @@ class ParamForm(QWidget):
         self._selectable = selectable
         self._cal_bounds = cal_bounds
         self._cal_freq_param = cal_freq_param
-        self._cal_freq_default = cal_freq_default
+        # A carried step frequency arrives in the freq field's own unit (e.g. MHz); fold
+        # frequencies are Hz internally, so scale it once here (needs _base_specs +
+        # _cal_freq_param, both set above).
+        self._cal_freq_default = (cal_freq_default * self._freq_unit_factor()
+                                  if cal_freq_default is not None else None)
         self._folded_at = None
         # Fold at the carried-forward frequency (a sequence step's effective freq) when
-        # given, else the freq field's own default.
-        self._render_freq = (cal_freq_default if cal_freq_default is not None
+        # given, else the freq field's own default (both already in Hz).
+        self._render_freq = (self._cal_freq_default if self._cal_freq_default is not None
                              else self._spec_default_freq())
         self._hint_bounds = hint_bounds
         self._caution = caution
@@ -1035,18 +1039,38 @@ class ParamForm(QWidget):
                 return dest
         return None
 
+    def _freq_unit_factor(self) -> float:
+        """Hz per unit of the calibration frequency field, so a field value in its own unit
+        (Hz / kHz / MHz / GHz) converts to Hz — which is what the fold (refold_bounds,
+        power snapping) and the 'range at N MHz' note all expect. The unit is the
+        CAL_FREQ_PARAM field's; when a mode hides it, a derived is_freq field's (they carry
+        the same frequency unit). Unknown/absent unit ⇒ 1.0 (treat as Hz), the old behaviour."""
+        fp = self._cal_freq_param
+        unit = None
+        fallback = None
+        for s in self._base_specs:
+            u = (s.get("unit") or "").strip().lower()
+            if s.get("dest") == fp:
+                unit = u
+                break
+            if s.get("is_freq") and fallback is None:
+                fallback = u
+        return {"hz": 1.0, "khz": 1e3, "mhz": 1e6, "ghz": 1e9}.get((unit or fallback or "hz"), 1.0)
+
     def _current_freq_hz(self) -> Optional[float]:
-        """The transmit frequency the form is currently at, from the active freq source
-        (the freq field, or a derived is_freq midpoint), or None when unset/unparseable."""
+        """The transmit frequency in Hz the form is currently at, from the active freq source
+        (the freq field, or a derived is_freq midpoint), or None when unset/unparseable. The
+        field's value is in its own unit (e.g. MHz), so it is scaled to Hz here."""
         dest = self._freq_source_dest()
         if dest is None:
             return None
         if dest in self._derived:
-            return self._eval_formula(self._derived[dest]["spec"].get("formula"))
-        val = self.values().get(dest)
-        if isinstance(val, (int, float)) and not isinstance(val, bool):
-            return float(val)
-        return None
+            v = self._eval_formula(self._derived[dest]["spec"].get("formula"))
+        else:
+            val = self.values().get(dest)
+            v = (float(val) if isinstance(val, (int, float)) and not isinstance(val, bool)
+                 else None)
+        return None if v is None else v * self._freq_unit_factor()
 
     def _fold_freq_now(self) -> Optional[float]:
         """The frequency to fold the power/gain range at right now: the active freq
@@ -1064,7 +1088,7 @@ class ParamForm(QWidget):
         return self._cal_freq_default
 
     def _spec_default_freq(self) -> Optional[float]:
-        """The freq field's default from the schema — the fold frequency for the FIRST
+        """The freq field's default from the schema, in Hz — the fold frequency for the FIRST
         render, before the widget (and any prefilled value) exists."""
         dest = self._freq_dest()
         if dest is None:
@@ -1072,7 +1096,9 @@ class ParamForm(QWidget):
         for s in self._base_specs:
             if s.get("dest") == dest:
                 d = s.get("default")
-                return float(d) if isinstance(d, (int, float)) and not isinstance(d, bool) else None
+                if isinstance(d, (int, float)) and not isinstance(d, bool):
+                    return float(d) * self._freq_unit_factor()
+                return None
         return None
 
     def _effective_cal_bounds(self):

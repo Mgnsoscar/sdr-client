@@ -149,4 +149,22 @@ def test_fold_frequency_falls_back_to_derived_midpoint_when_centre_hidden():
     assert f._freq_source_dest() == "band_center"
     f._widgets["start"][0].setValue(1500.0)
     f._widgets["stop"][0].setValue(1600.0)
-    assert f._current_freq_hz() == pytest.approx(1550.0)
+    # start/stop are in MHz; the fold frequency is Hz, so 1550 MHz → 1.55e9 Hz.
+    assert f._current_freq_hz() == pytest.approx(1550.0e6)
+
+
+def test_mhz_freq_field_folds_in_hz():
+    """Regression: a freq field declared in MHz must be scaled to Hz for folding — otherwise
+    the power range folds at ~DC and the 'range at N MHz' note reads 0.00 MHz. Covers the
+    plain freq field (centre mode), the schema default, and a carried step frequency."""
+    f = ParamForm()
+    f.set_params(_band_specs(), cal_freq_param="freq")
+    # centre mode: the freq field is MHz; the schema default 1575.42 MHz → Hz.
+    assert f._freq_source_dest() == "freq"
+    assert f._spec_default_freq() == pytest.approx(1575.42e6)
+    # a carried-forward step frequency (MHz) is scaled to Hz on the way in.
+    f.set_params(_band_specs(), cal_freq_param="freq", cal_freq_default=1420.0)
+    assert f._cal_freq_default == pytest.approx(1420.0e6)
+    # the MHz→Hz factor is picked up from a derived is_freq field too (centre hidden).
+    _switch(f, "start_stop")
+    assert f._freq_unit_factor() == pytest.approx(1e6)
