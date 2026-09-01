@@ -1705,6 +1705,18 @@ class CalibrationPanel(QWidget):
         # Each stage is a "slot" = its card plus a trailing "→", so a live reorder moves
         # the card and its arrow as one unit and the flow always reads left-to-right.
         self._chain_slots = []                   # [(plane_name, slot_widget)], chain order
+        # Source-bias stage (unit-owned, BEFORE the source) when the agent supports it and a
+        # chain exists. It's not a plane — it edits doc['source_bias'] directly.
+        if n and self._supports(CAL_SOURCE_BIAS_CAPABILITY):
+            bslot = QWidget()
+            bsl = QHBoxLayout(bslot); bsl.setContentsMargins(0, 0, 0, 0); bsl.setSpacing(0)
+            bsl.addWidget(self._source_bias_card())
+            barrow = QLabel("→")
+            barrow.setStyleSheet(f"color:{Palette.BORDER_STRONG};font-size:18px;")
+            barrow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            barrow.setFixedWidth(26)
+            bsl.addWidget(barrow)
+            self._chain_row.addWidget(bslot)
         for i, row in enumerate(rows):
             slot = QWidget()
             sl = QHBoxLayout(slot); sl.setContentsMargins(0, 0, 0, 0); sl.setSpacing(0)
@@ -1875,6 +1887,117 @@ class CalibrationPanel(QWidget):
             self._render_detail()
             self._update_issues()
         QTimer.singleShot(0, _after)
+
+    # ── source-bias stage (unit-owned, before the source) ────────────────────────
+    def _source_bias_card(self) -> QWidget:
+        """The leading 'Source bias' card: the SDR's power-vs-frequency flatness, edited as a
+        freq→dBm table on doc['source_bias']. Not a plane — one per unit."""
+        sb = (self._doc or {}).get("source_bias") or {}
+        pts = sb.get("power_by_freq") or []
+        bypassed = bool(sb.get("bypass")) and bool(pts)
+        card = _ClickCard(on_click=self._edit_source_bias)
+        card.setObjectName("stage")
+        card.setStyleSheet(f"#stage {{ background:{Palette.SURFACE_ALT}; "
+                           f"border:1px dashed {Palette.BORDER_STRONG}; border-radius:10px; }}")
+        card.setMinimumWidth(170); card.setMaximumWidth(215)
+        v = QVBoxLayout(card); v.setContentsMargins(12, 10, 12, 12); v.setSpacing(7)
+        top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.addStretch(1)
+        if pts and self._supports(CAL_STAGE_BYPASS_CAPABILITY):
+            byp = QCheckBox("bypass"); byp.setChecked(bypassed); byp.setStyleSheet("font-size:10px;")
+            byp.setToolTip("Bypass the source bias — apply no frequency correction.")
+            byp.toggled.connect(self._toggle_bias_bypass)
+            top.addWidget(byp)
+        v.addLayout(top)
+        text = "SOURCE BIAS" + (" · BYPASSED" if bypassed else "")
+        fg, kbg = ((Palette.TEXT_FAINT, Palette.SURFACE_ALT) if bypassed
+                   else (Palette.ACCENT, Palette.ACCENT_SOFT))
+        v.addWidget(_badge(text, fg, kbg), alignment=Qt.AlignmentFlag.AlignLeft)
+        title = QLabel("SDR flatness")
+        title.setStyleSheet(f"font-size:13px;font-weight:600;color:{Palette.TEXT};")
+        v.addWidget(title)
+        summ = QLabel(f"{len(pts)} point(s) · dBm(f)" if pts else "not set — click to add")
+        summ.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
+        v.addWidget(summ)
+        edit = QPushButton("Edit table…"); edit.setStyleSheet("font-size:11px;")
+        edit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        edit.clicked.connect(self._edit_source_bias)
+        v.addWidget(edit)
+        v.addStretch(1)
+        if bypassed:
+            from PyQt6.QtWidgets import QGraphicsOpacityEffect
+            eff = QGraphicsOpacityEffect(card); eff.setOpacity(0.42); card.setGraphicsEffect(eff)
+        return card
+
+    def _toggle_bias_bypass(self, checked: bool) -> None:
+        if self._syncing:
+            return
+        sb = (self._doc or {}).get("source_bias")
+        if not isinstance(sb, dict):
+            return
+        if checked:
+            sb["bypass"] = True
+        else:
+            sb.pop("bypass", None)
+        self._download_btn.setEnabled(True)
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, self._render_chain)
+
+    def _edit_source_bias(self) -> None:
+        """Modal freq→dBm table editor for the per-unit source bias. Frequencies are entered
+        in MHz; stored as Hz in doc['source_bias']['power_by_freq']."""
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox
+        if self._doc is None:
+            self._doc = self._blank_doc()
+        sb = dict((self._doc.get("source_bias") or {}))
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Source bias — SDR power vs frequency")
+        lay = QVBoxLayout(dlg)
+        info = QLabel(
+            "Transmit a fixed-gain CW and read the delivered power at each frequency, then "
+            "enter frequency (MHz) + measured power (dBm). The bias is normalized to each "
+            "signal's centre frequency and corrects the delivered power AND the safety ceiling.")
+        info.setWordWrap(True)
+        info.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_MUTED};")
+        lay.addWidget(info)
+        tbl = _CurveTable(headers=("frequency (MHz)", "power (dBm)"))
+        for f, p in (sb.get("power_by_freq") or []):
+            r = tbl.rowCount(); tbl.insertRow(r)
+            tbl.setItem(r, 0, QTableWidgetItem(_numstr(float(f) / 1e6)))
+            tbl.setItem(r, 1, QTableWidgetItem(_numstr(float(p))))
+        if not sb.get("power_by_freq"):
+            tbl.add_blank_row()
+        lay.addWidget(tbl)
+        grow = QHBoxLayout()
+        grow.addWidget(QLabel("measured at gain (dB), optional:"))
+        gain_e = QLineEdit(_numstr(sb.get("gain_db"))); gain_e.setPlaceholderText("e.g. 60")
+        grow.addWidget(gain_e); lay.addLayout(grow)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                              | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        pts = tbl.numeric_points()                    # (MHz, dBm) tuples, blanks skipped
+        new_sb = dict(sb)
+        if pts:
+            new_sb["power_by_freq"] = [[round(f * 1e6, 3), p] for f, p in sorted(pts)]
+        else:
+            new_sb.pop("power_by_freq", None)
+        g = gain_e.text().strip()
+        if g:
+            try:
+                new_sb["gain_db"] = float(g)
+            except ValueError:
+                pass
+        else:
+            new_sb.pop("gain_db", None)
+        if new_sb.get("power_by_freq"):
+            self._doc["source_bias"] = new_sb
+        else:
+            self._doc.pop("source_bias", None)        # no points ⇒ no bias
+        self._download_btn.setEnabled(True)
+        self._render_chain()
+        self._update_issues()
 
     # ── add / reorder stages ─────────────────────────────────────────────────────
     def _add_stage(self) -> None:

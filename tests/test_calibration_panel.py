@@ -1770,3 +1770,48 @@ def test_bypassed_stage_skips_local_validation():
     # the same stage un-bypassed IS flagged (missing Δ dB)
     d["chain"]["planes"]["pad"] = {"type": "derived", "from": "sdr_output"}
     assert any("pad" in i and "Δ" in i for i in local_calibration_issues(d))
+
+
+# ── source-bias stage ──────────────────────────────────────────────────────────
+
+def _bias_caps():
+    return ["calibration-source-bias", "calibration-stage-bypass"]
+
+
+def test_source_bias_survives_read_form():
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=_bias_caps())))
+    d = _doc(); d["source_bias"] = {"power_by_freq": [[9.0e8, -8.0], [1.5e9, -10.0]]}
+    p._set_doc(d)
+    out = p._read_form(strict=False)
+    assert out["source_bias"]["power_by_freq"] == [[9.0e8, -8.0], [1.5e9, -10.0]]
+
+
+def test_source_bias_card_builds_from_doc():
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=_bias_caps())))
+    d = _doc(); d["source_bias"] = {"power_by_freq": [[1.5e9, -10.0]]}
+    p._set_doc(d)
+    assert p._source_bias_card() is not None      # renders without error
+
+
+def test_bias_bypass_toggle_writes_doc():
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=_bias_caps())))
+    d = _doc(); d["source_bias"] = {"power_by_freq": [[1.5e9, -10.0]]}
+    p._set_doc(d)
+    p._toggle_bias_bypass(True)
+    assert p._doc["source_bias"]["bypass"] is True
+    p._toggle_bias_bypass(False)
+    assert "bypass" not in p._doc["source_bias"]
+
+
+def test_save_blocks_source_bias_without_capability():
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=[])))       # agent too old
+    d = _doc(); d["source_bias"] = {"power_by_freq": [[1.5e9, -10.0]]}
+    p._set_doc(d)
+    assert p._blocks_on_source_bias() is True
+
+
+def test_save_allows_source_bias_with_capability():
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=_bias_caps())))
+    d = _doc(); d["source_bias"] = {"power_by_freq": [[1.5e9, -10.0]]}
+    p._set_doc(d)
+    assert p._blocks_on_source_bias() is False
