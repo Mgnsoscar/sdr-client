@@ -95,6 +95,12 @@ CAL_STAGE_BYPASS_CAPABILITY = "calibration-stage-bypass"  # agent >= 1.9.0 (bypa
 _STAGE_BYPASS_NEEDS_NEWER = (
     "this unit's agent is too old to bypass a stage (needs 1.9.0+). Update the agent, or "
     "un-bypass every stage before saving.")
+CAL_POWER_BRIDGES_CAPABILITY = "calibration-power-bridges"  # agent >= 1.10.0
+_POWER_BRIDGES_NEEDS_NEWER = (
+    "this unit's agent is too old for reported/limiting power-quantity bridges (needs "
+    "1.10.0+). It would ignore them and report --power in the measured quantity (wrong power) "
+    "and skip the limiting cap. Update the agent, or set every reading to “Same as measured” "
+    "before saving.")
 
 # The baseband amplitude every broadcaster script transmits at is a FIXED constant (the
 # scripts' baked AMPLITUDE), not an operator control — so calibration is always measured at
@@ -3633,7 +3639,8 @@ class CalibrationPanel(QWidget):
                 or self._blocks_on_no_signals() or self._blocks_on_limit_side()
                 or self._blocks_on_plane_roles() or self._blocks_on_gain_step()
                 or self._blocks_on_freq_optional_center() or self._blocks_on_active_components()
-                or self._blocks_on_source_bias() or self._blocks_on_stage_bypass()):
+                or self._blocks_on_source_bias() or self._blocks_on_stage_bypass()
+                or self._blocks_on_power_bridges()):
             return False
         self._send(json.dumps(self._doc).encode("utf-8"))
         return True
@@ -3689,6 +3696,29 @@ class CalibrationPanel(QWidget):
         the bypass field)."""
         if self._doc_uses_bypass(self._doc) and not self._supports(CAL_STAGE_BYPASS_CAPABILITY):
             self._set_status(_STAGE_BYPASS_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
+    @staticmethod
+    def _doc_uses_power_bridges(doc) -> bool:
+        """True when any plane OR signal carries a non-trivial reported/limiting bridge —
+        anything a ≤1.9.0 agent would silently ignore (mis-reporting the power quantity)."""
+        def has(holder):
+            return any(_reading_block((holder or {}).get(k)) is not None
+                       for k in ("reported", "limiting"))
+        planes = ((doc or {}).get("chain") or {}).get("planes") or {}
+        if any(isinstance(p, dict) and has(p) for p in planes.values()):
+            return True
+        return any(isinstance(s, dict) and has(s)
+                   for s in ((doc or {}).get("signals") or {}).values())
+
+    def _blocks_on_power_bridges(self) -> bool:
+        """Guard (safety): don't push a reported/limiting bridge to an agent that predates it —
+        it would ignore `readings`, report --power in the measured quantity, and skip the
+        limiting cap."""
+        if (self._doc_uses_power_bridges(self._doc)
+                and not self._supports(CAL_POWER_BRIDGES_CAPABILITY)):
+            self._set_status(_POWER_BRIDGES_NEEDS_NEWER, kind="error")
             return True
         return False
 

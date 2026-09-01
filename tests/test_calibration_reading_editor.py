@@ -81,3 +81,25 @@ def test_reading_blocks_round_trip():
     assert ant["reported"]["unit"] == "dBm"
     assert ant["reported"]["quantity"] == "full-bandwidth power"
     assert ant["limiting"]["max_dbm"] == 30.0
+
+
+def test_save_gated_on_capability():
+    # old agent (no capability) → a bridged document is blocked from saving
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=())))
+    p._set_doc(_doc_with_reading())
+    assert p._doc_uses_power_bridges(p._doc) is True
+    assert p._blocks_on_power_bridges() is True
+    # a capable agent → not blocked
+    p2 = CalibrationPanel("u", FakeHub(FakeClient(caps=["calibration-power-bridges"])))
+    p2._set_doc(_doc_with_reading())
+    assert p2._blocks_on_power_bridges() is False
+
+
+def test_plain_document_not_gated():
+    doc = _doc_with_reading()
+    for k in ("reported", "limiting"):
+        doc["chain"]["planes"]["antenna"].pop(k, None)
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=())))
+    p._set_doc(doc)
+    assert p._doc_uses_power_bridges(p._doc) is False
+    assert p._blocks_on_power_bridges() is False
