@@ -414,16 +414,24 @@ def apply_power_bounds(specs: List[dict], bounds) -> List[dict]:
     # levels (non-uniform: attenuator-only at the bottom, SDR-only at the top). Mark the
     # field so the widget wires the resolver, and set its display resolution to the finest
     # achievable increment so a snapped level like −55.25 dBm renders exactly.
-    fold = PowerFold.from_artifact((bounds.get("artifact") or {}))
+    art = bounds.get("artifact") or {}
+    fold = PowerFold.from_artifact(art)
     if fold is not None:
         sp["snap_role"] = "power"
         sp["step"] = fold.finest_step()
     d = sp.get("default")
     if isinstance(d, (int, float)) and not isinstance(d, bool):
         sp["default"] = min(max(float(d), lo), hi)
-    sp["unit"] = f"dBm {quantity}" if quantity and quantity.lower() != "power" else "dBm"
+    # The reported reading's unit is script-defined (docs/calibration-v2.md §13): once a node
+    # is calibrated with a reported bridge, --power is shown in that unit (e.g. dBm/MHz), not
+    # always dBm. `operating_unit` rides the artifact; fall back to the old "dBm <quantity>"
+    # label for a plain (bridge-less) calibration.
+    unit_lbl = (art.get("operating_unit") or "").strip()
+    if not unit_lbl:
+        unit_lbl = f"dBm {quantity}" if quantity and quantity.lower() != "power" else "dBm"
+    sp["unit"] = unit_lbl
     where = quantity + (f" at {plane}" if plane else "") if quantity else (plane or "")
-    note = f"This unit (calibrated): {lo}…{hi} dBm" + (f" — {where}." if where else ".")
+    note = f"This unit (calibrated): {lo}…{hi} {unit_lbl}" + (f" — {where}." if where else ".")
     base = (sp.get("help") or "").strip()
     sp["help"] = f"{base}\n\n{note}" if base else note
     return out
@@ -671,6 +679,8 @@ class ParamForm(QWidget):
         self._cal_freq_default = None           # freq to fold at when the field isn't set
         self._folded_at = None                  # freq the power/gain bounds were last folded at
         self._render_freq = None                # freq to fold at for the in-progress render
+        self._folded_params = None              # bridge params the bounds were last folded at
+        self._render_params = None              # bridge params to fold at for this render
         self._refolding = False                 # re-entrancy guard for the re-fold re-render
         self._loading = False                   # a programmatic prefill (set_values) is running
         self._hint_bounds = None
@@ -1014,18 +1024,52 @@ class ParamForm(QWidget):
         fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
         return fold is not None and fold.freq_dependent
 
+    def _param_dependent(self) -> bool:
+        """True when a reported/limiting bridge keys on a task parameter present in this
+        schema, so the --power range/number move as that parameter is tuned (e.g. a chirp's
+        full-bandwidth-power law keyed on --bw)."""
+        return bool(self._bridge_param_dests())
+
+    def _bridge_param_dests(self) -> List[str]:
+        """The dests of the fields a reported/limiting bridge keys on (present in the schema)."""
+        fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
+        if fold is None:
+            return []
+        return [p for p in fold.keyed_params()
+                if any(s.get("dest") == p for s in self._base_specs)]
+
+    def _live_params(self) -> Optional[dict]:
+        """The current values of the bridge's keyed parameters, or None when they can't all be
+        resolved as numbers (the fold then uses the law's representative value). Read from the
+        live fields, falling back to each field's schema default (for the first render)."""
+        dests = self._bridge_param_dests()
+        if not dests:
+            return None
+        cur = self.values() if self._widgets else {}
+        out = {}
+        for d in dests:
+            v = cur.get(d)
+            if v is None:
+                v = next((s.get("default") for s in self._base_specs
+                          if s.get("dest") == d), None)
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                return None
+            out[d] = float(v)
+        return out
+
     def _power_snappers(self):
         """``(snap, quantize_up, quantize_down)`` for the calibrated --power field, bound to
-        the resolved artifact and the frequency this render folds at, so the widget steps
-        through only achievable power levels (universal — SDR-only chains snap to the real
-        gain grid too). None when there's no usable fold."""
+        the resolved artifact and the frequency + bridge parameters this render folds at, so
+        the widget steps through only achievable power levels (universal — SDR-only chains
+        snap to the real gain grid too). None when there's no usable fold."""
         fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
         if fold is None:
             return None
         f = self._render_freq
-        return (lambda p: fold.snap_power(p, f),
-                lambda p: fold.quantize_up(p, f),
-                lambda p: fold.quantize_down(p, f))
+        pr = self._render_params
+        return (lambda p: fold.snap_power(p, f, pr),
+                lambda p: fold.quantize_up(p, f, pr),
+                lambda p: fold.quantize_down(p, f, pr))
 
     @staticmethod
     def _connect_commit(w, cb) -> None:
@@ -1039,9 +1083,16 @@ class ParamForm(QWidget):
             w.editingFinished.connect(cb)
 
     def _wire_freq_refold(self) -> None:
-        """Connect the frequency source's change signal so the power/gain bounds re-fold at
-        the new frequency. Only wired when the calibration is frequency-dependent. When the
-        source is a derived midpoint (start/stop mode), its input fields drive the re-fold."""
+        """Connect the fold inputs' change signals so the power/gain bounds re-fold: the
+        frequency source (frequency-dependent chains) and any field a reported/limiting bridge
+        keys on (parameter-dependent chains, e.g. a chirp's --bw). When the frequency source is
+        a derived midpoint (start/stop mode), its input fields drive the re-fold."""
+        # Bridge-keyed parameter fields (e.g. --bw): re-fold when one is committed.
+        for pdest in self._bridge_param_dests():
+            if pdest in self._widgets:
+                self._connect_commit(self._widgets[pdest][0], self._on_freq_changed)
+                if self._selectable and pdest in self._checks:
+                    self._checks[pdest].toggled.connect(self._on_freq_changed)
         if not self._is_freq_dependent():
             return
         dest = self._freq_source_dest()
@@ -1061,32 +1112,38 @@ class ParamForm(QWidget):
             self._checks[dest].toggled.connect(self._on_freq_changed)
 
     def _on_freq_changed(self, *_) -> None:
-        """Re-fold the power/gain bounds when the transmit frequency is committed."""
+        """Re-fold the power/gain bounds when a fold input (the transmit frequency, or a
+        bridge-keyed parameter such as --bw) is committed."""
         if self._refolding or self._loading:
             return
         if self._power_mode not in ("absolute", "relative"):
             return
-        if self._fold_freq_now() == self._folded_at:     # frequency didn't actually move
+        # nothing actually moved (neither frequency nor a bridge parameter)
+        if (self._fold_freq_now() == self._folded_at
+                and self._live_params() == self._folded_params):
             return
         self._do_refold()
 
     def _maybe_refold_after_load(self) -> None:
-        """After a programmatic prefill (set_values), re-fold once if the loaded frequency
-        differs from the one the bounds were folded at during the last render."""
+        """After a programmatic prefill (set_values), re-fold once if the loaded frequency or
+        a bridge parameter differs from what the bounds were folded at during the last render."""
         if self._refolding or self._loading:
             return
         if self._power_mode not in ("absolute", "relative"):
             return
-        if not self._is_freq_dependent() or self._freq_source_dest() is None:
+        freq_dep = self._is_freq_dependent() and self._freq_source_dest() is not None
+        if not freq_dep and not self._param_dependent():
             return
-        if self._fold_freq_now() == self._folded_at:
+        if (self._fold_freq_now() == self._folded_at
+                and self._live_params() == self._folded_params):
             return
         self._do_refold()
 
     def _do_refold(self) -> None:
-        """Re-render folding at the frequency now in effect, preserving the other field
-        values (the same rebuild-and-restore the power-mode toggle uses)."""
+        """Re-render folding at the frequency and bridge parameters now in effect, preserving
+        the other field values (the same rebuild-and-restore the power-mode toggle uses)."""
         self._render_freq = self._fold_freq_now()      # capture BEFORE the widgets clear
+        self._render_params = self._live_params()
         self._refolding = True
         try:
             keep = self.build_args()
@@ -1213,7 +1270,8 @@ class ParamForm(QWidget):
         if not self._cal_bounds:
             return self._cal_bounds
         self._folded_at = self._render_freq
-        return refold_bounds(self._cal_bounds, self._render_freq)
+        self._folded_params = self._render_params
+        return refold_bounds(self._cal_bounds, self._render_freq, self._render_params)
 
     def _effective_specs(self) -> List[dict]:
         """The specs actually rendered: the active power/gain field (bounds applied
