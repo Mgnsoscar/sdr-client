@@ -1647,6 +1647,12 @@ class TimelineEditor(QWidget):
 
     # ── Add / load / read steps ──────────────────────────────────────────────
 
+    def items(self) -> List:
+        """The raw timeline objects (BarItem / RunItem) currently on the canvas — used by
+        the step and ramp editors to carry parameter state (the effective --freq) forward
+        along a task's steps, so the --power range folds at the frequency actually in effect."""
+        return self._canvas.items()
+
     def set_steps(self, steps: List[m.SequenceStep]) -> None:
         dicts = []
         for s in steps:

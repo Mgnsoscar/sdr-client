@@ -548,6 +548,108 @@ def _make_spinbox(spec: dict):
     return w
 
 
+def _fmt_bound(v) -> str:
+    """Compact display of a range end: whole values without a decimal or exponent, fractional
+    values trimmed, with a proper minus sign (−1.8). Module-level twin of ParamForm._fmt_bound
+    so standalone bounded widgets format their rails/chips identically."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    s = str(int(f)) if f.is_integer() else f"{f:g}"
+    return s.replace("-", "−")
+
+
+class BoundedNumberField(QWidget):
+    """A numeric input with a live range rail + limit chip — the parameter form's bounded
+    field, reusable on its own. For a calibrated --power spec (``snap_role`` 'power' with a
+    ``PowerFold``) the arrows, a rail drag and a typed commit all snap to the chain's true
+    achievable levels at ``fold_freq``. Emits ``valueChanged()`` on any change. ``value()`` /
+    ``setValue()`` read and write the current value."""
+
+    valueChanged = pyqtSignal()
+
+    def __init__(self, spec: dict, fold: Optional["PowerFold"] = None,
+                 fold_freq: Optional[float] = None, note: str = "", parent=None):
+        super().__init__(parent)
+        self._spec = dict(spec)
+        self._is_int = self._spec.get("type") == "int"
+        lo, hi = self._spec.get("min"), self._spec.get("max")
+        self._lo = float(lo) if lo is not None else None
+        self._hi = float(hi) if hi is not None else None
+        self._spin = _make_spinbox(self._spec)
+        self._psnap = None
+        if self._spec.get("snap_role") == "power" and fold is not None:
+            self._psnap = lambda p: fold.snap_power(p, fold_freq)
+            if isinstance(self._spin, _AchievableSpin):
+                self._spin.set_snappers(self._psnap,
+                                        lambda p: fold.quantize_up(p, fold_freq),
+                                        lambda p: fold.quantize_down(p, fold_freq))
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(4)
+        crow = QHBoxLayout(); crow.setContentsMargins(0, 0, 0, 0); crow.setSpacing(8)
+        crow.addWidget(self._spin, 1)
+        self._bounded = (self._spec.get("type") in ("int", "float")
+                         and self._lo is not None and self._hi is not None)
+        self._chip = self._rail = self._warn = None
+        if self._bounded:
+            self._chip = LimitChip()
+            self._chip.set_range(_fmt_bound(self._lo), _fmt_bound(self._hi))
+            crow.addWidget(self._chip)
+        outer.addLayout(crow)
+        if self._bounded:
+            self._rail = RangeRail()
+            self._rail.set_bounds(self._lo, self._hi, _fmt_bound)
+            if note:
+                self._rail.set_note(note)
+            outer.addWidget(self._rail)
+            self._warn = QLabel(); self._warn.setWordWrap(True); self._warn.setVisible(False)
+            self._warn.setStyleSheet(
+                f"font-size: 12px; color: {Palette.ARMED}; background: {Palette.ARMED_SOFT}; "
+                f"border: 1px solid {Palette.ARMED}; border-radius: 9px; padding: 8px 10px;")
+            outer.addWidget(self._warn)
+            self._spin.valueChanged.connect(self._on_change)
+            self._rail.valueChanged.connect(self._on_rail)
+            self._on_change()
+        else:
+            self._spin.valueChanged.connect(lambda *_: self.valueChanged.emit())
+
+    def _on_rail(self, value: float) -> None:
+        value = min(max(value, self._lo), self._hi)          # a drag can't leave the range
+        if self._psnap is not None:                          # snap to a real achievable level
+            value = min(max(self._psnap(value), self._lo), self._hi)
+        self._spin.setValue(int(round(value)) if self._is_int else value)
+
+    def _on_change(self, *_) -> None:
+        v = float(self._spin.value())
+        self._rail.set_value(v)
+        over = v > self._hi + 1e-9
+        under = v < self._lo - 1e-9
+        self._chip.set_state(over=over, under=under)
+        u = f" {self._spec['unit']}" if self._spec.get("unit") else ""
+        if over:
+            self._warn.setText(f"⚠ Above the maximum this unit can deliver "
+                               f"({_fmt_bound(self._hi)}{u}) — the request will be clamped "
+                               f"down to it.")
+        elif under:
+            self._warn.setText(f"⚠ Below the minimum this unit can deliver "
+                               f"({_fmt_bound(self._lo)}{u}) — the request will be clamped "
+                               f"up to it.")
+        self._warn.setVisible(over or under)
+        self.valueChanged.emit()
+
+    def value(self) -> float:
+        return float(self._spin.value())
+
+    def setValue(self, v) -> None:
+        try:
+            self._spin.setValue(int(round(float(v))) if self._is_int else float(v))
+        except (TypeError, ValueError):
+            pass
+
+
 # ── The form widget ───────────────────────────────────────────────────────────
 
 class ParamForm(QWidget):

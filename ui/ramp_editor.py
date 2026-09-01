@@ -29,10 +29,14 @@ from PyQt6.QtWidgets import (
 )
 
 from api import ramp as _ramp
+from state.power_fold import PowerFold, refold_bounds
 
 from . import timeline_model as tlm
 from .duration_spin import DurationSpinBox
-from .param_form import ParamForm, apply_power_bounds, fmt_duration, fmt_value, range_hint
+from .param_form import (
+    BoundedNumberField, ParamForm, apply_power_bounds, find_power_index,
+    fmt_duration, fmt_value, range_hint,
+)
 from .theme import Palette
 
 
@@ -96,6 +100,16 @@ def _num(text: str) -> Optional[float]:
         return float(str(text).strip())
     except (TypeError, ValueError):
         return None
+
+
+def _swap_only(layout, widget) -> None:
+    """Make `widget` the sole child of a (single-slot) layout, disposing of the previous one."""
+    while layout.count():
+        old = layout.takeAt(0).widget()
+        if old is not None:
+            old.setParent(None)
+            old.deleteLater()
+    layout.addWidget(widget)
 
 
 def _sequence_tasks(editor) -> list:
@@ -202,10 +216,20 @@ class RampEditorDialog(QDialog):
         self._param = Dropdown()
         form.addRow("Parameter", self._param)
 
-        self._start = QLineEdit(_fmt(r.get("start")));  self._start.setPlaceholderText("start value")
-        self._stop = QLineEdit(_fmt(r.get("stop")));    self._stop.setPlaceholderText("stop value")
-        form.addRow("From", self._start)
-        form.addRow("To", self._stop)
+        # From/To render as bounded numeric fields (spinbox + range rail + limit chip) —
+        # the same widget the parameter form uses — rebuilt for the swept parameter so its
+        # min/max, unit and (for --power on a calibrated unit) the frequency-folded range
+        # with real achievable-level snapping are all in view. Seeded from the saved ramp.
+        self._init_start = r.get("start")
+        self._init_stop = r.get("stop")
+        self._start_field = None
+        self._stop_field = None
+        self._start_box = QWidget(); self._start_lay = QVBoxLayout(self._start_box)
+        self._start_lay.setContentsMargins(0, 0, 0, 0); self._start_lay.setSpacing(0)
+        self._stop_box = QWidget(); self._stop_lay = QVBoxLayout(self._stop_box)
+        self._stop_lay.setContentsMargins(0, 0, 0, 0); self._stop_lay.setSpacing(0)
+        form.addRow("From", self._start_box)
+        form.addRow("To", self._stop_box)
 
         self._anchor = Dropdown()
         self._anchor.addItem("On-air (T0)", "start")
@@ -321,7 +345,7 @@ class RampEditorDialog(QDialog):
         self._run_chk.toggled.connect(self._sync_target_mode)
         self._task.currentTextChanged.connect(lambda t: self._select_task(t))
         self._param.currentTextChanged.connect(lambda _t: self._on_param_changed())
-        for w in (self._start, self._stop, self._steps, self._step, self._hold, self._duration):
+        for w in (self._steps, self._step, self._hold, self._duration):
             w.textChanged.connect(self._update_preview)
         self._inc_first.toggled.connect(self._update_preview)
         self._inc_last.toggled.connect(self._update_preview)
@@ -334,6 +358,7 @@ class RampEditorDialog(QDialog):
         # the first mode, hiding the fields the saved ramp actually uses).
         self._init_mode = _mode_for_ramp(r, self._is_both())
         self._ready = True
+        self._rebuild_value_fields()   # From/To fields (fallback until params load)
         self._apply_mode_visibility()
         self._sync_anchor()   # populate modes + show/hide rows + preview
 
@@ -381,13 +406,70 @@ class RampEditorDialog(QDialog):
         """If the ramped parameter is the calibrated --power field, narrow its min/max
         to the target unit's resolved dBm range (the task's calibration signal), so
         the range check, preview and unit conform to calibration rather than the
-        script's wider declared bounds. Non-power params, no unit, or an uncalibrated
-        unit pass through unchanged — exactly as apply_power_bounds does for the forms."""
+        script's wider declared bounds. For a frequency-dependent chain the range is
+        re-folded at the frequency the ramped task runs at (carried from the sequence),
+        the same fold the step editor applies — so the range tracks the operating
+        frequency, not just the calibration's representative one. Non-power params, no
+        unit, or an uncalibrated unit pass through unchanged."""
         getter = getattr(self._editor, "cal_bounds_for_task", None)
         if getter is None:
             return spec
-        bounds = getter(self._task.currentText().strip())
-        return apply_power_bounds([spec], bounds)[0] if bounds else spec
+        task = self._task.currentText().strip()
+        bounds = getter(task)
+        if not bounds:
+            return spec
+        freq_hz = self._op_freq_hz(task)
+        if freq_hz is not None:
+            bounds = refold_bounds(bounds, freq_hz)
+        return apply_power_bounds([spec], bounds)[0]
+
+    def _ramp_order_key(self):
+        """This ramp's best-effort position on its task's timeline (mirrors
+        timeline_model._carry_order_key), so carried state comes only from earlier steps.
+        A window-filling ('both') ramp starts at on-air, so it orders like a start anchor."""
+        anchor = self._anchor.currentData() or "start"
+        off = round(float(self._offset.value()), 1)
+        return (1, off) if anchor == "stop" else (0, off)
+
+    def _freq_unit_factor(self, freq_param: str) -> float:
+        """Hz per unit of the ramped script's calibration frequency field, so a carried
+        value in its own unit (MHz etc.) converts to the Hz that refold_bounds expects."""
+        for s in self._all_params:
+            if s.get("dest") == freq_param:
+                unit = (s.get("unit") or "").strip().lower()
+                return {"hz": 1.0, "khz": 1e3, "mhz": 1e6, "ghz": 1e9}.get(unit, 1.0)
+        return 1.0
+
+    def _op_freq_hz(self, task: str) -> Optional[float]:
+        """The transmit frequency (Hz) the ramped task is running at when this ramp fires
+        — its duration-bar baseline replayed through the earlier same-task steps in the
+        sequence — for folding a frequency-dependent power range. None when the script
+        declares no calibration freq param, the editor can't report the sequence, or it's
+        unset."""
+        freq_param = (getattr(self._editor, "_script_cal_freq_params", None) or {}).get(
+            self._current_script)
+        items_getter = getattr(self._editor, "items", None)
+        if not freq_param or items_getter is None:
+            return None
+        try:
+            items = list(items_getter())
+            _script, base_args = self._editor.script_for_task(task)
+            # Seed from the task's duration-bar args (its on-air baseline) so the frequency
+            # is known even when the ramp coincides with the bar's start (same order key,
+            # which would otherwise drop the bar); earlier tune steps then carry forward.
+            bar_args = next((list(it.args) for it in items
+                             if getattr(it, "kind", None) == "bar"
+                             and getattr(it, "task_name", None) == task
+                             and getattr(it, "args", None)), None)
+            carried = tlm.sequence_effective_values(
+                items, task, bar_args or base_args, self._all_params,
+                getattr(self._src, "uid", None), target_key=self._ramp_order_key())
+        except Exception:      # noqa: BLE001 — a fold helper must never break the editor
+            return None
+        val = carried.get(freq_param)
+        if not isinstance(val, (int, float)) or isinstance(val, bool):
+            return None
+        return float(val) * self._freq_unit_factor(freq_param)
 
     def _rebuild_run_form(self) -> None:
         if not self._run_mode:
@@ -400,7 +482,8 @@ class RampEditorDialog(QDialog):
             self._form.set_values(args)
 
     def _on_param_changed(self) -> None:
-        self._rebuild_run_form()   # the ramped param leaves the fixed-value form
+        self._rebuild_run_form()      # the ramped param leaves the fixed-value form
+        self._rebuild_value_fields()  # From/To take the new parameter's range/unit
         self._update_preview()
 
     def _update_warning(self) -> None:
@@ -482,6 +565,13 @@ class RampEditorDialog(QDialog):
         if isinstance(result, Exception):
             return
         self._editor.param_cache()[script] = (result or {}).get("params", [])
+        # Record the script's calibration freq param (like the step editor does) so the
+        # power range can be folded at the frequency the ramped task runs at.
+        for attr, key in (("_script_cal_signals", "calibration_signal"),
+                          ("_script_cal_freq_params", "calibration_freq_param")):
+            store = getattr(self._editor, attr, None)
+            if store is not None:
+                store[script] = (result or {}).get(key)
         if script == self._current_script:
             self._set_params(self._editor.param_cache()[script])
 
@@ -497,6 +587,7 @@ class RampEditorDialog(QDialog):
             self._param.setCurrentText(want)
         self._param.blockSignals(False)
         self._rebuild_run_form()
+        self._rebuild_value_fields()   # now the swept param's real range/unit is known
         self._update_preview()
 
     # ── Preview ──────────────────────────────────────────────────────────────
@@ -504,7 +595,7 @@ class RampEditorDialog(QDialog):
     def _spec_from_form(self) -> dict:
         fields = _FIELDS.get(self._mode.currentData(), ())
         spec = {"param": self._param.currentText().strip(),
-                "start": _num(self._start.text()), "stop": _num(self._stop.text())}
+                "start": self._val(self._start_field), "stop": self._val(self._stop_field)}
         if "steps" in fields:
             n = _num(self._steps.text())
             spec["steps"] = int(n) if n is not None else None
@@ -534,7 +625,62 @@ class RampEditorDialog(QDialog):
     def _range_error(self) -> Optional[str]:
         """From/To against the ramped parameter's allowed range (or None)."""
         return _ramp_range_error(self._ramped_spec(),
-                                 _num(self._start.text()), _num(self._stop.text()))
+                                 self._val(self._start_field), self._val(self._stop_field))
+
+    # ── From/To bounded fields ───────────────────────────────────────────────
+
+    def _val(self, field) -> Optional[float]:
+        """The current value of a From/To field — a BoundedNumberField always has one; a
+        plain-line-edit fallback (no numeric spec yet) may be blank."""
+        if isinstance(field, BoundedNumberField):
+            return field.value()
+        if isinstance(field, QLineEdit):
+            return _num(field.text())
+        return None
+
+    def _power_fold_ctx(self, spec: dict):
+        """(PowerFold, freq_hz, rail_note) for the swept parameter when it's the calibrated
+        --power field, so the bounded field snaps to real achievable levels and notes the
+        fold frequency — exactly as the parameter form does. (None, None, "") otherwise."""
+        task = self._task.currentText().strip()
+        getter = getattr(self._editor, "cal_bounds_for_task", None)
+        bounds = getter(task) if getter is not None else None
+        if not bounds or find_power_index([spec]) is None:
+            return None, None, ""
+        fold = PowerFold.from_artifact((bounds.get("artifact") or {}))
+        freq = self._op_freq_hz(task)
+        note = "Calibrated for this unit"
+        if fold is not None and fold.freq_dependent and isinstance(freq, (int, float)):
+            note = f"Range at {freq / 1e6:.2f} MHz · moves with frequency"
+        return fold, freq, note
+
+    def _make_value_field(self, spec: Optional[dict], value, placeholder: str):
+        """A From/To widget for the swept parameter: a bounded numeric field (spinbox + rail
+        + limit chip) when the parameter has a numeric min/max, else a plain line edit."""
+        if spec and spec.get("type") in ("int", "float") \
+                and spec.get("min") is not None and spec.get("max") is not None:
+            fold, freq, note = self._power_fold_ctx(spec)
+            field = BoundedNumberField(spec, fold=fold, fold_freq=freq, note=note)
+            if isinstance(value, (int, float)):
+                field.setValue(value)
+            field.valueChanged.connect(self._update_preview)
+            return field
+        le = QLineEdit("" if value is None else _fmt(value))
+        le.setPlaceholderText(placeholder)
+        le.textChanged.connect(self._update_preview)
+        return le
+
+    def _rebuild_value_fields(self) -> None:
+        """Rebuild the From/To fields for the currently-swept parameter, carrying the values
+        over. Called when the parameter, task or its params change so the fields always show
+        the right range/unit and (for --power) the calibrated, frequency-folded bound."""
+        spec = self._ramped_spec()
+        cur_start = self._val(self._start_field) if self._start_field is not None else self._init_start
+        cur_stop = self._val(self._stop_field) if self._stop_field is not None else self._init_stop
+        self._start_field = self._make_value_field(spec, cur_start, "start value")
+        self._stop_field = self._make_value_field(spec, cur_stop, "stop value")
+        _swap_only(self._start_lay, self._start_field)
+        _swap_only(self._stop_lay, self._stop_field)
 
     def _update_preview(self, *_) -> None:
         if not self._ready:
