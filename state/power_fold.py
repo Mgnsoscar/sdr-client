@@ -67,7 +67,7 @@ class PowerFold:
 
     def __init__(self, gains, powers, min_gain_db, ceiling_const,
                  hops=(), freq_limits=(), center_freq=None, gain_step_db=None,
-                 actives=()):
+                 actives=(), source_bias=()):
         pairs = sorted(zip((float(g) for g in gains), (float(p) for p in powers)))
         self._gains = [g for g, _ in pairs]
         self._powers = [p for _, p in pairs]
@@ -94,10 +94,21 @@ class PowerFold:
         self._center_freq = None if center_freq is None else float(center_freq)
         # Active components (programmable gain/attenuation) — empty for a plain passive chain.
         self._actives = [dict(a) for a in (actives or [])]
+        # Per-unit SOURCE BIAS Δ dB(f): the SDR's own output-vs-frequency flatness, shifting
+        # the measured anchor with frequency (normalized to 0 at the rep frequency). Applied to
+        # the anchor everywhere — delivered power AND the limit/ceiling inversion — byte-for-byte
+        # with calkit.PowerMap. Empty ⇒ no bias.
+        self._bias = [(float(f), float(d)) for f, d in (source_bias or [])]
 
     # ── the fold, at a frequency ──────────────────────────────────────────────────
     def _eff(self, freq: Optional[float]) -> Optional[float]:
         return freq if freq is not None else self._center_freq
+
+    def _source_bias_at(self, freq: Optional[float]) -> float:
+        """The source-bias shift (dB) on the anchor at ``freq`` — 0 when there's no bias."""
+        if not self._bias:
+            return 0.0
+        return _table_at([f for f, _ in self._bias], [d for _, d in self._bias], freq)
 
     @property
     def has_active(self) -> bool:
@@ -110,13 +121,14 @@ class PowerFold:
         from state.achievable import AchievableGrid, Active
         f = self._eff(freq)
         od = self._op_delta(f)
+        b = self._source_bias_at(f)
         actives = []
         for a in self._actives:
             hi, lo = _active_applied(a)
             actives.append(Active(hi, lo, a["step_db"], a.get("engage_pct", 0.0), meta=a))
         grid = AchievableGrid(
-            power_for_gain=lambda g: _interp(g, self._gains, self._powers) + od,
-            gain_for_power=lambda p: _interp(p - od, self._powers, self._gains),
+            power_for_gain=lambda g: _interp(g, self._gains, self._powers) + od + b,
+            gain_for_power=lambda p: _interp(p - od - b, self._powers, self._gains),
             min_gain=self.min_gain_db, ceiling=self._ceiling(f),
             gain_step=self._gain_step, actives=actives)
         return grid, actives
@@ -151,11 +163,13 @@ class PowerFold:
 
     def _ceiling(self, freq: Optional[float]) -> float:
         cap = self._ceiling_const
+        b = self._source_bias_at(freq)
         for max_dbm, fs, ds, ag, ap in self._freq_limits:
             target = max_dbm - _table_at(fs, ds, freq)
-            gains = ag if ag is not None else self._gains
-            powers = ap if ap is not None else self._powers
-            cap = min(cap, _interp(target, powers, gains))
+            if ag is not None:                    # own (downstream) limiting curve → no bias
+                cap = min(cap, _interp(target, ap, ag))
+            else:                                 # shared operating anchor = the biased source
+                cap = min(cap, _interp(target - b, self._powers, self._gains))
         return cap
 
     def _snap(self, gain: float, freq: Optional[float]) -> float:
@@ -173,7 +187,7 @@ class PowerFold:
     def power_for_gain(self, gain_db: float, freq: Optional[float] = None) -> float:
         f = self._eff(freq)
         g = self._snap(float(gain_db), f)
-        return _interp(g, self._gains, self._powers) + self._op_delta(f)
+        return _interp(g, self._gains, self._powers) + self._op_delta(f) + self._source_bias_at(f)
 
     def max_gain_db(self, freq: Optional[float] = None) -> float:
         f = self._eff(freq)
@@ -213,7 +227,8 @@ class PowerFold:
     def freq_dependent(self) -> bool:
         """True when --power/gain (or the ceiling) actually moves with frequency."""
         return (any(len(fs) > 1 for fs, _ in self._hops)
-                or any(len(fs) > 1 for _, fs, _ds, _ag, _ap in self._freq_limits))
+                or any(len(fs) > 1 for _, fs, _ds, _ag, _ap in self._freq_limits)
+                or len(self._bias) > 1)
 
     # ── constructor ───────────────────────────────────────────────────────────────
     @classmethod
@@ -241,7 +256,8 @@ class PowerFold:
             return cls(gains, powers, art.get("min_gain_db"), ceiling_const,
                        hops=hops, freq_limits=freq_limits,
                        center_freq=art.get("center_freq_hz"), gain_step_db=step,
-                       actives=actives)
+                       actives=actives,
+                       source_bias=art.get("source_bias_delta_by_freq") or ())
 
         curve = art.get("curve") or []                # v1: pre-flattened operating curve
         gains = [pt[0] for pt in curve]

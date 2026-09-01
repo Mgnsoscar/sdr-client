@@ -211,3 +211,35 @@ def test_non_commensurate_steps_snap_and_quantize_to_true_levels():
     # the attenuator value commanded for a snapped level is a real 0.3 dB multiple
     val = fold.realize(-50.1)["settings"][0]["value"]
     assert abs(round(val / 0.3) - val / 0.3) < 1e-6
+
+
+# ── source bias: the SDR flatness folds into the range (mirror of calkit) ─────────
+
+def _bias_artifact():
+    """SDR-only anchor + a per-unit source bias (+2 @1.0 GHz, 0 @1.5 GHz, -2 @2.0 GHz) and a
+    source power limit at 4 dBm, so both delivered power and the gain ceiling move with freq."""
+    return {
+        "anchor_curve": [[40.0, -30.0], [60.0, -10.0], [74.0, 4.0]],
+        "passive_hops": [],
+        "source_bias_delta_by_freq": [[1.0e9, 2.0], [1.5e9, 0.0], [2.0e9, -2.0]],
+        "freq_dependent_limits": [{"max_dbm": 4.0, "delta_db_by_freq": [[0.0, 0.0]]}],
+        "gain_ceiling_db": 89.75,
+        "min_gain_db": 0.0,
+        "center_freq_hz": 1.5e9,
+    }
+
+
+def test_source_bias_shifts_power_with_frequency():
+    fold = PowerFold.from_artifact(_bias_artifact())
+    assert fold.freq_dependent
+    assert fold.power_for_gain(60, freq=1.5e9) == pytest.approx(-10.0)   # zero at rep
+    assert fold.power_for_gain(60, freq=1.0e9) == pytest.approx(-8.0)    # SDR +2 hot
+    assert fold.power_for_gain(60, freq=2.0e9) == pytest.approx(-12.0)   # SDR -2 cold
+
+
+def test_source_bias_tightens_the_gain_ceiling_where_hot():
+    fold = PowerFold.from_artifact(_bias_artifact())
+    # limit holds delivered power at 4 dBm, but the GAIN cap drops where the SDR runs hot.
+    assert fold.max_gain_db(1.5e9) == pytest.approx(74.0)
+    assert fold.max_gain_db(1.0e9) == pytest.approx(72.0)
+    assert fold.bounds_at(1.0e9)["max_power_dbm"] == pytest.approx(4.0)
