@@ -1725,3 +1725,48 @@ def test_freq_interp_endpoint_clamped():
     mid = _interp_db(table, 1.35e9)
     assert -2.81 < mid < -2.30                    # interpolated
     assert _interp_db([[0, -3.0]], 5e9) == -3.0  # single point → constant
+
+
+# ── stage bypass ───────────────────────────────────────────────────────────────
+
+def _doc2():
+    """The base doc plus a derived 'pad' stage after the source (operating = pad)."""
+    d = _doc()
+    d["chain"]["planes"]["pad"] = {"type": "derived", "from": "sdr_output", "delta_db": -10.0}
+    d["chain"]["operating_plane"] = "pad"
+    return d
+
+
+def test_bypass_round_trips_and_is_serialized():
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=["calibration-stage-bypass"])))
+    p._set_doc(_doc2())
+    assert p._f["planes"][1].get("bypass") is False
+    p._f["planes"][1]["bypass"] = True
+    out = p._read_form(strict=False)
+    assert out["chain"]["planes"]["pad"]["bypass"] is True
+
+
+def test_bypass_loads_from_doc():
+    d = _doc2(); d["chain"]["planes"]["pad"]["bypass"] = True
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=["calibration-stage-bypass"])))
+    p._set_doc(d)
+    assert p._f["planes"][1].get("bypass") is True
+
+
+def test_source_stage_bypass_is_never_serialized():
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=["calibration-stage-bypass"])))
+    p._set_doc(_doc2())
+    p._f["planes"][0]["bypass"] = True             # the source can't be bypassed
+    out = p._read_form(strict=False)
+    assert "bypass" not in out["chain"]["planes"]["sdr_output"]
+
+
+def test_bypassed_stage_skips_local_validation():
+    from ui.calibration_panel import local_calibration_issues
+    d = _doc2()
+    # a bypassed derived stage with NO Δ/component is transparent → must NOT be flagged
+    d["chain"]["planes"]["pad"] = {"type": "derived", "from": "sdr_output", "bypass": True}
+    assert not any("pad" in i for i in local_calibration_issues(d))
+    # the same stage un-bypassed IS flagged (missing Δ dB)
+    d["chain"]["planes"]["pad"] = {"type": "derived", "from": "sdr_output"}
+    assert any("pad" in i and "Δ" in i for i in local_calibration_issues(d))

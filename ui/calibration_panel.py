@@ -37,7 +37,7 @@ from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QRect, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractItemDelegate, QAbstractItemView, QAbstractScrollArea, QApplication,
-    QButtonGroup, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox,
     QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
@@ -87,6 +87,14 @@ CAL_ACTIVE_COMPONENTS_CAPABILITY = "calibration-active-components"  # agent >= 1
 _ACTIVE_COMPONENTS_NEEDS_NEWER = (
     "this unit's agent is too old for active components (a task-controlled attenuator/gain "
     "stage — needs 1.8.0+). Update the agent, or remove the active stage before saving.")
+CAL_SOURCE_BIAS_CAPABILITY = "calibration-source-bias"  # agent >= 1.9.0 (per-unit source bias)
+_SOURCE_BIAS_NEEDS_NEWER = (
+    "this unit's agent is too old for a source bias (the SDR's power-vs-frequency flatness — "
+    "needs 1.9.0+). Update the agent, or remove the source-bias stage before saving.")
+CAL_STAGE_BYPASS_CAPABILITY = "calibration-stage-bypass"  # agent >= 1.9.0 (bypass a stage)
+_STAGE_BYPASS_NEEDS_NEWER = (
+    "this unit's agent is too old to bypass a stage (needs 1.9.0+). Update the agent, or "
+    "un-bypass every stage before saving.")
 
 # The baseband amplitude every broadcaster script transmits at is a FIXED constant (the
 # scripts' baked AMPLITUDE), not an operator control — so calibration is always measured at
@@ -257,15 +265,18 @@ def local_calibration_issues(doc) -> list:
                 issues.append(f"derived plane '{name}' has no parent plane")
             elif frm not in planes:
                 issues.append(f"derived plane '{name}' points at unknown plane '{frm}'")
-            # A hop's Δ dB comes from an inline constant (delta_db), a library component
-            # (component, possibly frequency-dependent), OR — for an active component — its
-            # own inline Δ dB(f) table (delta_db_by_freq). Only flag when it has NONE.
-            if (p.get("delta_db") is None and not p.get("component")
-                    and not p.get("delta_db_by_freq")):
-                issues.append(f"derived plane '{name}' has no Δ dB or component")
-            # An ACTIVE component adds a `control` block on top of that baseline.
-            if p.get("control") is not None:
-                issues.extend(_control_issues(name, p.get("control")))
+            # A bypassed stage is transparent (0 dB, limits dropped), so it needs no Δ /
+            # component / control — skip those checks (it still needs a valid parent above).
+            if not p.get("bypass"):
+                # A hop's Δ dB comes from an inline constant (delta_db), a library component
+                # (component, possibly frequency-dependent), OR — for an active component — its
+                # own inline Δ dB(f) table (delta_db_by_freq). Only flag when it has NONE.
+                if (p.get("delta_db") is None and not p.get("component")
+                        and not p.get("delta_db_by_freq")):
+                    issues.append(f"derived plane '{name}' has no Δ dB or component")
+                # An ACTIVE component adds a `control` block on top of that baseline.
+                if p.get("control") is not None:
+                    issues.extend(_control_issues(name, p.get("control")))
         elif t != "measured":
             issues.append(f"plane '{name}' has an unknown type")
 
@@ -1663,7 +1674,10 @@ class CalibrationPanel(QWidget):
         cal_role = spec.get("role", "limiting") if role == "measured" else "limiting"
         row = {"name": name_e, "role": role, "comp_id": spec.get("component") or "",
                "delta": delta_e, "orig": name,
-               "cal_role": cal_role if cal_role == "reported" else "limiting"}
+               "cal_role": cal_role if cal_role == "reported" else "limiting",
+               # Bypass: a stage physically pulled without deleting it — resolves as a
+               # transparent 0-dB hop with its limits dropped. Every stage but the source.
+               "bypass": bool(spec.get("bypass"))}
         if role == "active":
             c = spec.get("control") or {}
             row["control"] = {
@@ -1769,6 +1783,16 @@ class CalibrationPanel(QWidget):
             top.addWidget(_DragHandle(name, self._chain_drag_start,
                                       self._chain_drag_move, self._chain_drag_end))
         top.addStretch(1)
+        # Bypass: every stage but the source (index 0) can be pulled from the chain without
+        # deleting it. Gated on the agent capability (an older agent would reject bypass).
+        if index > 0 and self._supports(CAL_STAGE_BYPASS_CAPABILITY):
+            byp = QCheckBox("bypass")
+            byp.setChecked(bool(row.get("bypass")))
+            byp.setToolTip("Bypass this stage — treat it as if it weren't there (0 dB, its "
+                           "safety limits don't apply), without deleting it.")
+            byp.setStyleSheet("font-size:10px;")
+            byp.toggled.connect(lambda ck, r=row: self._toggle_bypass(r, ck))
+            top.addWidget(byp)
         if index > 0:                             # the source stage stays first
             for glyph, delta, en in (("◀", -1, index > 1), ("▶", +1, index < total - 1)):
                 mv = QPushButton(glyph); mv.setFixedSize(20, 20)
@@ -1784,6 +1808,10 @@ class CalibrationPanel(QWidget):
                       "passive": "Passive · from library", "active": "ACTIVE"}[kind]
         if kind == "measured" and row.get("cal_role") == "reported":
             badge_text = "REPORTED"           # report-only: invisible to safety limits
+        bypassed = index > 0 and bool(row.get("bypass"))
+        if bypassed:                          # translucent, transparent 0-dB, limits dropped
+            badge_text = f"{badge_text} · BYPASSED"
+            fg, kbg = Palette.TEXT_FAINT, Palette.SURFACE_ALT
         v.addWidget(_badge(badge_text, fg, kbg), alignment=Qt.AlignmentFlag.AlignLeft)
 
         title = QLabel(name or "(unnamed)")
@@ -1825,7 +1853,28 @@ class CalibrationPanel(QWidget):
             hint.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
             v.addWidget(hint)
         v.addStretch(1)
+        if bypassed:                          # dim the whole card so it reads as "not there"
+            from PyQt6.QtWidgets import QGraphicsOpacityEffect
+            eff = QGraphicsOpacityEffect(card)
+            eff.setOpacity(0.42)
+            card.setGraphicsEffect(eff)
         return card
+
+    def _toggle_bypass(self, row, checked: bool) -> None:
+        """Bypass / un-bypass a stage. The row model carries the flag (serialized by
+        _read_planes); the chain re-render + re-validate is deferred to the next event-loop
+        turn so the toggled checkbox isn't destroyed mid-signal."""
+        if self._syncing:
+            return
+        row["bypass"] = bool(checked)
+        self._download_btn.setEnabled(True)          # a real edit — Save/Download now live
+        from PyQt6.QtCore import QTimer
+
+        def _after():
+            self._render_chain()
+            self._render_detail()
+            self._update_issues()
+        QTimer.singleShot(0, _after)
 
     # ── add / reorder stages ─────────────────────────────────────────────────────
     def _add_stage(self) -> None:
@@ -2887,7 +2936,7 @@ class CalibrationPanel(QWidget):
         prev = ((self._doc or {}).get("chain") or {}).get("planes") or {}
         planes: dict = {}
         prev_name: Optional[str] = None
-        for row in self._f.get("planes", []):
+        for idx, row in enumerate(self._f.get("planes", [])):
             name = row["name"].text().strip()
             if not name:
                 continue
@@ -2930,6 +2979,9 @@ class CalibrationPanel(QWidget):
                 if of:
                     p["role"] = "reported"
                     p["of"] = of
+            # Bypass (never on the source/first stage): a transparent, limits-dropped stage.
+            if idx > 0 and row.get("bypass"):
+                p["bypass"] = True
             planes[name] = p
             prev_name = name
         return planes
@@ -3235,7 +3287,8 @@ class CalibrationPanel(QWidget):
         if (self._blocks_on_components() or self._blocks_on_partial_stages()
                 or self._blocks_on_no_signals() or self._blocks_on_limit_side()
                 or self._blocks_on_plane_roles() or self._blocks_on_gain_step()
-                or self._blocks_on_freq_optional_center() or self._blocks_on_active_components()):
+                or self._blocks_on_freq_optional_center() or self._blocks_on_active_components()
+                or self._blocks_on_source_bias() or self._blocks_on_stage_bypass()):
             return False
         self._send(json.dumps(self._doc).encode("utf-8"))
         return True
@@ -3261,6 +3314,36 @@ class CalibrationPanel(QWidget):
         if (self._doc_uses_active_components(self._doc)
                 and not self._supports(CAL_ACTIVE_COMPONENTS_CAPABILITY)):
             self._set_status(_ACTIVE_COMPONENTS_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
+    @staticmethod
+    def _doc_uses_source_bias(doc) -> bool:
+        sb = (doc or {}).get("source_bias")
+        return isinstance(sb, dict) and bool(sb.get("power_by_freq"))
+
+    def _blocks_on_source_bias(self) -> bool:
+        """Guard: don't push a source-bias document to an agent that predates it (it would
+        ignore the bias and mis-report power vs frequency)."""
+        if (self._doc_uses_source_bias(self._doc)
+                and not self._supports(CAL_SOURCE_BIAS_CAPABILITY)):
+            self._set_status(_SOURCE_BIAS_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
+    @staticmethod
+    def _doc_uses_bypass(doc) -> bool:
+        planes = ((doc or {}).get("chain") or {}).get("planes") or {}
+        if any(isinstance(p, dict) and p.get("bypass") for p in planes.values()):
+            return True
+        sb = (doc or {}).get("source_bias")
+        return isinstance(sb, dict) and bool(sb.get("bypass"))
+
+    def _blocks_on_stage_bypass(self) -> bool:
+        """Guard: don't push a bypassed stage to an agent that predates it (it would reject
+        the bypass field)."""
+        if self._doc_uses_bypass(self._doc) and not self._supports(CAL_STAGE_BYPASS_CAPABILITY):
+            self._set_status(_STAGE_BYPASS_NEEDS_NEWER, kind="error")
             return True
         return False
 
@@ -3424,7 +3507,8 @@ class CalibrationPanel(QWidget):
         if (self._blocks_on_components() or self._blocks_on_partial_stages()
                 or self._blocks_on_no_signals() or self._blocks_on_limit_side()
                 or self._blocks_on_plane_roles() or self._blocks_on_gain_step()
-                or self._blocks_on_freq_optional_center()):
+                or self._blocks_on_freq_optional_center()
+                or self._blocks_on_source_bias() or self._blocks_on_stage_bypass()):
             return
         self._set_status("validating (dry run — not saving)…")
         doc = self._doc
