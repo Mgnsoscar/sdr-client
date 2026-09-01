@@ -224,6 +224,40 @@ def _control_issues(name: str, control) -> list:
     return out
 
 
+def _reading_block(sub) -> Optional[dict]:
+    """Normalize a reported/limiting reading's editor state into a clean doc block, or None
+    when it is the trivial default (Same as measured with nothing else). Mirrors the shapes
+    state/power_law.parse_bridge accepts (docs/calibration-v2.md §13); a `law` keeps its
+    embedded law dict so the document stays self-contained."""
+    if not isinstance(sub, dict):
+        return None
+    kind = sub.get("kind", "same")
+    if kind not in ("same", "own", "law"):
+        return None
+    out = {"kind": kind}
+    if kind == "law":
+        law = sub.get("law")
+        if not isinstance(law, dict):
+            return None
+        out["law"] = law
+    else:
+        k = sub.get("k")
+        if isinstance(k, (int, float)) and not isinstance(k, bool) and k:
+            out["k"] = float(k)
+    unit = str(sub.get("unit", "") or "").strip()
+    if unit:
+        out["unit"] = unit
+    q = str(sub.get("quantity", "") or "").strip()
+    if q:
+        out["quantity"] = q
+    mx = sub.get("max_dbm")
+    if isinstance(mx, (int, float)) and not isinstance(mx, bool):
+        out["max_dbm"] = float(mx)
+    if kind == "same" and set(out) == {"kind"}:
+        return None                     # nothing to say — a plain "same" is the default
+    return out
+
+
 def _upstream_plane_name(planes: dict, name: str):
     """The plane feeding INTO ``name``'s stage — one hop upstream in the cascade, mirroring
     the agent (agent/calibration.py:_upstream_plane): a derived plane's parent is its
@@ -1101,6 +1135,7 @@ class CalibrationPanel(QWidget):
         # Active-component editor: a script's numeric params, fetched per task on demand so the
         # control's "set param" picker can offer the linked task's parameters.
         self._task_params: dict = {}           # script basename → list[param spec]
+        self._task_laws: dict = {}             # script basename → CAL_POWER_LAWS (declared laws)
         self._task_params_inflight: set = set()
         self._saved_doc: Optional[dict] = None  # the unit's last-persisted calibration doc
         # Canonical form snapshot taken whenever a whole document is loaded into the editor
@@ -1692,6 +1727,12 @@ class CalibrationPanel(QWidget):
             # The active component's OWN baseline insertion loss: a frequency table it owns
             # inline (not a shared library part). Empty ⇒ a flat constant (row["delta"]).
             row["baseline_table"] = [list(p) for p in (spec.get("delta_db_by_freq") or [])]
+        # Reported/limiting power-quantity BRIDGES (docs/calibration-v2.md §13) — meaningful
+        # only on the operating (last) plane, but stored per row so a rename/reorder keeps
+        # them. Loaded from the plane spec; the editor mutates these dicts in place and
+        # _read_planes writes them back on the operating plane.
+        row["reading"] = {"reported": dict(spec.get("reported") or {}),
+                          "limiting": dict(spec.get("limiting") or {})}
         name_e.editingFinished.connect(lambda r=row: self._on_plane_name_changed(r))
         return row
 
@@ -2354,6 +2395,10 @@ class CalibrationPanel(QWidget):
             self._detail_active(row)
         else:
             self._detail_passive(row)
+        # The operating plane (always the last stage) is where --power is read, so it carries
+        # the reported/limiting power-quantity bridges (docs/calibration-v2.md §13).
+        if rows and row is rows[-1]:
+            self._detail_body.addWidget(self._reading_editor(row))
         self._detail_body.addWidget(self._stage_advanced(row))
 
     def _detail_passive(self, row) -> None:
@@ -2559,6 +2604,9 @@ class CalibrationPanel(QWidget):
         self._task_params_inflight.discard(script)
         if isinstance(result, dict):
             self._task_params[script] = result.get("params", []) or []
+            # A script may also declare power-quantity laws (CAL_POWER_LAWS) for the reported/
+            # limiting bridge picker (docs/calibration-v2.md §13).
+            self._task_laws[script] = result.get("calibration_power_laws", []) or []
             self._render_detail()
 
     def _control_from_row(self, row) -> dict:
@@ -2580,6 +2628,168 @@ class CalibrationPanel(QWidget):
         if consts:
             out["consts"] = consts
         return out
+
+    # ── reported / limiting power-quantity bridges (operating plane) ──────────────
+    _DENSITY_UNITS = ("dBm/MHz", "dBm/kHz", "dBm/Hz")
+
+    def _declared_laws(self) -> dict:
+        """Every power-quantity law any of this unit's signals' scripts declares
+        (CAL_POWER_LAWS), keyed by id — the "declared by this signal" picker options. Triggers
+        the per-task param fetch (cached) so they populate as they arrive."""
+        laws: dict = {}
+        for tname in self._all_task_names():
+            self._fetch_task_params(tname)
+            for lw in self._task_laws.get(self._task_script(tname), []) or []:
+                lid = lw.get("id") or lw.get("name")
+                if lid and lid not in laws:
+                    laws[lid] = lw
+        return laws
+
+    def _reading_editor(self, row) -> QWidget:
+        """The operating plane's reported/limiting bridge editor (docs/calibration-v2.md §13):
+        how --power (reported) and the safety ceiling (limiting) relate to the measured curve."""
+        reading = row.setdefault("reading", {"reported": {}, "limiting": {}})
+        laws = self._declared_laws()
+        box = QFrame(); box.setObjectName("readbox")
+        box.setStyleSheet(f"#readbox {{ border:1px solid {Palette.BORDER}; border-radius:8px; }}")
+        v = QVBoxLayout(box); v.setContentsMargins(10, 8, 10, 8); v.setSpacing(8)
+        hdr = QLabel("Reported &amp; limiting power")
+        hdr.setStyleSheet(f"font-size:12px;font-weight:600;color:{Palette.TEXT};")
+        v.addWidget(hdr)
+        intro = QLabel(
+            "What --power means here (reported) and what the safety ceiling gauges (limiting), "
+            "relative to what you measured at this node. “Same as measured” keeps the measured "
+            "quantity; a law a signal declares converts it (e.g. spectral density → "
+            "full-bandwidth power) and may key on a task parameter.")
+        intro.setWordWrap(True); intro.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+        v.addWidget(intro)
+        v.addWidget(self._reading_row("Reported", reading.setdefault("reported", {}), laws, False))
+        v.addWidget(self._reading_row("Limiting", reading.setdefault("limiting", {}), laws, True))
+        if not laws:
+            note = QLabel("No signal on this unit declares a conversion law — only “Same as "
+                          "measured” is offered. Advanced or per-signal readings: use JSON…")
+            note.setWordWrap(True); note.setStyleSheet(f"font-size:10px;color:{Palette.TEXT_FAINT};")
+            v.addWidget(note)
+        return box
+
+    def _reading_row(self, title, sub, laws, is_limiting) -> QWidget:
+        w = QFrame(); r = QVBoxLayout(w); r.setContentsMargins(0, 0, 0, 0); r.setSpacing(4)
+        top = QHBoxLayout()
+        lab = QLabel(title); lab.setFixedWidth(72)
+        lab.setStyleSheet(f"font-size:11px;font-weight:600;color:{Palette.TEXT_MUTED};")
+        kind = QComboBox()
+        kind.addItem("Same as measured", "same")
+        for lid, lw in laws.items():
+            kind.addItem(f"Law: {lw.get('name', lid)}", "law:" + lid)
+        curkind = sub.get("kind", "same")
+        curdata = "same"
+        if curkind == "law":
+            curdata = "law:" + str((sub.get("law") or {}).get("id", ""))
+            if kind.findData(curdata) < 0:            # an embedded law not in the declared set
+                lw = sub.get("law") or {}
+                kind.addItem(f"Law: {lw.get('name', lw.get('id', '?'))} (embedded)", curdata)
+        elif curkind == "own":
+            kind.addItem("Its own measured curve (JSON)", "own")
+            curdata = "own"
+        i = kind.findData(curdata)
+        kind.setCurrentIndex(i if i >= 0 else 0)
+        kind.currentIndexChanged.connect(
+            lambda _=0, k=kind, s=sub, L=laws: self._on_reading_kind(k, s, L))
+        top.addWidget(lab); top.addWidget(kind, 1)
+        r.addLayout(top)
+        if sub.get("kind") == "law" and isinstance(sub.get("law"), dict):
+            lw = sub["law"]
+            fam = lw.get("out", "abs")
+            row2 = QHBoxLayout()
+            row2.addWidget(QLabel("unit"))
+            unit = QComboBox()
+            if fam == "abs":
+                unit.addItem("dBm"); unit.setEnabled(False)
+            else:
+                unit.addItems(self._DENSITY_UNITS)
+            want = str(sub.get("unit") or ("dBm" if fam == "abs" else "dBm/MHz"))
+            j = unit.findText(want)
+            unit.setCurrentIndex(j if j >= 0 else 0)
+            if not sub.get("unit"):
+                sub["unit"] = unit.currentText()
+            unit.currentTextChanged.connect(lambda t, s=sub: self._reading_set(s, "unit", t))
+            unit.setFixedWidth(96); row2.addWidget(unit)
+            row2.addWidget(QLabel("quantity"))
+            q = QLineEdit(str(sub.get("quantity") or lw.get("name", "")))
+            q.editingFinished.connect(
+                lambda ed=q, s=sub: self._reading_set(s, "quantity", ed.text().strip()))
+            row2.addWidget(q, 1)
+            r.addLayout(row2)
+            r.addWidget(self._law_caption(lw, title.lower()))
+        if is_limiting:
+            row3 = QHBoxLayout()
+            row3.addWidget(QLabel("ceiling on the limiting reading"))
+            cap = QLineEdit(_numstr(sub.get("max_dbm")) if sub.get("max_dbm") is not None else "")
+            cap.setPlaceholderText("none"); cap.setFixedWidth(80)
+            cap.editingFinished.connect(
+                lambda ed=cap, s=sub: self._reading_set_cap(s, ed.text().strip()))
+            row3.addWidget(cap); row3.addWidget(QLabel("dBm")); row3.addStretch(1)
+            r.addLayout(row3)
+        return w
+
+    def _law_caption(self, lw: dict, role: str) -> QLabel:
+        terms = lw.get("terms") or ([{"param": lw["param"], "coeff": lw.get("coeff", 10.0),
+                                      "ref": lw.get("ref", 1.0)}] if lw.get("param") else [])
+        parts = []
+        if lw.get("k"):
+            parts.append(f"{lw['k']:+g} dB")
+        for t in terms:
+            parts.append(f"{t.get('coeff', 10.0):+g}·log₁₀({t['param']}/{t.get('ref', 1.0):g})")
+        expr = (" " + " ".join(parts)) if parts else " (unchanged)"
+        cap = QLabel(f"{role} = measured{expr}  ·  declared by the signal (read-only)")
+        cap.setWordWrap(True)
+        cap.setStyleSheet(f"font-size:10px;color:{Palette.ONLINE};font-family:monospace;")
+        return cap
+
+    def _on_reading_kind(self, combo, sub, laws) -> None:
+        data = combo.currentData() or "same"
+        if data.startswith("law:"):
+            lid = data[4:]
+            lw = laws.get(lid)
+            if lw is None and (sub.get("law") or {}).get("id") == lid:
+                lw = sub.get("law")
+            sub.clear(); sub["kind"] = "law"
+            if lw:
+                sub["law"] = dict(lw)
+        else:
+            keep_cap = sub.get("max_dbm")
+            sub.clear(); sub["kind"] = data
+            if keep_cap is not None:
+                sub["max_dbm"] = keep_cap
+        self._refresh_form_from_widgets()
+
+    def _reading_set(self, sub, key, val) -> None:
+        val = (val or "").strip() if isinstance(val, str) else val
+        if val:
+            sub[key] = val
+        else:
+            sub.pop(key, None)
+        self._mark_reading_dirty()
+
+    def _reading_set_cap(self, sub, text) -> None:
+        text = (text or "").strip()
+        if text:
+            try:
+                sub["max_dbm"] = float(text)
+            except ValueError:
+                return
+        else:
+            sub.pop("max_dbm", None)
+        self._mark_reading_dirty()
+
+    def _mark_reading_dirty(self) -> None:
+        """Persist reading edits into the working doc without a full detail rebuild (which
+        would steal focus mid-edit) — _read_planes reads the blocks from row['reading']."""
+        try:
+            self._doc = self._read_form(strict=False)
+        except ValueError:
+            return
+        self._download_btn.setEnabled(True)
 
     def _detail_active(self, row) -> None:
         """Detail editor for an ACTIVE component: a passive baseline Δ dB plus a control block
@@ -3107,6 +3317,18 @@ class CalibrationPanel(QWidget):
                 p["bypass"] = True
             planes[name] = p
             prev_name = name
+        # Reported/limiting power-quantity bridges live on the OPERATING (last) plane as the
+        # shared default across signals (a signal entry may override per-signal — see the
+        # agent resolver). Write the non-trivial blocks from that stage's editor state.
+        rows = self._f.get("planes", [])
+        if rows:
+            op_row = rows[-1]
+            op_name = op_row["name"].text().strip()
+            if op_name in planes:
+                for kind in ("reported", "limiting"):
+                    block = _reading_block((op_row.get("reading") or {}).get(kind))
+                    if block is not None:
+                        planes[op_name][kind] = block
         return planes
 
     def _remove_plane(self, row) -> None:
