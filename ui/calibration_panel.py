@@ -101,6 +101,11 @@ _POWER_BRIDGES_NEEDS_NEWER = (
     "1.10.0+). It would ignore them and report --power in the measured quantity (wrong power) "
     "and skip the limiting cap. Update the agent, or set every reading to “Same as measured” "
     "before saving.")
+CAL_MEASUREMENT_DEEMBED_CAPABILITY = "calibration-measurement-deembed"  # agent >= 1.11.0
+_DEEMBED_NEEDS_NEWER = (
+    "this unit's agent is too old to de-embed a measurement cable (needs 1.11.0+). It would "
+    "leave the cable loss baked into the measurement — wrong absolute power and a mis-placed "
+    "ceiling. Update the agent, or clear the measurement cable before saving.")
 
 # The baseband amplitude every broadcaster script transmits at is a FIXED constant (the
 # scripts' baked AMPLITUDE), not an operator control — so calibration is always measured at
@@ -1739,6 +1744,12 @@ class CalibrationPanel(QWidget):
         # _read_planes writes them back on the operating plane.
         row["reading"] = {"reported": dict(spec.get("reported") or {}),
                           "limiting": dict(spec.get("limiting") or {})}
+        # Measurement DE-EMBED (docs/calibration-v2.md §14) on a measured stage: the cable/pad
+        # between it and the analyzer, removed from the reading. A catalog component id is
+        # picker-editable; a non-string inline table is preserved (JSON-only, advanced).
+        dm = spec.get("measurement_deembed")
+        row["deembed"] = dm if isinstance(dm, str) else ""
+        row["deembed_custom"] = dm if (dm is not None and not isinstance(dm, str)) else None
         name_e.editingFinished.connect(lambda r=row: self._on_plane_name_changed(r))
         return row
 
@@ -3282,6 +3293,12 @@ class CalibrationPanel(QWidget):
             role = row.get("role", "measured")
             if role == "measured":
                 p = {"type": "measured"}
+                # Measurement de-embed (the analyzer-cable loss to remove): a picked catalog
+                # component id, or a preserved inline table (JSON-authored).
+                if row.get("deembed_custom") is not None:
+                    p["measurement_deembed"] = row["deembed_custom"]
+                elif row.get("deembed"):
+                    p["measurement_deembed"] = row["deembed"]
             elif role == "component":
                 p = {"type": "derived", "from": prev_name or "", "component": row.get("comp_id", "")}
             elif role == "active":                    # baseline (constant Δ dB or Δ dB(f)) + control
@@ -3640,7 +3657,7 @@ class CalibrationPanel(QWidget):
                 or self._blocks_on_plane_roles() or self._blocks_on_gain_step()
                 or self._blocks_on_freq_optional_center() or self._blocks_on_active_components()
                 or self._blocks_on_source_bias() or self._blocks_on_stage_bypass()
-                or self._blocks_on_power_bridges()):
+                or self._blocks_on_power_bridges() or self._blocks_on_deembed()):
             return False
         self._send(json.dumps(self._doc).encode("utf-8"))
         return True
@@ -3711,6 +3728,20 @@ class CalibrationPanel(QWidget):
             return True
         return any(isinstance(s, dict) and has(s)
                    for s in ((doc or {}).get("signals") or {}).values())
+
+    @staticmethod
+    def _doc_uses_deembed(doc) -> bool:
+        return any(isinstance(p, dict) and p.get("measurement_deembed")
+                   for p in (((doc or {}).get("chain") or {}).get("planes") or {}).values())
+
+    def _blocks_on_deembed(self) -> bool:
+        """Guard (safety): don't push a measurement de-embed to an agent that predates it —
+        it would leave the analyzer-cable loss baked into the measurement."""
+        if (self._doc_uses_deembed(self._doc)
+                and not self._supports(CAL_MEASUREMENT_DEEMBED_CAPABILITY)):
+            self._set_status(_DEEMBED_NEEDS_NEWER, kind="error")
+            return True
+        return False
 
     def _blocks_on_power_bridges(self) -> bool:
         """Guard (safety): don't push a reported/limiting bridge to an agent that predates it —
