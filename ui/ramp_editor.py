@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 )
 
 from api import ramp as _ramp
+from state.power_fold import refold_bounds
 
 from . import timeline_model as tlm
 from .duration_spin import DurationSpinBox
@@ -381,13 +382,70 @@ class RampEditorDialog(QDialog):
         """If the ramped parameter is the calibrated --power field, narrow its min/max
         to the target unit's resolved dBm range (the task's calibration signal), so
         the range check, preview and unit conform to calibration rather than the
-        script's wider declared bounds. Non-power params, no unit, or an uncalibrated
-        unit pass through unchanged — exactly as apply_power_bounds does for the forms."""
+        script's wider declared bounds. For a frequency-dependent chain the range is
+        re-folded at the frequency the ramped task runs at (carried from the sequence),
+        the same fold the step editor applies — so the range tracks the operating
+        frequency, not just the calibration's representative one. Non-power params, no
+        unit, or an uncalibrated unit pass through unchanged."""
         getter = getattr(self._editor, "cal_bounds_for_task", None)
         if getter is None:
             return spec
-        bounds = getter(self._task.currentText().strip())
-        return apply_power_bounds([spec], bounds)[0] if bounds else spec
+        task = self._task.currentText().strip()
+        bounds = getter(task)
+        if not bounds:
+            return spec
+        freq_hz = self._op_freq_hz(task)
+        if freq_hz is not None:
+            bounds = refold_bounds(bounds, freq_hz)
+        return apply_power_bounds([spec], bounds)[0]
+
+    def _ramp_order_key(self):
+        """This ramp's best-effort position on its task's timeline (mirrors
+        timeline_model._carry_order_key), so carried state comes only from earlier steps.
+        A window-filling ('both') ramp starts at on-air, so it orders like a start anchor."""
+        anchor = self._anchor.currentData() or "start"
+        off = round(float(self._offset.value()), 1)
+        return (1, off) if anchor == "stop" else (0, off)
+
+    def _freq_unit_factor(self, freq_param: str) -> float:
+        """Hz per unit of the ramped script's calibration frequency field, so a carried
+        value in its own unit (MHz etc.) converts to the Hz that refold_bounds expects."""
+        for s in self._all_params:
+            if s.get("dest") == freq_param:
+                unit = (s.get("unit") or "").strip().lower()
+                return {"hz": 1.0, "khz": 1e3, "mhz": 1e6, "ghz": 1e9}.get(unit, 1.0)
+        return 1.0
+
+    def _op_freq_hz(self, task: str) -> Optional[float]:
+        """The transmit frequency (Hz) the ramped task is running at when this ramp fires
+        — its duration-bar baseline replayed through the earlier same-task steps in the
+        sequence — for folding a frequency-dependent power range. None when the script
+        declares no calibration freq param, the editor can't report the sequence, or it's
+        unset."""
+        freq_param = (getattr(self._editor, "_script_cal_freq_params", None) or {}).get(
+            self._current_script)
+        items_getter = getattr(self._editor, "items", None)
+        if not freq_param or items_getter is None:
+            return None
+        try:
+            items = list(items_getter())
+            _script, base_args = self._editor.script_for_task(task)
+            # Seed from the task's duration-bar args (its on-air baseline) so the frequency
+            # is known even when the ramp coincides with the bar's start (same order key,
+            # which would otherwise drop the bar); earlier tune steps then carry forward.
+            bar_args = next((list(it.args) for it in items
+                             if getattr(it, "kind", None) == "bar"
+                             and getattr(it, "task_name", None) == task
+                             and getattr(it, "args", None)), None)
+            carried = tlm.sequence_effective_values(
+                items, task, bar_args or base_args, self._all_params,
+                getattr(self._src, "uid", None), target_key=self._ramp_order_key())
+        except Exception:      # noqa: BLE001 — a fold helper must never break the editor
+            return None
+        val = carried.get(freq_param)
+        if not isinstance(val, (int, float)) or isinstance(val, bool):
+            return None
+        return float(val) * self._freq_unit_factor(freq_param)
 
     def _rebuild_run_form(self) -> None:
         if not self._run_mode:
@@ -482,6 +540,13 @@ class RampEditorDialog(QDialog):
         if isinstance(result, Exception):
             return
         self._editor.param_cache()[script] = (result or {}).get("params", [])
+        # Record the script's calibration freq param (like the step editor does) so the
+        # power range can be folded at the frequency the ramped task runs at.
+        for attr, key in (("_script_cal_signals", "calibration_signal"),
+                          ("_script_cal_freq_params", "calibration_freq_param")):
+            store = getattr(self._editor, attr, None)
+            if store is not None:
+                store[script] = (result or {}).get(key)
         if script == self._current_script:
             self._set_params(self._editor.param_cache()[script])
 
