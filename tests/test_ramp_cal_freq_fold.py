@@ -96,6 +96,23 @@ def test_range_folds_at_bar_frequency():
     assert _ramp_range(1000.0) == (-24.0, 10.0)     # hot: whole range 6 dB higher
 
 
+def test_from_to_widget_bounds_fold_at_frequency():
+    # The user-visible From/To fields (spinbox + rail) carry the folded range, and the rail
+    # notes the frequency it was folded at.
+    from ui.param_form import BoundedNumberField
+    t = _editor()
+    bar = tlm.BarItem(task_name="mocktask", args=["--freq", "2000"],
+                      start_offset=0.0, stop_offset=60.0)
+    t._canvas.set_items([bar])
+    src = tlm.RunItem(task_name="mocktask", action="ramp", anchor="start", offset=0.0, ramp={})
+    dlg = RampEditorDialog(src, t, new=True)
+    dlg._param.setCurrentText("power")
+    f = dlg._start_field
+    assert isinstance(f, BoundedNumberField)
+    assert (f._spin.minimum(), f._spin.maximum()) == (-36.0, -2.0)
+    assert f._rail._note is not None and "2000.00 MHz" in f._rail._note.text()
+
+
 def test_fold_survives_when_ramp_offset_coincides_with_bar_start():
     # A ramp at on-air offset 0 shares the bar's order key; the fold must still see the
     # bar's frequency (seeded from the bar's args) rather than dropping it.

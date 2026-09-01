@@ -1,7 +1,7 @@
-"""The ramp editor's From/To range check conforms to a unit's power calibration:
-when the ramped parameter is the calibrated --power field, its allowed range is
-the unit's resolved dBm bounds (from the task's calibration signal), not just the
-script's wider declared min/max."""
+"""The ramp editor's From/To fields conform to a unit's power calibration: when the
+ramped parameter is the calibrated --power field, they render as bounded fields (spinbox
++ range rail + limit chip) whose min/max ARE the unit's resolved dBm bounds (from the
+task's calibration signal), not the script's wider declared min/max."""
 import os
 
 import pytest
@@ -11,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
+from ui.param_form import BoundedNumberField
 from ui.ramp_editor import RampEditorDialog
 
 _app = QApplication.instance() or QApplication([])
@@ -69,49 +70,30 @@ def _dialog(bounds):
     return dlg
 
 
-def test_calibrated_range_is_enforced():
+def test_calibrated_range_is_the_field_bound():
+    # From/To render as bounded fields (spinbox + rail + limit chip) whose min/max ARE the
+    # unit's calibrated dBm range, not the script's wider -140..60 — so out-of-range values
+    # can't be dialled in at all (the widget clamps).
     dlg = _dialog(_CAL_BOUNDS)
-    dlg._start.setText("-20")            # within the script range, below the cal floor
-    dlg._stop.setText("10")
-    err = dlg._range_error()
-    assert err is not None
-    assert "From" in err and "-1.8..28.2" in err   # the calibrated range, not -140..60
-    # A sweep inside the calibrated range is fine.
-    dlg._start.setText("0")
-    dlg._stop.setText("25")
-    assert dlg._range_error() is None
+    for field in (dlg._start_field, dlg._stop_field):
+        assert isinstance(field, BoundedNumberField)
+        assert (field._spin.minimum(), field._spin.maximum()) == (-1.8, 28.2)
+        assert field._chip is not None and field._rail is not None   # min/max chip + slider
+    dlg._start_field.setValue(-20)       # below the calibrated floor
+    assert dlg._start_field.value() == -1.8            # clamped to the calibrated min
+    dlg._stop_field.setValue(60)         # above the calibrated ceiling
+    assert dlg._stop_field.value() == 28.2             # clamped to the calibrated max
 
 
-def test_without_calibration_falls_back_to_schema_range():
+def test_calibrated_field_labels_the_quantity():
+    dlg = _dialog(_CAL_BOUNDS)
+    assert dlg._start_field._spin.suffix().strip() == "dBm EIRP"
+
+
+def test_without_calibration_uses_the_script_range():
     dlg = _dialog(None)                  # uncalibrated / no bounds
-    dlg._start.setText("-20")
-    dlg._stop.setText("10")
-    assert dlg._range_error() is None    # both within the script's -140..60
-    dlg._stop.setText("999")
-    err = dlg._range_error()
-    assert err is not None and "-140..60" in err
-
-
-def test_calibrated_unit_shows_dbm_and_bounds_in_message():
-    dlg = _dialog(_CAL_BOUNDS)
-    dlg._start.setText("50")             # above the calibrated ceiling
-    dlg._stop.setText("60")
-    err = dlg._range_error()
-    assert err is not None
-    assert "dBm" in err and "28.2" in err and "power" in err
-
-
-def test_range_hint_is_always_visible_and_calibrated():
-    # The allowed range shows even before you type an out-of-range value, narrowed to the
-    # unit's calibrated dBm range and flagged as calibrated.
-    dlg = _dialog(_CAL_BOUNDS)
-    txt = dlg._range_lbl.text()
-    assert "Allowed range: -1.8..28.2 dBm EIRP" in txt
-    assert "calibrated for this unit" in txt
-
-
-def test_range_hint_falls_back_to_script_range_without_calibration():
-    dlg = _dialog(None)                  # uncalibrated / no bounds
-    txt = dlg._range_lbl.text()
-    assert "Allowed range: -140..60 dBm" in txt
-    assert "calibrated" not in txt
+    field = dlg._start_field
+    assert isinstance(field, BoundedNumberField)
+    assert (field._spin.minimum(), field._spin.maximum()) == (-140.0, 60.0)
+    field.setValue(999)
+    assert field.value() == 60.0                       # clamped to the script max
