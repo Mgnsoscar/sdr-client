@@ -107,6 +107,12 @@ _DEEMBED_NEEDS_NEWER = (
     "leave the cable loss baked into the measurement — wrong absolute power and a mis-placed "
     "ceiling. Update the agent, or clear the measurement cable before saving.")
 
+CAL_MEASUREMENT_QUANTITY_CAPABILITY = "calibration-measurement-quantity"  # agent >= 1.12.0
+_MEASUREMENT_QUANTITY_NEEDS_NEWER = (
+    "this unit's agent is too old for a per-signal measurement quantity/unit (needs 1.12.0+). "
+    "It would ignore the signal's declared unit and show --power in the wrong quantity. Update "
+    "the agent, or clear the per-signal measurement unit before saving.")
+
 # The baseband amplitude every broadcaster script transmits at is a FIXED constant (the
 # scripts' baked AMPLITUDE), not an operator control — so calibration is always measured at
 # this amplitude and the editor does not expose it as an editable field. It is recorded on
@@ -3912,7 +3918,8 @@ class CalibrationPanel(QWidget):
                 or self._blocks_on_plane_roles() or self._blocks_on_gain_step()
                 or self._blocks_on_freq_optional_center() or self._blocks_on_active_components()
                 or self._blocks_on_source_bias() or self._blocks_on_stage_bypass()
-                or self._blocks_on_power_bridges() or self._blocks_on_deembed()):
+                or self._blocks_on_power_bridges() or self._blocks_on_deembed()
+                or self._blocks_on_measurement_quantity()):
             return False
         self._send(json.dumps(self._doc).encode("utf-8"))
         return True
@@ -4005,6 +4012,23 @@ class CalibrationPanel(QWidget):
         if (self._doc_uses_power_bridges(self._doc)
                 and not self._supports(CAL_POWER_BRIDGES_CAPABILITY)):
             self._set_status(_POWER_BRIDGES_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
+    @staticmethod
+    def _doc_uses_measurement_quantity(doc) -> bool:
+        """True when any signal declares a per-signal ``measurement`` block (quantity/unit) —
+        a ≤1.11.x agent ignores it and shows --power in the plane quantity / dBm."""
+        return any(isinstance(s, dict) and isinstance(s.get("measurement"), dict)
+                   and s["measurement"]
+                   for s in ((doc or {}).get("signals") or {}).values())
+
+    def _blocks_on_measurement_quantity(self) -> bool:
+        """Guard: don't push a per-signal measurement quantity/unit to an agent that predates
+        it — it would ignore the declared unit and mislabel the operator's --power axis."""
+        if (self._doc_uses_measurement_quantity(self._doc)
+                and not self._supports(CAL_MEASUREMENT_QUANTITY_CAPABILITY)):
+            self._set_status(_MEASUREMENT_QUANTITY_NEEDS_NEWER, kind="error")
             return True
         return False
 

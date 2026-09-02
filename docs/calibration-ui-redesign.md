@@ -1,7 +1,28 @@
 # Calibration UI redesign — per-signal signal editor (handoff)
 
-Status: **Phase 1 built (client-only, no agent bump) — ready for Phase 2.**
+Status: **Phase 1 + Phase 2 built. Feature complete.** Agent bumped to **1.12.0**.
 Branch (all three repos): `claude/todo-list-onboarding-86r5pg`.
+
+## Phase 2 — DONE (agent + client, gated)
+The per-signal measurement quantity/unit is now honored end-to-end:
+- **Agent** (`sdr-agent`): `resolve()` reads `signals.<id>.measurement = {quantity, unit}`
+  (`_measurement_of`) and publishes it as the artifact's **operating quantity/unit**
+  (`ResolvedCalibration.public_quantity` / `public_unit` → `to_public_dict` + the summary),
+  so the operator's base `--power` axis reads e.g. "Spectral density at main lobe peak
+  [dBm/Hz]" instead of the plane quantity + dBm. This fixes review **item #4**. The unit's
+  FAMILY gauges the reading bridges: a per-signal reported/limiting **law** must accept that
+  family (`in_fam`), a "same as measurement" **limiting** is refused for a density (a dBm
+  ceiling can't gauge it), and a limiting law must return dBm (`out == abs`). Absent
+  measurement ⇒ byte-identical to before. New capability
+  **`calibration-measurement-quantity`**; `AGENT_VERSION` → **1.12.0**.
+- **Client** (`sdr-client`): gates saving a doc that declares a per-signal measurement on the
+  new capability (`_doc_uses_measurement_quantity` / `_blocks_on_measurement_quantity` →
+  `CAL_MEASUREMENT_QUANTITY_CAPABILITY`), with a "needs 1.12.0+" message. The measurement
+  quantity/unit editor already shipped in Phase 1; the POWER `quantity [unit]` label already
+  shipped in the review round — Phase 2 makes the agent publish the right content into it.
+- Tests: `sdr-agent/tests/test_calibration_measurement.py` (publishing + family gauging +
+  shape validation), a capability assertion in `test_meta_endpoint.py`, and client gating
+  tests in `test_calibration_reading_editor.py`. Suites green: sdr-agent 361, sdr-client 556.
 
 This doc is a self-contained handoff so a fresh session can continue with no prior context.
 

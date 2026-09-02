@@ -273,3 +273,35 @@ def test_plain_document_not_gated():
     p._set_doc(_base_doc())
     assert p._doc_uses_power_bridges(p._doc) is False
     assert p._blocks_on_power_bridges() is False
+
+
+# ── per-signal measurement quantity/unit gating (Phase 2 capability) ────────────
+
+def test_measurement_quantity_gates_on_capability():
+    doc = _base_doc({"measurement": {"unit": "dBm/MHz", "quantity": "psd"},
+                     "limiting": {"kind": "law", "law": FBW}})
+    # an agent with power-bridges but NOT measurement-quantity → blocked
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=("calibration-power-bridges",))))
+    p._set_doc(doc)
+    assert p._doc_uses_measurement_quantity(p._doc) is True
+    assert p._blocks_on_measurement_quantity() is True
+    # a capable agent → not blocked
+    p2 = CalibrationPanel("u", FakeHub(FakeClient(
+        caps=["calibration-power-bridges", "calibration-measurement-quantity"])))
+    p2._set_doc(doc)
+    assert p2._blocks_on_measurement_quantity() is False
+
+
+def test_measurement_quantity_label_alone_still_counts():
+    # A quantity label with the implied dBm unit is still a measurement block → gated.
+    doc = _base_doc({"measurement": {"quantity": "Full-band power"}})
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=())))
+    p._set_doc(doc)
+    assert p._doc_uses_measurement_quantity(p._doc) is True
+
+
+def test_no_measurement_not_gated():
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=())))
+    p._set_doc(_base_doc())
+    assert p._doc_uses_measurement_quantity(p._doc) is False
+    assert p._blocks_on_measurement_quantity() is False
