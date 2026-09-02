@@ -23,10 +23,12 @@ from ui.param_form import ParamForm
 _app = QApplication.instance() or QApplication([])
 
 # The two declared laws, anchored to a 10 MHz measurement bandwidth.
-FBW = {"id": "fbw_power", "name": "Full-bandwidth (total) power", "in": "density",
-       "out": "abs", "k": 10.0, "rep": 10.0}
-PSD = {"id": "psd_live", "name": "Spectral density (at live sweep bw)", "in": "density",
+FBW = {"id": "fbw_power", "name": "Full-bandwidth (total) power", "unit": "dBm",
+       "in": "density", "out": "abs", "k": 10.0, "rep": 10.0}
+PSD = {"id": "psd_live", "name": "Spectral density", "unit": "dBm/MHz", "in": "density",
        "out": "density", "param": "bw", "coeff": -10.0, "ref": 10.0, "rep": 10.0}
+PSD_HZ = {"id": "psd_hz", "name": "Spectral density", "unit": "dBm/Hz", "in": "density",
+          "out": "density", "param": "bw", "coeff": -10.0, "ref": 10.0, "k": -60.0, "rep": 10.0}
 
 
 def _artifact(reported):
@@ -214,6 +216,26 @@ def test_held_value_clamps_to_new_range():
     _app.processEvents()
     _set_bw(f, 20)   # density range drops to [-29.77, -19.72]; -16.71 is now above max
     assert _power_value(f) == pytest.approx(-19.72, abs=1e-2)
+
+
+def test_declared_unit_adds_a_dbm_per_hz_view():
+    f = ParamForm()
+    f.set_params(_specs("dBm/MHz"),
+                 cal_bounds=_bounds(_density_reported(), -26.76, -16.71, "dBm/MHz"),
+                 absolute_allowed=True, default_power_mode="absolute", cal_freq_param="freq",
+                 power_laws=[FBW, PSD, PSD_HZ])
+    f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-22"])
+    _app.processEvents()
+    combo = _view_combo(f)
+    units = {combo.itemData(i): combo.itemText(i) for i in range(combo.count())}
+    assert "psd_hz" in units and "dBm/Hz" in units["psd_hz"]
+    # control in dBm/Hz: dBm/Hz = dBm/MHz − 60, so the range shifts down 60 dB
+    _select(combo, "psd_hz")
+    _app.processEvents()
+    sp = f._widgets["power"][1]
+    assert sp["unit"] == "dBm/Hz"
+    assert sp["max"] == pytest.approx(-76.71, abs=1e-2)   # -16.71 − 60
+    assert "-22" in f.build_args()                        # base density unchanged
 
 
 def test_no_laws_means_no_dropdown_or_companion():

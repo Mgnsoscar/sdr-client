@@ -1190,7 +1190,8 @@ class ParamForm(QWidget):
                 continue
             if law.id == base_id:
                 continue
-            unit = "dBm" if law.out_fam == "abs" else "dBm/MHz"
+            # A law may declare its own display unit (e.g. dBm/Hz); else default by family.
+            unit = str(spec.get("unit") or ("dBm" if law.out_fam == "abs" else "dBm/MHz"))
             views.append({"id": law.id, "name": spec.get("name", law.id),
                           "unit": unit, "law": law})
         return views if len(views) > 1 else []
