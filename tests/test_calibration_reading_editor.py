@@ -197,20 +197,34 @@ def test_limiting_laws_are_dbm_returning_and_input_matched(monkeypatch):
         "d2d": {"id": "d2d", "name": "Density restate", "in": "density", "out": "density"},
         "peak": {"id": "peak", "name": "Peak→total", "in": "abs", "out": "abs"},
     }
-    monkeypatch.setattr(p, "_declared_laws", lambda: laws)
+    # the picker is scoped to the SIGNAL's own declared laws
+    monkeypatch.setattr(p, "_declared_laws_for_signal", lambda sid: laws)
     # a density measurement offers only the density→dBm law (not the density→density one)
-    assert set(p._limiting_laws_for("dBm/MHz")) == {"fbw"}
+    assert set(p._limiting_laws_for("fm_chirp", "dBm/MHz")) == {"fbw"}
     # a dBm (absolute) measurement offers only the abs→dBm law
-    assert set(p._limiting_laws_for("dBm")) == {"peak"}
+    assert set(p._limiting_laws_for("fm_chirp", "dBm")) == {"peak"}
+
+
+def test_limiting_laws_are_scoped_to_the_signal(monkeypatch):
+    # A law belonging to another signal's script must not appear in this signal's picker.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    by_signal = {
+        "gps": {"fsp": {"id": "fsp", "name": "Full signal power", "in": "density", "out": "abs"}},
+        "chirp": {"fbw": {"id": "fbw", "name": "Full-bandwidth power",
+                          "in": "density", "out": "abs"}},
+    }
+    monkeypatch.setattr(p, "_declared_laws_for_signal", lambda sid: by_signal.get(sid, {}))
+    assert set(p._limiting_laws_for("gps", "dBm/MHz")) == {"fsp"}      # not the chirp's law
+    assert set(p._limiting_laws_for("chirp", "dBm/MHz")) == {"fbw"}
 
 
 def test_limiting_coerces_same_to_derived_for_a_density(monkeypatch):
     # "Same as measurement" is not a dBm reading for a density — rendering coerces it to the
     # available derived law.
     p = CalibrationPanel("u", FakeHub(FakeClient()))
-    monkeypatch.setattr(p, "_declared_laws",
-                        lambda: {"fbw": {"id": "fbw", "name": "Full-bw",
-                                         "in": "density", "out": "abs"}})
+    monkeypatch.setattr(p, "_declared_laws_for_signal",
+                        lambda sid: {"fbw": {"id": "fbw", "name": "Full-bw",
+                                             "in": "density", "out": "abs"}})
     p._set_doc(_base_doc({"measurement": {"unit": "dBm/MHz", "quantity": "density"},
                           "limiting": {"kind": "same"}}))
     entry = p._f["signals"]["fm_chirp"]
@@ -222,7 +236,7 @@ def test_limiting_coerces_same_to_derived_for_a_density(monkeypatch):
 def test_limiting_coerces_to_own_for_a_density_without_a_dbm_law(monkeypatch):
     # A density with no dBm-returning law can only limit via a separate dBm measurement.
     p = CalibrationPanel("u", FakeHub(FakeClient()))
-    monkeypatch.setattr(p, "_declared_laws", lambda: {})
+    monkeypatch.setattr(p, "_declared_laws_for_signal", lambda sid: {})
     p._set_doc(_base_doc({"measurement": {"unit": "dBm/MHz", "quantity": "density"},
                           "limiting": {"kind": "same"}}))
     entry = p._f["signals"]["fm_chirp"]
@@ -232,7 +246,7 @@ def test_limiting_coerces_to_own_for_a_density_without_a_dbm_law(monkeypatch):
 
 def test_limiting_stays_same_for_dbm_measurement(monkeypatch):
     p = CalibrationPanel("u", FakeHub(FakeClient()))
-    monkeypatch.setattr(p, "_declared_laws", lambda: {})
+    monkeypatch.setattr(p, "_declared_laws_for_signal", lambda sid: {})
     p._set_doc(_base_doc({"measurement": {"unit": "dBm", "quantity": "power"}}))
     entry = p._f["signals"]["fm_chirp"]
     p._limiting_section("fm_chirp", entry)

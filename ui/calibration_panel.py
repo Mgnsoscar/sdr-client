@@ -2699,10 +2699,27 @@ class CalibrationPanel(QWidget):
     # ── power-quantity conversion laws (declared by signals' scripts) ─────────────
     def _declared_laws(self) -> dict:
         """Every power-quantity law any of this unit's signals' scripts declares
-        (CAL_POWER_LAWS), keyed by id — the "declared by this signal" picker options. Triggers
-        the per-task param fetch (cached) so they populate as they arrive."""
+        (CAL_POWER_LAWS), keyed by id. Triggers the per-task param fetch (cached) so they
+        populate as they arrive. Prefer _declared_laws_for_signal for a per-signal picker —
+        this unscoped set mixes every signal's laws together."""
         laws: dict = {}
         for tname in self._all_task_names():
+            self._fetch_task_params(tname)
+            for lw in self._task_laws.get(self._task_script(tname), []) or []:
+                lid = lw.get("id") or lw.get("name")
+                if lid and lid not in laws:
+                    laws[lid] = lw
+        return laws
+
+    def _declared_laws_for_signal(self, sid: str) -> dict:
+        """The power-quantity laws THIS signal's transmit script declares (CAL_POWER_LAWS),
+        keyed by id — scoped by SDR_CAL_SIGNAL_ID so one signal's laws never leak into
+        another's picker (a chirp's law must not appear for a GPS signal). Empty until this
+        unit's tasks (and their params) are fetched."""
+        laws: dict = {}
+        for tname, tsid in self._task_signals.items():
+            if tsid != sid:
+                continue
             self._fetch_task_params(tname)
             for lw in self._task_laws.get(self._task_script(tname), []) or []:
                 lid = lw.get("id") or lw.get("name")
@@ -3076,17 +3093,15 @@ class CalibrationPanel(QWidget):
         return box
 
     def _inline_curve_editor(self, bv, entry: dict, plane: str) -> None:
-        """The downstream measured-stage curve editor (unchanged from the pre-redesign
-        layout): plot label + frequency, the gain→power grid with its sparkline, and
-        add/remove-point buttons. Only shown on non-source measured stages, where the card
-        is a per-stage curve override rather than the signal's own config."""
+        """The downstream measured-stage curve editor: the signal's frequency, the gain→power
+        grid with its sparkline, and add/remove-point buttons. Only shown on non-source
+        measured stages, where the card is a per-stage curve override rather than the
+        signal's own config. (The plot-label field was removed — see _measurement_section.)"""
         tbl = entry["curves"][plane]
         sub = QHBoxLayout()
-        sub.addWidget(QLabel("plot label")); entry["plabel"].setFixedWidth(90)
-        sub.addWidget(entry["plabel"])
-        sub.addStretch(1)
         sub.addWidget(QLabel("freq Hz")); entry["cfreq"].setFixedWidth(104)
         sub.addWidget(entry["cfreq"])
+        sub.addStretch(1)
         bv.addLayout(sub)
         grid = QHBoxLayout()
         grid.addWidget(tbl, 3); grid.addWidget(entry["sparks"][plane], 2)
@@ -3159,8 +3174,14 @@ class CalibrationPanel(QWidget):
         uw = QWidget(); ur = QHBoxLayout(uw); ur.setContentsMargins(0, 0, 0, 0)
         fam_hint = QLabel(fam); fam_hint.setStyleSheet(f"font-size:10.5px;color:{Palette.TEXT_FAINT};")
         ur.addWidget(u); ur.addWidget(fam_hint); ur.addStretch(1)
+        # Frequency, with a note that it's the frequency the curve was measured at. (The
+        # plot-label field was removed — it will become signal-independent later; the stored
+        # value still round-trips via _read_form, just no longer shown here.)
         entry["cfreq"].setFixedWidth(150)
-        entry["plabel"].setFixedWidth(150)
+        fw = QWidget(); fr = QHBoxLayout(fw); fr.setContentsMargins(0, 0, 0, 0)
+        freq_hint = QLabel("the frequency the signal was measured at")
+        freq_hint.setStyleSheet(f"font-size:10.5px;color:{Palette.TEXT_FAINT};")
+        fr.addWidget(entry["cfreq"]); fr.addWidget(freq_hint); fr.addStretch(1)
         pts_btn = QPushButton(f"Measured points…   ({npts} point(s))")
         pts_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         pts_btn.setToolTip("The measured SDR gain → measured value points, in a dialog.")
@@ -3168,18 +3189,18 @@ class CalibrationPanel(QWidget):
         form.addRow("quantity", q)
         form.addRow("unit", uw)
         form.addRow("shows as", preview)
-        form.addRow("frequency (Hz)", entry["cfreq"])
-        form.addRow("plot label", entry["plabel"])
+        form.addRow("frequency (Hz)", fw)
         form.addRow("curve", pts_btn)
         v.addLayout(form)
         return sec
 
-    def _limiting_laws_for(self, unit: str) -> dict:
-        """Declared laws usable as a LIMITING conversion for a measurement in ``unit``: they
-        must RETURN dBm (out == abs) and accept the measurement's family (in == its family).
-        These are the only "Derived" options — a limiting reading is always dBm."""
+    def _limiting_laws_for(self, sid: str, unit: str) -> dict:
+        """The laws usable as a LIMITING conversion for signal ``sid`` measured in ``unit``:
+        scoped to the signal's OWN declared laws (not the whole unit's), and among those the
+        ones that RETURN dBm (out == abs) and accept the measurement's family (in == its
+        family). These are the only "Derived" options — a limiting reading is always dBm."""
         fam = _unit_family(unit)
-        return {lid: lw for lid, lw in self._declared_laws().items()
+        return {lid: lw for lid, lw in self._declared_laws_for_signal(sid).items()
                 if str(lw.get("out", "abs")) == "abs" and str(lw.get("in", "abs")) == fam}
 
     def _limiting_section(self, sid: str, entry: dict) -> QWidget:
@@ -3189,7 +3210,7 @@ class CalibrationPanel(QWidget):
         Separate measurement (an own dBm curve). Bound to signals.<id>.limiting."""
         meas = entry["measurement"]; unit = meas.get("unit", "dBm")
         sub = entry["reading"]["limiting"]
-        lim_laws = self._limiting_laws_for(unit)
+        lim_laws = self._limiting_laws_for(sid, unit)
         is_abs = _unit_family(unit) == "abs"
         # Coerce a stored kind this measurement can't offer (a density can't be a dBm
         # "same"; "derived" needs a dBm-returning law), preserving an own curve.
