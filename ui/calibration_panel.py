@@ -264,9 +264,50 @@ def _reading_block(sub) -> Optional[dict]:
     mx = sub.get("max_dbm")
     if isinstance(mx, (int, float)) and not isinstance(mx, bool):
         out["max_dbm"] = float(mx)
+    if kind == "own":
+        # An `own` reading is a SEPARATELY measured curve (docs/calibration-v2 §13/§15):
+        # {kind: own, curve: {points: […]}}. The curve is the whole point — an own reading
+        # without one is meaningless, so drop it. (Kept out of the trivial-default check
+        # below, which only concerns `same`.)
+        curve = sub.get("curve")
+        if isinstance(curve, dict) and curve.get("points"):
+            out["curve"] = curve
+        else:
+            return None
     if kind == "same" and set(out) == {"kind"}:
         return None                     # nothing to say — a plain "same" is the default
     return out
+
+
+# ── per-signal MEASUREMENT (quantity + unit) ─────────────────────────────────────
+# The unit the operator measured the signal in. `dBm` is absolute power; the rest are
+# spectral densities (a per-Hz/kHz/MHz denominator). The family drives which conversion
+# laws apply and whether the limiting reading can be "the same" (a density can't be a dBm
+# limit). The agent reads signals.<id>.measurement from >= the Phase-2 capability; today it
+# ignores the key, so a dBm measurement is byte-for-byte today's behaviour.
+_MEASUREMENT_UNITS = ("dBm", "dBm/Hz", "dBm/kHz", "dBm/MHz")
+_UNIT_FAMILY = {"dBm": "abs", "dBm/Hz": "density", "dBm/kHz": "density", "dBm/MHz": "density"}
+
+
+def _unit_family(unit: str) -> str:
+    """The unit family (``abs`` or ``density``) a display unit belongs to; unknown ⇒ abs."""
+    return _UNIT_FAMILY.get((unit or "").strip(), "abs")
+
+
+def _measurement_block(sub) -> Optional[dict]:
+    """Normalize a per-signal measurement editor dict into a clean doc block, or None when
+    it's the trivial default (absolute dBm, no quantity label). Mirrors _reading_block's
+    drop-the-default philosophy so a plain dBm signal stays byte-identical to today."""
+    if not isinstance(sub, dict):
+        return None
+    out = {}
+    q = str(sub.get("quantity", "") or "").strip()
+    if q:
+        out["quantity"] = q
+    unit = str(sub.get("unit", "") or "").strip()
+    if unit and unit != "dBm":              # dBm is the default — omit it to keep docs clean
+        out["unit"] = unit
+    return out or None
 
 
 def _upstream_plane_name(planes: dict, name: str):
@@ -1535,6 +1576,22 @@ class CalibrationPanel(QWidget):
         for sid, sig in ((doc or {}).get("signals") or {}).items():
             self._build_signal_entry(sid, sig or {}, measured)
 
+        # MIGRATE a legacy operating-plane shared `limiting` default into each signal that
+        # lacks its own (docs/calibration-ui-redesign §5: no stage-level shared defaults).
+        # The resolver read per-signal first with the plane as fallback, so this is
+        # semantics-preserving; on save the per-signal blocks are written and the plane
+        # default is dropped (_read_planes no longer emits plane readings).
+        plane_specs = (chain.get("planes") or {})
+        if plane_specs:
+            op_name = list(plane_specs)[-1]
+            op_lim = (plane_specs.get(op_name) or {}).get("limiting")
+            if isinstance(op_lim, dict) and op_lim:
+                seed = copy.deepcopy(op_lim)
+                seed.pop("max_dbm", None)      # the per-signal ceiling is gone (§5/§6.6);
+                for entry in self._f["signals"].values():   # the stage limits list caps now
+                    if not entry["reading"]["limiting"]:
+                        entry["reading"]["limiting"] = copy.deepcopy(seed)
+
         names = self._plane_names()
         op = names[-1] if names else None       # operating plane = the last stage, always
 
@@ -1738,12 +1795,6 @@ class CalibrationPanel(QWidget):
             # The active component's OWN baseline insertion loss: a frequency table it owns
             # inline (not a shared library part). Empty ⇒ a flat constant (row["delta"]).
             row["baseline_table"] = [list(p) for p in (spec.get("delta_db_by_freq") or [])]
-        # Reported/limiting power-quantity BRIDGES (docs/calibration-v2.md §13) — meaningful
-        # only on the operating (last) plane, but stored per row so a rename/reorder keeps
-        # them. Loaded from the plane spec; the editor mutates these dicts in place and
-        # _read_planes writes them back on the operating plane.
-        row["reading"] = {"reported": dict(spec.get("reported") or {}),
-                          "limiting": dict(spec.get("limiting") or {})}
         # Measurement DE-EMBED (docs/calibration-v2.md §14) on a measured stage: the cable/pad
         # between it and the analyzer, removed from the reading. A catalog component id is
         # picker-editable; a non-string inline table is preserved (JSON-only, advanced).
@@ -2412,10 +2463,9 @@ class CalibrationPanel(QWidget):
             self._detail_active(row)
         else:
             self._detail_passive(row)
-        # The operating plane (always the last stage) is where --power is read, so it carries
-        # the reported/limiting power-quantity bridges (docs/calibration-v2.md §13).
-        if rows and row is rows[-1]:
-            self._detail_body.addWidget(self._reading_editor(row))
+        # Reported/limiting readings are per-SIGNAL now (docs/calibration-ui-redesign §5),
+        # rendered inside each signal's card on the source stage — not a shared block on the
+        # operating plane.
         self._detail_body.addWidget(self._stage_advanced(row))
 
     def _detail_passive(self, row) -> None:
@@ -2646,9 +2696,7 @@ class CalibrationPanel(QWidget):
             out["consts"] = consts
         return out
 
-    # ── reported / limiting power-quantity bridges (operating plane) ──────────────
-    _DENSITY_UNITS = ("dBm/MHz", "dBm/kHz", "dBm/Hz")
-
+    # ── power-quantity conversion laws (declared by signals' scripts) ─────────────
     def _declared_laws(self) -> dict:
         """Every power-quantity law any of this unit's signals' scripts declares
         (CAL_POWER_LAWS), keyed by id — the "declared by this signal" picker options. Triggers
@@ -2661,93 +2709,6 @@ class CalibrationPanel(QWidget):
                 if lid and lid not in laws:
                     laws[lid] = lw
         return laws
-
-    def _reading_editor(self, row) -> QWidget:
-        """The operating plane's reported/limiting bridge editor (docs/calibration-v2.md §13):
-        how --power (reported) and the safety ceiling (limiting) relate to the measured curve."""
-        reading = row.setdefault("reading", {"reported": {}, "limiting": {}})
-        laws = self._declared_laws()
-        box = QFrame(); box.setObjectName("readbox")
-        box.setStyleSheet(f"#readbox {{ border:1px solid {Palette.BORDER}; border-radius:8px; }}")
-        v = QVBoxLayout(box); v.setContentsMargins(10, 8, 10, 8); v.setSpacing(8)
-        hdr = QLabel("Reported &amp; limiting power")
-        hdr.setStyleSheet(f"font-size:12px;font-weight:600;color:{Palette.TEXT};")
-        v.addWidget(hdr)
-        intro = QLabel(
-            "What --power means here (reported) and what the safety ceiling gauges (limiting), "
-            "relative to what you measured at this node. “Same as measured” keeps the measured "
-            "quantity; a law a signal declares converts it (e.g. spectral density → "
-            "full-bandwidth power) and may key on a task parameter.")
-        intro.setWordWrap(True); intro.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
-        v.addWidget(intro)
-        v.addWidget(self._reading_row("Reported", reading.setdefault("reported", {}), laws, False))
-        v.addWidget(self._reading_row("Limiting", reading.setdefault("limiting", {}), laws, True))
-        if not laws:
-            note = QLabel("No signal on this unit declares a conversion law — only “Same as "
-                          "measured” is offered. Advanced or per-signal readings: use JSON…")
-            note.setWordWrap(True); note.setStyleSheet(f"font-size:10px;color:{Palette.TEXT_FAINT};")
-            v.addWidget(note)
-        return box
-
-    def _reading_row(self, title, sub, laws, is_limiting) -> QWidget:
-        w = QFrame(); r = QVBoxLayout(w); r.setContentsMargins(0, 0, 0, 0); r.setSpacing(4)
-        top = QHBoxLayout()
-        lab = QLabel(title); lab.setFixedWidth(72)
-        lab.setStyleSheet(f"font-size:11px;font-weight:600;color:{Palette.TEXT_MUTED};")
-        kind = QComboBox()
-        kind.addItem("Same as measured", "same")
-        for lid, lw in laws.items():
-            kind.addItem(f"Law: {lw.get('name', lid)}", "law:" + lid)
-        curkind = sub.get("kind", "same")
-        curdata = "same"
-        if curkind == "law":
-            curdata = "law:" + str((sub.get("law") or {}).get("id", ""))
-            if kind.findData(curdata) < 0:            # an embedded law not in the declared set
-                lw = sub.get("law") or {}
-                kind.addItem(f"Law: {lw.get('name', lw.get('id', '?'))} (embedded)", curdata)
-        elif curkind == "own":
-            kind.addItem("Its own measured curve (JSON)", "own")
-            curdata = "own"
-        i = kind.findData(curdata)
-        kind.setCurrentIndex(i if i >= 0 else 0)
-        kind.currentIndexChanged.connect(
-            lambda _=0, k=kind, s=sub, L=laws: self._on_reading_kind(k, s, L))
-        top.addWidget(lab); top.addWidget(kind, 1)
-        r.addLayout(top)
-        if sub.get("kind") == "law" and isinstance(sub.get("law"), dict):
-            lw = sub["law"]
-            fam = lw.get("out", "abs")
-            row2 = QHBoxLayout()
-            row2.addWidget(QLabel("unit"))
-            unit = QComboBox()
-            if fam == "abs":
-                unit.addItem("dBm"); unit.setEnabled(False)
-            else:
-                unit.addItems(self._DENSITY_UNITS)
-            want = str(sub.get("unit") or ("dBm" if fam == "abs" else "dBm/MHz"))
-            j = unit.findText(want)
-            unit.setCurrentIndex(j if j >= 0 else 0)
-            if not sub.get("unit"):
-                sub["unit"] = unit.currentText()
-            unit.currentTextChanged.connect(lambda t, s=sub: self._reading_set(s, "unit", t))
-            unit.setFixedWidth(96); row2.addWidget(unit)
-            row2.addWidget(QLabel("quantity"))
-            q = QLineEdit(str(sub.get("quantity") or lw.get("name", "")))
-            q.editingFinished.connect(
-                lambda ed=q, s=sub: self._reading_set(s, "quantity", ed.text().strip()))
-            row2.addWidget(q, 1)
-            r.addLayout(row2)
-            r.addWidget(self._law_caption(lw, title.lower()))
-        if is_limiting:
-            row3 = QHBoxLayout()
-            row3.addWidget(QLabel("ceiling on the limiting reading"))
-            cap = QLineEdit(_numstr(sub.get("max_dbm")) if sub.get("max_dbm") is not None else "")
-            cap.setPlaceholderText("none"); cap.setFixedWidth(80)
-            cap.editingFinished.connect(
-                lambda ed=cap, s=sub: self._reading_set_cap(s, ed.text().strip()))
-            row3.addWidget(cap); row3.addWidget(QLabel("dBm")); row3.addStretch(1)
-            r.addLayout(row3)
-        return w
 
     def _law_caption(self, lw: dict, role: str) -> QLabel:
         terms = lw.get("terms") or ([{"param": lw["param"], "coeff": lw.get("coeff", 10.0),
@@ -2763,45 +2724,10 @@ class CalibrationPanel(QWidget):
         cap.setStyleSheet(f"font-size:10px;color:{Palette.ONLINE};font-family:monospace;")
         return cap
 
-    def _on_reading_kind(self, combo, sub, laws) -> None:
-        data = combo.currentData() or "same"
-        if data.startswith("law:"):
-            lid = data[4:]
-            lw = laws.get(lid)
-            if lw is None and (sub.get("law") or {}).get("id") == lid:
-                lw = sub.get("law")
-            sub.clear(); sub["kind"] = "law"
-            if lw:
-                sub["law"] = dict(lw)
-        else:
-            keep_cap = sub.get("max_dbm")
-            sub.clear(); sub["kind"] = data
-            if keep_cap is not None:
-                sub["max_dbm"] = keep_cap
-        self._refresh_form_from_widgets()
-
-    def _reading_set(self, sub, key, val) -> None:
-        val = (val or "").strip() if isinstance(val, str) else val
-        if val:
-            sub[key] = val
-        else:
-            sub.pop(key, None)
-        self._mark_reading_dirty()
-
-    def _reading_set_cap(self, sub, text) -> None:
-        text = (text or "").strip()
-        if text:
-            try:
-                sub["max_dbm"] = float(text)
-            except ValueError:
-                return
-        else:
-            sub.pop("max_dbm", None)
-        self._mark_reading_dirty()
-
     def _mark_reading_dirty(self) -> None:
-        """Persist reading edits into the working doc without a full detail rebuild (which
-        would steal focus mid-edit) — _read_planes reads the blocks from row['reading']."""
+        """Persist an in-place reading/measurement edit (a quantity keystroke) into the
+        working doc without a full detail rebuild (which would steal focus mid-edit) —
+        _read_form reads the blocks from each signal entry's live dicts."""
         try:
             self._doc = self._read_form(strict=False)
         except ValueError:
@@ -3079,10 +3005,13 @@ class CalibrationPanel(QWidget):
 
     def _signal_section(self, sid: str, entry: dict, plane: str,
                         is_source: bool = True) -> QWidget:
-        """One collapsible signal in the measured-stage detail: a header that toggles,
-        and (when expanded) its amplitude/frequency + the gain→power grid. On the source
-        the remove action deletes the whole signal; on a downstream stage it only clears
-        the signal's measurement here (and downstream)."""
+        """One collapsible signal card. On the SOURCE stage the expanded card owns the
+        signal's full config (docs/calibration-ui-redesign §5): a Measurement section
+        (quantity, unit, its frequency, and the measured curve behind a dialog) and a
+        Limiting section (how the dBm safety reading is obtained). On a downstream measured
+        stage the card is just the per-stage curve override — otherwise it inherits the
+        upstream curve. The remove action deletes the whole signal on the source, or clears
+        it from this stage downstream."""
         tbl = entry["curves"][plane]
         expanded = sid in self._expanded_signals
         npts = len(tbl.numeric_points())
@@ -3102,7 +3031,13 @@ class CalibrationPanel(QWidget):
         chev = QLabel("▾" if expanded else "▸")
         chev.setStyleSheet(f"font-size:12px;color:{Palette.TEXT_MUTED};")
         nm = QLabel(sid); nm.setStyleSheet(f"font-weight:600;color:{Palette.TEXT};")
-        hh.addWidget(chev); hh.addWidget(nm); hh.addStretch(1)
+        hh.addWidget(chev); hh.addWidget(nm)
+        if is_source:                                    # a unit chip beside the name
+            unit = entry["measurement"].get("unit", "dBm")
+            fg, bg = ((Palette.ONLINE, Palette.ONLINE_SOFT) if _unit_family(unit) == "density"
+                      else (Palette.TEXT_MUTED, Palette.IDLE_SOFT))
+            hh.addWidget(_badge(unit, fg, bg))
+        hh.addStretch(1)
         if not expanded:                                 # a compact summary while collapsed
             summ = QLabel(f"{npts} point(s)" if npts else
                           (f"inherits “{prev_stage}”" if inherits else "no points yet"))
@@ -3117,20 +3052,12 @@ class CalibrationPanel(QWidget):
             note.setWordWrap(True)
             note.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
             bv.addWidget(note)
-        sub = QHBoxLayout()
-        sub.addWidget(QLabel("plot label")); entry["plabel"].setFixedWidth(90)
-        sub.addWidget(entry["plabel"])
-        sub.addStretch(1)
-        sub.addWidget(QLabel("freq Hz")); entry["cfreq"].setFixedWidth(104); sub.addWidget(entry["cfreq"])
-        bv.addLayout(sub)
-        grid = QHBoxLayout()
-        grid.addWidget(tbl, 3); grid.addWidget(entry["sparks"][plane], 2)
-        bv.addLayout(grid)
-        btns = QHBoxLayout()
-        addp = QPushButton("+ point"); addp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        addp.clicked.connect(tbl.add_blank_row)
-        rmp = QPushButton("− point"); rmp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        rmp.clicked.connect(tbl.remove_selected)
+        if is_source:
+            bv.addWidget(self._measurement_section(sid, entry, plane))
+            bv.addWidget(self._limiting_section(sid, entry))
+        else:
+            self._inline_curve_editor(bv, entry, plane)
+        foot = QHBoxLayout(); foot.addStretch(1)
         rmsig = QPushButton("Remove signal" if is_source else "Remove from this stage")
         rmsig.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         rmsig.setStyleSheet(f"color:{Palette.CRASH};font-size:11px;")
@@ -3144,9 +3071,300 @@ class CalibrationPanel(QWidget):
                              "and inherits that curve here.")
             rmsig.clicked.connect(
                 lambda _=False, s=sid, p=plane: self._on_remove_signal_from_stage(s, p))
-        btns.addWidget(addp); btns.addWidget(rmp); btns.addStretch(1); btns.addWidget(rmsig)
-        bv.addLayout(btns)
+        foot.addWidget(rmsig)
+        bv.addLayout(foot)
         return box
+
+    def _inline_curve_editor(self, bv, entry: dict, plane: str) -> None:
+        """The downstream measured-stage curve editor (unchanged from the pre-redesign
+        layout): plot label + frequency, the gain→power grid with its sparkline, and
+        add/remove-point buttons. Only shown on non-source measured stages, where the card
+        is a per-stage curve override rather than the signal's own config."""
+        tbl = entry["curves"][plane]
+        sub = QHBoxLayout()
+        sub.addWidget(QLabel("plot label")); entry["plabel"].setFixedWidth(90)
+        sub.addWidget(entry["plabel"])
+        sub.addStretch(1)
+        sub.addWidget(QLabel("freq Hz")); entry["cfreq"].setFixedWidth(104)
+        sub.addWidget(entry["cfreq"])
+        bv.addLayout(sub)
+        grid = QHBoxLayout()
+        grid.addWidget(tbl, 3); grid.addWidget(entry["sparks"][plane], 2)
+        bv.addLayout(grid)
+        btns = QHBoxLayout()
+        addp = QPushButton("+ point"); addp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        addp.clicked.connect(tbl.add_blank_row)
+        rmp = QPushButton("− point"); rmp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        rmp.clicked.connect(tbl.remove_selected)
+        btns.addWidget(addp); btns.addWidget(rmp); btns.addStretch(1)
+        bv.addLayout(btns)
+
+    # ── per-signal Measurement + Limiting (source card) ──────────────────────────
+    def _section_head(self, marker: str, tag_bg: str, title: str, tag: str) -> QHBoxLayout:
+        """A section header row: a small colour marker, a bold title, and a faint tag chip
+        (matching docs/calibration-signal-editor-mockup.html)."""
+        h = QHBoxLayout(); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(8)
+        m = QLabel(); m.setFixedSize(10, 10)
+        m.setStyleSheet(f"background:{marker};border-radius:3px;")
+        t = QLabel(title); t.setStyleSheet(f"font-size:12px;font-weight:600;color:{Palette.TEXT};")
+        tg = QLabel(tag)
+        tg.setStyleSheet(f"font-size:9px;font-weight:700;letter-spacing:.06em;"
+                         f"color:{Palette.TEXT_FAINT};background:{tag_bg};"
+                         f"border-radius:4px;padding:2px 7px;")
+        h.addWidget(m); h.addWidget(t); h.addWidget(tg); h.addStretch(1)
+        return h
+
+    def _measurement_section(self, sid: str, entry: dict, plane: str) -> QWidget:
+        """The per-signal Measurement block: the free-text quantity label, the unit it was
+        measured in, a live "shows as" preview, the signal's frequency, and the measured
+        curve behind a dialog. quantity+unit persist to signals.<id>.measurement (the agent
+        reads them from the Phase-2 capability; today it ignores the key)."""
+        meas = entry["measurement"]
+        tbl = entry["curves"][plane]
+        npts = len(tbl.numeric_points())
+        sec = QFrame(); v = QVBoxLayout(sec); v.setContentsMargins(0, 8, 0, 0); v.setSpacing(6)
+        v.addLayout(self._section_head(Palette.TEXT_MUTED, Palette.IDLE_SOFT, "Measurement",
+                                       "WHAT YOU TOOK ON THE ANALYZER"))
+        form = QFormLayout(); form.setContentsMargins(0, 0, 0, 0); form.setSpacing(6)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        q = QLineEdit(meas.get("quantity", "")); q.setPlaceholderText("e.g. Full-band power")
+        q.setToolTip("The label the operator sees above --power (e.g. “Full-band power”).")
+        u = QComboBox()
+        for uu in _MEASUREMENT_UNITS:
+            u.addItem(uu, uu)
+        j = u.findData(meas.get("unit", "dBm")); u.setCurrentIndex(j if j >= 0 else 0)
+        u.setToolTip("The unit you measured the signal in. dBm is absolute power; the "
+                     "dBm/… units are spectral densities. The unit fixes which limiting "
+                     "conversions are offered below.")
+        u.setFixedWidth(120)
+        preview = QLabel()
+
+        def _set_preview():
+            qn = q.text().strip() or "—"
+            preview.setText(
+                f"<b>{qn}</b>&nbsp;&nbsp;<span style='color:{Palette.TEXT_MUTED};"
+                f"font-family:monospace;font-size:11px;'>[{u.currentData()}]</span>")
+        preview.setStyleSheet(
+            f"font-size:11.5px;background:{Palette.SURFACE_ALT};border:1px solid "
+            f"{Palette.BORDER};border-radius:5px;padding:4px 9px;")
+        _set_preview()
+        q.textChanged.connect(lambda t, m=meas: (m.__setitem__("quantity", t.strip()),
+                                                  _set_preview()))
+        q.editingFinished.connect(self._mark_reading_dirty)
+        u.currentIndexChanged.connect(
+            lambda _=0, cb=u, m=meas: (m.__setitem__("unit", cb.currentData()),
+                                       self._refresh_form_from_widgets()))
+        fam = "absolute · no denominator" if _unit_family(meas.get("unit", "dBm")) == "abs" \
+            else "spectral density"
+        uw = QWidget(); ur = QHBoxLayout(uw); ur.setContentsMargins(0, 0, 0, 0)
+        fam_hint = QLabel(fam); fam_hint.setStyleSheet(f"font-size:10.5px;color:{Palette.TEXT_FAINT};")
+        ur.addWidget(u); ur.addWidget(fam_hint); ur.addStretch(1)
+        entry["cfreq"].setFixedWidth(150)
+        entry["plabel"].setFixedWidth(150)
+        pts_btn = QPushButton(f"Measured points…   ({npts} point(s))")
+        pts_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        pts_btn.setToolTip("The measured SDR gain → measured value points, in a dialog.")
+        pts_btn.clicked.connect(lambda _=False, s=sid, p=plane: self._open_points_dialog(s, p))
+        form.addRow("quantity", q)
+        form.addRow("unit", uw)
+        form.addRow("shows as", preview)
+        form.addRow("frequency (Hz)", entry["cfreq"])
+        form.addRow("plot label", entry["plabel"])
+        form.addRow("curve", pts_btn)
+        v.addLayout(form)
+        return sec
+
+    def _limiting_laws_for(self, unit: str) -> dict:
+        """Declared laws usable as a LIMITING conversion for a measurement in ``unit``: they
+        must RETURN dBm (out == abs) and accept the measurement's family (in == its family).
+        These are the only "Derived" options — a limiting reading is always dBm."""
+        fam = _unit_family(unit)
+        return {lid: lw for lid, lw in self._declared_laws().items()
+                if str(lw.get("out", "abs")) == "abs" and str(lw.get("in", "abs")) == fam}
+
+    def _limiting_section(self, sid: str, entry: dict) -> QWidget:
+        """The per-signal Limiting block — how the dBm safety reading (what the stage
+        ceiling gauges against) is obtained from the measurement. Always resolves to dBm:
+        Same as measurement (only if measured in dBm) · Derived via a dBm-returning law ·
+        Separate measurement (an own dBm curve). Bound to signals.<id>.limiting."""
+        meas = entry["measurement"]; unit = meas.get("unit", "dBm")
+        sub = entry["reading"]["limiting"]
+        lim_laws = self._limiting_laws_for(unit)
+        is_abs = _unit_family(unit) == "abs"
+        # Coerce a stored kind this measurement can't offer (a density can't be a dBm
+        # "same"; "derived" needs a dBm-returning law), preserving an own curve.
+        kind = sub.get("kind", "same")
+
+        def _ok(k):
+            return (k == "same" and is_abs) or (k == "law" and bool(lim_laws)) or k == "own"
+        if not _ok(kind):
+            kind = "law" if lim_laws else ("same" if is_abs else "own")
+            keep = sub.get("curve")
+            sub.clear(); sub["kind"] = kind
+            if kind == "own" and isinstance(keep, dict):
+                sub["curve"] = keep
+        sec = QFrame(); v = QVBoxLayout(sec); v.setContentsMargins(0, 8, 0, 0); v.setSpacing(6)
+        v.addLayout(self._section_head(Palette.ARMED, Palette.ARMED_SOFT, "Limiting",
+                                       "GAUGED IN dBm"))
+        combo = QComboBox()
+
+        def _add(value, label, enabled):
+            combo.addItem(label, value)
+            if not enabled:
+                combo.model().item(combo.count() - 1).setEnabled(False)
+        _add("same", "Same as measurement" if is_abs else "Same as measurement (needs dBm)",
+             is_abs)
+        _add("law", "Derived (convert → dBm)" if lim_laws else "Derived (no dBm law)",
+             bool(lim_laws))
+        _add("own", "Separate measurement (dBm)", True)
+        i = combo.findData(kind); combo.setCurrentIndex(i if i >= 0 else 0)
+        combo.currentIndexChanged.connect(
+            lambda _=0, c=combo, s=sub, L=lim_laws: self._on_limiting_kind(c, s, L))
+        row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0)
+        lab = QLabel("follows by"); lab.setFixedWidth(80)
+        lab.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_MUTED};")
+        row.addWidget(lab); row.addWidget(combo, 1)
+        v.addLayout(row)
+        read_q = ""
+        if kind == "same":
+            read_q = meas.get("quantity", "").strip() or "measured quantity"
+        elif kind == "law":
+            law = sub.get("law") or {}
+            lid = law.get("id") if law.get("id") in lim_laws else next(iter(lim_laws), None)
+            if lid and law.get("id") != lid:
+                sub["kind"] = "law"; sub["law"] = dict(lim_laws[lid]); law = sub["law"]
+            picker = QComboBox()
+            for llid, lw in lim_laws.items():
+                picker.addItem(lw.get("name", llid), llid)
+            k = picker.findData(law.get("id")); picker.setCurrentIndex(k if k >= 0 else 0)
+            picker.currentIndexChanged.connect(
+                lambda _=0, c=picker, s=sub, L=lim_laws: self._on_limiting_law(c, s, L))
+            lr = QHBoxLayout(); lr.setContentsMargins(0, 0, 0, 0)
+            ll = QLabel("law"); ll.setFixedWidth(80)
+            ll.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_MUTED};")
+            lr.addWidget(ll); lr.addWidget(picker, 1)
+            v.addLayout(lr)
+            v.addWidget(self._law_caption(law, "limiting"))
+            read_q = sub.get("quantity", "").strip() or law.get("name", "derived power")
+        elif kind == "own":
+            npts = len((sub.get("curve") or {}).get("points") or [])
+            ob = QPushButton(f"Separate points (dBm)…   ({npts} point(s))")
+            ob.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            ob.clicked.connect(lambda _=False, s=sid: self._open_own_points_dialog(s))
+            orow = QHBoxLayout(); orow.setContentsMargins(0, 0, 0, 0)
+            ol = QLabel("its curve"); ol.setFixedWidth(80)
+            ol.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_MUTED};")
+            hint = QLabel("shares the signal frequency")
+            hint.setStyleSheet(f"font-size:10.5px;color:{Palette.TEXT_FAINT};")
+            orow.addWidget(ol); orow.addWidget(ob); orow.addWidget(hint); orow.addStretch(1)
+            v.addLayout(orow)
+            read_q = sub.get("quantity", "").strip() or "Separate dBm measurement"
+        reads = QLabel(f"limit reading: <b>{read_q}</b> "
+                       f"<span style='color:{Palette.TEXT_MUTED};font-family:monospace;"
+                       f"font-size:10.5px;'>[dBm]</span>")
+        reads.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_MUTED};")
+        v.addWidget(reads)
+        return sec
+
+    def _on_limiting_kind(self, combo, sub, lim_laws) -> None:
+        data = combo.currentData() or "same"
+        if data == "law":
+            cur = (sub.get("law") or {}).get("id")
+            lid = cur if cur in lim_laws else next(iter(lim_laws), None)
+            sub.clear(); sub["kind"] = "law"
+            if lid:
+                sub["law"] = dict(lim_laws[lid])
+        elif data == "own":
+            curve = sub.get("curve")
+            sub.clear(); sub["kind"] = "own"
+            if isinstance(curve, dict):
+                sub["curve"] = curve
+        else:
+            sub.clear(); sub["kind"] = "same"
+        self._refresh_form_from_widgets()
+
+    def _on_limiting_law(self, combo, sub, lim_laws) -> None:
+        lid = combo.currentData()
+        if lid in lim_laws:
+            sub["kind"] = "law"; sub["law"] = dict(lim_laws[lid])
+            sub.pop("quantity", None)          # follow the law's own name
+        self._refresh_form_from_widgets()
+
+    def _open_points_dialog(self, sid: str, plane: str) -> None:
+        """The signal's measured gain→power points in a modal dialog (the persistent curve
+        table + its sparkline are re-parented in, then detached so closing the dialog can't
+        destroy them). A rebuild on close refreshes the button's point count."""
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox
+        entry = self._f["signals"].get(sid)
+        if not entry or plane not in entry.get("curves", {}):
+            return
+        tbl = entry["curves"][plane]; spark = entry["sparks"][plane]
+        dlg = QDialog(self.window())
+        dlg.setWindowTitle(f"Measured points — {sid}")
+        v = QVBoxLayout(dlg); v.setSpacing(8)
+        cap = QLabel(f"SDR gain → measured value, for “{sid}”. At least two points, "
+                     f"gain and value both strictly increasing.")
+        cap.setWordWrap(True); cap.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+        v.addWidget(cap)
+        grid = QHBoxLayout(); grid.addWidget(tbl, 3); grid.addWidget(spark, 2)
+        v.addLayout(grid)
+        pts = QHBoxLayout()
+        addp = QPushButton("+ point"); addp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        addp.clicked.connect(tbl.add_blank_row)
+        rmp = QPushButton("− point"); rmp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        rmp.clicked.connect(tbl.remove_selected)
+        pts.addWidget(addp); pts.addWidget(rmp); pts.addStretch(1)
+        v.addLayout(pts)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(dlg.reject); bb.accepted.connect(dlg.accept)
+        v.addWidget(bb)
+        dlg.exec()
+        tbl.setParent(None); spark.setParent(None)   # keep the persistent widgets alive
+        self._refresh_form_from_widgets()
+
+    def _open_own_points_dialog(self, sid: str) -> None:
+        """The Limiting `own` reading's separately-measured dBm curve, in a modal dialog.
+        Data-backed (a fresh table seeded from signals.<id>.limiting.curve.points, committed
+        on Done) since the own curve only exists while the reading is `own`."""
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox
+        entry = self._f["signals"].get(sid)
+        if not entry:
+            return
+        sub = entry["reading"]["limiting"]
+        if sub.get("kind") != "own":
+            return
+        spark = _Sparkline()
+        tbl = _CurveTable(headers=("gain (dB)", "power (dBm)"))
+        tbl._on_changed = lambda t=tbl, s=spark: s.set_points(t.numeric_points())
+        tbl.set_points((sub.get("curve") or {}).get("points"))
+        spark.set_points(tbl.numeric_points())
+        dlg = QDialog(self.window())
+        dlg.setWindowTitle(f"Separate limiting measurement (dBm) — {sid}")
+        v = QVBoxLayout(dlg); v.setSpacing(8)
+        cap = QLabel("A separately-measured dBm curve backing the limit (e.g. a main-lobe "
+                     "measurement). Shares the signal's frequency.")
+        cap.setWordWrap(True); cap.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
+        v.addWidget(cap)
+        grid = QHBoxLayout(); grid.addWidget(tbl, 3); grid.addWidget(spark, 2)
+        v.addLayout(grid)
+        pts = QHBoxLayout()
+        addp = QPushButton("+ point"); addp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        addp.clicked.connect(tbl.add_blank_row)
+        rmp = QPushButton("− point"); rmp.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        rmp.clicked.connect(tbl.remove_selected)
+        pts.addWidget(addp); pts.addWidget(rmp); pts.addStretch(1)
+        v.addLayout(pts)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
+                              | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        v.addWidget(bb)
+        if dlg.exec():
+            pts_out = tbl.points(strict=False)
+            if pts_out:
+                sub["curve"] = {"points": pts_out}
+            else:
+                sub.pop("curve", None)
+            self._refresh_form_from_widgets()
 
     def _toggle_signal(self, sid: str) -> None:
         self._expanded_signals ^= {sid}          # flip membership
@@ -3340,18 +3558,10 @@ class CalibrationPanel(QWidget):
                 p["bypass"] = True
             planes[name] = p
             prev_name = name
-        # Reported/limiting power-quantity bridges live on the OPERATING (last) plane as the
-        # shared default across signals (a signal entry may override per-signal — see the
-        # agent resolver). Write the non-trivial blocks from that stage's editor state.
-        rows = self._f.get("planes", [])
-        if rows:
-            op_row = rows[-1]
-            op_name = op_row["name"].text().strip()
-            if op_name in planes:
-                for kind in ("reported", "limiting"):
-                    block = _reading_block((op_row.get("reading") or {}).get(kind))
-                    if block is not None:
-                        planes[op_name][kind] = block
+        # Reported/limiting readings are per-SIGNAL now (docs/calibration-ui-redesign §5) —
+        # written to signals.<id> by _read_form. No plane carries a shared reading block, so
+        # a legacy operating-plane default (already migrated into each signal on load) is not
+        # re-emitted here and drops out of the document on save.
         return planes
 
     def _remove_plane(self, row) -> None:
@@ -3465,8 +3675,17 @@ class CalibrationPanel(QWidget):
             spark.set_points(tbl.numeric_points())
             self._spark_src[spark] = tbl
             curves[plane] = tbl; sparks[plane] = spark
-        self._f["signals"][sid] = {"bw": bw, "cfreq": cfreq,
-                                   "plabel": plabel, "curves": curves, "sparks": sparks}
+        # Per-signal MEASUREMENT (quantity + unit) and the LIMITING reading, both owned by
+        # the signal now (docs/calibration-ui-redesign §5). Stored as mutable dicts the
+        # source card's editors mutate in place (like the old plane reading blocks); the
+        # widgets are rebuilt each render, the dicts persist. Reported is gone entirely.
+        meas = sig.get("measurement") if isinstance(sig.get("measurement"), dict) else {}
+        measurement = {"quantity": str(meas.get("quantity") or "").strip(),
+                       "unit": str(meas.get("unit") or "dBm").strip() or "dBm"}
+        reading = {"limiting": dict(sig.get("limiting") or {})}
+        self._f["signals"][sid] = {"bw": bw, "cfreq": cfreq, "plabel": plabel,
+                                   "curves": curves, "sparks": sparks,
+                                   "measurement": measurement, "reading": reading}
 
     def _on_curve_changed(self, spark: "_Sparkline") -> None:
         """A curve grid was edited: repaint its sparkline from its source table and
@@ -3559,6 +3778,21 @@ class CalibrationPanel(QWidget):
                 entry["points"] = pts
                 curves[plane] = entry
             sig["curves"] = curves
+            # Per-signal MEASUREMENT (quantity/unit) and LIMITING reading, from the source
+            # card's editor state (docs/calibration-ui-redesign §5). Reported is removed
+            # entirely — drop any stored bridge so "gone from the UI" means gone from the doc.
+            sig.pop("reported", None)
+            lim = _reading_block((w.get("reading") or {}).get("limiting"))
+            if lim is not None:
+                lim.pop("max_dbm", None)     # per-signal ceiling removed (§5/§6.6): the
+                sig["limiting"] = lim         # stage limits list is the dBm cap for all
+            else:
+                sig.pop("limiting", None)
+            mb = _measurement_block(w.get("measurement"))
+            if mb is not None:
+                sig["measurement"] = mb
+            else:
+                sig.pop("measurement", None)
             signals[sid] = sig
         doc["signals"] = signals
         return doc

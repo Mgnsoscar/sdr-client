@@ -1,9 +1,41 @@
 # Calibration UI redesign — per-signal signal editor (handoff)
 
-Status: **design locked, ready to build Phase 1.** No editor code written yet.
+Status: **Phase 1 built (client-only, no agent bump) — ready for Phase 2.**
 Branch (all three repos): `claude/todo-list-onboarding-86r5pg`.
 
 This doc is a self-contained handoff so a fresh session can continue with no prior context.
+
+## Phase 1 — DONE (what landed, in `sdr-client/ui/calibration_panel.py`)
+Each signal on the **source** stage is an expandable card owning its config:
+- **Measurement** section: a free-text `quantity`, a per-signal **`unit`** selector
+  (`dBm`/`dBm/Hz`/`dBm/kHz`/`dBm/MHz`), a live **"shows as" `quantity [unit]`** preview, the
+  signal's frequency, and the measured **curve behind a modal dialog** (collapsed card shows a
+  unit chip + point count). Persists to **`signals.<id>.measurement = {quantity, unit}`**
+  (`dBm`/empty is the trivial default and is omitted — see `_measurement_block`). Today's agent
+  ignores this key; Phase 2 makes it act on it.
+- **Limiting** section (always resolves to **dBm**): `Same as measurement` (offered only when
+  the measurement is dBm) · `Derived (→ dBm)` (only laws with `out==abs` whose `in` matches the
+  measurement family — `_limiting_laws_for`; the option is disabled when none exist) ·
+  `Separate measurement (dBm)` (an `own` dBm curve, also behind a dialog). Bound to
+  **`signals.<id>.limiting`** (kind `same`/`law`/`own`). An invalid stored kind is coerced on
+  render (`_limiting_section`).
+- **Reported reading bridge REMOVED everywhere** — dropped from planes and signals on save
+  (`_read_form` / `_read_planes`). NB this is the *reading bridge*, distinct from the measured-
+  plane `role: reported` concept (§4.1), which is untouched.
+- **Per-signal `max_dbm` ceiling REMOVED** — stripped on save; the dBm cap lives only in the
+  existing stage **limits list** (gauged against each signal's dBm limiting reading).
+- **Migration:** a legacy operating-plane shared `limiting` default is copied into each signal
+  on load (minus its `max_dbm`); no plane carries a reading block after save (no stage-level
+  shared defaults). Ships against today's agent — per-signal `limiting` is already resolved
+  (§4) and gated by the existing `calibration-power-bridges` capability.
+- Downstream measured stages are unchanged (per-stage curve override, still inline).
+- Tests: `sdr-client/tests/test_calibration_reading_editor.py` rewritten for the per-signal
+  design (normalizers, round-trips, migration, dBm law gating, capability gating). Suites green:
+  `sdr-agent` 347, `sdr-client` 550.
+
+Deferred to Phase 2 (below): the **agent** reading `signals.<id>.measurement` and threading the
+unit into bridge resolution, its capability flag + `AGENT_VERSION` bump, and the param-form's
+per-signal "shows as" wiring.
 
 ---
 
@@ -163,9 +195,9 @@ Measurement → Limiting order (this is the order the user wants).
 
 ## 6. Build plan
 
-### Phase 1 — client-only, no agent bump (start here)
-All in `sdr-client/ui/calibration_panel.py` (~4530 lines). Reuses backend capability that already
-exists (§4).
+### Phase 1 — client-only, no agent bump ✅ DONE (see the "Phase 1 — DONE" section up top)
+All in `sdr-client/ui/calibration_panel.py`. Reuses backend capability that already
+exists (§4). The checklist below is what was built.
 1. Move the reading editor out of the shared operating-plane block (`_render_detail` ~2417) and
    render a per-signal **Measurement + Limiting** panel inside each signal's expandable card,
    bound to the per-signal doc keys `signals.<id>.limiting` (and measurement fields), not
@@ -196,8 +228,10 @@ the offered laws are only those matching the measurement unit — this already m
 ---
 
 ## 7. Open items / things to confirm while building
-- Exact doc shape for `signals.<id>.measurement` (Phase 2) — pick keys and update the resolver +
-  `_reading_block`-style normalizer together.
+- Doc shape for `signals.<id>.measurement` is now **chosen** (Phase 1): `{quantity, unit}`, with
+  `unit` omitted when it is the default `dBm` (see `_measurement_block` in the client). Phase 2's
+  resolver must read this key and default `unit` to `dBm` when absent — keep it in step with the
+  client normalizer.
 - Confirm the stage limits list already applies its dBm cap to a per-signal limiting reading
   without a per-signal cap (read the limit-inversion path in `calibration.py`).
 - Collapsed signal summary row content (currently unit chip + point count — user OK'd this).
