@@ -817,6 +817,10 @@ class ParamForm(QWidget):
             if spec.get("kind") == "derived":
                 # A read-only computed readout (e.g. the carrier / sweep width a
                 # start/stop pair implies). Never an input — not in self._widgets.
+                # A hidden derived field is computed (so a power law can key on it) but
+                # never rendered — _live_params reads it straight from _base_specs.
+                if spec.get("hidden"):
+                    continue
                 self._body.addWidget(self._derived_frame(spec, top_sep=not first))
                 first = False
                 continue
@@ -1173,8 +1177,15 @@ class ParamForm(QWidget):
         for d in dests:
             v = cur.get(d)
             if v is None:
-                v = next((s.get("default") for s in self._base_specs
-                          if s.get("dest") == d), None)
+                spec = next((s for s in self._base_specs if s.get("dest") == d), None)
+                # A bridge may key on a value the FORM derives from other fields (e.g. the
+                # GPS L1 C/A full-power law keys on a non-analytic equivalent-noise bandwidth
+                # computed from --sidelobes). Compute it from the derived spec's formula so the
+                # fold tracks the source field even though there is no input widget for it.
+                if spec is not None and spec.get("kind") == "derived":
+                    v = self._eval_formula(spec.get("formula"))
+                if v is None:
+                    v = spec.get("default") if spec else None
             if not isinstance(v, (int, float)) or isinstance(v, bool):
                 return None
             out[d] = float(v)
@@ -1347,6 +1358,18 @@ class ParamForm(QWidget):
                 self._connect_companion_live(self._widgets[pdest][0])
                 if self._selectable and pdest in self._checks:
                     self._checks[pdest].toggled.connect(self._on_freq_changed)
+            else:
+                # A bridge parameter with no input widget of its own is a value the form
+                # DERIVES from other fields (e.g. an equivalent-noise bandwidth from
+                # --sidelobes). Re-fold when those source fields move so --power tracks it.
+                spec = next((s for s in self._base_specs
+                             if s.get("dest") == pdest and s.get("kind") == "derived"), None)
+                if spec is not None:
+                    for src in self._formula_sources(spec):
+                        if src in self._widgets:
+                            self._connect_commit(self._widgets[src][0], self._on_freq_changed)
+                            self._connect_live(self._widgets[src][0])
+                            self._connect_companion_live(self._widgets[src][0])
         if not self._is_freq_dependent():
             return
         dest = self._freq_source_dest()
@@ -1733,11 +1756,13 @@ class ParamForm(QWidget):
 
     @staticmethod
     def _formula_sources(spec: dict) -> List[str]:
-        """The field names a derived spec's formula reads from."""
+        """The field names a derived spec's formula reads from (numeric literals in the
+        args — e.g. a scale/offset or a lookup table — are not fields, so they are skipped)."""
         out: List[str] = []
         for args in (spec.get("formula") or {}).values():
             if isinstance(args, (list, tuple)):
-                out.extend(str(a) for a in args)
+                out.extend(str(a) for a in args
+                           if not (isinstance(a, (int, float)) and not isinstance(a, bool)))
         return out
 
     def _source_num(self, dest: str) -> Optional[float]:
@@ -1755,9 +1780,18 @@ class ParamForm(QWidget):
             return num_or_none(choice_token(w))
         return None
 
+    def _arg_value(self, arg) -> Optional[float]:
+        """A single derived-formula argument: a numeric literal is used as-is (a scale,
+        offset, or lookup-table entry baked into the formula); a string names another
+        field, read live from its widget."""
+        if isinstance(arg, (int, float)) and not isinstance(arg, bool):
+            return float(arg)
+        return self._source_num(str(arg))
+
     def _eval_formula(self, formula) -> Optional[float]:
         """Evaluate a small derived formula over other fields' current values, or None
-        if any source is missing. Ops: center=(a+b)/2, span=|last-first|, sum, diff."""
+        if any source is missing. Ops: center=(a+b)/2, span=|last-first|, sum, diff.
+        Args may be field names or numeric literals (see _arg_value)."""
         if not formula:
             return None
         try:
@@ -1766,7 +1800,7 @@ class ParamForm(QWidget):
             return None
         if not isinstance(args, (list, tuple)):
             return None
-        vals = [self._source_num(str(a)) for a in args]
+        vals = [self._arg_value(a) for a in args]
         if any(v is None for v in vals):
             return None
         if op == "center":
@@ -1794,6 +1828,16 @@ class ParamForm(QWidget):
         if op == "extent":                     # [n, s] span of n terms: (n-1)s
             n, s = vals[0], vals[1]
             return (n - 1) * s
+        if op == "linear":                     # [x, scale, offset] = scale·x + offset
+            if len(vals) < 3:
+                return None
+            return vals[0] * vals[1] + vals[2]
+        if op == "table":                      # [i, t0, t1, …] nearest-int lookup t[clamp(i)]
+            tbl = vals[1:]
+            if not tbl:
+                return None
+            idx = int(round(vals[0]))
+            return tbl[max(0, min(len(tbl) - 1, idx))]
         return None
 
     def _derived_frame(self, spec: dict, top_sep: bool) -> QWidget:
