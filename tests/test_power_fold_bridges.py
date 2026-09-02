@@ -66,6 +66,32 @@ def test_refold_bounds_uses_params():
     assert out["max_power_dbm"] == pytest.approx(64.0)
 
 
+LAW_ENBW = {"id": "full_power", "name": "Full signal power", "in": "density", "out": "abs",
+            "k": 60.0, "param": "enbw_mhz", "coeff": 10.0, "ref": 1.0, "rep": 0.988638}
+
+
+def test_bridge_law_on_missing_param_folds_at_rep_not_crash():
+    # A bridge law keyed on a script-INTERNAL parameter (e.g. GPS L1 C/A's full_power on
+    # enbw_mhz, which has no form field): the form folds with whatever params it DOES have
+    # (e.g. a chirp's {"bw": ...}). The fold must fall back to the law's representative value,
+    # not raise — regression: opening the sweep Run form crashed with
+    # "law 'full_power' needs parameter 'enbw_mhz'".
+    for role in ("reported", "limiting"):
+        art = _artifact(**{role: {"kind": "law", "law": LAW_ENBW, "max_dbm": 30.0}})
+        fold = PowerFold.from_artifact(art)
+        b = fold.bounds_at(None, {"bw": 1.0})          # params present, but no enbw_mhz
+        assert "max_power_dbm" in b and "min_power_dbm" in b
+        # identical to folding with no params at all (both use the representative value)
+        assert fold._reading_delta(
+            fold._limiting if role == "limiting" else fold._reported,
+            {"bw": 1.0}) == pytest.approx(fold._reading_delta(
+                fold._limiting if role == "limiting" else fold._reported, None))
+    # and refold_bounds (the path the Run form actually takes) no longer raises
+    bounds = {"artifact": _artifact(limiting={"kind": "law", "law": LAW_ENBW, "max_dbm": 30.0}),
+              "max_power_dbm": 4.0, "min_power_dbm": -30.0}
+    assert "max_power_dbm" in refold_bounds(bounds, 1.5e9, params={"bw": 20.0})
+
+
 def test_clamp_warning_on_parameter():
     art = _artifact(reported={"kind": "law", "unit": "dBm", "law": FBW})
     # at bw=1e6 the max reported power is 64 dBm; asking 70 → clamp warning

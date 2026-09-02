@@ -115,12 +115,19 @@ class PowerFold:
         return freq if freq is not None else self._center_freq
 
     def _reading_delta(self, bridge, params: Optional[dict]) -> float:
-        """dB a bridge adds to the measured value: at the live parameter values when keyed and
-        supplied, else at the representative values (mirrors calkit.PowerMap)."""
+        """dB a bridge adds to the measured value: at the live parameter values when the bridge
+        keys on a parameter and ALL of them are supplied (and usable), else at the representative
+        values (mirrors calkit.PowerMap). A law keyed on a parameter with no form field — e.g. a
+        script-internal one the transmit script fills — is not evaluable here, so it folds at its
+        representative value rather than raising."""
         if bridge is None:
             return 0.0
-        if params and bridge.keyed_params():
-            return bridge.delta_db(params)
+        keyed = bridge.keyed_params()
+        if keyed and params and all(params.get(k) is not None for k in keyed):
+            try:
+                return bridge.delta_db(params)
+            except (ValueError, TypeError):
+                pass                                  # non-positive/invalid value → representative
         return bridge.rep_delta_db()
 
     def _reported_shift(self, params: Optional[dict]) -> float:
