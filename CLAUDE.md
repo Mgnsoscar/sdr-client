@@ -1,0 +1,63 @@
+# sdr-client — Claude working notes
+
+PyQt6 **desktop client** for controlling a fleet of SDR units (each runs `sdr-agent`) and
+authoring their power **calibration**. Talks to agents over HTTP (mDNS discovery). Part of a
+three-repo system: **`sdr-agent`** (on-unit HTTP agent + calibration resolver), **`sdr-client`**
+(this GUI), **`sdr-scripts`** (the transmit scripts the agent runs).
+
+## Environment setup (container starts without deps)
+```bash
+pip3 install numpy pytest PyQt6 httpx pydantic zeroconf websocket-client PyYAML paramiko \
+             fastapi uvicorn "ruamel.yaml" starlette psutil python-multipart inotify-simple
+apt-get update -q && apt-get install -y -q libegl1 libgl1 libglib2.0-0t64 libdbus-1-3 \
+             libxkbcommon0 libfontconfig1        # PyQt6 offscreen needs these GL/X libs
+```
+
+## Run the tests (always green on `main`)
+```bash
+QT_QPA_PLATFORM=offscreen python3 -m pytest -q        # ~556 tests, headless Qt
+```
+`QT_QPA_PLATFORM=offscreen` is **required** — tests instantiate real Qt widgets.
+
+## Cross-repo invariants (do not break)
+- **Drift guard (enforced by `sdr-agent/tests/test_shared_source_drift.py`):**
+  `api/argspec.py` and `api/ramp.py` MUST stay **byte-identical** to `sdr-agent/agent/argspec.py`
+  and `sdr-agent/agent/ramp.py`. If you touch one, mirror it exactly.
+- **Power-law mirror (manual convention):** `state/power_law.py` is a verbatim copy of
+  `sdr-agent/paramkit/power_law.py` (pure stdlib so Python/JS parity holds). Keep them in step.
+- **Capability gating:** a feature the agent must understand is gated behind a
+  `CAL_*_CAPABILITY` string advertised by the agent's `GET /info`; the client blocks saving a
+  document that uses it on an agent that lacks it (`_supports(cap)` + a `_blocks_on_*` guard
+  wired into `_on_save`). Never send a document a feature-older agent would silently mishandle.
+
+## Where things live
+- `ui/calibration_panel.py` (~4.7k lines) — the **Calibration tab**: the RF chain builder and
+  the **per-signal signal editor** (each signal's Measurement + Limiting reading). The heart of
+  recent work.
+- `ui/param_form.py` — the arm/task **parameter form**, including the calibrated `--power`
+  field: unit "views" (control `--power` in the measured quantity or a declared conversion law),
+  the range rail, and the `quantity [unit]` label.
+- `state/power_fold.py` / `state/power_law.py` — client-side re-fold of the resolved artifact at
+  the operator's live frequency/parameters (mirrors the agent + transmit script math).
+- `api/` — the agent HTTP client + the drift-guarded `argspec.py` / `ramp.py`.
+- `ui/theme.py` — `Palette` (colors) and `Fonts` (`Fonts.MONO`/`SANS`). Match the existing
+  compact style: `font-size:11–12px`, teal field labels (`Palette.ACCENT`/`TEXT_MUTED`), amber
+  = `Palette.ARMED`.
+
+## Calibration model (one paragraph)
+A unit's calibration is a **chain of planes** (measured SDR output → derived hops: cables,
+amps, antenna). Each **signal** carries its own **measurement** (`{quantity, unit}` — dBm or a
+spectral density) and a **limiting reading** (how the dBm safety ceiling is gauged: same as
+measurement / a declared **law** that returns dBm / a separate dBm curve). `--power` is
+controlled in the measured quantity; declared **power laws** (`CAL_POWER_LAWS` in a transmit
+script, `in`/`out` families abs↔density) convert between quantities. A single dBm ceiling on
+the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
+The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
+
+## Current state — per-signal signal editor redesign: COMPLETE (this branch → main)
+See `docs/calibration-ui-redesign.md` (full record) and
+`docs/calibration-signal-editor-mockup.html` (the locked design). Phase 1 (client) + Phase 2
+(agent `≥1.12.0` + client, gated on `calibration-measurement-quantity`) shipped: per-signal
+Measurement/Limiting cards, measured points in a dialog, Reported bridge + per-signal ceiling
+removed, limiting laws constrained to dBm and scoped to the signal, and the agent publishes each
+signal's measured quantity/unit as the operating `--power` axis. No open items in that redesign.
