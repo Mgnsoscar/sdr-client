@@ -677,6 +677,11 @@ class ParamForm(QWidget):
         self._base_specs: List[dict] = []
         self._cal_bounds = None
         self._power_laws: List[dict] = []       # script CAL_POWER_LAWS (companion --power units)
+        self._power_view = None                 # law id the --power field is CONTROLLED in
+                                                # (None = the embedded reported quantity / base)
+        self._power_dest = None                 # dest of the --power field (for unit conversion)
+        self._power_offset = 0.0                # dB the displayed --power unit adds over the
+                                                # base quantity at the current render (0 for base)
         self._cal_freq_param = None             # dest of the freq field (CAL_FREQ_PARAM)
         self._cal_freq_default = None           # freq to fold at when the field isn't set
         self._folded_at = None                  # freq the power/gain bounds were last folded at
@@ -732,6 +737,7 @@ class ParamForm(QWidget):
         # reading as a live companion read-out — e.g. --power in spectral density (dBm/MHz) with
         # the full-bandwidth power (dBm) shown alongside, both tracking the live sweep bandwidth.
         self._power_laws = list(power_laws or [])
+        self._power_view = None                 # a fresh schema starts in the base quantity
         self._cal_freq_param = cal_freq_param
         # A carried step frequency arrives in the freq field's own unit (e.g. MHz); fold
         # frequencies are Hz internally, so scale it once here (needs _base_specs +
@@ -765,6 +771,15 @@ class ParamForm(QWidget):
         self._widgets.clear()
         self._checks.clear()
         self._derived.clear()
+
+        # Settle the --power unit view for this render: which quantity the field is controlled
+        # in (self._power_view) and the dB it adds over the base (sent) quantity at the folded
+        # bandwidth. Both _effective_specs (bounds/label) and _power_snappers read the offset,
+        # so compute it before the fields are built. 0 for the base quantity ⇒ no change.
+        pidx = find_power_index(self._base_specs)
+        self._power_dest = self._base_specs[pidx]["dest"] if pidx is not None else None
+        _off_params = self._render_params if self._render_params is not None else self._live_params()
+        self._power_offset = self._power_display_offset(_off_params)
 
         # No-safeguard caution: raw power/gain with no calibration behind it (an
         # uncalibrated unit, or a task with no calibration signal). Only shown when there
@@ -961,55 +976,76 @@ class ParamForm(QWidget):
             self._wire_rail(widget, spec, rail, chip, warn)
         if spec.get("snap_role") == "power" and isinstance(
                 widget, (QSpinBox, QDoubleSpinBox, QLineEdit)):
-            self._add_power_companions(v, widget)
+            self._add_power_unit_ui(v, widget)
         return frame
 
-    def _add_power_companions(self, layout, widget) -> None:
-        """Under a calibrated --power field, show each companion reading (a declared power law
-        that is a different quantity than --power) as a live read-out that tracks both the value
-        and the sweep bandwidth — e.g. --power set as spectral density (dBm/MHz) with the
-        full-bandwidth power (dBm) shown alongside. --power itself stays the operator's chosen
-        quantity; these are display only. Every reading is ``measured + law_delta(params)``, so
-        a companion value is the --power value plus the gap between the two laws' deltas at the
-        live parameter values (the same sweep bandwidth the range folds at)."""
-        companions = self._power_companion_laws()
-        if not companions:
+    def _add_power_unit_ui(self, layout, widget) -> None:
+        """The calibrated --power field's unit control: a dropdown to choose which quantity the
+        field/slider is CONTROLLED in (the base reported quantity or any declared companion law)
+        plus a live read-out of every other view, all tracking the sweep bandwidth. --power is
+        always SENT in the base quantity (build_args removes the display offset); the dropdown
+        and read-outs are a display/entry convenience. Every reading is
+        ``measured + view_delta(params)``, so a view's value is the controlled value plus the
+        gap between the two views' deltas at the live parameters."""
+        views = self._power_views()
+        if not views:
             return
+        selected = self._selected_view()
         params = self._render_params if self._render_params is not None else self._live_params()
-        base_delta = self._reported_delta(params)
-        rows = []
-        for name, unit, law in companions:
-            lbl = QLabel()
-            lbl.setWordWrap(True)
-            lbl.setStyleSheet(f"font-size: 11px; color: {Palette.ONLINE}; padding: 1px 2px 0;")
-            layout.addWidget(lbl)
-            rows.append((lbl, name, unit, law))
+        s_delta = self._view_delta(selected, params)
+
+        row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(8)
+        lab = QLabel("control in")
+        lab.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
+        combo = QComboBox()
+        for v in views:
+            combo.addItem(f"{v['name']} ({v['unit']})", v["id"])
+        idx = combo.findData(selected["id"])
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.currentIndexChanged.connect(lambda _=0, c=combo: self._on_power_view_changed(c))
+        self._guard_scroll(combo)
+        row.addWidget(lab); row.addWidget(combo, 1)
+        layout.addLayout(row)
 
         def _current() -> Optional[float]:
-            # --power is a bounded spinbox when it has a default, else a free text box; read
-            # either as a number (None while the box is empty / mid-edit).
             if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
                 return float(widget.value())
             return num_or_none(widget.text())
 
+        rows = []
+        for v in views:
+            if v["id"] == selected["id"]:
+                continue
+            lbl = QLabel(); lbl.setWordWrap(True)
+            lbl.setStyleSheet(f"font-size: 11px; color: {Palette.ONLINE}; padding: 1px 2px 0;")
+            layout.addWidget(lbl)
+            rows.append((lbl, v))
+
         def _update(*_):
             pv = _current()
-            for lbl, name, unit, law in rows:
+            for lbl, v in rows:
                 if pv is None:
-                    lbl.setText(f"= — {unit}  ·  {name}")
+                    lbl.setText(f"= — {v['unit']}  ·  {v['name']}")
                     continue
-                try:
-                    d = law.delta_db(params) if params else law.rep_delta_db()
-                except (ValueError, TypeError):
-                    d = law.rep_delta_db()
-                cv = pv + (d - base_delta)
-                lbl.setText(f"= {self._fmt_bound(round(cv, 2))} {unit}  ·  {name}")
+                cv = pv + (self._view_delta(v, params) - s_delta)
+                lbl.setText(f"= {self._fmt_bound(round(cv, 2))} {v['unit']}  ·  {v['name']}")
 
         if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
             widget.valueChanged.connect(_update)
         else:
             widget.textChanged.connect(_update)
         _update()
+
+    def _on_power_view_changed(self, combo) -> None:
+        """Swap the quantity --power is controlled in. The sent value (base quantity) is
+        preserved across the swap: build_args removes the old unit's offset, the re-render
+        settles the new offset, and set_values re-applies it — so only the displayed unit and
+        the achievable grid change, never the commanded output."""
+        vid = combo.currentData()
+        if vid == self._power_view or self._refolding or self._loading:
+            return
+        self._power_view = vid
+        self._do_refold()
 
     def _warn_line(self) -> QLabel:
         """A hidden clamp warning; _wire_rail fills in the message and shows it when a
@@ -1102,8 +1138,9 @@ class ParamForm(QWidget):
         spectral-density companion that tracks the sweep)."""
         fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
         keyed = set(fold.keyed_params()) if fold is not None else set()
-        for _name, _unit, law in self._power_companion_laws():
-            keyed.update(law.params())
+        for view in self._power_views():
+            if view.get("law") is not None:
+                keyed.update(view["law"].params())
         return [p for p in keyed if any(s.get("dest") == p for s in self._base_specs)]
 
     def _live_params(self) -> Optional[dict]:
@@ -1125,20 +1162,27 @@ class ParamForm(QWidget):
             out[d] = float(v)
         return out
 
-    # ── Companion --power readings (script CAL_POWER_LAWS) ─────────────────────────
-    def _reported_base_id(self) -> Optional[str]:
-        """The law id of the operator's chosen --power quantity (the embedded reported
-        reading), or None when --power is the measured quantity / a plain `same` bridge."""
-        rep = ((self._cal_bounds or {}).get("artifact") or {}).get("readings", {}).get("reported") or {}
-        return (rep.get("law") or {}).get("id") if rep.get("kind") == "law" else None
+    # ── --power unit views (script CAL_POWER_LAWS) ─────────────────────────────────
+    def _reported_base(self) -> tuple:
+        """``(law_id | None, unit, name)`` of the operator's --power quantity (the embedded
+        reported reading). ``law_id`` is None when --power is the measured quantity."""
+        art = (self._cal_bounds or {}).get("artifact") or {}
+        rep = (art.get("readings") or {}).get("reported") or {}
+        law = rep.get("law") if rep.get("kind") == "law" else None
+        unit = (art.get("operating_unit") or "").strip() or "dBm"
+        name = art.get("quantity") or (law or {}).get("name") or "power"
+        return (law or {}).get("id"), unit, name
 
-    def _power_companion_laws(self) -> List[tuple]:
-        """``[(name, unit, Law)]`` for each declared power law that is a DIFFERENT reading
-        than the operator's --power quantity — rendered as a live read-out under --power. Every
-        reading is ``measured + law_delta(params)``, so a companion's value is just the --power
-        value plus the (parameter-dependent) gap between the two laws' deltas."""
-        base_id = self._reported_base_id()
-        out: List[tuple] = []
+    def _power_views(self) -> List[dict]:
+        """Selectable unit views for the calibrated --power field: the base (embedded reported)
+        quantity first, then each declared power law that is a DIFFERENT reading. Empty unless
+        the signal declares a law differing from the base — then the field carries no dropdown /
+        companion. Each view: ``{id, name, unit, law}`` (``law`` None for the base; its delta is
+        the reported shift)."""
+        if not self._power_laws:
+            return []
+        base_id, base_unit, base_name = self._reported_base()
+        views = [{"id": None, "name": base_name, "unit": base_unit, "law": None}]
         for spec in self._power_laws:
             try:
                 law = parse_law(spec)
@@ -1147,16 +1191,56 @@ class ParamForm(QWidget):
             if law.id == base_id:
                 continue
             unit = "dBm" if law.out_fam == "abs" else "dBm/MHz"
-            out.append((spec.get("name", law.id), unit, law))
-        return out
+            views.append({"id": law.id, "name": spec.get("name", law.id),
+                          "unit": unit, "law": law})
+        return views if len(views) > 1 else []
 
     def _reported_delta(self, params: Optional[dict]) -> float:
-        """The dB the embedded --power (reported) reading adds to the measured value at
-        ``params`` — the baseline a companion law's delta is measured against."""
+        """dB the embedded --power (reported) reading adds to the MEASURED value at ``params``."""
         fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
-        if fold is None:
+        return fold._reported_shift(params) if fold is not None else 0.0
+
+    def _view_delta(self, view: dict, params: Optional[dict]) -> float:
+        """dB a view's quantity adds over the MEASURED value at ``params``."""
+        law = view.get("law")
+        if law is None:
+            return self._reported_delta(params)
+        try:
+            return law.delta_db(params) if params else law.rep_delta_db()
+        except (ValueError, TypeError):
+            return law.rep_delta_db()
+
+    def _selected_view(self) -> Optional[dict]:
+        """The view --power is currently controlled in (base when the selection is unset/stale)."""
+        views = self._power_views()
+        if not views:
+            return None
+        return next((v for v in views if v["id"] == self._power_view), views[0])
+
+    def _power_display_offset(self, params: Optional[dict]) -> float:
+        """dB the CONTROLLED --power unit adds over the base (sent) quantity — the selected
+        view's delta minus the base view's delta. 0 when the base quantity is selected, so the
+        sent value and every non-companion field is byte-identical to before this feature."""
+        sel = self._selected_view()
+        if sel is None or sel["id"] is None:
             return 0.0
-        return fold._reported_shift(params)
+        return self._view_delta(sel, params) - self._reported_delta(params)
+
+    def _shift_power_spec(self, sp: dict) -> dict:
+        """Re-label and shift a bounded --power spec into the selected control unit: its range
+        (and any default) move by the display offset, its unit becomes the view's unit. No-op
+        for the base quantity, so an un-toggled field is byte-identical to before."""
+        sel = self._selected_view()
+        if sel is None or sel["id"] is None:
+            return sp
+        off = self._power_offset
+        sp = dict(sp)
+        sp["unit"] = sel["unit"]
+        for k in ("min", "max", "default"):
+            v = sp.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                sp[k] = round(float(v) + off, 4)
+        return sp
 
     def _power_snappers(self):
         """``(snap, quantize_up, quantize_down)`` for the calibrated --power field, bound to
@@ -1168,9 +1252,13 @@ class ParamForm(QWidget):
             return None
         f = self._render_freq
         pr = self._render_params
-        return (lambda p: fold.snap_power(p, f, pr),
-                lambda p: fold.quantize_up(p, f, pr),
-                lambda p: fold.quantize_down(p, f, pr))
+        # When --power is CONTROLLED in a non-base unit, the achievable grid is the base grid
+        # shifted by a constant (the display offset at this bandwidth): snap in the base unit,
+        # then re-apply the offset. `off` is 0 for the base quantity, so the base path is exact.
+        off = self._power_offset
+        return (lambda p: fold.snap_power(p - off, f, pr) + off,
+                lambda p: fold.quantize_up(p - off, f, pr) + off,
+                lambda p: fold.quantize_down(p - off, f, pr) + off)
 
     @staticmethod
     def _connect_commit(w, cb) -> None:
@@ -1392,7 +1480,7 @@ class ParamForm(QWidget):
             elif i == pidx:
                 if self._power_mode == "absolute":
                     if cal_bounds:                       # a targeted unit → hard bounds
-                        out.append(apply_power_bounds([s], cal_bounds)[0])
+                        out.append(self._shift_power_spec(apply_power_bounds([s], cal_bounds)[0]))
                     elif self._hint_bounds:              # Library → free-form + soft hint
                         out.append(apply_power_hint(s, self._hint_bounds))
                     else:
@@ -1689,6 +1777,12 @@ class ParamForm(QWidget):
                 i += 1
             elif i + 1 < len(args):
                 val = args[i + 1]
+                # --power arrives in the base (reported) quantity; if the field is currently
+                # controlled in another unit, shift it into that display unit before setting.
+                if dest == self._power_dest and self._power_offset:
+                    n = num_or_none(val)
+                    if n is not None:
+                        val = fmt_value(round(n + self._power_offset, 4))
                 if spec.get("presets") and isinstance(w, QComboBox):
                     lbl = preset_label_for_value(spec, val)
                     w.setCurrentText(lbl if lbl is not None else val)
@@ -1738,6 +1832,12 @@ class ParamForm(QWidget):
                     val = choice_token(w)         # the value the script receives
                 else:
                     val = w.text().strip()
+                # --power controlled in a non-base unit: the widget holds the DISPLAYED unit;
+                # the script always receives the base (reported) quantity, so remove the offset.
+                if dest == self._power_dest and self._power_offset:
+                    n = num_or_none(val)
+                    if n is not None:
+                        val = fmt_value(round(n - self._power_offset, 4))
                 if val == "":
                     continue
                 if flag:
@@ -1771,6 +1871,11 @@ class ParamForm(QWidget):
                 txt = w.text().strip()
                 if txt != "":
                     out[dest] = _typed(txt, spec)
+        # --power in a non-base display unit → send the base (reported) quantity (live tuning).
+        if (self._power_offset and self._power_dest in out
+                and isinstance(out[self._power_dest], (int, float))
+                and not isinstance(out[self._power_dest], bool)):
+            out[self._power_dest] = round(out[self._power_dest] - self._power_offset, 4)
         return out
 
     def validate(self) -> Optional[str]:
