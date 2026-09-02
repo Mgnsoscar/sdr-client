@@ -37,6 +37,32 @@ Deferred to Phase 2 (below): the **agent** reading `signals.<id>.measurement` an
 unit into bridge resolution, its capability flag + `AGENT_VERSION` bump, and the param-form's
 per-signal "shows as" wiring.
 
+## Phase 1 review round — DONE (feedback in "Improvements to calibration UI", with screenshots)
+After reviewing Phase 1 in the app, four of five items were fixed client-side:
+1. **Plot-label field removed** from the signal card (Measurement section + downstream inline
+   editor). The `entry["plabel"]` widget and its `_read_form` round-trip are kept, so a stored
+   `plot_label` is preserved unchanged — the field is just no longer shown (it will become
+   signal-independent later).
+2. **Frequency field** now shows a visible hint: "the frequency the signal was measured at".
+3. **Limiting law picker scoped to the signal** — `_declared_laws_for_signal(sid)` (keyed off
+   each task's `SDR_CAL_SIGNAL_ID` via `_task_signals`) + `_limiting_laws_for(sid, unit)`, so
+   one signal's law (a chirp's "Full-bandwidth (total) power") no longer leaks into another
+   signal's (GPS C/A) picker.
+5. **Param-form POWER label** now reads `quantity [unit]` with the quantity's real spaces
+   (e.g. "Total in-band power [dBm]"), not "dBm · dotted · text" — `_power_chip_label()` in
+   `ui/param_form.py`, tracking the selected control-in view. Client-only cosmetic.
+
+**Item 4 is the concrete Phase 2 entry point (still open):** in the param form's "control in"
+dropdown, the base option ("Total in-band power (dBm)") is the *operating-plane* quantity + dBm
+that today's agent publishes in the artifact (`quantity` / `operating_unit`, read by
+`_reported_base` in `ui/param_form.py`). It is really the per-signal measurement shown with the
+wrong quantity/unit. Fixing it = the core Phase 2 change: the agent reads
+`signals.<id>.measurement = {quantity, unit}` and publishes it as the artifact's operating
+quantity/unit, so the base view (and the POWER `quantity [unit]` label) show
+e.g. "Spectral density at main lobe peak [dBm/Hz]". The two correct control options
+("Full signal power (filter passband)", "Main-lobe integrated power") already come from the
+signal's own laws and are fine.
+
 ---
 
 ## 1. Repos, branch, and what's already done this session
