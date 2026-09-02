@@ -950,7 +950,12 @@ class ParamForm(QWidget):
             lrow.addWidget(chk)
         lrow.addWidget(field_name_label(self._display_name(spec)))
         if spec.get("unit"):
-            lrow.addWidget(unit_chip(spec["unit"].replace(" ", " · ")))
+            # The calibrated --power field shows its quantity as "quantity [unit]" with the
+            # quantity's real spaces; every other field's unit chip keeps the " · " styling.
+            if spec.get("snap_role") == "power":
+                lrow.addWidget(unit_chip(self._power_chip_label()))
+            else:
+                lrow.addWidget(unit_chip(spec["unit"].replace(" ", " · ")))
         lrow.addStretch(1)
         if spec.get("live"):
             lrow.addWidget(LiveBadge())
@@ -1246,6 +1251,22 @@ class ParamForm(QWidget):
         if not views:
             return None
         return next((v for v in views if v["id"] == self._power_view), views[0])
+
+    def _power_chip_label(self) -> str:
+        """The label shown beside the calibrated --power field: ``quantity [unit]`` (with the
+        quantity's real spaces, not dotted), for the currently controlled view — the base
+        reported quantity or the selected companion law. Falls back to just the unit when the
+        quantity is trivial/absent."""
+        sel = self._selected_view()
+        if sel is not None:
+            name, unit = sel.get("name", ""), sel.get("unit", "dBm")
+        else:
+            _lid, unit, name = self._reported_base()
+        name = (name or "").strip()
+        unit = (unit or "dBm").strip()
+        if not name or name.lower() == "power":
+            return unit
+        return f"{name} [{unit}]"
 
     def _power_display_offset(self, params: Optional[dict]) -> float:
         """dB the CONTROLLED --power unit adds over the base (sent) quantity — the selected

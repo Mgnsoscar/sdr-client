@@ -259,3 +259,31 @@ def test_no_laws_means_no_dropdown_or_companion():
     _app.processEvents()
     assert _view_combo(f) is None
     assert _companions(f) == []
+
+
+# ── the "quantity [unit]" label beside POWER (review item #5) ───────────────────
+
+def test_power_chip_is_quantity_bracket_unit_with_real_spaces():
+    # The label beside POWER reads "quantity [unit]" with the quantity's real spaces, not the
+    # old "dBm · dotted · text" form, and it tracks the selected control-in view.
+    f = _form(_density_reported(), -26.76, -16.71, "dBm/MHz")
+    _app.processEvents()
+    labels = [w.text() for w in f.findChildren(QLabel)]
+    assert "spectral density [dBm/MHz]" in labels
+    assert not any("·" in t and "spectral" in t for t in labels)   # quantity not dotted
+    combo = _view_combo(f); _select(combo, "fbw_power"); _app.processEvents()
+    labels = [w.text() for w in f.findChildren(QLabel)]
+    assert "Full-bandwidth (total) power [dBm]" in labels
+
+
+def test_power_chip_when_operating_unit_absent_falls_back_to_dbm():
+    # A bridge-less calibration (no operating_unit) keeps the quantity and shows [dBm].
+    art = _artifact(_density_reported()); art.pop("operating_unit"); art["quantity"] = "Total in-band power"
+    bounds = {"min_power_dbm": -136.61, "max_power_dbm": -49.18, "quantity": "Total in-band power",
+              "operating_plane": "sdr_output", "amplitude": 0.5, "artifact": art}
+    f = ParamForm()
+    f.set_params(_specs("dBm/MHz"), cal_bounds=bounds, absolute_allowed=True,
+                 default_power_mode="absolute", cal_freq_param="freq", power_laws=[FBW, PSD])
+    _app.processEvents()
+    labels = [w.text() for w in f.findChildren(QLabel)]
+    assert "Total in-band power [dBm]" in labels
