@@ -78,13 +78,17 @@ class PowerFold:
         self._ceiling_const = float(ceiling_const)
         self._gain_step = float(gain_step_db) if gain_step_db and float(gain_step_db) > 0 else None
         self._hops = [([float(f) for f, _ in t], [float(d) for _, d in t]) for t in hops]
-        # Each freq-dependent limit: (max_dbm, freqs, deltas, anchor_gains, anchor_powers).
-        # anchor_* is None when it inverts against the shared operating anchor, or a separate
-        # LIMITING curve when the operating plane is REPORTED (mirrors calkit.PowerMap).
+        # Each freq-dependent limit: (max_dbm, freqs, deltas, anchor_gains, anchor_powers,
+        # via_limiting). anchor_* is None when it inverts against the shared operating anchor, or
+        # a separate LIMITING curve (a reported operating plane, or an OWN limiting reading).
+        # via_limiting is True when the limit is gauged through a law/same LIMITING reading — the
+        # consumer folds the limiting delta (max_dbm − Δlim) at the live parameter value before
+        # inverting on the shared anchor (mirrors calkit.PowerMap).
         self._freq_limits = []
         for item in freq_limits:
             mx, t = item[0], item[1]
             anchor = item[2] if len(item) > 2 else None
+            via = item[3] if len(item) > 3 else False
             fs = [float(f) for f, _ in t]
             ds = [float(d) for _, d in t]
             if anchor:
@@ -93,7 +97,7 @@ class PowerFold:
                 ap = [p for _, p in pairs]
             else:
                 ag = ap = None
-            self._freq_limits.append((float(mx), fs, ds, ag, ap))
+            self._freq_limits.append((float(mx), fs, ds, ag, ap, bool(via)))
         self._center_freq = None if center_freq is None else float(center_freq)
         # Active components (programmable gain/attenuation) — empty for a plain passive chain.
         self._actives = [dict(a) for a in (actives or [])]
@@ -218,8 +222,10 @@ class PowerFold:
     def _ceiling(self, freq: Optional[float], params: Optional[dict] = None) -> float:
         cap = self._ceiling_const
         b = self._source_bias_at(freq)
-        for max_dbm, fs, ds, ag, ap in self._freq_limits:
+        for max_dbm, fs, ds, ag, ap, via in self._freq_limits:
             target = max_dbm - _table_at(fs, ds, freq)
+            if via:                               # gauged through the law/same LIMITING reading:
+                target -= self._reading_delta(self._limiting, params)  # fold Δlim at live param
             if ag is not None:                    # own (downstream) limiting curve → no bias
                 cap = min(cap, _interp(target, ap, ag))
             else:                                 # shared operating anchor = the biased source
@@ -289,7 +295,7 @@ class PowerFold:
     def freq_dependent(self) -> bool:
         """True when --power/gain (or the ceiling) actually moves with frequency."""
         return (any(len(fs) > 1 for fs, _ in self._hops)
-                or any(len(fs) > 1 for _, fs, _ds, _ag, _ap in self._freq_limits)
+                or any(len(fs) > 1 for _, fs, _ds, _ag, _ap, _via in self._freq_limits)
                 or len(self._bias) > 1)
 
     # ── constructor ───────────────────────────────────────────────────────────────
@@ -319,7 +325,7 @@ class PowerFold:
                 return None
             hops = [h.get("delta_db_by_freq") or [] for h in art.get("passive_hops", [])]
             freq_limits = [(lim["max_dbm"], lim.get("delta_db_by_freq") or [],
-                            lim.get("anchor_curve"))
+                            lim.get("anchor_curve"), lim.get("via_limiting", False))
                            for lim in art.get("freq_dependent_limits", [])]
             ceiling_const = art.get("gain_ceiling_db")
             if ceiling_const is None:

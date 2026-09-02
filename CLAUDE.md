@@ -54,7 +54,18 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
-## Current state — per-signal signal editor redesign: COMPLETE (this branch → main)
+## Current state — stage limits gauged through the limiting reading: COMPLETE
+The client mirror of the agent 1.13.0 fix: `state/power_fold.py` `_ceiling()` folds a stage
+limit's `via_limiting` entry (or its own dBm `anchor_curve`) through the signal's limiting reading
+at the live task parameter — so the form's `--power` range/ceiling match the transmit path. Saving
+a document whose stage limit is gauged through a non-trivial limiting reading is gated on the new
+agent capability (`CAL_LIMIT_THROUGH_READING_CAPABILITY` / `_blocks_on_limit_through_reading`, a
+safety gate). The **Signals table** gained a per-row "Shown in" dropdown (`_quantity_views`): read
+each signal's range in its measured quantity or in the dBm quantity its safety limit is gauged in
+(the range column moved to index 2, the picker is index 3). Tests: `test_power_fold_bridges.py`,
+`test_calibration_limit_reading_client.py`, `test_calibration_panel.py`.
+
+## Prior state — per-signal signal editor redesign: COMPLETE (this branch → main)
 See `docs/calibration-ui-redesign.md` (full record) and
 `docs/calibration-signal-editor-mockup.html` (the locked design). Phase 1 (client) + Phase 2
 (agent `≥1.12.0` + client, gated on `calibration-measurement-quantity`) shipped: per-signal

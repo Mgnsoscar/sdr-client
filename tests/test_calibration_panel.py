@@ -738,15 +738,40 @@ def test_selecting_a_stage_updates_selection_and_survives_read():
 
 def test_signals_table_shows_freq_and_range():
     # Amplitude is fixed fleet-wide, so the table no longer carries an Ampl. column:
-    # Signal | Freq MHz | --power dBm.
+    # Signal | Freq MHz | Range | Shown in (the per-signal quantity picker).
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     _seed_catalog(p)
     p._set_doc(_v2_doc())
     p._populate_table({"mock": {"min_power_dbm": -12.4, "max_power_dbm": 28.2}})
-    assert p._table.columnCount() == 3
+    assert p._table.columnCount() == 4
     assert p._table.item(0, 0).text() == "mock"
     assert p._table.item(0, 1).text() == "1575.42"       # centre freq in MHz
-    assert "28.2" in p._table.item(0, 2).text()          # resolved --power range
+    assert "28.2" in p._table.item(0, 2).text()          # resolved range
+    # with no limiting reading, the "Shown in" picker has one (disabled) view: the measurement
+    combo = p._table.cellWidget(0, 3)
+    assert combo is not None and combo.count() == 1 and not combo.isEnabled()
+
+
+def test_signals_table_range_quantity_dropdown():
+    # A density-measured signal whose limiting reading is a law returning dBm: the "Shown in"
+    # picker offers the measured quantity AND the dBm limiting quantity, and switching it
+    # relabels the Range cell (measured −30..4 dBm/Hz; limiting = +10 dB → −20..14 dBm).
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    _seed_catalog(p)
+    p._set_doc(_v2_doc())
+    art = {"operating_unit": "dBm/Hz",
+           "readings": {"limiting": {"kind": "law",
+                                     "law": {"id": "fbw", "name": "total", "in": "density",
+                                             "out": "abs", "k": 10.0}}}}
+    info = {"min_power_dbm": -30.0, "max_power_dbm": 4.0, "quantity": "psd", "artifact": art}
+    p._populate_table({"mock": info})
+    combo = p._table.cellWidget(0, 3)
+    assert combo is not None and combo.count() == 2 and combo.isEnabled()
+    assert "dBm/Hz" in p._table.item(0, 2).text()        # default view: the measured quantity
+    assert "14" not in p._table.item(0, 2).text()
+    combo.setCurrentIndex(1)                              # switch to the limiting (dBm) quantity
+    assert "14" in p._table.item(0, 2).text()            # 4 + 10 dB
+    assert "-20" in p._table.item(0, 2).text()           # -30 + 10 dB
 
 
 def test_multifreq_signal_shows_at_run():

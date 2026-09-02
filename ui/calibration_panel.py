@@ -113,6 +113,13 @@ _MEASUREMENT_QUANTITY_NEEDS_NEWER = (
     "It would ignore the signal's declared unit and show --power in the wrong quantity. Update "
     "the agent, or clear the per-signal measurement unit before saving.")
 
+CAL_LIMIT_THROUGH_READING_CAPABILITY = "calibration-limit-through-reading"  # agent >= 1.13.0
+_LIMIT_THROUGH_READING_NEEDS_NEWER = (
+    "this unit's agent is too old to gauge a stage limit through the signal's limiting reading "
+    "(needs 1.13.0+). It would compare the dBm ceiling against the measured quantity instead — "
+    "under-applying the limit and transmitting over the ceiling. Update the agent, or set every "
+    "signal's limiting to “Same as measured” before saving.")
+
 # The baseband amplitude every broadcaster script transmits at is a FIXED constant (the
 # scripts' baked AMPLITUDE), not an operator control — so calibration is always measured at
 # this amplitude and the editor does not expose it as an editable field. It is recorded on
@@ -1364,8 +1371,11 @@ class CalibrationPanel(QWidget):
         sig_card, sig_body = self._make_card(
             lbl="Signals", sub="resolved --power at each frequency", trailing=add_sig)
         sig_body.setContentsMargins(0, 0, 0, 0)
-        self._table = QTableWidget(0, 3)
-        self._table.setHorizontalHeaderLabels(["Signal", "Freq MHz", "--power dBm"])
+        self._table = QTableWidget(0, 4)
+        # "Range" is shown in the quantity chosen by the per-row "Shown in" dropdown — the
+        # measured quantity the operator dials --power in, or (when the signal declares a
+        # non-trivial limiting reading) the dBm quantity the safety ceiling is gauged in.
+        self._table.setHorizontalHeaderLabels(["Signal", "Freq MHz", "Range", "Shown in"])
         self._table.verticalHeader().setVisible(False)
         # Only the Signal cell is editable — double-click it to rename the signal id (the
         # other columns are read-outs). See _populate_table for the per-cell flags.
@@ -3919,7 +3929,8 @@ class CalibrationPanel(QWidget):
                 or self._blocks_on_freq_optional_center() or self._blocks_on_active_components()
                 or self._blocks_on_source_bias() or self._blocks_on_stage_bypass()
                 or self._blocks_on_power_bridges() or self._blocks_on_deembed()
-                or self._blocks_on_measurement_quantity()):
+                or self._blocks_on_measurement_quantity()
+                or self._blocks_on_limit_through_reading()):
             return False
         self._send(json.dumps(self._doc).encode("utf-8"))
         return True
@@ -4029,6 +4040,36 @@ class CalibrationPanel(QWidget):
         if (self._doc_uses_measurement_quantity(self._doc)
                 and not self._supports(CAL_MEASUREMENT_QUANTITY_CAPABILITY)):
             self._set_status(_MEASUREMENT_QUANTITY_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
+    @staticmethod
+    def _doc_uses_limit_through_reading(doc) -> bool:
+        """True when the chain has a stage limit AND some signal (or the operating-plane spec)
+        declares a NON-TRIVIAL limiting reading (a law / own / same+k). Then a stage limit is
+        gauged THROUGH that reading (agent >= 1.13.0); a ≤1.12.0 agent gauges it in the measured
+        quantity instead — under-applying the ceiling (over-power). A trivial "same as measured"
+        limiting doesn't change the gauging, so it doesn't need the newer agent."""
+        chain = (doc or {}).get("chain") or {}
+        if not (chain.get("limits") or []):
+            return False
+
+        def has_lim(holder):
+            return _reading_block((holder or {}).get("limiting")) is not None
+
+        planes = chain.get("planes") or {}
+        if any(isinstance(p, dict) and has_lim(p) for p in planes.values()):
+            return True
+        return any(isinstance(s, dict) and has_lim(s)
+                   for s in ((doc or {}).get("signals") or {}).values())
+
+    def _blocks_on_limit_through_reading(self) -> bool:
+        """Guard (safety): don't push a document whose stage limit is gauged through a limiting
+        reading to an agent that predates it — it would compare the dBm ceiling against the
+        measured quantity and resolve a ceiling that is too high (over-power)."""
+        if (self._doc_uses_limit_through_reading(self._doc)
+                and not self._supports(CAL_LIMIT_THROUGH_READING_CAPABILITY)):
+            self._set_status(_LIMIT_THROUGH_READING_NEEDS_NEWER, kind="error")
             return True
         return False
 
@@ -4758,10 +4799,12 @@ class CalibrationPanel(QWidget):
                     CalibrationPanel._clear_layout(child)
 
     def _populate_table(self, signals: dict, resolved: bool = True) -> None:
-        """Fill the resolved Signals table (Signal | Freq | --power range). Freq comes from
-        the document; the --power range from the resolver. `resolved=False` (the plain editor
-        view, before a Validate/Save) shows a "validate to resolve" placeholder for the
-        --power column instead. (Amplitude is fixed fleet-wide, so it is not shown.)"""
+        """Fill the resolved Signals table (Signal | Freq | Range | Shown in). Freq comes from
+        the document; the Range from the resolver, shown in the quantity picked by the per-row
+        "Shown in" dropdown (the measured quantity, or the dBm limiting quantity when the signal
+        declares a non-trivial limiting reading). `resolved=False` (the plain editor view, before
+        a Validate/Save) shows a "validate to resolve" placeholder instead. (Amplitude is fixed
+        fleet-wide, so it is not shown.)"""
         doc_sigs = (self._doc or {}).get("signals") or {}
         active = self._active_signal_ids()               # rows to tint (editor on screen)
         hi = QColor(Palette.ACCENT_SOFT)
@@ -4775,12 +4818,8 @@ class CalibrationPanel(QWidget):
                 freq = f"{float(f)/1e6:.2f}" if f else "at run"
             except (TypeError, ValueError):
                 freq = "at run"
-            rng = _fmt_range(info.get("min_power_dbm"), info.get("max_power_dbm"), "").strip()
-            if not resolved:                             # plain editor view, pre-validate
-                rng = "validate to resolve"
-            elif rng in ("—", "") and not f:
-                rng = "per frequency"
-            for c, text in enumerate([sid, freq, rng or "—"]):
+            views = self._quantity_views(info, resolved=resolved, has_freq=bool(f))
+            for c, text in enumerate([sid, freq, views[0][1]]):
                 item = QTableWidgetItem(str(text))
                 if c == 0:                               # the Signal cell: editable → rename
                     item.setData(Qt.ItemDataRole.UserRole, sid)   # its current id, for rename
@@ -4791,7 +4830,78 @@ class CalibrationPanel(QWidget):
                 if sid in active:                        # accent tint while its editor is open
                     item.setBackground(hi)
                 self._table.setItem(r, c, item)
+            # "Shown in": a dropdown of the quantities this signal's range can be read in. Its
+            # per-item data is the pre-formatted range string, so switching it just re-labels the
+            # Range cell (no recompute needed). Single-view rows (measured only, or pre-validate)
+            # get a disabled combo — the picker is only meaningful with a second quantity.
+            combo = QComboBox()
+            combo.setStyleSheet("font-size: 11px;")
+            for label, range_text in views:
+                combo.addItem(label, range_text)
+            combo.setEnabled(resolved and len(views) > 1)
+            combo.setToolTip("Read this signal's range in its measured quantity, or in the dBm "
+                             "quantity its safety limit is gauged in.")
+            combo.currentIndexChanged.connect(lambda _i, row=r: self._on_view_changed(row))
+            self._table.setCellWidget(r, 3, combo)
         self._table.blockSignals(False)
+
+    def _on_view_changed(self, row: int) -> None:
+        """The row's 'Shown in' dropdown changed → relabel its Range cell in the chosen
+        quantity (the range strings are pre-computed and stored as the combo items' data)."""
+        combo = self._table.cellWidget(row, 3)
+        item = self._table.item(row, 2)
+        if combo is not None and item is not None:
+            item.setText(str(combo.currentData() or "—"))
+
+    def _quantity_views(self, info: dict, *, resolved: bool, has_freq: bool) -> list:
+        """The quantities a signal's range can be shown in, as ``[(label, range_text), …]`` —
+        the first is the default (the measured/operating quantity). A non-trivial LIMITING
+        reading adds a second view in dBm (the quantity the safety ceiling is gauged in): a
+        law/same shifts the measured range by the reading's representative delta; an own reading
+        reads its separate dBm curve at the gain bounds. Ranges are indicative (folded at the
+        representative frequency/parameter), enough to see what to expect."""
+        if not resolved:
+            return [("—", "validate to resolve")]
+        art = info.get("artifact") or {}
+        op_unit = (art.get("operating_unit") or "").strip() or "dBm"
+        op_q = (info.get("quantity") or art.get("quantity") or "").strip()
+        meas_label = f"{op_q} [{op_unit}]" if op_q and op_q.lower() != "power" else op_unit
+        lo, hi = info.get("min_power_dbm"), info.get("max_power_dbm")
+        if lo is None or hi is None:
+            return [(meas_label, "per frequency" if not has_freq else "—")]
+        views = [(meas_label, _fmt_range(lo, hi, op_unit).strip() or "—")]
+        lim_view = self._limiting_view((art.get("readings") or {}).get("limiting"), lo, hi, info)
+        if lim_view is not None:
+            views.append(lim_view)
+        return views
+
+    @staticmethod
+    def _limiting_view(lim, lo: float, hi: float, info: dict):
+        """A ``(label, range_text)`` for the LIMITING (dBm) quantity, or None when the limiting
+        reading is trivial (same as measured). A law/same shifts the measured range by the
+        reading's representative delta; an own reading reads its published dBm curve at the
+        signal's gain bounds."""
+        block = _reading_block(lim)                      # None ⇒ trivial (same, no k)
+        if block is None:
+            return None
+        try:
+            from state.power_law import parse_bridge
+            from state.power_fold import _interp
+            bridge = parse_bridge(block)
+        except Exception:                                # noqa: BLE001 — never break the table
+            return None
+        if bridge.is_own:
+            curve = (lim or {}).get("anchor_curve") or []
+            gmin, gmax = info.get("min_gain_db"), info.get("max_gain_db")
+            if not curve or gmin is None or gmax is None:
+                return None
+            gs = [pt[0] for pt in curve]
+            ps = [pt[1] for pt in curve]
+            llo, lhi = _interp(gmin, gs, ps), _interp(gmax, gs, ps)
+        else:
+            d = bridge.rep_delta_db()
+            llo, lhi = lo + d, hi + d
+        return ("limiting [dBm]", _fmt_range(llo, lhi, "dBm").strip() or "—")
 
     def _on_signal_item_changed(self, item) -> None:
         """The Signal cell was edited in place → rename the signal. The item's stored id is

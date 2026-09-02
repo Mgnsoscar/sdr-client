@@ -92,6 +92,50 @@ def test_bridge_law_on_missing_param_folds_at_rep_not_crash():
     assert "max_power_dbm" in refold_bounds(bounds, 1.5e9, params={"bw": 20.0})
 
 
+def test_stage_limit_via_limiting_refolds_at_parameter():
+    # A STAGE limit (chain.limits) gauged through a PARAM-KEYED limiting law is published as a
+    # via_limiting freq_dependent_limits entry: the consumer folds the limiting delta at the live
+    # parameter before inverting on the shared anchor (mirrors calkit + the agent resolver;
+    # tracks sdr-agent/tests/test_calibration_limit_reading.py). Density anchor −30..4; limiting
+    # = density + 10·log10(bw); a 60 dBm total stage ceiling.
+    art = {
+        "anchor_curve": [[40.0, -30.0], [74.0, 4.0]],
+        "passive_hops": [],
+        "gain_ceiling_db": 74.0,
+        "min_gain_db": 40.0,
+        "readings": {"reported": {"kind": "same", "unit": "dBm/Hz"},
+                     "limiting": {"kind": "law", "law": FBW}},
+        "freq_dependent_limits": [
+            {"plane": "sdr_output", "max_dbm": 60.0, "reason": "amp",
+             "delta_db_by_freq": [[0.0, 0.0]], "via_limiting": True}],
+    }
+    fold = PowerFold.from_artifact(art)
+    assert fold.param_dependent                    # the ceiling moves with bw
+    c_narrow = fold._ceiling(None, {"bw": 1e6})    # target 60 − 60 = 0 → gain 70
+    c_wide = fold._ceiling(None, {"bw": 1e7})      # target 60 − 70 = −10 → gain 60
+    assert c_narrow == pytest.approx(70.0)
+    assert c_wide == pytest.approx(60.0)
+
+
+def test_stage_limit_via_own_curve_inverts_against_it():
+    # An OWN limiting reading publishes the limit's own dBm curve as its anchor_curve (no
+    # via_limiting flag, no Δlim): the limit inverts directly against that curve.
+    art = {
+        "anchor_curve": [[40.0, -30.0], [74.0, 4.0]],   # measured density
+        "passive_hops": [],
+        "gain_ceiling_db": 74.0,
+        "min_gain_db": 40.0,
+        "readings": {"limiting": {"kind": "own"}},
+        "freq_dependent_limits": [
+            {"plane": "sdr_output", "max_dbm": 4.0, "reason": "amp",
+             "delta_db_by_freq": [[0.0, 0.0]],
+             "anchor_curve": [[40.0, -20.0], [74.0, 14.0]]}],   # own dBm curve, slope-1
+    }
+    fold = PowerFold.from_artifact(art)
+    # 4 dBm on the own curve → gain 40 + (4 − (−20)) = 64
+    assert fold._ceiling(None) == pytest.approx(64.0)
+
+
 def test_clamp_warning_on_parameter():
     art = _artifact(reported={"kind": "law", "unit": "dBm", "law": FBW})
     # at bw=1e6 the max reported power is 64 dBm; asking 70 → clamp warning
