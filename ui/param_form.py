@@ -1311,7 +1311,9 @@ class ParamForm(QWidget):
         if (self._fold_freq_now() == self._folded_at
                 and self._live_params() == self._folded_params):
             return
-        self._do_refold()
+        # A live frequency/bandwidth change keeps the number the operator set in their selected
+        # --power unit (density or total), re-mapping the base quantity behind it.
+        self._do_refold(hold_display=True)
 
     def _maybe_refold_after_load(self) -> None:
         """After a programmatic prefill (set_values), re-fold once if the loaded frequency or
@@ -1328,19 +1330,59 @@ class ParamForm(QWidget):
             return
         self._do_refold()
 
-    def _do_refold(self) -> None:
+    def _do_refold(self, hold_display: bool = False) -> None:
         """Re-render folding at the frequency and bridge parameters now in effect, preserving
-        the other field values (the same rebuild-and-restore the power-mode toggle uses)."""
+        the other field values (the same rebuild-and-restore the power-mode toggle uses).
+
+        ``hold_display``: on a bandwidth / frequency change, keep the --power number the
+        operator sees in their SELECTED unit (clamped to the new range) instead of holding the
+        base quantity — so entering −30 dBm/MHz and then widening the sweep leaves it at −30,
+        re-mapping the commanded output. A unit swap and a programmatic load leave it False, so
+        the base quantity is converted into the (new) display unit instead."""
         self._render_freq = self._fold_freq_now()      # capture BEFORE the widgets clear
         self._render_params = self._live_params()
         self._refolding = True
         try:
+            # Hold the displayed value only for a --power field that offers unit views (the new
+            # dual-unit feature); a plain calibrated field keeps its existing hold-the-base
+            # behaviour untouched.
+            disp = (self._current_power_display()
+                    if hold_display and self._power_views() else None)
             keep = self.build_args()
             self._render()
             self._set_values(keep)
+            if disp is not None:
+                self._restore_power_display(disp)
         finally:
             self._refolding = False
         self.changed.emit()
+
+    def _current_power_display(self) -> Optional[float]:
+        """The --power field's current value in its SELECTED display unit, or None when the
+        field is absent/blank."""
+        if not self._power_dest or self._power_dest not in self._widgets:
+            return None
+        w = self._widgets[self._power_dest][0]
+        if isinstance(w, (QSpinBox, QDoubleSpinBox)):
+            return float(w.value())
+        return num_or_none(w.text())
+
+    def _restore_power_display(self, value: float) -> None:
+        """Set the (re-rendered) --power field to ``value`` in its selected display unit,
+        clamped to the new range so a held value never lands outside what the unit can deliver."""
+        if value is None or not self._power_dest or self._power_dest not in self._widgets:
+            return
+        w, spec = self._widgets[self._power_dest]
+        v = float(value)
+        lo, hi = spec.get("min"), spec.get("max")
+        if lo is not None:
+            v = max(v, float(lo))
+        if hi is not None:
+            v = min(v, float(hi))
+        if isinstance(w, (QSpinBox, QDoubleSpinBox)):
+            w.setValue(v)
+        else:
+            w.setText(fmt_value(round(v, 4)))
 
     def _update_amplitude_warning(self) -> None:
         """Show a caption when the baseband amplitude differs from the value the

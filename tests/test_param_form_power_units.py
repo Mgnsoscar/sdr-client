@@ -96,15 +96,15 @@ def _select(combo, view_id):
 
 def test_density_base_shows_total_companion_tracking_bw():
     f = _form(_density_reported(), -26.76, -16.71, "dBm/MHz")
-    f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-16.71"])
+    f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-22"])   # in range at both bw
     _app.processEvents()
-    # density -16.71 dBm/MHz at bw 10 -> total -6.71 dBm
-    assert any("−6.71 dBm" in t and "Full-bandwidth" in t for t in _companions(f))
+    # density -22 dBm/MHz at bw 10 -> total -22 + 10*log10(10) = -12 dBm
+    assert any("−12 dBm" in t and "Full-bandwidth" in t for t in _companions(f))
     f._widgets["bw"][0].setValue(20.0)
     f._widgets["bw"][0].editingFinished.emit()
     _app.processEvents()
-    # at bw 20 the same commanded density is +3.01 dB more total
-    assert any("−3.7 dBm" in t for t in _companions(f))
+    # density held at -22 (selected unit stays put); total companion = -22 + 10*log10(20) = -8.99
+    assert any("−8.99 dBm" in t for t in _companions(f))
 
 
 def test_total_base_shows_density_companion_tracking_bw():
@@ -159,6 +159,61 @@ def test_editing_in_total_unit_sends_converted_base_value():
     f._widgets["power"][0].setText("-6.71")
     _app.processEvents()
     assert "-16.71" in f.build_args()
+
+
+# ── hold the SELECTED unit's value across a bandwidth change ───────────────────
+
+def _power_value(f):
+    w = f._widgets["power"][0]           # re-fetch: a re-fold rebuilds the widget
+    return float(w.value()) if hasattr(w, "value") else float(w.text())
+
+
+def _set_power(f, val):
+    w = f._widgets["power"][0]
+    if hasattr(w, "value"):
+        w.setValue(float(val))
+    else:
+        w.setText(str(val))
+    _app.processEvents()
+
+
+def _set_bw(f, b):
+    w = f._widgets["bw"][0]
+    w.setValue(float(b))
+    w.editingFinished.emit()
+    _app.processEvents()
+
+
+def test_density_value_held_across_bandwidth_change():
+    f = _form(_density_reported(), -26.76, -16.71, "dBm/MHz")
+    f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-20"])
+    _app.processEvents()
+    _set_bw(f, 20)
+    assert _power_value(f) == pytest.approx(-20.0, abs=1e-3)   # dBm/MHz stays put
+    assert "-20" in f.build_args()                            # base density held too
+
+
+def test_total_value_held_across_bandwidth_change():
+    f = _form(_density_reported(), -26.76, -16.71, "dBm/MHz")
+    f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-20"])
+    _app.processEvents()
+    _select(_view_combo(f), "fbw_power")     # control in total power
+    _app.processEvents()
+    _set_power(f, -10.0)
+    _set_bw(f, 20)
+    assert _power_value(f) == pytest.approx(-10.0, abs=1e-3)   # total (bw-invariant) stays put
+    # base density re-maps: total -10 at bw 20 → density -10 - 10*log10(20) = -23.01
+    args = f.build_args()
+    dens = float(args[args.index("--power") + 1])
+    assert dens == pytest.approx(-23.01, abs=1e-2)
+
+
+def test_held_value_clamps_to_new_range():
+    f = _form(_density_reported(), -26.76, -16.71, "dBm/MHz")
+    f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-16.71"])   # density at max
+    _app.processEvents()
+    _set_bw(f, 20)   # density range drops to [-29.77, -19.72]; -16.71 is now above max
+    assert _power_value(f) == pytest.approx(-19.72, abs=1e-2)
 
 
 def test_no_laws_means_no_dropdown_or_companion():
