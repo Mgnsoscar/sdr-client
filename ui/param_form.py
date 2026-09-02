@@ -40,6 +40,7 @@ from .param_widgets import (
     field_name_label, unit_chip,
 )
 from state.power_fold import PowerFold, refold_bounds
+from state.power_law import parse_law
 
 
 # Scoped styling for the value inputs, so a field looks like the mockup's recessed
@@ -675,6 +676,7 @@ class ParamForm(QWidget):
         # Power mode (relative gain vs absolute dBm) — see _compute_power_modes.
         self._base_specs: List[dict] = []
         self._cal_bounds = None
+        self._power_laws: List[dict] = []       # script CAL_POWER_LAWS (companion --power units)
         self._cal_freq_param = None             # dest of the freq field (CAL_FREQ_PARAM)
         self._cal_freq_default = None           # freq to fold at when the field isn't set
         self._folded_at = None                  # freq the power/gain bounds were last folded at
@@ -708,7 +710,8 @@ class ParamForm(QWidget):
     def set_params(self, specs: List[dict], selectable: bool = False,
                    cal_bounds=None, absolute_allowed: bool = False,
                    default_power_mode=None, hint_bounds=None, caution=None,
-                   cal_freq_param=None, cal_freq_default=None) -> None:
+                   cal_freq_param=None, cal_freq_default=None,
+                   power_laws=None) -> None:
         """Rebuild the form for a parameter schema (clears existing widgets).
 
         selectable=True prefixes each row with an include checkbox: values() then
@@ -723,6 +726,12 @@ class ParamForm(QWidget):
         self._base_specs = list(specs)
         self._selectable = selectable
         self._cal_bounds = cal_bounds
+        # Power-quantity conversion laws the SCRIPT declares (CAL_POWER_LAWS, surfaced by the
+        # agent as calibration_power_laws). A calibrated --power field whose signal declares a
+        # law that is a DIFFERENT reading than the operator's chosen --power quantity shows that
+        # reading as a live companion read-out — e.g. --power in spectral density (dBm/MHz) with
+        # the full-bandwidth power (dBm) shown alongside, both tracking the live sweep bandwidth.
+        self._power_laws = list(power_laws or [])
         self._cal_freq_param = cal_freq_param
         # A carried step frequency arrives in the freq field's own unit (e.g. MHz); fold
         # frequencies are Hz internally, so scale it once here (needs _base_specs +
@@ -950,7 +959,57 @@ class ParamForm(QWidget):
             warn = self._warn_line()
             v.addWidget(warn)
             self._wire_rail(widget, spec, rail, chip, warn)
+        if spec.get("snap_role") == "power" and isinstance(
+                widget, (QSpinBox, QDoubleSpinBox, QLineEdit)):
+            self._add_power_companions(v, widget)
         return frame
+
+    def _add_power_companions(self, layout, widget) -> None:
+        """Under a calibrated --power field, show each companion reading (a declared power law
+        that is a different quantity than --power) as a live read-out that tracks both the value
+        and the sweep bandwidth — e.g. --power set as spectral density (dBm/MHz) with the
+        full-bandwidth power (dBm) shown alongside. --power itself stays the operator's chosen
+        quantity; these are display only. Every reading is ``measured + law_delta(params)``, so
+        a companion value is the --power value plus the gap between the two laws' deltas at the
+        live parameter values (the same sweep bandwidth the range folds at)."""
+        companions = self._power_companion_laws()
+        if not companions:
+            return
+        params = self._render_params if self._render_params is not None else self._live_params()
+        base_delta = self._reported_delta(params)
+        rows = []
+        for name, unit, law in companions:
+            lbl = QLabel()
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(f"font-size: 11px; color: {Palette.ONLINE}; padding: 1px 2px 0;")
+            layout.addWidget(lbl)
+            rows.append((lbl, name, unit, law))
+
+        def _current() -> Optional[float]:
+            # --power is a bounded spinbox when it has a default, else a free text box; read
+            # either as a number (None while the box is empty / mid-edit).
+            if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+                return float(widget.value())
+            return num_or_none(widget.text())
+
+        def _update(*_):
+            pv = _current()
+            for lbl, name, unit, law in rows:
+                if pv is None:
+                    lbl.setText(f"= — {unit}  ·  {name}")
+                    continue
+                try:
+                    d = law.delta_db(params) if params else law.rep_delta_db()
+                except (ValueError, TypeError):
+                    d = law.rep_delta_db()
+                cv = pv + (d - base_delta)
+                lbl.setText(f"= {self._fmt_bound(round(cv, 2))} {unit}  ·  {name}")
+
+        if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+            widget.valueChanged.connect(_update)
+        else:
+            widget.textChanged.connect(_update)
+        _update()
 
     def _warn_line(self) -> QLabel:
         """A hidden clamp warning; _wire_rail fills in the message and shows it when a
@@ -1036,12 +1095,16 @@ class ParamForm(QWidget):
         return bool(self._bridge_param_dests())
 
     def _bridge_param_dests(self) -> List[str]:
-        """The dests of the fields a reported/limiting bridge keys on (present in the schema)."""
+        """The dests of the fields a reported/limiting bridge — or a companion --power law —
+        keys on (present in the schema). Companion laws count too: a companion read-out that
+        keys on --bw must re-fold (re-render) when --bw changes even if the operator's own
+        --power quantity does not (e.g. --power in bandwidth-invariant total power, with a
+        spectral-density companion that tracks the sweep)."""
         fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
-        if fold is None:
-            return []
-        return [p for p in fold.keyed_params()
-                if any(s.get("dest") == p for s in self._base_specs)]
+        keyed = set(fold.keyed_params()) if fold is not None else set()
+        for _name, _unit, law in self._power_companion_laws():
+            keyed.update(law.params())
+        return [p for p in keyed if any(s.get("dest") == p for s in self._base_specs)]
 
     def _live_params(self) -> Optional[dict]:
         """The current values of the bridge's keyed parameters, or None when they can't all be
@@ -1061,6 +1124,39 @@ class ParamForm(QWidget):
                 return None
             out[d] = float(v)
         return out
+
+    # ── Companion --power readings (script CAL_POWER_LAWS) ─────────────────────────
+    def _reported_base_id(self) -> Optional[str]:
+        """The law id of the operator's chosen --power quantity (the embedded reported
+        reading), or None when --power is the measured quantity / a plain `same` bridge."""
+        rep = ((self._cal_bounds or {}).get("artifact") or {}).get("readings", {}).get("reported") or {}
+        return (rep.get("law") or {}).get("id") if rep.get("kind") == "law" else None
+
+    def _power_companion_laws(self) -> List[tuple]:
+        """``[(name, unit, Law)]`` for each declared power law that is a DIFFERENT reading
+        than the operator's --power quantity — rendered as a live read-out under --power. Every
+        reading is ``measured + law_delta(params)``, so a companion's value is just the --power
+        value plus the (parameter-dependent) gap between the two laws' deltas."""
+        base_id = self._reported_base_id()
+        out: List[tuple] = []
+        for spec in self._power_laws:
+            try:
+                law = parse_law(spec)
+            except (ValueError, TypeError):
+                continue
+            if law.id == base_id:
+                continue
+            unit = "dBm" if law.out_fam == "abs" else "dBm/MHz"
+            out.append((spec.get("name", law.id), unit, law))
+        return out
+
+    def _reported_delta(self, params: Optional[dict]) -> float:
+        """The dB the embedded --power (reported) reading adds to the measured value at
+        ``params`` — the baseline a companion law's delta is measured against."""
+        fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
+        if fold is None:
+            return 0.0
+        return fold._reported_shift(params)
 
     def _power_snappers(self):
         """``(snap, quantize_up, quantize_down)`` for the calibrated --power field, bound to
