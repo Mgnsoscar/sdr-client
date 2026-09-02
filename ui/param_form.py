@@ -697,6 +697,8 @@ class ParamForm(QWidget):
         self._refold_timer.setSingleShot(True)
         self._refold_timer.setInterval(90)
         self._refold_timer.timeout.connect(self._refold_timer_fire)
+        self._pw_companion_update = None        # refreshes the --power companion read-outs in
+                                                # place (set per render when the field has views)
         self._hint_bounds = None
         self._caution = None
         self._cal_amplitude = None              # amplitude the calibration curve assumes
@@ -778,6 +780,7 @@ class ParamForm(QWidget):
         self._widgets.clear()
         self._checks.clear()
         self._derived.clear()
+        self._pw_companion_update = None        # re-set by _add_power_unit_ui if it runs
 
         # Settle the --power unit view for this render: which quantity the field is controlled
         # in (self._power_view) and the dB it adds over the base (sent) quantity at the folded
@@ -998,8 +1001,6 @@ class ParamForm(QWidget):
         if not views:
             return
         selected = self._selected_view()
-        params = self._render_params if self._render_params is not None else self._live_params()
-        s_delta = self._view_delta(selected, params)
 
         row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(8)
         lab = QLabel("control in")
@@ -1029,14 +1030,24 @@ class ParamForm(QWidget):
             rows.append((lbl, v))
 
         def _update(*_):
+            # Recompute at the LIVE bridge parameters, not the render-time capture, so the
+            # read-outs track a bridge parameter (e.g. --bw) continuously as it is dragged or
+            # typed — the same way they already track the --power value being dragged. Skip while
+            # a re-render restores values field-by-field (the power field is set before --bw, so
+            # a mid-restore read would use a stale bandwidth); the caller fires it once at the end.
+            if self._loading or self._refolding:
+                return
+            lp = self._live_params()
+            s_d = self._view_delta(selected, lp)
             pv = _current()
             for lbl, v in rows:
                 if pv is None:
                     lbl.setText(f"= — {v['unit']}  ·  {v['name']}")
                     continue
-                cv = pv + (self._view_delta(v, params) - s_delta)
+                cv = pv + (self._view_delta(v, lp) - s_d)
                 lbl.setText(f"= {self._fmt_bound(round(cv, 2))} {v['unit']}  ·  {v['name']}")
 
+        self._pw_companion_update = _update
         if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
             widget.valueChanged.connect(_update)
         else:
@@ -1299,6 +1310,21 @@ class ParamForm(QWidget):
             return
         self._refold_timer.start()
 
+    def _connect_companion_live(self, w) -> None:
+        """Refresh the --power companion read-outs on EVERY live change of a bridge-keyed field,
+        typing included — a cheap in-place label update (no re-render), so 'the other quantity'
+        tracks the parameter continuously as it is dragged or typed, like it already tracks the
+        --power value. The range re-fold (rail/limit) still settles via the debounced path."""
+        if isinstance(w, (QSpinBox, QDoubleSpinBox)):
+            w.valueChanged.connect(self._live_companion_refresh)
+        elif isinstance(w, QLineEdit):
+            w.textChanged.connect(self._live_companion_refresh)
+
+    def _live_companion_refresh(self, *_) -> None:
+        if self._refolding or self._loading or self._pw_companion_update is None:
+            return
+        self._pw_companion_update()
+
     def _refold_timer_fire(self) -> None:
         """Fire the debounced re-fold — but not while a mouse button is held: a rail DRAG must
         re-fold once when released, never mid-drag (which would destroy the rail being dragged)."""
@@ -1318,6 +1344,7 @@ class ParamForm(QWidget):
             if pdest in self._widgets:
                 self._connect_commit(self._widgets[pdest][0], self._on_freq_changed)
                 self._connect_live(self._widgets[pdest][0])
+                self._connect_companion_live(self._widgets[pdest][0])
                 if self._selectable and pdest in self._checks:
                     self._checks[pdest].toggled.connect(self._on_freq_changed)
         if not self._is_freq_dependent():
@@ -1380,6 +1407,11 @@ class ParamForm(QWidget):
         re-mapping the commanded output. A unit swap and a programmatic load leave it False, so
         the base quantity is converted into the (new) display unit instead."""
         self._refold_timer.stop()                      # a queued live re-fold is now redundant
+        # Hold the viewport where it is across the rebuild: clearing every field frame collapses
+        # the form to ~0 height for a tick, which makes the enclosing scroll area clamp (and
+        # jump) its scrollbar. Capture the position and put it back once the new frames are in.
+        vbar = self._enclosing_vscrollbar()
+        scroll_pos = vbar.value() if vbar is not None else None
         self._render_freq = self._fold_freq_now()      # capture BEFORE the widgets clear
         self._render_params = self._live_params()
         self._refolding = True
@@ -1401,7 +1433,22 @@ class ParamForm(QWidget):
         # instead of only after the viewport is nudged (a stale-geometry scroll artefact).
         self._body.activate()
         self.updateGeometry()
+        if vbar is not None and scroll_pos is not None:
+            vbar.setValue(scroll_pos)               # now, and again after the scroll area re-lays
+            QTimer.singleShot(0, lambda v=vbar, p=scroll_pos: v.setValue(p))
+        if self._pw_companion_update is not None:   # values are all restored now → final read-out
+            self._pw_companion_update()
         self.changed.emit()
+
+    def _enclosing_vscrollbar(self):
+        """The vertical scrollbar of the nearest scroll area this form sits in, or None when it
+        isn't scrolled — used to hold the viewport steady across a re-render."""
+        w = self.parentWidget()
+        while w is not None:
+            if isinstance(w, QAbstractScrollArea):
+                return w.verticalScrollBar()
+            w = w.parentWidget()
+        return None
 
     def _current_power_display(self) -> Optional[float]:
         """The --power field's current value in its SELECTED display unit, or None when the
@@ -1839,6 +1886,8 @@ class ParamForm(QWidget):
         finally:
             self._loading = False
         self._maybe_refold_after_load()
+        if self._pw_companion_update is not None:   # settle the read-outs at the loaded values
+            self._pw_companion_update()
         return extra
 
     def _set_values(self, args: List[str]) -> List[str]:

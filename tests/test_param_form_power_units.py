@@ -121,6 +121,19 @@ def test_total_base_shows_density_companion_tracking_bw():
     assert any("−19.72 dBm/MHz" in t for t in _companions(f))
 
 
+def test_companion_read_outs_track_bw_live_without_a_commit():
+    # A drag/keystroke on --bw updates the companion read-outs continuously — no editingFinished
+    # commit and no re-render — the same live feedback the --power value already gets.
+    f = _form(_total_reported(), -16.76, -6.71, "dBm")
+    f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-6.71"])
+    _app.processEvents()
+    assert any("−16.71 dBm/MHz" in t for t in _companions(f))
+    f._widgets["bw"][0].setValue(20.0)          # ← what a rail drag / keystroke does; no commit
+    assert any("−19.72 dBm/MHz" in t for t in _companions(f))
+    f._widgets["bw"][0].setValue(40.0)
+    assert any("−22.73 dBm/MHz" in t for t in _companions(f))
+
+
 # ── control-unit dropdown ─────────────────────────────────────────────────────
 
 def test_dropdown_lists_both_views():
