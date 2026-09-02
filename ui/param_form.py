@@ -27,7 +27,7 @@ import math
 import shlex
 from typing import Any, Dict, List, Optional
 
-from PyQt6.QtCore import QEvent, QLocale, QObject, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QLocale, QObject, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractScrollArea, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
     QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QSizePolicy, QSpinBox,
@@ -690,6 +690,13 @@ class ParamForm(QWidget):
         self._render_params = None              # bridge params to fold at for this render
         self._refolding = False                 # re-entrancy guard for the re-fold re-render
         self._loading = False                   # a programmatic prefill (set_values) is running
+        # Debounced re-fold for a LIVE (non-typed) change to a fold input — a drag on a
+        # bridge-keyed slider (e.g. a chirp's --bw). Coalesces a drag's stream of updates and
+        # fires once it settles, so --power re-folds without waiting for a click elsewhere.
+        self._refold_timer = QTimer(self)
+        self._refold_timer.setSingleShot(True)
+        self._refold_timer.setInterval(90)
+        self._refold_timer.timeout.connect(self._refold_timer_fire)
         self._hint_bounds = None
         self._caution = None
         self._cal_amplitude = None              # amplitude the calibration curve assumes
@@ -1272,15 +1279,45 @@ class ParamForm(QWidget):
         elif isinstance(w, (QSpinBox, QDoubleSpinBox, QLineEdit)):
             w.editingFinished.connect(cb)
 
+    def _connect_live(self, w) -> None:
+        """ALSO re-fold on a live value change that ISN'T typing — a rail drag or an arrow/scroll
+        step sets the widget value without giving it keyboard focus, so it schedules a debounced
+        re-fold (a keystroke keeps focus and is gated out in _schedule_live_refold, left to
+        _connect_commit). Lets --power track a bridge slider (e.g. --bw) as it moves, not only
+        after a click elsewhere."""
+        if isinstance(w, (QSpinBox, QDoubleSpinBox)):
+            w.valueChanged.connect(lambda *_a, _w=w: self._schedule_live_refold(_w))
+        elif isinstance(w, QLineEdit):
+            w.textChanged.connect(lambda *_a, _w=w: self._schedule_live_refold(_w))
+
+    def _schedule_live_refold(self, widget) -> None:
+        """Queue a debounced re-fold for a live change, unless it's a keystroke (the widget has
+        focus) — those commit on Enter/focus-out so a re-render never steals focus mid-typing."""
+        if self._refolding or self._loading:
+            return
+        if widget is not None and widget.hasFocus():
+            return
+        self._refold_timer.start()
+
+    def _refold_timer_fire(self) -> None:
+        """Fire the debounced re-fold — but not while a mouse button is held: a rail DRAG must
+        re-fold once when released, never mid-drag (which would destroy the rail being dragged)."""
+        if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
+            self._refold_timer.start()
+            return
+        self._on_freq_changed()
+
     def _wire_freq_refold(self) -> None:
         """Connect the fold inputs' change signals so the power/gain bounds re-fold: the
         frequency source (frequency-dependent chains) and any field a reported/limiting bridge
         keys on (parameter-dependent chains, e.g. a chirp's --bw). When the frequency source is
         a derived midpoint (start/stop mode), its input fields drive the re-fold."""
-        # Bridge-keyed parameter fields (e.g. --bw): re-fold when one is committed.
+        # Bridge-keyed parameter fields (e.g. --bw): re-fold when one is committed AND live
+        # (a drag on its slider), so --power tracks it as it moves.
         for pdest in self._bridge_param_dests():
             if pdest in self._widgets:
                 self._connect_commit(self._widgets[pdest][0], self._on_freq_changed)
+                self._connect_live(self._widgets[pdest][0])
                 if self._selectable and pdest in self._checks:
                     self._checks[pdest].toggled.connect(self._on_freq_changed)
         if not self._is_freq_dependent():
@@ -1292,10 +1329,12 @@ class ParamForm(QWidget):
             for src in self._formula_sources(self._derived[dest]["spec"]):
                 if src in self._widgets:
                     self._connect_commit(self._widgets[src][0], self._on_freq_changed)
+                    self._connect_live(self._widgets[src][0])
             return
         if dest not in self._widgets:
             return
         self._connect_commit(self._widgets[dest][0], self._on_freq_changed)
+        self._connect_live(self._widgets[dest][0])
         # In tune (selectable) mode, ticking the freq param on/off changes whether it
         # overrides the carried-forward frequency, so re-fold on that too.
         if self._selectable and dest in self._checks:
@@ -1340,6 +1379,7 @@ class ParamForm(QWidget):
         base quantity — so entering −30 dBm/MHz and then widening the sweep leaves it at −30,
         re-mapping the commanded output. A unit swap and a programmatic load leave it False, so
         the base quantity is converted into the (new) display unit instead."""
+        self._refold_timer.stop()                      # a queued live re-fold is now redundant
         self._render_freq = self._fold_freq_now()      # capture BEFORE the widgets clear
         self._render_params = self._live_params()
         self._refolding = True
@@ -1356,6 +1396,11 @@ class ParamForm(QWidget):
                 self._restore_power_display(disp)
         finally:
             self._refolding = False
+        # The field frames were just swapped out and back in; re-measure now so the enclosing
+        # scroll area reflows and the refreshed range/value/read-outs are visible immediately,
+        # instead of only after the viewport is nudged (a stale-geometry scroll artefact).
+        self._body.activate()
+        self.updateGeometry()
         self.changed.emit()
 
     def _current_power_display(self) -> Optional[float]:

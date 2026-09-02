@@ -94,3 +94,43 @@ def test_changing_bandwidth_refolds_the_power_range():
     f._widgets["bw"][0].setCurrentText("10")
     f._on_freq_changed()
     assert _power_max(f) == pytest.approx(14.0, abs=1e-6)
+
+
+def _specs_slider_bw():
+    # --bw as a plain bounded number (no presets) → rendered as a spinbox + range rail.
+    specs = _specs()
+    specs[0] = {"dest": "bw", "flags": ["-Sweep-BW", "--bw"], "type": "float", "unit": "MHz",
+                "min": 1.0, "max": 100.0, "default": 10.0, "step": 1.0}
+    return specs
+
+
+def test_bandwidth_slider_refolds_power_live_without_a_commit():
+    # A drag on the --bw slider sets its spinbox value WITHOUT keyboard focus; that schedules a
+    # debounced re-fold that fires once the drag settles — so --power re-folds without the
+    # operator having to click elsewhere (only editingFinished did that before).
+    from PyQt6.QtWidgets import QDoubleSpinBox
+    f = ParamForm()
+    f.set_params(_specs_slider_bw(), cal_bounds=_bounds(), absolute_allowed=True,
+                 default_power_mode="absolute")
+    bw = f._widgets["bw"][0]
+    assert isinstance(bw, QDoubleSpinBox)          # a slider-backed spinbox, not a preset combo
+    assert _power_max(f) == pytest.approx(14.0, abs=1e-6)
+    assert not bw.hasFocus()                       # a rail drag doesn't focus the spinbox
+    bw.setValue(100.0)                             # ← what RangeRail.valueChanged does on a drag
+    assert f._refold_timer.isActive()              # a live change was queued (not fired per-tick)
+    f._refold_timer_fire()                         # the drag settled (no mouse button held)
+    assert _power_max(f) == pytest.approx(24.0, abs=1e-6)   # re-folded live, no commit needed
+
+
+def test_typing_bandwidth_does_not_refold_until_commit():
+    # A keystroke keeps focus on the field, so the live path is gated out (a mid-typing re-render
+    # would steal focus); the commit path (editingFinished) still handles it.
+    f = ParamForm()
+    f.set_params(_specs_slider_bw(), cal_bounds=_bounds(), absolute_allowed=True,
+                 default_power_mode="absolute")
+    bw = f._widgets["bw"][0]
+    bw.setFocus()
+    if bw.hasFocus():                              # offscreen may not grant focus; guard it
+        f._refold_timer.stop()
+        f._schedule_live_refold(bw)
+        assert not f._refold_timer.isActive()      # typing does not schedule a live re-fold
