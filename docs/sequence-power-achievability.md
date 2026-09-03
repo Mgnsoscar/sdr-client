@@ -1,8 +1,9 @@
 # Sequence power achievability + power control in step/ramp editors
 
-**Status:** Surface A (temporal achievability pass), Surface B (bridge `params` in the ramp's
-per-step fold) and Surface C (the multi-quantity card in run/tune steps) **DONE + tested**.
-Design locked. Optional follow-ups (§9) remain.
+**Status:** Surface A (temporal achievability pass — ramp points, HELD power, and directly-SET
+power steps, with a proactive params prefetch), Surface B (bridge `params` in the ramp's per-step
+fold) and Surface C (the multi-quantity card in run/tune steps) **DONE + tested**. Design locked.
+Only the bridge-param-ramp min/max-over-sweep case (§8) remains deferred.
 **Branch:** `claude/sequence-power-achievability` (exists in all three repos; work is
 expected to be **client-only** unless a `paramkit` tweak proves necessary).
 **Owner context:** continues the calibrated `--power` work whose prior phases are recorded in
@@ -95,14 +96,27 @@ range folds that currently omit them.
 
 Implemented in `ui/timeline_model.py` (pure; next to `sequence_effective_values`) as
 `achievability_warnings(items, resolve)`, wired into `TimelineEditor`. What follows is the design
-it was built to; the code matches it. **Step 4 (held-power re-check) is now implemented** (added
-after the owner reported that a fixed spectral density set by one tune wasn't warned when a later
-tune doubled the sweep bandwidth): the walk tracks the standing `--power` and, on any freq/bridge-
-param event that does NOT itself set `--power`, re-folds and flags the transition INTO violation
-(`_held_power_issue`, `points=[(-1, level, fire_s)]`). Only the **ramped** bridge-param case (a
-min/max-over-sweep check) remains deferred (§8). Params resolution is **best-effort**: a task whose
-script params aren't cached yet (no step/ramp dialog opened for it) is skipped and picked up on the
-next edit — a proactive prefetch of sequence-task params is a possible follow-up.
+it was built to; the code matches it. **Step 4 (held-power re-check) is implemented** (added after
+the owner reported that a fixed spectral density set by one tune wasn't warned when a later tune
+doubled the sweep bandwidth): the walk tracks the standing `--power` and, on any freq/bridge-param
+event that does NOT itself set `--power`, re-folds and flags the transition INTO violation
+(`_held_power_issue`, `points=[(-1, level, fire_s)]`).
+
+**Directly-SET power steps are now flagged too** (added after the owner reported that RE-setting the
+density to bw-10's max in a still-later tune — once an earlier step had already widened the sweep to
+20 MHz — also went unwarned). The walk's directly-set branch (a tune/run/baseline event that
+commands `--power`) folds bounds at that moment's operating point and emits a `_set_power_issue`
+when the command clamps — the operator's own explicit command, distinct from a held level pushed
+out of range by a later change. So every commanded power (ramp point, held level, or explicit set)
+is checked against the achievable range at its fire time. Only the **ramped** bridge-param case (a
+min/max-over-sweep check) remains deferred (§8).
+
+Params resolution is no longer only best-effort-on-next-edit: `_update_achievability` now
+**proactively prefetches** each sequence task's script params (`_prefetch_seq_params` →
+`_on_prefetch_params`, routed by a distinct `tl_prefetch:` label), so the banner appears on load
+without first opening a step/ramp dialog; the step dialog's `_on_params` also refreshes the banner
+after caching (closing the interactive-authoring race). A task with no hub/targeted unit is still
+simply skipped.
 
 A pure function over the sequence, taking a calibration-resolver callback so the model stays
 calibration-agnostic.
@@ -284,8 +298,9 @@ Headless Qt: `QT_QPA_PLATFORM=offscreen python3 -m pytest -q` (a known teardown 
 
 - **Bridge-param ramp with fixed `--power`** (e.g. ramp `--bw` while power fixed): power
   achievability moves *across* the swept param. A *discrete* bridge/freq change under a held power
-  is now covered (step 4, `_held_power_issue`); a *ramped* bridge still needs a min/max-over-sweep
-  check. Owner deferred the ramped-bridge case ("we'll get back to this") — TODO.
+  is covered (step 4, `_held_power_issue`), as is a directly-SET power that clamps at its fire-time
+  operating point (`_set_power_issue`); a *ramped* bridge still needs a min/max-over-sweep check.
+  Owner deferred the ramped-bridge case ("we'll get back to this") — TODO.
 - **Companion-quantity ramps**: ramp From/To are currently base-quantity only. If Surface C makes
   the ramp offer companion quantities, the temporal comparison must convert. Out of scope now.
 - **Window-dependent timing precision**: see §5 caveats.
@@ -303,11 +318,11 @@ Headless Qt: `QT_QPA_PLATFORM=offscreen python3 -m pytest -q` (a known teardown 
 4. Keep `QT_QPA_PLATFORM=offscreen … pytest -q` green (run 3–5×). Client-only; drift guard intact.
 
 ### Possible refinements to Surface A (not blockers)
-- **Proactive params prefetch**: today a task's ramp clamps only show once its script params are
-  cached (a step/ramp dialog fetched them). Prefetching sequence-task params when calibration is
-  set would make the banner appear without opening a dialog first.
-- **Held-power / bridge-param-ramp checks** (§8) — the deferred cases; the walk already visits
-  every event, so held-power is a small addition (re-check the standing power at each freq/param
-  change) once the owner wants it.
+- **Proactive params prefetch** — ✅ DONE. `_update_achievability` demand-drives `_prefetch_seq_
+  params`, so the banner appears on load without opening a dialog first (and `_on_params` refreshes
+  it after an interactive fetch).
+- **Held-power check** (§8) — ✅ DONE (`_held_power_issue`). **Directly-set power check** — ✅ DONE
+  (`_set_power_issue`, added for the owner's re-set-at-the-wrong-bandwidth report). The **bridge-
+  param-ramp** min/max-over-sweep check is the one deferred case that remains.
 - **Per-issue placement**: the banner currently concatenates messages above the canvas; a future
   pass could also echo the subset for the ramp being edited inside the ramp dialog preview.

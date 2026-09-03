@@ -96,9 +96,23 @@ unaffected). Now it surfaces the laws too. Tests:
 `test_step_editor_power_units.py` (ramp-warmed cache still yields the card),
 `test_achievability_warnings.py` (held-power clamps / silent / warn-once),
 `test_library_script_params_cal.py` (the library surfaces `calibration_power_laws`).
-**Optional follow-ups remain** (design doc §9): a proactive sequence-task params prefetch so the
-achievability banner shows without opening a dialog first; a run-mode ramp folding at the
-fixed-value form's freq/params instead of the carried state; the ramped-bridge achievability case.
+**Temporal warnings completed (owner testing).** The banner now flags EVERY commanded power at its
+fire-time operating point, not just ramp points and held levels: (1) **Directly-SET power steps** —
+a tune/run/baseline step that COMMANDS a `--power` the unit can't deliver at the operating point in
+effect when it fires (e.g. re-setting the density to bw-10's max after an earlier step widened the
+sweep to 20 MHz) is flagged via `timeline_model._set_power_issue`, distinct from `_held_power_issue`
+(a standing level pushed out of range by a later change). The walk's directly-set branch folds
+bounds through the carried freq/bridge params and warns when the command clamps; in-range commands
+stay silent. (2) **Proactive params prefetch** — `TimelineEditor._update_achievability` demand-drives
+`_prefetch_seq_params` (→ `_on_prefetch_params`, routed by a distinct `tl_prefetch:` label, its own
+`_prefetch_inflight`), so the banner surfaces on load WITHOUT opening a step/ramp dialog first; the
+step dialog's `_on_params` also refreshes the banner after caching. Together these fix the owner
+report "I set the spectral density to max at bw 10, later doubled the bw / re-set the same power,
+and got no warning." Tests: `test_achievability_warnings.py` (directly-set clamp at the carried bw;
+held-then-re-set → two warnings; in-range silent; run step folds at its own args; prefetch surfaces
+the banner from an empty cache without a dialog). **Optional follow-up remaining** (design doc §9):
+a run-mode ramp folding at the fixed-value form's freq/params instead of the carried state; the
+ramped-bridge (min/max-over-sweep) achievability case.
 
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY
