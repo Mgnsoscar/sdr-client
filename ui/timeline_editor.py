@@ -1792,9 +1792,26 @@ class TimelineEditor(QWidget):
             freq_unit = next((s.get("unit") for s in specs if s.get("dest") == freq_param), None)
             return {"artifact": artifact, "specs": specs, "base_args": base_args,
                     "freq_param": freq_param, "freq_factor": hz_per_unit(freq_unit),
-                    "power_dest": specs[pidx]["dest"]}
+                    "power_dest": specs[pidx]["dest"],
+                    "view_law": self._controlled_view_law(artifact, script)}
 
         return resolve
+
+    def _controlled_view_law(self, artifact: dict, script: str):
+        """The CAL_POWER_LAWS entry the operator authors --power in when the raw measured quantity
+        is dropped from the control picker — the leading ``restates_measurement`` law (a chirp's
+        live spectral density, keyed on --bw), or None. Mirrors ParamForm._power_views' drop-base
+        rule: a declared REPORTED reading is the operator's chosen axis and is never dropped, so a
+        restatement law only stands in when the reported reading is the measured base itself. The
+        temporal walk folds the achievable range in this view at each event's fire-time param, so a
+        held/commanded live density is checked at the live sweep width (the base range can't see it)."""
+        rep = ((artifact or {}).get("readings") or {}).get("reported") or {}
+        if rep.get("kind") == "law":            # a declared reported axis — not a restatement target
+            return None
+        for spec in (self._script_power_laws.get(script) or []):
+            if isinstance(spec, dict) and spec.get("restates_measurement"):
+                return spec
+        return None
 
     def _update_achievability(self) -> None:
         """Refresh the sequence-level power-achievability warning. Best-effort: a task whose params

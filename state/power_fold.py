@@ -482,35 +482,22 @@ def eval_formula(formula, get_value) -> Optional[float]:
     return None
 
 
-def fold_params_from_values(artifact, specs: list, values: dict) -> Optional[dict]:
-    """The bridge-keyed --power parameters a resolved ``artifact`` folds its ceiling through,
-    resolved over a flat ``{dest: value}`` state instead of a live ParamForm — for a caller
-    with no single form holding the full effective state (the sequence step editor, whose state
-    is carried-forward sequence values layered with a step's own form values, and where a
-    bridge-keyed source may live in the CARRIED state, not the step's form).
-
-    Mirrors ``ParamForm.fold_params``/``_live_params`` for the dict path: a key the
-    reported/limiting reading keys on is read straight from ``values`` when it is a raw
-    parameter, computed from a visible derived stand-in's formula (``provides``) when a mode
-    hides the parameter's own field, or computed from its OWN derived formula when it is an
-    internal quantity (e.g. GPS C/A's ``enbw_mhz``, a table lookup on ``--sidelobes`` that
-    never appears as a raw param). Returns ``{dest: float}``, or None when the artifact has no
-    keyed params or any one can't be resolved to a number — so the fold falls back to the law's
-    representative value rather than a wrong one (a warn-never-block caption must not mis-fire)."""
-    fold = PowerFold.from_artifact(artifact or {})
-    if fold is None:
-        return None
-    keyed = fold.keyed_params()
-    if not keyed:
+def resolve_keyed_values(specs: list, values: dict, keys) -> Optional[dict]:
+    """Resolve a set of task-parameter dests to numeric values over a flat ``{dest: value}``
+    state, the way a calibration law/bridge reads its keyed params. For each dest: a visible
+    derived stand-in that ``provides`` it wins when a mode hides the parameter's own field; else
+    the field's own value; else the dest's OWN derived formula (an internal quantity like GPS
+    C/A's ``enbw_mhz``, a table lookup on ``--sidelobes``); else the schema default. Returns
+    ``{dest: float}`` for the requested keys, or None when any one can't be resolved to a number
+    (so a fold falls back to the law's representative value rather than a wrong one). Mirrors
+    ``ParamForm._keyed_param_value`` over the flat state — the shared resolver for the artifact's
+    reported/limiting bridges AND a controlled-view law's own keyed params (e.g. a chirp's ``bw``)."""
+    keys = list(keys or [])
+    if not keys:
         return None
     by_dest = {s.get("dest"): s for s in specs}
 
     def keyed_value(dest):
-        # A derived stand-in that ``provides`` this dest wins when the parameter's own field is
-        # hidden by a mode (its formula is evaluable only when its source fields are present in
-        # the state, so it self-selects); else the field's own value; else the dest's own derived
-        # formula (an internal quantity like enbw); else the schema default. Mirrors
-        # ParamForm._keyed_param_value over the flat state.
         prov = next((s for s in specs
                      if s.get("kind") == "derived" and s.get("provides") == dest), None)
         if prov is not None:
@@ -528,9 +515,31 @@ def fold_params_from_values(artifact, specs: list, values: dict) -> Optional[dic
         return spec.get("default") if spec else None
 
     out = {}
-    for dest in keyed:
+    for dest in keys:
         v = keyed_value(dest)
         if not isinstance(v, (int, float)) or isinstance(v, bool):
             return None
         out[dest] = float(v)
     return out
+
+
+def fold_params_from_values(artifact, specs: list, values: dict) -> Optional[dict]:
+    """The bridge-keyed --power parameters a resolved ``artifact`` folds its ceiling through,
+    resolved over a flat ``{dest: value}`` state instead of a live ParamForm — for a caller
+    with no single form holding the full effective state (the sequence step editor, whose state
+    is carried-forward sequence values layered with a step's own form values, and where a
+    bridge-keyed source may live in the CARRIED state, not the step's form).
+
+    Mirrors ``ParamForm.fold_params``/``_live_params`` for the dict path (via
+    ``resolve_keyed_values``): a key the reported/limiting reading keys on is read straight from
+    ``values`` when it is a raw parameter, computed from a visible derived stand-in's formula
+    (``provides``) when a mode hides the parameter's own field, or computed from its OWN derived
+    formula when it is an internal quantity (e.g. GPS C/A's ``enbw_mhz``, a table lookup on
+    ``--sidelobes`` that never appears as a raw param). Returns ``{dest: float}``, or None when
+    the artifact has no keyed params or any one can't be resolved to a number — so the fold falls
+    back to the law's representative value rather than a wrong one (a warn-never-block caption
+    must not mis-fire)."""
+    fold = PowerFold.from_artifact(artifact or {})
+    if fold is None:
+        return None
+    return resolve_keyed_values(specs, values, fold.keyed_params())

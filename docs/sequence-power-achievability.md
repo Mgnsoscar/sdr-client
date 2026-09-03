@@ -365,42 +365,63 @@ now accepts those bridge dests alongside the non-live context dests. Result: a s
 caps the density ~3 dB below the bw-10 max (−10.4 vs −7.4), so an undeliverable density can no longer
 be **authored** in the step editor. Tests: `tests/test_step_editor_carried_bw.py`.
 
-**Owner's chosen direction (this is the spec for the next session):** *HOLD LIVE DENSITY + WARN.*
+**Owner's chosen direction (this is the spec):** *HOLD LIVE DENSITY + WARN.*
 Treat a commanded spectral density as the **live** density the operator wants delivered, re-evaluated
 at each step's **fire-time** sweep bandwidth, and WARN (the runtime would clamp) when a later bandwidth
 change makes a held/commanded density undeliverable. i.e. don't accept "the base density is invariant
 so it's always fine" — that's technically true of the stored base value but NOT of the operator's
-intent. Concretely, still-open work:
+intent.
 
-1. **Achievability WALK (the banner).** Make `achievability_warnings` fold the operator's CONTROLLED
-   quantity (the leading `restates_measurement` view / the reported view) at each event's fire-time
-   bridge params, and compare the commanded density expressed in THAT quantity against its achievable
-   range at that bandwidth. The clean way: the range of the controlled view at bandwidth `bw` is
-   `[base_min + view_delta(bw), base_max + view_delta(bw)]` (`view_delta = coeff·log10(bw/ref)`), which
-   MOVES with bw even though the base range doesn't. The walk must know (a) the controlled view/law
-   and (b) the operator's intended density. Today only the base value is stored per step — so the
-   walk needs the resolver/editor to also supply the controlling law (from `CAL_POWER_LAWS`), and it
-   must decide what "intended density" means: interpret the stored base as the density at the fold-
-   `--bw` when the step was authored, i.e. `intended_live(fire_bw) = base + view_delta(authoring_bw)`.
-   Since the authoring bw isn't stored, the pragmatic model the owner wants is: **the stored base IS
-   the intended live density at the reference bandwidth** (base == psd_live at `ref`), so at a later
-   `fire_bw` the required base to hold it is `base − view_delta(fire_bw)`; warn when that exceeds
-   `base_max`. Validate this against the GPS path (which must keep working) and the currently-passing
-   `tests/test_achievability_warnings.py` (whose `_CHIRP_ART` uses a *reported-bridge* density that IS
-   `param_dependent` — decide whether to keep that fixture or replace it with the real bw-invariant
-   structure; the real-structure fixture lives in `tests/test_step_editor_carried_bw.py`).
-2. **Ramp editor.** It currently shows/folds From/To in the BASE quantity (bw-invariant for the
-   chirp), with no view support — so a density ramp isn't limited or warned at the carried bw. Give it
-   the same `psd_live`-view fold at the carried bandwidth as the step editor (`_with_cal_bounds` /
-   `_op_params` fold the base; add the view offset + a carried-`--bw` seed), and feed the ramp's points
-   into the temporal walk in the controlled quantity.
-3. **Decide the transmit-path question.** "Hold live density" strictly means the delivered live
-   density stays fixed as bw changes, which the runtime does NOT do today (it holds base). If the
-   product wants the runtime to actually hold live density (re-fold base at the live bw per step),
-   that is an **agent/scripts** change (out of the client-only guardrail) — confirm with the owner
-   whether "warn" is enough (client-only) or the runtime behavior must change too. The client-only
-   reading: keep sending base, but LIMIT (can't author an undeliverable live density) + WARN (a held
-   density that a later bw makes undeliverable) so the operator is never surprised.
+**Owner decisions (branch `claude/temporal-power-warnings-zemu9p`):**
+- **Transmit path:** *also change it* — the runtime must actually hold live density across `--bw`
+  changes (not just warn). This is a cross-repo change (breaks the client-only guardrail; needs a
+  capability + version bump). **Its mechanism is being confirmed before implementation** — see the
+  transmit-path design block below.
+- **Intended-density model:** *set-time bandwidth* — the intended density is the value the operator
+  set, `intended_live = base + view_delta(bw-in-effect-when-SET)`, re-checked against the view range
+  at each later fire-time `--bw`. NOT the §10 "reference bandwidth" reading (which spuriously flags a
+  density authored while a non-reference `--bw` was carried, since the step editor already folds the
+  view at the carried bw).
+
+Work items:
+
+1. **Achievability WALK (the banner) — ✅ DONE this session.** `achievability_warnings` now folds the
+   operator's CONTROLLED view at each event's fire-time bridge params. The resolver
+   (`TimelineEditor._achievability_resolver` → new `_controlled_view_law`) surfaces the controlling
+   law — the leading `restates_measurement` `CAL_POWER_LAWS` entry, dropped-base rule mirroring
+   `ParamForm._power_views` (only when the reported reading is the measured base). The walk parses it
+   (`_view_law_of`), gates the task in when it keys on a live param (`view_moves`), and expresses every
+   commanded/held `--power` in the view via `_view_value_of = base + _view_delta(state)`; `_view_delta`
+   resolves the law's own keyed params through the new pure `state.power_fold.resolve_keyed_values`
+   (factored out of `fold_params_from_values`). `_clamp(view_value, state)` shifts the base range into
+   the view (`[base_min+vd, base_max+vd]`) and compares. The **set-time model** falls out naturally:
+   `held_view` is captured (= base + view_delta) whenever `--power` is commanded and re-checked at each
+   later event's `--bw`, so a density set at bw 10 and held into bw 20 warns, while one AUTHORED at bw
+   20 stays silent. With no view law `_view_delta` is 0 → **byte-identical** to before (GPS, frequency
+   chains, and the reported-bridge `_CHIRP_ART` all unchanged — that fixture is KEPT, it exercises the
+   param-dependent-base path; the real bw-invariant structure is pinned separately). Tests:
+   `tests/test_achievability_view_fold.py` (real verbatim artifact: held-density clamp; silent without
+   the widen; set-time-model non-false-positive; warns-once; editor surfaces the view law end-to-end),
+   `tests/test_achievability_warnings.py` (all 16 still green).
+2. **Ramp editor — PENDING the transmit-path mechanism.** It shows/folds From/To in the BASE quantity
+   (bw-invariant for the chirp), with no view support. It needs the same `psd_live`-view fold at the
+   carried bandwidth as the step editor AND to feed its points into the walk in the controlled
+   quantity — but whether a "density ramp" stores the view or the base (and how its points are checked
+   against a moving bw) depends on the transmit-path contract, so it is designed alongside #3.
+3. **Transmit-path change (cross-repo) — MECHANISM BEING CONFIRMED.** "Hold live density" strictly
+   means the delivered live density stays fixed as `--bw` changes; the runtime does NOT do that today
+   (it holds base — `fm_chirp_tx.py`'s `--bw` handler re-maps `gain_for_power(state["power"], …)`,
+   which is bandwidth-invariant for the chirp, so the gain doesn't move and the density drifts). The
+   transmit-side `PowerMap` has NO concept of the `psd_live` VIEW law (only the reported/limiting
+   bridges, both bw-invariant here), so making the runtime hold live density needs a new client→agent→
+   script contract carrying WHICH quantity to hold. See the transmit-path design block below.
+
+Note (verified): when a density is UNDELIVERABLE, the current runtime (holds base) and a
+hold-live-density runtime BOTH clamp base to `base_max` and deliver the **same** reduced density
+(`base_max + view_delta(fire_bw)`) — so the WARN in #1 is identical under either transmit model. The
+transmit change only affects the deliverable-but-drifting case (bw changes while the density is still
+in range: hold-live re-derives base to keep it constant; today it drifts). So #1 shipped independent
+of the transmit decision.
 
 **Key files/functions for the next session:**
 - `ui/timeline_model.py`: `achievability_warnings` (the walk), `_set_power_issue`/`_held_power_issue`,

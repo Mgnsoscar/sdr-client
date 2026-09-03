@@ -1,0 +1,209 @@
+"""HOLD-LIVE-DENSITY temporal warnings on the REAL FM-chirp structure.
+
+The real chirp's operating/BASE quantity is the FIXED-reference measured density — it is
+bandwidth-INVARIANT (``param_dependent`` False), so ``PowerFold.bounds_at`` returns the same base
+range at every ``--bw``. The bandwidth dependence lives ONLY in the ``psd_live`` VIEW law
+(``restates_measurement``), which the operator authors ``--power`` in. So the base fold can never
+see a live density going out of range as the sweep widens — the achievability walk must fold the
+CONTROLLED view at each event's fire-time ``--bw``.
+
+The walk now does (`resolve()` surfaces the controlling ``view_law``): a held/commanded density is
+expressed in the controlled view at the ``--bw`` in effect when it was SET, and re-checked against
+the achievable view range (``[base_min+view_delta(bw), base_max+view_delta(bw)]``) at each later
+event's ``--bw``. See docs/sequence-power-achievability.md §10.
+
+The artifact + laws are copied VERBATIM from tests/test_step_editor_carried_bw.py (the resolver's
+real output), so these tests pin the structure the fixture tests in test_achievability_warnings.py
+missed (that file's ``_CHIRP_ART`` uses a param-dependent reported-bridge density instead).
+"""
+import math
+
+import pytest
+
+from ui import timeline_model as tlm
+
+
+# psd_live: live spectral density = base + coeff·log10(bw/ref); coeff −10, ref 10 (dBm/MHz).
+_PSD = {"id": "psd_live", "name": "Spectral density", "unit": "dBm/MHz", "in": "density",
+        "out": "density", "param": "bw", "coeff": -10.0, "ref": 10.0, "rep": 10.0,
+        "restates_measurement": True}
+_FBW = {"id": "fbw_power", "name": "Full-bandwidth (total) power", "unit": "dBm", "in": "density",
+        "out": "abs", "k": 10.0, "rep": 10.0}
+
+# The artifact EXACTLY as the agent resolver publishes it for a density measurement whose dBm
+# ceiling is gauged through the (constant) total-power law: the base quantity maps to gain
+# bandwidth-INDEPENDENTLY, so bounds_at is the same at every --bw (param_dependent is False).
+_ART = {
+    "schema_version": 1, "signal_id": "fm_chirp", "unit_type": "broadcaster",
+    "operating_plane": "sdr_output", "quantity": "spectral density", "amplitude": 0.5,
+    "min_gain_db": 0.0, "max_gain_db": 70.0, "min_power_dbm": -27.38, "max_power_dbm": -7.38,
+    "curve": [[0.0, -27.38], [70.0, -7.38]], "gain_step_db": 0.5, "operating_unit": "dBm/MHz",
+    "readings": {"reported": {"kind": "same"},
+                 "limiting": {"kind": "law", "law": {"id": "fbw_power", "name": "fbw",
+                                                     "in": "density", "out": "abs", "k": 10.0},
+                              "max_dbm": 50.0},
+                 "reported_delta_db": 0.0, "limiting_delta_db": 10.0},
+    "anchor_curve": [[0.0, -27.38], [70.0, -7.38]], "passive_hops": [],
+    "freq_dependent_limits": [], "gain_ceiling_db": 70.0, "center_freq_hz": 1575420000.0,
+}
+_SPECS = [
+    {"dest": "freq", "flags": ["--freq"], "type": "float", "unit": "MHz", "is_freq": True},
+    {"dest": "power", "flags": ["--power"], "type": "float", "unit": "dBm/MHz", "snap_role": "power"},
+    {"dest": "bw", "flags": ["--bw"], "type": "float", "unit": "MHz"},
+]
+# A low baseline density (comfortably in range) so the bar itself never warns.
+_BASE = ["--freq", "1575.42", "--power", "-25", "--bw", "10"]
+
+
+def _resolve(task, view=True):
+    if task != "chirp":
+        return None
+    info = {"artifact": _ART, "specs": _SPECS, "base_args": _BASE,
+            "freq_param": "freq", "freq_factor": 1e6, "power_dest": "power"}
+    if view:
+        info["view_law"] = _PSD
+    return info
+
+
+def _bar():
+    return tlm.BarItem(task_name="chirp", args=_BASE, start_offset=0.0, stop_offset=600.0)
+
+
+def _set_power(dbm, offset):
+    return tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=offset,
+                       params={"power": dbm})
+
+
+def _set_bw(bw, offset):
+    return tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=offset,
+                       params={"bw": bw})
+
+
+# density max at bandwidth bw = base_max (−7.38) + view_delta(bw), view_delta = −10·log10(bw/10).
+def _psd_max(bw):
+    return -7.38 - 10 * math.log10(bw / 10.0)
+
+
+# ── the crux: the base is bandwidth-invariant, so ONLY the view fold catches the clamp ──────────
+
+def test_the_base_fold_alone_would_skip_this_task():
+    # Guard the premise: with NO controlling view law surfaced, the walk sees a constant chain
+    # (base bw-invariant, no frequency dependence) and stays out — exactly why the owner saw no
+    # warning before this fix. The bandwidth dependence is invisible to the base fold.
+    set_max = _set_power(-7.38, 5.0)          # bw-10 max density, set at bw 10
+    double_bw = _set_bw(20, 10.0)             # later widened to 20 MHz
+    assert tlm.achievability_warnings([_bar(), set_max, double_bw],
+                                      lambda t: _resolve(t, view=False)) == []
+
+
+def test_held_density_clamps_when_a_later_tune_widens_the_sweep():
+    # The owner's report: set the density to the bw-10 max (−7.38), then a LATER tune doubles the
+    # sweep to 20 MHz. The live density can't be held there (max ≈ −10.39), so the runtime clamps
+    # it. The base value (−7.38) is unchanged and the base range is bandwidth-invariant, so ONLY
+    # the controlled-view fold catches this.
+    set_max = _set_power(-7.38, 5.0)
+    double_bw = _set_bw(20, 10.0)
+    issues = tlm.achievability_warnings([_bar(), set_max, double_bw], _resolve)
+    assert len(issues) == 1
+    iss = issues[0]
+    assert iss.direction == "high"
+    assert iss.bound == pytest.approx(_psd_max(20), abs=0.02)      # ≈ −10.39 dBm/MHz
+    assert iss.unit == "dBm/MHz"
+    assert iss.points == [(-1, -7.38, 10.0)]                       # the held density, at the widen
+    m = iss.message
+    assert "held" in m and "clamped down" in m
+    assert "-7.38" in m.replace("−", "-")                          # the held density, named
+    assert "0:10" in m                                             # when it goes out of range
+    assert "‘bw’ change to 20" in m                                # what pushed it out
+
+
+def test_held_density_silent_without_the_later_widen():
+    # The same held density is fine until a later step widens the sweep — no widen, no warning.
+    assert tlm.achievability_warnings([_bar(), _set_power(-7.38, 5.0)], _resolve) == []
+
+
+def test_held_density_in_range_stays_silent_after_widening():
+    # A density comfortably below the bw-20 max stays achievable after doubling → no false positive.
+    low = _set_power(-15.0, 5.0)              # −15 is below _psd_max(20) ≈ −10.39
+    assert tlm.achievability_warnings([_bar(), low, _set_bw(20, 10.0)], _resolve) == []
+
+
+def test_held_density_warns_once_not_at_every_later_widen():
+    set_max = _set_power(-7.38, 5.0)
+    issues = tlm.achievability_warnings(
+        [_bar(), set_max, _set_bw(20, 10.0), _set_bw(40, 15.0)], _resolve)
+    assert len(issues) == 1                   # one transition into violation, not one per widen
+
+
+# ── the SET-TIME-bandwidth model: a density AUTHORED at a wide sweep is not spuriously flagged ──
+# The pragmatic §10 reading (stored base == intended density at the REFERENCE bw) would MIS-flag a
+# density the operator authored while a non-reference --bw was carried, because the step editor
+# already folds the view at the carried bw. The set-time model interprets the stored base as the
+# density at the --bw IN EFFECT WHEN IT WAS SET, so an in-range authored density stays silent.
+
+def test_density_authored_at_the_wide_sweep_is_not_spuriously_warned():
+    # Widen to 20 FIRST, then set --power −7.38 (base). At bw 20 that base reads as −10.39 dBm/MHz
+    # — exactly the bw-20 max, i.e. deliverable — so the operator authored a valid density. The
+    # set-time model stays silent; the reference-bw reading would have wrongly flagged −7.38.
+    seq = [_bar(), _set_bw(20, 5.0), _set_power(-7.38, 10.0)]
+    assert tlm.achievability_warnings(seq, _resolve) == []
+
+
+def test_density_authored_at_the_wide_sweep_then_widened_further_clamps():
+    # Author −7.38 base at bw 20 (density −10.39, deliverable), THEN widen to 40. Holding that
+    # −10.39 density needs the bw-40 max (≈ −13.40) — undeliverable → clamp. Confirms the held
+    # density tracked is the SET-TIME one (−10.39 at bw 20), not the raw base or the reference.
+    seq = [_bar(), _set_bw(20, 5.0), _set_power(-7.38, 10.0), _set_bw(40, 15.0)]
+    issues = tlm.achievability_warnings(seq, _resolve)
+    assert len(issues) == 1
+    iss = issues[0]
+    assert iss.direction == "high"
+    assert iss.bound == pytest.approx(_psd_max(40), abs=0.02)      # ≈ −13.40 dBm/MHz
+    assert iss.points[0][1] == pytest.approx(_psd_max(20), abs=0.02)   # the held density ≈ −10.39
+
+
+def test_run_step_commanding_an_over_max_base_density_clamps_at_its_bandwidth():
+    # A run step re-invokes the task with its OWN args. A base −4.0 dBm/MHz exceeds the chain max
+    # (−7.38) — at its own bw 20 that reads as −7.01 dBm/MHz, above the −10.39 max, so it clamps.
+    run = tlm.RunItem(task_name="chirp", action="run", anchor="start", offset=30.0,
+                      args=["--freq", "1575.42", "--power", "-4.0", "--bw", "20"])
+    issues = tlm.achievability_warnings([_bar(), run], _resolve)
+    assert len(issues) == 1
+    assert issues[0].direction == "high"
+    assert "set to" in issues[0].message
+
+
+# ── the TimelineEditor surfaces the controlled-view law to the walk (wiring end-to-end) ─────────
+
+def test_timeline_editor_surfaces_the_view_law_and_the_held_density_clamp():
+    # The editor's _achievability_resolver must surface the controlling restates_measurement law
+    # (psd_live) from the script's CAL_POWER_LAWS, so the walk folds the live density. Without that
+    # the real chirp (bw-invariant base) would be skipped and the held-density clamp go unwarned.
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PyQt6")
+    from PyQt6.QtWidgets import QApplication
+    from ui.timeline_editor import TimelineEditor
+    QApplication.instance() or QApplication([])
+
+    ed = TimelineEditor()
+    ed._task_commands = {"chirp": ["python3", "chirp.py", "--freq", "1575.42", "--power",
+                                   "-25", "--bw", "10"]}
+    ed._task_signals = {"chirp": "chirp"}
+    ed._param_specs = {"chirp.py": _SPECS}
+    ed._script_cal_freq_params = {"chirp.py": "freq"}
+    ed._script_power_laws = {"chirp.py": [_PSD, _FBW]}
+    ed._cal_hostname = "unit"
+    ed._calibration = {"valid": True, "signals": {"chirp": {"artifact": _ART}}}
+
+    ed._canvas.set_items([_bar(), _set_power(-7.38, 5.0), _set_bw(20, 10.0)])
+    ed._update_achievability()
+    assert "held" in ed._achv_warn.text()
+    assert "clamped down" in ed._achv_warn.text()
+    assert not ed._achv_warn.isHidden()
+
+    # Remove the widen → the density is deliverable at bw 10 and the banner clears.
+    ed._canvas.set_items([_bar(), _set_power(-7.38, 5.0)])
+    ed._update_achievability()
+    assert ed._achv_warn.text() == ""
+    assert ed._achv_warn.isHidden()
