@@ -54,6 +54,17 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## NEXT UP — Sequence power achievability + step/ramp power control: PLANNED (multi-session)
+Active branch `claude/sequence-power-achievability` (all three repos; expected client-only). Full
+design + code map + next actions live in **`docs/sequence-power-achievability.md`** — read it
+before starting. In one line: sequence power achievability is **temporal** (a power ramp's top
+levels can become unachievable when a *later* tune step retunes the carrier), so the guarantee is
+a sequence-level, time-ordered **`achievability_warnings`** pass (warn, never block; name the
+clamped points/times/ceiling), NOT a per-step fold. Then thread bridge `params` into the ramp's
+per-step range fold (`ramp_editor._with_cal_bounds`/`BoundedNumberField`), then wire the
+multi-quantity power card into run/tune steps. Reuses the already-shipped
+`param_form.fold_params_from_values` / `eval_formula` (below).
+
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY
 quantity you set (large step-rounded value + range rail with labelled MIN/MAX + a family-coloured
