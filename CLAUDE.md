@@ -60,9 +60,14 @@ quantity you set (large step-rounded value + range rail with labelled MIN/MAX + 
 `quantity [unit]` chip + `LIVE`) and each OTHER quantity as its own
 read-only live field in an "ALSO READS AS" grid, each with a `Control in this →` button
 (promotes it via `_set_power_view` → `_power_view`/`_do_refold`) — replacing the old
-`control in` dropdown + green `= … · name` lines. A `DEPENDS ON` row surfaces the fold inputs
-(the fold frequency in MHz when freq-dependent, plus every bridge-keyed param such as a chirp's
-`--bw`), superseding the power field's old "moves with frequency" rail note (`--gain` keeps it).
+`control in` dropdown + green `= … · name` lines. Below the grid a `DEPENDS ON` row surfaces the
+fold inputs (the fold frequency in MHz when freq-dependent, plus every field the range depends on
+via `_dep_param_dests`), superseding the power field's old "moves with frequency" rail note
+(`--gain` keeps it). A bridge param with no input field of its own — an INTERNAL derived quantity
+a law keys on (e.g. GPS C/A's full-power law keyed on an equivalent-noise bandwidth `enbw_mhz`
+that's a hidden table lookup on `--sidelobes`) — is resolved to the SOURCE knob behind it
+(`--sidelobes`, its count), not the derived intermediate (`_is_input_field` reads `_base_specs` so
+it's correct mid-render, before later fields are in `_widgets`).
 Unit chips are family-coloured (slate = absolute dBm, teal = a spectral density; `_unit_family`),
 and every power read-out (value, MIN/MAX, companions) is rounded to the chain's finest achievable
 step (`_decimals_for(fold.finest_step())`). Reuses the existing data model unchanged (`_power_views`

@@ -1070,24 +1070,15 @@ class ParamForm(QWidget):
 
     def _add_power_unit_ui(self, layout, widget) -> None:
         """Finish the calibrated --power card the primary control (built above) belongs to: a
-        DEPENDS ON row of the fold inputs, then — when the signal declares other power quantities
-        — an "ALSO READS AS" grid of read-only companion fields, each with a "Control in this →"
-        button that promotes it to the primary. --power is always SENT in the base quantity
+        an "ALSO READS AS" grid of read-only companion fields (when the signal declares other
+        power quantities), each with a "Control in this →" button that promotes it to the primary,
+        then a DEPENDS ON row of the fold inputs. --power is always SENT in the base quantity
         (build_args removes the display offset); the companions and the switch are a
         display/entry convenience. Every reading is ``measured + view_delta(params)``, so a
         companion value is the controlled value plus the gap between the two views' deltas at the
         live parameters."""
         views = self._power_views()
         selected = self._selected_view()
-
-        # DEPENDS ON — the fold inputs surfaced like the frequency (the fold frequency + every
-        # bridge-keyed parameter), so the operator sees what moves the range. Rebuilt each render;
-        # its values also refresh live (below) as a bridge param is dragged/typed.
-        dep_lbls: List[tuple] = []
-        deps = self._dep_specs()
-        if deps:
-            deps_row, dep_lbls = self._deps_row(deps)
-            layout.addWidget(deps_row)
 
         def _current() -> Optional[float]:
             if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
@@ -1113,6 +1104,14 @@ class ParamForm(QWidget):
             if grid.count() == 1:                        # a single companion shouldn't span 2 cols
                 grid.setColumnStretch(1, 1)
             layout.addLayout(grid)
+
+        # DEPENDS ON — the fold inputs, under the read-outs. Rebuilt each render; its values
+        # also refresh live (below) as a fold input is dragged/typed.
+        dep_lbls: List[tuple] = []
+        deps = self._dep_specs()
+        if deps:
+            deps_row, dep_lbls = self._deps_row(deps)
+            layout.addWidget(deps_row)
 
         def _update(*_):
             # Recompute at the LIVE bridge parameters, not the render-time capture, so the
@@ -1143,19 +1142,64 @@ class ParamForm(QWidget):
         _update()
 
     # ── power-card building blocks ─────────────────────────────────────────────
+    def _is_input_field(self, dest: str) -> bool:
+        """True when ``dest`` is a real, currently-rendered input the operator sets (not a derived
+        readout, not hidden by a mode). Read from ``_base_specs`` so it's correct even mid-render,
+        before the later fields are in ``_widgets`` (``_add_power_unit_ui`` runs inside the field
+        loop, so a check against ``_widgets`` would miss a field built after --power)."""
+        s = next((x for x in self._base_specs if x.get("dest") == dest), None)
+        return (s is not None and s.get("kind") != "derived"
+                and not s.get("hidden") and self._show_when_visible(s))
+
+    def _dep_param_dests(self) -> List[str]:
+        """The user-facing fields the --power range depends on. Each bridge-keyed parameter,
+        but when that parameter has no input field of its own — it's an INTERNAL derived quantity
+        a law keys on (e.g. a GPS C/A full-power law keyed on an equivalent-noise bandwidth
+        computed from --sidelobes) — the SOURCE field(s) it's derived from instead, so the
+        operator sees the knob they actually turn (--sidelobes, its real count), not the derived
+        intermediate (an ENBW in MHz). Mirrors how _wire_freq_refold resolves the same params."""
+        out: List[str] = []
+
+        def add(dest):
+            if dest not in out and self._is_input_field(dest):
+                out.append(dest)
+
+        for pdest in self._bridge_param_dests():
+            if self._is_input_field(pdest):                   # a real input field (e.g. --bw)
+                add(pdest)
+                continue
+            # No field of its own → the source fields of the derived UNDER it, or the visible
+            # derived that STANDS IN FOR it (provides). Resolved from _base_specs (order-safe).
+            srcs: List[str] = []
+            own = next((s for s in self._base_specs
+                        if s.get("dest") == pdest and s.get("kind") == "derived"), None)
+            prov = next((s for s in self._base_specs if s.get("kind") == "derived"
+                         and s.get("provides") == pdest and self._show_when_visible(s)), None)
+            for src_spec in (own, prov):
+                if src_spec is not None:
+                    srcs.extend(self._formula_sources(src_spec))
+            input_srcs = [s for s in srcs if self._is_input_field(s)]
+            if input_srcs:
+                for s in input_srcs:
+                    add(s)
+            else:
+                out.append(pdest)                             # fall back so the row is never empty
+        return out
+
     def _dep_specs(self) -> List[dict]:
         """The fold inputs to surface under the --power range as ``{kind, dest, name, unit}``:
         the fold frequency (only when the range actually moves with it, shown in MHz like the
-        old note), then each bridge-keyed parameter (e.g. a chirp's --bw, in its own unit). The
-        generalisation of the old 'moves with frequency' note — it names every input that moves
-        the range. Empty for a constant, bridge-less chain (nothing re-folds)."""
+        old note), then each field the range depends on (``_dep_param_dests`` — a bridge param's
+        own field, or the source knob behind an internal derived quantity). The generalisation of
+        the old 'moves with frequency' note — it names every input that moves the range. Empty
+        for a constant, bridge-less chain (nothing re-folds)."""
         out: List[dict] = []
         fsrc = self._freq_source_dest()
         if fsrc and self._is_freq_dependent():
             spec = next((s for s in self._base_specs if s.get("dest") == fsrc), None)
             name = self._display_name(spec).rstrip(" *") if spec else "frequency"
             out.append({"kind": "freq", "dest": fsrc, "name": name, "unit": "MHz"})
-        for d in self._bridge_param_dests():
+        for d in self._dep_param_dests():
             spec = next((s for s in self._base_specs if s.get("dest") == d), None)
             if spec is None:
                 continue

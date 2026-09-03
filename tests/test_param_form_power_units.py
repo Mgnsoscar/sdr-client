@@ -393,6 +393,52 @@ def test_depends_on_row_lists_the_bridge_keyed_param():
     assert "20" in _deps()
 
 
+def _dep_chips(f):
+    out = []
+    for c in f.findChildren(QFrame):
+        if c.objectName() == "depChip":
+            out.append(" ".join(l.text() for l in c.findChildren(QLabel)))
+    return out
+
+
+def test_depends_on_shows_the_source_knob_not_an_internal_derived_quantity():
+    # A GPS C/A-style signal: the full-power law keys on enbw_mhz, a HIDDEN derived field that is
+    # a table lookup on --sidelobes. DEPENDS ON must name the knob the operator actually turns
+    # (--sidelobes, its integer count) — not the internal equivalent-noise bandwidth (an MHz value
+    # that would read like a mysterious "0.92 → 1.02 MHz" as the slider moves).
+    ENBW = ["sidelobes", 9.235883, 9.717879, 9.886379]
+    FULL = {"id": "full_power", "name": "Full signal power", "unit": "dBm", "in": "density",
+            "out": "abs", "k": 60.0, "param": "enbw_mhz", "coeff": 10.0, "ref": 1.0, "rep": 9.886379}
+    art = {"operating_unit": "dBm/Hz", "quantity": "Peak spectral density",
+           "min_gain_db": 60.0, "max_gain_db": 70.0, "min_power_dbm": -126.0, "max_power_dbm": -116.0,
+           "anchor_curve": [[60, -126.0], [70, -116.0]], "passive_hops": [],
+           "readings": {"limiting": {"kind": "same"}}}
+    bounds = {"min_power_dbm": -126.0, "max_power_dbm": -116.0, "quantity": "Peak spectral density",
+              "operating_plane": "sdr_output", "amplitude": 0.5, "artifact": art}
+    specs = [
+        {"dest": "freq", "flags": ["--freq"], "type": "float", "step": 0.01, "unit": "MHz",
+         "default": 1575.42, "is_freq": True},
+        {"dest": "power", "flags": ["--power"], "type": "float", "step": 0.01, "unit": "dBm/Hz",
+         "snap_role": "power", "default": -120.0},
+        {"dest": "sidelobes", "flags": ["-Sidelobes", "--sidelobes"], "type": "int", "min": 0,
+         "max": 2, "step": 1, "default": 2},
+        {"dest": "enbw_mhz", "flags": ["-Full-power-bandwidth"], "kind": "derived", "hidden": True,
+         "unit": "MHz", "formula": {"table": ENBW}},
+    ]
+    f = ParamForm()
+    f.set_params(specs, cal_bounds=bounds, absolute_allowed=True, default_power_mode="absolute",
+                 cal_freq_param="freq", power_laws=[FULL])
+    f.set_values(["--freq", "1575.42", "--sidelobes", "2", "--power", "-120"])
+    _app.processEvents()
+
+    assert f._bridge_param_dests() == ["enbw_mhz"]      # the law keys on the internal quantity
+    assert f._dep_param_dests() == ["sidelobes"]        # but DEPENDS ON shows the knob behind it
+    assert "Sidelobes 2" in _dep_chips(f)
+    assert not any("MHz" in t for t in _dep_chips(f))   # never the internal ENBW bandwidth
+    f._widgets["sidelobes"][0].setValue(0)              # tracks the count live, no commit
+    assert "Sidelobes 0" in _dep_chips(f)
+
+
 def test_power_chip_when_operating_unit_absent_falls_back_to_dbm():
     # A bridge-less calibration (no operating_unit) keeps the quantity and shows [dBm].
     art = _artifact(_density_reported()); art.pop("operating_unit"); art["quantity"] = "Total in-band power"
