@@ -61,6 +61,7 @@ class LiveTuneDialog(QDialog):
         self.task_name = task_name
         self._script_name = ""
         self._live_specs: List[dict] = []
+        self._script_power_laws: List[dict] = []  # CAL_POWER_LAWS: companion --power quantities
         self._loading = True          # suppress the dirty marker while we seed
         self._applying = False
         self._dirty = False
@@ -188,6 +189,7 @@ class LiveTuneDialog(QDialog):
             specs = (result or {}).get("params", [])
             self._live_specs = [s for s in specs if s.get("live")]
             self._script_cal_freq_param = (result or {}).get("calibration_freq_param")
+            self._script_power_laws = (result or {}).get("calibration_power_laws", []) or []
             self._params_ready = True
             self._maybe_build()
         elif op == "livetune_get":
@@ -234,7 +236,8 @@ class LiveTuneDialog(QDialog):
         self._form.set_params(self._live_specs, cal_bounds=self._cal_bounds,
                               absolute_allowed=True,
                               default_power_mode=getattr(self, "_default_power_mode", None),
-                              cal_freq_param=self._script_cal_freq_param)
+                              cal_freq_param=self._script_cal_freq_param,
+                              power_laws=self._script_power_laws)
         if not self._live_specs:
             self._set_result("This task declares no live parameters.")
             self._form.setEnabled(False)

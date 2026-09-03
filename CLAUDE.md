@@ -77,6 +77,12 @@ SENT in the base quantity (`build_args`). Lives in `ui/param_form.py` `_add_powe
 no agent/scripts change, no capability/version bump, drift-guarded files untouched. Design record:
 `docs/param-form-power-redesign.md` + `docs/param-form-power-mockup.html`. Tests:
 `test_param_form_power_units.py`, `test_range_rail.py`.
+The **live-tune ("Tune…") form** now offers the same card: `ui/live_tune_dialog.py` reads the
+script's `calibration_power_laws` from `get_script_params` and forwards it as `power_laws=` to
+`ParamForm.set_params` (it already forwarded `cal_freq_param`), so the ALSO READS AS companions +
+`Control in this →` switch render while retuning — a companion tracks a live bridge param (e.g.
+the chirp's `--bw`) exactly as in Run. Was missing because the dialog dropped `power_laws` from
+the `set_params` call. Tests: `test_live_tune_power.py`.
 
 ## Current state — start/stop sweep folds at the real span (`provides`): COMPLETE
 `ui/param_form.py` resolves a law-keyed parameter through a visible derived stand-in when the
