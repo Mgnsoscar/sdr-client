@@ -433,13 +433,23 @@ Work items:
   value does. With no `view_laws`/`view_law` the walk is byte-identical (all base-fold paths
   unchanged). Tests: `tests/test_achievability_view_fold.py` (total-power silent vs density warns at
   the same base; latest-set total→density wins).
-- **Stage 2 — the hold (client precompute) — TODO (confirm the re-edit UX first).** A pure timeline
-  transform (reusing the walk) that, at each `--bw`/`--freq` change under a held quantity, sets/injects
-  the step's base `--power` to hold the set-time value of the latest-set control quantity, clamping to
-  `[base_min, base_max]` (→ the same amber warning where it clamps). UX consequence to confirm: since
-  a sequence is stored on the agent and re-edit loads it back, the held `--power` is baked into a
-  `--bw`-only step and reappears on reopen (naturally, rendered in the step editor's power card in the
-  held quantity) — "the Run/Tune form on a timeline." Recomputed on each save.
+- **Stage 2 — the hold (client precompute) — ✅ DONE.** `timeline_model.hold_control_quantity(items,
+  resolve)` returns a copy of the timeline with the base `--power` INJECTED so the latest-set control
+  quantity stays constant across a `--bw` change: it walks fire-time order (mirroring the warn walk —
+  per-step control view, set-time held value), and at a step that moves a param the held bw-keyed view
+  keys on (a `--bw` tune) WITHOUT setting `--power`, it re-derives `base = held − view_delta(new_bw)`,
+  clamps to `[base_min, base_max]` (warn-never-block — `achievability_warnings` flags the clamp, and
+  both agree because they share the set-time model), and injects it into that step marked
+  `power_hold_dest=<dest>`. `TimelineEditor.steps()` applies it to the DEPLOYED steps; the canvas is
+  untouched, and `set_steps()` STRIPS the injected `--power` (by `power_hold_dest`) on load — so the
+  authored `--bw` step edits as a clean `--bw` step, upstream density edits propagate automatically,
+  and re-save re-derives the same value (idempotent). A no-op for a non-density control view (total
+  power / gain / dBm hold via a constant base the runtime already keeps) or a constant chain.
+  `power_hold_dest` (client-only, on `SequenceStep`/`BarItem`/`RunItem`) is authoring metadata; the
+  deployed `--power` is an ordinary base command the agent runs unchanged — **no agent/scripts/
+  capability change**. Tests: `tests/test_hold_control_quantity.py` (hold keeps density constant;
+  clamp agrees with the warning; propagation; idempotent-after-strip; total-power/freq/no-view no-op;
+  editor steps→set_steps→steps round-trip).
 - **Stage 3 — ramp editor power card — TODO.** The ramp editor has no control-view switch today. Give
   it the `_add_power_unit_ui` card so a density ramp is authored + limited in the view at the carried
   bw, and its points precompute base per point.

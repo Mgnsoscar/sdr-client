@@ -1902,22 +1902,39 @@ class TimelineEditor(QWidget):
         for s in steps:
             ramp = getattr(s, "ramp", None)
             end = getattr(s, "offset_end_s", None)
+            params = dict(getattr(s, "params", {}) or {})
+            # Strip a --power the hold precompute INJECTED (power_hold_dest) so the authored --bw
+            # step loads clean (edited as a --bw step); steps() re-derives it fresh on the next save.
+            hold_dest = getattr(s, "power_hold_dest", None)
+            if hold_dest:
+                params.pop(hold_dest, None)
             dicts.append({
                 "anchor": s.anchor, "offset_s": float(s.offset_s),
                 "offset_end_s": float(end) if end is not None else 0.0,
                 "action": s.action.value if hasattr(s.action, "value") else str(s.action),
                 "task_name": s.task_name, "args": list(getattr(s, "args", []) or []),
                 "replace_args": bool(getattr(s, "replace_args", False)),
-                "params": dict(getattr(s, "params", {}) or {}),
+                "params": params,
                 "ramp": (ramp.model_dump() if hasattr(ramp, "model_dump")
                          else dict(ramp)) if ramp else None,
                 "power_view": getattr(s, "power_view", None),
+                # power_hold_dest is deliberately NOT carried onto the canvas item — the injected
+                # --power was just stripped, so the authored item is clean and re-derived on save.
             })
         self._canvas.set_items(tlm.steps_to_items(dicts))
 
     def steps(self) -> List[m.SequenceStep]:
+        # Hold the latest-set control quantity across --bw changes: inject the base --power the unit
+        # needs at each operating point so a live density stays constant (client precompute — the
+        # Run/Tune form's re-send, baked onto the DEPLOYED steps). The canvas items are untouched
+        # (authoring stays clean); set_steps strips the injected --power on the next load.
+        try:
+            held_items = tlm.hold_control_quantity(
+                self._canvas.items(), self._achievability_resolver())
+        except Exception:                          # noqa: BLE001 — never break the save
+            held_items = self._canvas.items()
         out: List[m.SequenceStep] = []
-        for d in tlm.items_to_steps(self._canvas.items()):
+        for d in tlm.items_to_steps(held_items):
             # Each action carries different payload (args / params / ramp); use .get
             # so a missing key never crashes the save.
             ramp = d.get("ramp")
@@ -1929,7 +1946,8 @@ class TimelineEditor(QWidget):
                 replace_args=bool(d.get("replace_args", False)),
                 params=dict(d.get("params") or {}),
                 ramp=m.RampSpec(**ramp) if ramp else None,
-                power_view=d.get("power_view")))
+                power_view=d.get("power_view"),
+                power_hold_dest=d.get("power_hold_dest")))
         return out
 
     # ── Validation (mirrors the agent's _validate_steps) ─────────────────────

@@ -321,6 +321,12 @@ class SequenceStep(BaseModel):
     # later --bw/--freq change re-derives base to keep THAT quantity constant (a chirp's live
     # density), matching the Run/Tune power card. The agent never reads it.
     power_view: Optional[str] = None
+    # When set, the dest of a --power the client's hold precompute INJECTED into this step (not set
+    # by the operator) — a --bw change that re-derives base to hold the standing control quantity.
+    # The client strips this --power on load (by this dest) so the authored timeline stays clean (a
+    # --bw step is edited as a --bw step) and re-derives it fresh on the next save. The agent just
+    # runs the --power it's given, exactly as for an operator-set one.
+    power_hold_dest: Optional[str] = None
 
 
 class Sequence(BaseModel):

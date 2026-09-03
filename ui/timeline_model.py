@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import itertools
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
 # ── Geometry constants ───────────────────────────────────────────────────────
@@ -85,6 +85,10 @@ class RunItem:
     # The calibrated --power CONTROL QUANTITY this step is authored in (a CAL_POWER_LAWS view id,
     # or None for the signal default) — the quantity HELD from this step forward. See SequenceStep.
     power_view: Optional[str] = None
+    # When set, the dest of a --power INJECTED by the hold precompute (a --bw change re-deriving base
+    # to hold the standing quantity), not set by the operator. Present only on DEPLOYED items; the
+    # canvas is always clean (set_steps strips this dest), so the authoring UI never shows it.
+    power_hold_dest: Optional[str] = None
     uid: int = 0
     kind: str = "run"
 
@@ -259,19 +263,21 @@ def item_to_steps(it) -> List[dict]:
     """Flatten one item to sequence-step dicts (anchor/offset_s/action/task_name/
     args/replace_args)."""
     pv = getattr(it, "power_view", None)
+    hd = getattr(it, "power_hold_dest", None)
     if it.kind == "bar":
         return [
             {"anchor": "start", "offset_s": it.start_offset, "action": "start",
              "task_name": it.task_name, "args": list(it.args), "replace_args": it.replace_args,
              "inject_resume_offset": bool(getattr(it, "inject_resume_offset", False)),
-             "power_view": pv},
+             "power_view": pv, "power_hold_dest": hd},
             {"anchor": "stop", "offset_s": it.stop_offset, "action": "stop",
              "task_name": it.task_name, "args": [], "replace_args": False},
         ]
     if getattr(it, "action", "run") == "tune":
         return [
             {"anchor": it.anchor, "offset_s": it.offset, "action": "tune",
-             "task_name": it.task_name, "params": dict(it.params or {}), "power_view": pv},
+             "task_name": it.task_name, "params": dict(it.params or {}),
+             "power_view": pv, "power_hold_dest": hd},
         ]
     if getattr(it, "action", "run") == "ramp":
         # A run-mode ramp carries the OTHER params' fixed values as args; a tune ramp
@@ -281,12 +287,13 @@ def item_to_steps(it) -> List[dict]:
              "offset_end_s": getattr(it, "offset_end", 0.0),
              "task_name": it.task_name, "ramp": dict(it.ramp or {}),
              "args": list(getattr(it, "args", []) or []),
-             "replace_args": bool(getattr(it, "replace_args", True)), "power_view": pv},
+             "replace_args": bool(getattr(it, "replace_args", True)),
+             "power_view": pv, "power_hold_dest": hd},
         ]
     return [
         {"anchor": it.anchor, "offset_s": it.offset, "action": "run",
          "task_name": it.task_name, "args": list(it.args), "replace_args": it.replace_args,
-         "power_view": pv},
+         "power_view": pv, "power_hold_dest": hd},
     ]
 
 
@@ -920,6 +927,192 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
         for uid, hitlist in hits.items():
             issues.extend(_ramp_issues(task, meta[uid]["param"], unit, hitlist))
     return issues
+
+
+def hold_control_quantity(items, resolve):
+    """Return a COPY of ``items`` with the calibrated --power INJECTED so the latest-set control
+    quantity is HELD across --bw changes — the client-side precompute of the hold the Run/Tune form
+    already does live (keep the displayed quantity fixed on a --bw change; re-send the recomputed
+    base). Applied to the DEPLOYED steps (``TimelineEditor.steps``): at each --bw change under a held
+    bw-keyed density, the standing density's base is re-derived at the new sweep width and injected
+    into that step, clamped to the achievable range (warn-never-block — ``achievability_warnings``
+    flags where it clamps). Injected steps are marked ``power_auto_held`` so the client strips them
+    on load (the authored --bw step stays a --bw step) and re-derives them fresh on the next save.
+
+    A no-op for a task with no bw-keyed control view (total power / gain / dBm / a constant chain
+    all hold via a constant base, which the runtime already keeps). The walk mirrors
+    ``achievability_warnings`` (fire-time order, per-step control view, set-time held value) so the
+    injected value and the warning agree. Ramps are handled only insofar as a --power ramp updates
+    the standing density; injecting a held --power INTO ramp points is Surface B / Stage 3."""
+    from state.power_fold import (PowerFold, fold_params_from_values,   # pure (no Qt); lazy
+                                  resolve_keyed_values)
+
+    items = list(items)
+    try:
+        window = min_on_air_duration(items)
+    except Exception:                      # noqa: BLE001 — a transform helper must never break
+        window = 0.0
+
+    injections: Dict[int, tuple] = {}      # item index → (base_new, view_id)
+
+    tasks: List[str] = []
+    for it in items:
+        t = getattr(it, "task_name", None)
+        if t and t not in tasks:
+            tasks.append(t)
+
+    for task in tasks:
+        info = resolve(task) if resolve else None
+        if not info:
+            continue
+        artifact = info.get("artifact")
+        specs = info.get("specs") or []
+        power_dest = info.get("power_dest")
+        if power_dest is None:
+            continue
+        fold = PowerFold.from_artifact(artifact or {})
+        if fold is None:
+            continue
+        default_view_law = _view_law_of(info.get("view_law"))
+        default_view_id = default_view_law.id if default_view_law is not None else None
+        laws_by_id = {vid: _view_law_of(spec)
+                      for vid, spec in (info.get("view_laws") or {}).items()}
+        laws_by_id = {vid: law for vid, law in laws_by_id.items()
+                      if law is not None and law.params()}       # only bw-keyed views need holding
+        # Nothing to hold on a --bw change unless SOME control view is bw-keyed.
+        if not ((default_view_law is not None and default_view_law.params()) or laws_by_id):
+            continue
+
+        def _law_for_view(pv):
+            return default_view_law if pv is None else laws_by_id.get(pv)
+
+        def _id_for_view(pv):
+            return default_view_id if pv is None else pv
+
+        freq_param = info.get("freq_param")
+        freq_factor = float(info.get("freq_factor") or 1.0)
+        base_args = list(info.get("base_args") or [])
+        flag_to_dest = {f: (s.get("dest") or s.get("name"))
+                        for s in specs for f in (s.get("flags") or [])}
+        name_to_dest = {(s.get("name") or s.get("dest")): s.get("dest") for s in specs}
+
+        active = [default_view_law]
+        active_id = [default_view_id]
+
+        def _view_delta(state) -> float:
+            law = active[0]
+            if law is None:
+                return 0.0
+            keyed = resolve_keyed_values(specs, state, law.params())
+            try:
+                return law.delta_db(keyed) if keyed else law.rep_delta_db()
+            except (ValueError, TypeError):
+                return law.rep_delta_db()
+
+        def _held_value(state):
+            p = state.get(power_dest)
+            if not isinstance(p, (int, float)) or isinstance(p, bool):
+                return None
+            return float(p) + _view_delta(state)
+
+        # Fire-time events, keeping the item index so a --bw change can be injected into (mirrors
+        # achievability_warnings' event build).
+        events: list = []
+        for seq_idx, it in enumerate(items):
+            if getattr(it, "task_name", None) != task:
+                continue
+            act = getattr(it, "action", "run")
+            pv = getattr(it, "power_view", None)
+            if getattr(it, "kind", None) == "bar":
+                events.append((_fire_time_s("start", getattr(it, "start_offset", 0.0), window),
+                               seq_idx, "args",
+                               {"replace": getattr(it, "replace_args", True), "args": list(it.args),
+                                "power_view": pv}))
+            elif act == "tune":
+                events.append((_fire_time_s(it.anchor, it.offset, window), seq_idx, "tune",
+                               {"params": dict(getattr(it, "params", {}) or {}), "power_view": pv}))
+            elif act == "run":
+                events.append((_fire_time_s(it.anchor, it.offset, window), seq_idx, "args",
+                               {"replace": getattr(it, "replace_args", True), "args": list(it.args),
+                                "power_view": pv}))
+            # A ramp is a --power sweep; it updates the standing density (last point) but is not
+            # itself injected here (Stage 3). Approximate its end value by the ramp's stop.
+            elif act == "ramp":
+                r = dict(getattr(it, "ramp", None) or {})
+                rdest = name_to_dest.get(r.get("param")) or flag_to_dest.get(r.get("flag"))
+                if rdest != power_dest or r.get("mode") == "run":
+                    continue
+                try:
+                    resolved = _resolve_ramp_points(r, it.anchor, window)
+                    fires = _place_ramp_points(r, it.anchor, float(it.offset), resolved)
+                except (ValueError, TypeError):
+                    continue
+                if fires:
+                    fa, foff, val = fires[-1]
+                    events.append((_fire_time_s(fa, foff, window), seq_idx, "rampend",
+                                   {"val": float(val), "rdest": rdest, "power_view": pv}))
+        events.sort(key=lambda e: (e[0], e[1]))
+
+        state = _args_to_values(base_args, flag_to_dest)
+        held = _held_value(state)          # standing control-quantity value (view units)
+        for _fire_s, seq_idx, kind, p in events:
+            touched: set = set()
+            if kind == "args":
+                new_vals = _args_to_values(p["args"], flag_to_dest)
+                if p["replace"]:
+                    touched = set(state) | set(new_vals)
+                    state = new_vals
+                else:
+                    touched = set(new_vals)
+                    state.update(new_vals)
+            elif kind == "tune":
+                for k, v in p["params"].items():
+                    try:
+                        state[name_to_dest.get(k, k)] = float(v)
+                        touched.add(name_to_dest.get(k, k))
+                    except (TypeError, ValueError):
+                        pass
+            elif kind == "rampend":
+                active[0] = _law_for_view(p.get("power_view"))
+                active_id[0] = _id_for_view(p.get("power_view"))
+                state[p["rdest"]] = p["val"]
+                held = _held_value(state)
+                continue
+
+            if power_dest in touched:
+                # A power-setting step: its control view becomes the held quantity (latest-set-wins).
+                active[0] = _law_for_view(p.get("power_view"))
+                active_id[0] = _id_for_view(p.get("power_view"))
+                held = _held_value(state)
+            else:
+                # A change that doesn't set --power. If it moved a param the HELD bw-keyed view keys
+                # on (a --bw change), re-derive the base to keep the held density constant and inject.
+                law = active[0]
+                if law is not None and held is not None and (set(law.params()) & touched):
+                    fv = state.get(freq_param) if freq_param else None
+                    freq_hz = (float(fv) * freq_factor
+                               if isinstance(fv, (int, float)) and not isinstance(fv, bool) else None)
+                    params = fold_params_from_values(artifact, specs, state)
+                    b = fold.bounds_at(freq_hz, params)
+                    base_new = held - _view_delta(state)            # base to deliver held at new op
+                    base_new = min(max(base_new, b["min_power_dbm"]), b["max_power_dbm"])   # clamp
+                    base_new = round(base_new, 4)
+                    injections[seq_idx] = (base_new, active_id[0], power_dest)
+                    state[power_dest] = base_new    # subsequent holds see the (clamped) standing base
+
+    if not injections:
+        return items
+    out = []
+    for i, it in enumerate(items):
+        inj = injections.get(i)
+        if inj is None or getattr(it, "action", None) != "tune":
+            out.append(it)
+            continue
+        base_new, view_id, pdest = inj
+        new_params = dict(getattr(it, "params", {}) or {})
+        new_params[pdest] = base_new
+        out.append(replace(it, params=new_params, power_view=view_id, power_hold_dest=pdest))
+    return out
 
 
 def _held_power_issue(task: str, param: str, unit: str, power: float, direction: str,
