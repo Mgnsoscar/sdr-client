@@ -25,6 +25,17 @@ One **Power** card:
   button that promotes it to the primary (the commanded output never changes — only which
   quantity you type in).
 
+Two refinements the user asked for (in the mockup, carry into the build):
+- **Round power to the achievable step.** Every displayed power (primary value, MIN/MAX, and each
+  companion) is shown rounded to the chain's **finest achievable step** — the stage step with the
+  most decimals — never at raw fold precision (no "-26.2272"). Precision = decimals of that step.
+  The value is snapped to that grid too (the app already does this via `snap_role:"power"` /
+  `PowerFold.finest_step()`; formatting uses `_decimals_for(step)`).
+- **List power's dependencies like the frequency.** A **"DEPENDS ON"** row under the rail lists
+  every fold input as a labelled value chip — the fold **frequency** AND every bridge-keyed
+  parameter (e.g. the chirp's `--bw`) — so the operator sees what moves the range. This replaces
+  the frequency-only `Range at <f> MHz · moves with frequency` caption.
+
 ## Where it lives in code (`sdr-client/ui/param_form.py`)
 The calibrated `--power` field is built by `_field_row` (~line 940): the name label +
 `_power_chip_label()` unit chip (already `quantity [unit]`), the input widget, the `RangeRail`
@@ -57,7 +68,13 @@ Data model (unchanged — reuse it):
 3. **Switch control:** the `Control in this →` button calls the existing
    `_on_power_view_changed`-equivalent (set `self._power_view = view_id`; `_do_refold()`).
 4. **Family colours:** slate chip for `abs`, teal for `density` — reuse `_unit_family`.
-5. **No agent/scripts changes.** Client-only; no capability/version bump.
+5. **Precision:** format every power value with `_decimals_for(fold.finest_step())` decimals
+   (the field already snaps to that grid). Apply to the primary value, the `RangeRail`/`LimitChip`
+   MIN/MAX (`_fmt_bound`), and the companion values — so they all match the step, not raw fold output.
+6. **Depends-on row:** build it from the fold inputs — the active freq source (`_freq_source_dest`,
+   shown in its own unit) plus `_bridge_param_dests()` (each param's dest → label + live value +
+   unit). It replaces the old "moves with frequency" note; keep it live (rebuild on re-fold).
+7. **No agent/scripts changes.** Client-only; no capability/version bump.
 
 ## Tests to update/add (`tests/test_param_form_power_units.py`)
 - `_companions(f)` currently finds labels starting with `=`; the redesign changes that format —

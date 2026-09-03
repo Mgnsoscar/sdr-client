@@ -105,9 +105,16 @@
        box-shadow:0 1px 3px rgba(22,32,48,.25);}
   input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:var(--surface);
        border:2px solid var(--accent);cursor:grab;box-shadow:0 1px 3px rgba(22,32,48,.25);}
-  .rail-note{margin-top:8px;font-size:11px;color:var(--muted);}
-  .rail-note b{color:var(--accent-ink);font-weight:600;}
-  .rail-note .mv{color:var(--faint);}
+  /* what the power fold depends on — shown like the frequency, so the operator sees what
+     moves the range (the fold frequency + every bridge-keyed parameter). */
+  .deps{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:12px;}
+  .deps-lbl{font-size:9.5px;font-weight:700;letter-spacing:.09em;color:var(--faint);}
+  .dep{display:inline-flex;align-items:baseline;gap:6px;background:var(--inset);
+       border:1px solid var(--border);border-radius:20px;padding:3px 10px;}
+  .dep .dk{font-size:10.5px;font-weight:600;color:var(--accent-ink);}
+  .dep .dv{font-family:var(--mono);font-size:12px;color:var(--text);font-variant-numeric:tabular-nums;}
+  .dep .du{font-family:var(--mono);font-size:10.5px;color:var(--faint);}
+  .deps-note{font-size:10.5px;color:var(--faint);}
   .warn{display:none;margin-top:9px;font-size:11.5px;color:#8a5a12;background:var(--armed-soft);
        border:1px solid #ecd3a3;border-radius:8px;padding:8px 10px;}
   .warn.show{display:block;}
@@ -196,20 +203,30 @@
   // control keeps the physical power constant and recomputes the rest — exactly the model in
   // ui/param_form.py (_power_views + view_delta): value(q) = base + off(q).
   var Q = [
-    {id:"mainlobe", name:"Main-lobe integrated power", unit:"dBm",    fam:"abs", off:0.0,    prec:4},
-    {id:"density",  name:"Spectral density at main lobe peak", unit:"dBm/Hz", fam:"den", off:-59.65, prec:2},
-    {id:"fullsig",  name:"Full signal power (filter passband)", unit:"dBm", fam:"abs", off:-0.003, prec:2}
+    {id:"mainlobe", name:"Main-lobe integrated power", unit:"dBm",    fam:"abs", off:0.0},
+    {id:"density",  name:"Spectral density at main lobe peak", unit:"dBm/Hz", fam:"den", off:-59.65},
+    {id:"fullsig",  name:"Full signal power (filter passband)", unit:"dBm", fam:"abs", off:0.10}
   ];
-  var BASE_MIN = -76.9552, BASE_MAX = -2.7152;   // range in the reference quantity
-  var base = -26.2272;                            // current value, in the reference quantity
+  // Power is shown rounded to the chain's finest achievable step (the stage step with the most
+  // decimals), never at raw fold precision — so no "crazy decimals". PREC = decimals of STEP.
+  var STEP = 0.05, PREC = 2;                       // e.g. a 0.05 dB achievable grid → 2 decimals
+  var BASE_MIN = -76.95, BASE_MAX = -2.70;         // range in the reference quantity (on-grid)
+  var base = -26.25;                               // current value, in the reference quantity
   var active = "mainlobe";
-  var FREQ_MHZ = 1575.42;
+  // The parameters the power fold depends on — surfaced like the fold frequency so the operator
+  // sees what moves the range. Frequency is the calibration fold frequency; the rest are the
+  // bridge-keyed params (here the chirp's density↔total law keys on the sweep bandwidth).
+  var DEPS = [
+    {k:"Frequency", v:"1575.42", u:"MHz"},
+    {k:"Sweep BW",  v:"10",      u:"MHz"}
+  ];
 
   function q(id){ return Q.find(function(x){return x.id===id;}); }
   function val(x){ return base + x.off; }
   function vmin(x){ return BASE_MIN + x.off; }
   function vmax(x){ return BASE_MAX + x.off; }
-  function fmt(n,p){ return (n>=0?"":"−") + Math.abs(n).toFixed(p); }   // real minus sign
+  function snap(v){ return Math.round(v/STEP)*STEP; }                   // to the achievable grid
+  function fmt(n){ return (n>=0?"":"−") + Math.abs(n).toFixed(PREC); }  // rounded, real minus
   function chip(x){ return '<span class="chip '+(x.fam==="den"?"den":"abs")+'">'+x.unit+'</span>'; }
 
   var primary = document.getElementById("primary");
@@ -224,18 +241,21 @@
       '</div>'+
       '<div class="p-value">'+
         '<span class="p-input">'+
-          '<input id="pv" type="text" inputmode="decimal" aria-label="'+a.name+' value" value="'+fmt(val(a),a.prec)+'">'+
+          '<input id="pv" type="text" inputmode="decimal" aria-label="'+a.name+' value" value="'+fmt(val(a))+'">'+
           '<span class="u">'+a.unit+'</span>'+
           '<span class="step"><button id="up" aria-label="increase">▲</button>'+
           '<button id="dn" aria-label="decrease">▼</button></span>'+
         '</span>'+
       '</div>'+
       '<div class="rail">'+
-        '<div class="rail-ends"><span><b>MIN</b>'+fmt(vmin(a),a.prec)+'</span>'+
-          '<span><b>MAX</b>'+fmt(vmax(a),a.prec)+'</span></div>'+
-        '<input id="slider" type="range" min="'+BASE_MIN+'" max="'+BASE_MAX+'" step="0.0001" value="'+base+'" '+
+        '<div class="rail-ends"><span><b>MIN</b>'+fmt(vmin(a))+'</span>'+
+          '<span><b>MAX</b>'+fmt(vmax(a))+'</span></div>'+
+        '<input id="slider" type="range" min="'+BASE_MIN+'" max="'+BASE_MAX+'" step="'+STEP+'" value="'+base+'" '+
           'aria-label="'+a.name+'">'+
-        '<div class="rail-note">Range at <b>'+FREQ_MHZ.toFixed(2)+' MHz</b> <span class="mv">· moves with frequency</span></div>'+
+        '<div class="deps"><span class="deps-lbl">DEPENDS ON</span>'+
+          DEPS.map(function(d){ return '<span class="dep"><span class="dk">'+d.k+'</span>'+
+            '<span class="dv">'+d.v+'</span><span class="du">'+d.u+'</span></span>'; }).join('')+
+          '<span class="deps-note">range folds at these · moves as they change</span></div>'+
         '<div class="warn" id="warn"></div>'+
       '</div>';
 
@@ -244,7 +264,7 @@
       var el = document.createElement("div"); el.className="comp";
       el.innerHTML =
         '<div class="comp-top"><span class="comp-name">'+x.name+'</span>'+chip(x)+'</div>'+
-        '<div class="comp-val"><span class="n">'+fmt(val(x),x.prec)+'</span><span class="u">'+x.unit+'</span></div>'+
+        '<div class="comp-val"><span class="n">'+fmt(val(x))+'</span><span class="u">'+x.unit+'</span></div>'+
         '<div class="comp-foot"><span class="comp-live"><span class="d"></span>live</span>'+
           '<button class="q-set" data-id="'+x.id+'">Control in this →</button></div>';
       companions.appendChild(el);
@@ -256,7 +276,7 @@
     var a = q(active);
     var v = parseFloat(String(displayVal).replace("−","-"));
     if(isNaN(v)) return;
-    base = Math.min(Math.max(v - a.off, BASE_MIN), BASE_MAX);
+    base = Math.min(Math.max(snap(v - a.off), BASE_MIN), BASE_MAX);
   }
 
   function wire(){
@@ -268,31 +288,31 @@
     function refreshCompanions(){
       var tiles = companions.querySelectorAll(".comp");
       var others = Q.filter(function(x){return x.id!==active;});
-      tiles.forEach(function(t,i){ t.querySelector(".n").textContent = fmt(val(others[i]),others[i].prec); });
+      tiles.forEach(function(t,i){ t.querySelector(".n").textContent = fmt(val(others[i])); });
     }
     function showClamp(typed){
       var v = parseFloat(String(typed).replace("−","-"));
       if(isNaN(v)){ warn.classList.remove("show"); return; }
-      if(v > vmax(a)+1e-9){ warn.textContent = "Above the maximum this unit can deliver ("+fmt(vmax(a),a.prec)+" "+a.unit+") — the request is clamped down to it."; warn.classList.add("show"); }
-      else if(v < vmin(a)-1e-9){ warn.textContent = "Below the minimum this unit can deliver ("+fmt(vmin(a),a.prec)+" "+a.unit+") — the request is clamped up to it."; warn.classList.add("show"); }
+      if(v > vmax(a)+1e-9){ warn.textContent = "Above the maximum this unit can deliver ("+fmt(vmax(a))+" "+a.unit+") — the request is clamped down to it."; warn.classList.add("show"); }
+      else if(v < vmin(a)-1e-9){ warn.textContent = "Below the minimum this unit can deliver ("+fmt(vmin(a))+" "+a.unit+") — the request is clamped up to it."; warn.classList.add("show"); }
       else warn.classList.remove("show");
     }
 
     pv.addEventListener("input", function(){
       showClamp(pv.value);
-      setBaseFromActive(pv.value);
+      setBaseFromActive(pv.value);      // snaps base to the achievable grid
       slider.value = base;
       refreshCompanions();
     });
-    pv.addEventListener("blur", function(){ pv.value = fmt(val(a),a.prec); warn.classList.remove("show"); });
+    pv.addEventListener("blur", function(){ pv.value = fmt(val(a)); warn.classList.remove("show"); });
     slider.addEventListener("input", function(){
-      base = parseFloat(slider.value);
-      pv.value = fmt(val(a),a.prec);
+      base = snap(parseFloat(slider.value));
+      pv.value = fmt(val(a));
       warn.classList.remove("show");
       refreshCompanions();
     });
-    function bump(d){ base = Math.min(Math.max(base + d, BASE_MIN), BASE_MAX);
-      pv.value = fmt(val(a),a.prec); slider.value = base; warn.classList.remove("show"); refreshCompanions(); }
+    function bump(d){ base = Math.min(Math.max(snap(base + d), BASE_MIN), BASE_MAX);
+      pv.value = fmt(val(a)); slider.value = base; warn.classList.remove("show"); refreshCompanions(); }
     document.getElementById("up").addEventListener("click", function(){ bump(0.25); });
     document.getElementById("dn").addEventListener("click", function(){ bump(-0.25); });
 
