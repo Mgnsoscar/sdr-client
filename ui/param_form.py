@@ -622,7 +622,8 @@ class BoundedNumberField(QWidget):
     valueChanged = pyqtSignal()
 
     def __init__(self, spec: dict, fold: Optional["PowerFold"] = None,
-                 fold_freq: Optional[float] = None, note: str = "", parent=None):
+                 fold_freq: Optional[float] = None, note: str = "", parent=None,
+                 fold_params: Optional[dict] = None):
         super().__init__(parent)
         self._spec = dict(spec)
         self._is_int = self._spec.get("type") == "int"
@@ -631,12 +632,16 @@ class BoundedNumberField(QWidget):
         self._hi = float(hi) if hi is not None else None
         self._spin = _make_spinbox(self._spec)
         self._psnap = None
+        # For a calibrated --power spec the achievable-level snapping folds at ``fold_freq`` AND
+        # ``fold_params`` (the bridge-keyed params — a chirp's --bw, GPS C/A's enbw behind
+        # --sidelobes), so a ramp's From/To snaps to the levels the unit can really reach at the
+        # operating point, matching its (params-folded) min/max bounds.
         if self._spec.get("snap_role") == "power" and fold is not None:
-            self._psnap = lambda p: fold.snap_power(p, fold_freq)
+            self._psnap = lambda p: fold.snap_power(p, fold_freq, fold_params)
             if isinstance(self._spin, _AchievableSpin):
                 self._spin.set_snappers(self._psnap,
-                                        lambda p: fold.quantize_up(p, fold_freq),
-                                        lambda p: fold.quantize_down(p, fold_freq))
+                                        lambda p: fold.quantize_up(p, fold_freq, fold_params),
+                                        lambda p: fold.quantize_down(p, fold_freq, fold_params))
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)

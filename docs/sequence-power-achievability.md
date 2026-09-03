@@ -1,7 +1,8 @@
 # Sequence power achievability + power control in step/ramp editors
 
-**Status:** Surface A (temporal achievability pass) **DONE + wired + tested**. Surfaces B and C
-still to do. Design locked.
+**Status:** Surface A (temporal achievability pass) and Surface B (bridge `params` in the ramp's
+per-step fold) **DONE + tested**. Surface C (the multi-quantity card in run/tune steps) still to
+do. Design locked.
 **Branch:** `claude/sequence-power-achievability` (exists in all three repos; work is
 expected to be **client-only** unless a `paramkit` tweak proves necessary).
 **Owner context:** continues the calibrated `--power` work whose prior phases are recorded in
@@ -148,11 +149,27 @@ Caveats to state in code + UI:
 - Per-task: a tune that changes task B's freq doesn't affect task A. `sequence_effective_values`
   is already per-task; keep that.
 
-### Surface B — Thread bridge `params` into per-step range folds (NEEDED for correct live feedback)
+### Surface B — Thread bridge `params` into per-step range folds — ✅ DONE
 
-The ramp editor already folds the `--power` From/To range at the carried **frequency** and
-validates both endpoints (monotonic ⇒ whole sweep at that fold point). The gap: **no `params`**,
-so a parameter-dependent chain folds at the law's *representative* bridge value, not the live one.
+Shipped: the ramp's From/To range and its achievable-level snapping now fold through the bridge
+params in effect when the ramp fires, so every level From..To is validated against the real
+operating point (endpoint check ⇒ whole monotonic sweep). Implemented as:
+- `BoundedNumberField(... fold_params=None)` — threads `fold_params` into `snap_power` /
+  `quantize_up` / `quantize_down` (`ui/param_form.py`).
+- `ramp_editor`: `_op_state(task)` (shared carried snapshot) feeds both `_op_freq_hz` and the new
+  `_op_params(task)` (= `fold_params_from_values(artifact, all_params, carried)`); `_with_cal_bounds`
+  passes `params` to `refold_bounds`; `_power_fold_ctx` returns params → `BoundedNumberField`.
+- **Deviation / deferred:** the fold source is the **carried** sequence state for BOTH tune and run
+  ramps (matching the pre-existing `_op_freq_hz` behavior). A run-mode ramp re-invokes the task per
+  point with the fixed-value form's args, so strictly it should fold at *that form's* freq/params;
+  switching run mode to read `self._form` is a small, isolated follow-up (change `_op_state` to
+  branch on `self._run_mode`). Left as-is to avoid changing tested tune-mode behavior under budget.
+Tests: `tests/test_ramp_cal_param_fold.py` (range + snapper track a carried `--sidelobes`; both
+fail without the fix). Original design notes below.
+
+The ramp editor already folded the `--power` From/To range at the carried **frequency** and
+validated both endpoints (monotonic ⇒ whole sweep at that fold point). The gap was **no `params`**,
+so a parameter-dependent chain folded at the law's *representative* bridge value, not the live one.
 
 - `RampEditorDialog._with_cal_bounds` (`ui/ramp_editor.py` ~405): `refold_bounds(bounds, freq_hz)`
   → add `params=`. Source of params depends on mode:
@@ -267,13 +284,14 @@ Headless Qt: `QT_QPA_PLATFORM=offscreen python3 -m pytest -q` (a known teardown 
 
 1. Confirm you're on `claude/sequence-power-achievability` in all three repos (client is where the
    work lives). `main` already carries all prior merged work; Surface A is committed on this branch.
-2. **Surface A is DONE** (`achievability_warnings` + editor wiring + `tests/test_achievability_
-   warnings.py`, all green). Next: **Surface B** — thread bridge `params` into the ramp's
-   per-step From/To fold (`ramp_editor._with_cal_bounds` add `params=`; `BoundedNumberField` add a
-   `fold_params=` ctor arg threaded into `snap_power`/`quantize_up`/`quantize_down`; add
-   `_op_params(task)` mirroring `_op_freq_hz`, sourcing carried state for a tune ramp and the
-   fixed form for a run ramp). Reuse `state.power_fold.fold_params_from_values`.
-3. Then **Surface C** (the multi-quantity card in run/tune steps).
+2. **Surfaces A and B are DONE** (all green: `tests/test_achievability_warnings.py`,
+   `tests/test_ramp_cal_param_fold.py`). Next: **Surface C** — wire the multi-quantity power card
+   (`param_form._add_power_unit_ui`) into the step editor's run/tune steps (cache
+   `calibration_power_laws` in `TimelineEditor._on_params`; pass `power_laws` + `context_dests`
+   seeded from `_carried` in `StepEditorDialog._build_form`; add `ParamForm.set_fold_context` +
+   re-fold on anchor/offset change). See §5 Surface C for the full recipe and live-tune analogue.
+3. Optional Surface-B follow-up: make a **run-mode** ramp fold at the fixed-value form's
+   freq/params instead of the carried state (branch `_op_state` on `self._run_mode`).
 4. Keep `QT_QPA_PLATFORM=offscreen … pytest -q` green (run 3–5×). Client-only; drift guard intact.
 
 ### Possible refinements to Surface A (not blockers)

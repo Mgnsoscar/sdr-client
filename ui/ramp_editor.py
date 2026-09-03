@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
 )
 
 from api import ramp as _ramp
-from state.power_fold import PowerFold, refold_bounds
+from state.power_fold import PowerFold, fold_params_from_values, refold_bounds
 
 from . import timeline_model as tlm
 from .duration_spin import DurationSpinBox
@@ -418,9 +418,11 @@ class RampEditorDialog(QDialog):
         bounds = getter(task)
         if not bounds:
             return spec
-        freq_hz = self._op_freq_hz(task)
-        if freq_hz is not None:
-            bounds = refold_bounds(bounds, freq_hz)
+        # Fold the range at the frequency AND the bridge params (a chirp's --bw, GPS C/A's enbw
+        # behind --sidelobes) in effect when the ramp fires, so every level From..To is checked
+        # against what the unit can actually deliver at the operating point — not the law's
+        # representative value. refold_bounds is a no-op when neither applies.
+        bounds = refold_bounds(bounds, self._op_freq_hz(task), self._op_params(task))
         return apply_power_bounds([spec], bounds)[0]
 
     def _ramp_order_key(self):
@@ -439,36 +441,54 @@ class RampEditorDialog(QDialog):
                 return hz_per_unit(s.get("unit"))
         return 1.0
 
-    def _op_freq_hz(self, task: str) -> Optional[float]:
-        """The transmit frequency (Hz) the ramped task is running at when this ramp fires
-        — its duration-bar baseline replayed through the earlier same-task steps in the
-        sequence — for folding a frequency-dependent power range. None when the script
-        declares no calibration freq param, the editor can't report the sequence, or it's
-        unset."""
-        freq_param = (getattr(self._editor, "_script_cal_freq_params", None) or {}).get(
-            self._current_script)
+    def _op_state(self, task: str) -> dict:
+        """The effective ``{dest: value}`` parameter state to fold the swept --power range at —
+        the ramped task's duration-bar baseline replayed through the earlier same-task steps in
+        the sequence (the same carry the step editor uses). ``{}`` when it can't be built. Both
+        ``_op_freq_hz`` and ``_op_params`` read from this one snapshot, so the range's frequency
+        and its bridge params come from a single consistent operating point."""
         items_getter = getattr(self._editor, "items", None)
-        if not freq_param or items_getter is None:
-            return None
+        if items_getter is None:
+            return {}
         try:
             items = list(items_getter())
             _script, base_args = self._editor.script_for_task(task)
-            # Seed from the task's duration-bar args (its on-air baseline) so the frequency
-            # is known even when the ramp coincides with the bar's start (same order key,
-            # which would otherwise drop the bar); earlier tune steps then carry forward.
+            # Seed from the task's duration-bar args (its on-air baseline) so state is known even
+            # when the ramp coincides with the bar's start (same order key, which would otherwise
+            # drop the bar); earlier tune steps then carry forward.
             bar_args = next((list(it.args) for it in items
                              if getattr(it, "kind", None) == "bar"
                              and getattr(it, "task_name", None) == task
                              and getattr(it, "args", None)), None)
-            carried = tlm.sequence_effective_values(
+            return tlm.sequence_effective_values(
                 items, task, bar_args or base_args, self._all_params,
                 getattr(self._src, "uid", None), target_key=self._ramp_order_key())
         except Exception:      # noqa: BLE001 — a fold helper must never break the editor
+            return {}
+
+    def _op_freq_hz(self, task: str) -> Optional[float]:
+        """The transmit frequency (Hz) the ramped task is running at when this ramp fires (see
+        ``_op_state``) — for folding a frequency-dependent power range. None when the script
+        declares no calibration freq param, or it's unset."""
+        freq_param = (getattr(self._editor, "_script_cal_freq_params", None) or {}).get(
+            self._current_script)
+        if not freq_param:
             return None
-        val = carried.get(freq_param)
+        val = self._op_state(task).get(freq_param)
         if not isinstance(val, (int, float)) or isinstance(val, bool):
             return None
         return float(val) * self._freq_unit_factor(freq_param)
+
+    def _op_params(self, task: str) -> Optional[dict]:
+        """The bridge-keyed --power params (a chirp's --bw, GPS C/A's enbw behind --sidelobes) the
+        ramped task runs with when this ramp fires — so the swept range/snapping fold through them,
+        not the law's representative value. None when the signal has no keyed params, an
+        uncalibrated unit, or one can't be resolved. Same source as ``_op_freq_hz``."""
+        getter = getattr(self._editor, "cal_bounds_for_task", None)
+        artifact = ((getter(task) if getter is not None else None) or {}).get("artifact")
+        if not artifact:
+            return None
+        return fold_params_from_values(artifact, self._all_params, self._op_state(task))
 
     def _rebuild_run_form(self) -> None:
         if not self._run_mode:
@@ -638,28 +658,33 @@ class RampEditorDialog(QDialog):
         return None
 
     def _power_fold_ctx(self, spec: dict):
-        """(PowerFold, freq_hz, rail_note) for the swept parameter when it's the calibrated
-        --power field, so the bounded field snaps to real achievable levels and notes the
-        fold frequency — exactly as the parameter form does. (None, None, "") otherwise."""
+        """(PowerFold, freq_hz, fold_params, rail_note) for the swept parameter when it's the
+        calibrated --power field, so the bounded field snaps to real achievable levels at the
+        operating frequency + bridge params and notes what the range moves with — exactly as the
+        parameter form does. (None, None, None, "") otherwise."""
         task = self._task.currentText().strip()
         getter = getattr(self._editor, "cal_bounds_for_task", None)
         bounds = getter(task) if getter is not None else None
         if not bounds or find_power_index([spec]) is None:
-            return None, None, ""
+            return None, None, None, ""
         fold = PowerFold.from_artifact((bounds.get("artifact") or {}))
         freq = self._op_freq_hz(task)
+        params = self._op_params(task)
         note = "Calibrated for this unit"
         if fold is not None and fold.freq_dependent and isinstance(freq, (int, float)):
             note = f"Range at {freq / 1e6:.2f} MHz · moves with frequency"
-        return fold, freq, note
+        elif fold is not None and fold.param_dependent:
+            note = "Range moves with the live parameters"
+        return fold, freq, params, note
 
     def _make_value_field(self, spec: Optional[dict], value, placeholder: str):
         """A From/To widget for the swept parameter: a bounded numeric field (spinbox + rail
         + limit chip) when the parameter has a numeric min/max, else a plain line edit."""
         if spec and spec.get("type") in ("int", "float") \
                 and spec.get("min") is not None and spec.get("max") is not None:
-            fold, freq, note = self._power_fold_ctx(spec)
-            field = BoundedNumberField(spec, fold=fold, fold_freq=freq, note=note)
+            fold, freq, params, note = self._power_fold_ctx(spec)
+            field = BoundedNumberField(spec, fold=fold, fold_freq=freq, note=note,
+                                       fold_params=params)
             if isinstance(value, (int, float)):
                 field.setValue(value)
             field.valueChanged.connect(self._update_preview)

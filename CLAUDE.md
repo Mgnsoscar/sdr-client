@@ -64,10 +64,12 @@ clamped points/times/ceiling), NOT a per-step fold.
 **DONE:** Surface A — `timeline_model.achievability_warnings(items, resolve)` + `TimelineEditor`
 wiring (amber banner above the canvas), tests in `tests/test_achievability_warnings.py`. The pure
 fold helpers `eval_formula` / `fold_params_from_values` now live in **`state/power_fold.py`**
-(re-exported from `param_form` for compatibility).
-**NEXT:** Surface B — thread bridge `params` into the ramp's per-step From/To fold
-(`ramp_editor._with_cal_bounds` / `BoundedNumberField`); then Surface C — the multi-quantity power
-card in run/tune steps.
+(re-exported from `param_form` for compatibility). Surface B — the ramp editor's From/To range +
+achievable-level snapping fold through the live bridge params (`BoundedNumberField(fold_params=…)`,
+`ramp_editor._op_state`/`_op_params`), tests in `tests/test_ramp_cal_param_fold.py`.
+**NEXT:** Surface C — wire the multi-quantity power card (`param_form._add_power_unit_ui`) into the
+step editor's run/tune steps (`power_laws` + `context_dests` seeded from `_carried`; a
+`set_fold_context` re-fold on anchor/offset change). Full recipe in the design doc §5 Surface C.
 
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY
