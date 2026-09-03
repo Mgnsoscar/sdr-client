@@ -56,8 +56,8 @@ The agent's resolver publishes a per-signal **artifact** the client/script re-fo
 
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY
-quantity you set (large step-rounded value + range rail with labelled MIN/MAX + a `CONTROLLING`
-tag + family-coloured `quantity [unit]` chip + `LIVE`) and each OTHER quantity as its own
+quantity you set (large step-rounded value + range rail with labelled MIN/MAX + a family-coloured
+`quantity [unit]` chip + `LIVE`) and each OTHER quantity as its own
 read-only live field in an "ALSO READS AS" grid, each with a `Control in this →` button
 (promotes it via `_set_power_view` → `_power_view`/`_do_refold`) — replacing the old
 `control in` dropdown + green `= … · name` lines. A `DEPENDS ON` row surfaces the fold inputs

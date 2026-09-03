@@ -597,18 +597,6 @@ def _family_chip(text: str, unit: str) -> QLabel:
     return lbl
 
 
-def _controlling_tag() -> QLabel:
-    """The small accent 'CONTROLLING' pill marking the primary quantity you set."""
-    lbl = QLabel("CONTROLLING")
-    f = QFont("IBM Plex Sans")
-    f.setPixelSize(9)
-    f.setWeight(QFont.Weight.Bold)
-    lbl.setFont(f)
-    lbl.setStyleSheet(
-        f"color: {Palette.ACCENT}; background: {Palette.SURFACE}; "
-        f"border: 1px solid {Palette.ACCENT_SOFT}; border-radius: 5px; "
-        f"padding: 1px 6px; letter-spacing: 0.6px;")
-    return lbl
 
 
 class BoundedNumberField(QWidget):
@@ -1020,12 +1008,9 @@ class ParamForm(QWidget):
         is_power = spec.get("snap_role") == "power"
         lrow.addWidget(field_name_label(self._display_name(spec)))
         # The calibrated --power field is the PRIMARY control of a multi-quantity power card:
-        # a "CONTROLLING" tag (when it offers other quantities) + a family-coloured
-        # "quantity [unit]" chip (slate = absolute dBm, teal = a spectral density). Every
-        # other field keeps a plain " · "-styled unit chip.
+        # a family-coloured "quantity [unit]" chip (slate = absolute dBm, teal = a spectral
+        # density). Every other field keeps a plain " · "-styled unit chip.
         if is_power:
-            if self._power_views():
-                lrow.addWidget(_controlling_tag())
             lrow.addWidget(_family_chip(self._power_chip_label(),
                                         (self._selected_view() or {}).get("unit", spec["unit"])))
             # The primary quantity you set reads large — the prominent thing on the card, with
