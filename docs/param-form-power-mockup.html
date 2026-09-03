@@ -123,7 +123,7 @@
   .reads{display:flex;align-items:center;gap:10px;margin:16px 15px 9px;}
   .reads .lbl{font-size:10px;font-weight:700;letter-spacing:.1em;color:var(--faint);}
   .reads .rule{flex:1;height:1px;background:var(--border);}
-  .comp-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(255px,1fr));gap:10px;
+  .comp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(248px,1fr));gap:10px;
        padding:0 15px 16px;}
   .comp{border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-alt);
        padding:11px 13px;display:flex;flex-direction:column;gap:8px;}
@@ -145,13 +145,31 @@
        border:1px solid var(--border);border-radius:var(--radius);color:var(--muted);font-size:11.5px;}
   .legend b{color:var(--text);} .legend ul{margin:8px 0 0;padding-left:18px;} .legend li{margin:4px 0;}
   code{font-family:var(--mono);font-size:11px;background:var(--inset);padding:1px 5px;border-radius:4px;color:var(--accent-ink);}
-  .ribbon{display:flex;align-items:center;gap:9px;max-width:640px;margin:0 auto 14px;padding:7px 12px;
+  .ribbon{display:flex;align-items:center;gap:9px;max-width:640px;margin:0 auto 10px;padding:7px 12px;
        background:var(--accent-soft);border:1px solid #cfe0ee;border-radius:8px;color:var(--accent-ink);font-size:11.5px;}
   .ribbon .d{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:none;}
+  /* mockup-only demo control (not part of the real UI) */
+  .demobar{display:flex;align-items:center;gap:10px;max-width:640px;margin:0 auto 14px;padding:6px 10px;
+       border:1px dashed var(--border-strong);border-radius:8px;color:var(--faint);font-size:11px;}
+  .demobar .lab{font-weight:600;letter-spacing:.04em;}
+  .seg{display:inline-flex;border:1px solid var(--border-strong);border-radius:7px;overflow:hidden;margin-left:auto;}
+  .seg button{border:0;background:var(--surface);color:var(--muted);font-family:var(--sans);font-size:11px;
+       padding:5px 12px;cursor:pointer;}
+  .seg button+button{border-left:1px solid var(--border);}
+  .seg button.on{background:var(--accent);color:#fff;font-weight:600;}
+  .seg button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;}
 </style>
 
 <div class="ribbon"><span class="d"></span>
   <span><b>Mockup — proposed Run/tune power control.</b> Example values from a GPS C/A signal; drag the slider or switch which quantity you control.</span></div>
+
+<div class="demobar">
+  <span class="lab">Mockup control · how many power quantities the signal declares:</span>
+  <span class="seg" id="seg">
+    <button data-set="three" class="on">3 quantities</button>
+    <button data-set="six">6 quantities</button>
+  </span>
+</div>
 
 <div class="wrap">
   <div class="dlg">
@@ -202,11 +220,25 @@
   // fixed dB offset from a shared reference (the "base" quantity); switching which one you
   // control keeps the physical power constant and recomputes the rest — exactly the model in
   // ui/param_form.py (_power_views + view_delta): value(q) = base + off(q).
-  var Q = [
-    {id:"mainlobe", name:"Main-lobe integrated power", unit:"dBm",    fam:"abs", off:0.0},
-    {id:"density",  name:"Spectral density at main lobe peak", unit:"dBm/Hz", fam:"den", off:-59.65},
-    {id:"fullsig",  name:"Full signal power (filter passband)", unit:"dBm", fam:"abs", off:0.10}
-  ];
+  // Two example signals: the real GPS C/A (3 quantities), and a busier one (6) to show how the
+  // "also reads as" grid scales. All are just alternative expressions of the same physical power
+  // (a fixed dB offset from the shared reference); the mockup toggle swaps between them.
+  var SETS = {
+    three: [
+      {id:"mainlobe", name:"Main-lobe integrated power", unit:"dBm", fam:"abs", off:0.0},
+      {id:"density",  name:"Spectral density at main lobe peak", unit:"dBm/Hz", fam:"den", off:-59.65},
+      {id:"fullsig",  name:"Full signal power (filter passband)", unit:"dBm", fam:"abs", off:0.10}
+    ],
+    six: [
+      {id:"mainlobe", name:"Main-lobe integrated power", unit:"dBm", fam:"abs", off:0.0},
+      {id:"fullsig",  name:"Full signal power (filter passband)", unit:"dBm", fam:"abs", off:0.10},
+      {id:"totalinb", name:"Total in-band power", unit:"dBm", fam:"abs", off:0.30},
+      {id:"density",  name:"Spectral density at main lobe peak", unit:"dBm/Hz", fam:"den", off:-59.65},
+      {id:"densmhz",  name:"Spectral density (per MHz)", unit:"dBm/MHz", fam:"den", off:0.35},
+      {id:"pep",      name:"Peak envelope power", unit:"dBm", fam:"abs", off:2.10}
+    ]
+  };
+  var Q = SETS.three;
   // Power is shown rounded to the chain's finest achievable step (the stage step with the most
   // decimals), never at raw fold precision — so no "crazy decimals". PREC = decimals of STEP.
   var STEP = 0.05, PREC = 2;                       // e.g. a 0.05 dB achievable grid → 2 decimals
@@ -320,6 +352,17 @@
       b.addEventListener("click", function(){ active = b.getAttribute("data-id"); render(); });
     });
   }
+
+  // mockup-only: swap between the 3- and 6-quantity example signals
+  document.querySelectorAll("#seg button").forEach(function(b){
+    b.addEventListener("click", function(){
+      document.querySelectorAll("#seg button").forEach(function(x){ x.classList.remove("on"); });
+      b.classList.add("on");
+      Q = SETS[b.getAttribute("data-set")];
+      if(!q(active)) active = Q[0].id;     // keep the controlled quantity if it still exists
+      render();
+    });
+  });
 
   render();
 })();
