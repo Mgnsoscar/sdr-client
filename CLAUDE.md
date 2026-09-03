@@ -54,22 +54,33 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
-## NEXT UP — Sequence power achievability + step/ramp power control: IN PROGRESS (multi-session)
-Active branch `claude/sequence-power-achievability` (all three repos; expected client-only). Full
-design + code map + next actions live in **`docs/sequence-power-achievability.md`** — read it
-before starting. In one line: sequence power achievability is **temporal** (a power ramp's top
-levels can become unachievable when a *later* tune step retunes the carrier), so the guarantee is
-a sequence-level, time-ordered **`achievability_warnings`** pass (warn, never block; name the
-clamped points/times/ceiling), NOT a per-step fold.
-**DONE:** Surface A — `timeline_model.achievability_warnings(items, resolve)` + `TimelineEditor`
-wiring (amber banner above the canvas), tests in `tests/test_achievability_warnings.py`. The pure
-fold helpers `eval_formula` / `fold_params_from_values` now live in **`state/power_fold.py`**
-(re-exported from `param_form` for compatibility). Surface B — the ramp editor's From/To range +
-achievable-level snapping fold through the live bridge params (`BoundedNumberField(fold_params=…)`,
-`ramp_editor._op_state`/`_op_params`), tests in `tests/test_ramp_cal_param_fold.py`.
-**NEXT:** Surface C — wire the multi-quantity power card (`param_form._add_power_unit_ui`) into the
-step editor's run/tune steps (`power_laws` + `context_dests` seeded from `_carried`; a
-`set_fold_context` re-fold on anchor/offset change). Full recipe in the design doc §5 Surface C.
+## Sequence power achievability + step/ramp power control: COMPLETE (multi-session)
+Branch `claude/sequence-power-achievability` (all three repos; client-only). Full design + code
+map live in **`docs/sequence-power-achievability.md`**. In one line: sequence power achievability
+is **temporal** (a power ramp's top levels can become unachievable when a *later* tune step retunes
+the carrier), so the guarantee is a sequence-level, time-ordered **`achievability_warnings`** pass
+(warn, never block; name the clamped points/times/ceiling), NOT a per-step fold.
+**Surface A** — `timeline_model.achievability_warnings(items, resolve)` + `TimelineEditor` wiring
+(amber banner above the canvas), tests `tests/test_achievability_warnings.py`. The pure fold helpers
+`eval_formula` / `fold_params_from_values` live in **`state/power_fold.py`** (re-exported from
+`param_form` for compatibility). **Surface B** — the ramp editor's From/To range + achievable-level
+snapping fold through the live bridge params (`BoundedNumberField(fold_params=…)`,
+`ramp_editor._op_state`/`_op_params`), tests `tests/test_ramp_cal_param_fold.py`.
+**Surface C** — the multi-quantity power card (`param_form._add_power_unit_ui`: ALSO READS AS
+companions, `Control in this →`, DEPENDS ON, family chips, finest-step rounding) now renders in the
+step editor's run/tune steps. `TimelineEditor._script_power_laws` caches `calibration_power_laws`;
+`StepEditorDialog._build_form` passes `power_laws` to both branches and, for a tune step, the full
+schema + `context_dests` (non-live dests) seeded from `_carried` via the static
+`_seed_context_from_carried` (the tune analogue of `live_tune_dialog._prepare_specs`; fresh spec
+copies — never mutates the shared param cache). A new `ParamForm.set_fold_context(cal_freq_default=,
+context_defaults=)` updates `_cal_freq_default` + the context specs' defaults then re-folds
+(`_do_refold(hold_display=True)`) only when the fold point actually moved; `_refold_for_position`
+recomputes `_carried` and calls it, wired to the anchor/offset change signals. Saves are unchanged
+(run/bar → `build_args`, tune → `values`, both base-quantity `--power`, no context leakage). Tests:
+`tests/test_step_editor_power_units.py`. Client-only; no agent/scripts/capability change; drift
+guard intact. **Optional follow-ups remain** (design doc §9): a proactive sequence-task params
+prefetch so the achievability banner shows without opening a dialog first; a run-mode ramp folding
+at the fixed-value form's freq/params instead of the carried state.
 
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY

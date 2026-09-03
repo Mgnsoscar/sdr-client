@@ -282,6 +282,8 @@ POWER_DEST = "power"
 GAIN_DEST = "gain"
 AMP_DEST = "amplitude"
 
+_UNSET = object()   # sentinel: an argument the caller did not pass (distinct from an explicit None)
+
 _POWER_FLAGS = ("--power", "-Power")
 _GAIN_FLAGS = ("--gain", "-Gain")
 _AMP_FLAGS = ("--amplitude", "-Amplitude", "--ampl")
@@ -1975,6 +1977,38 @@ class ParamForm(QWidget):
         can't be read as a number — the same params ``refold_bounds``/``clamp_warning`` need so
         the ceiling tracks the live knobs exactly as the displayed range does."""
         return self._live_params()
+
+    def set_fold_context(self, cal_freq_default=_UNSET, context_defaults=None) -> None:
+        """Update the fold CONTEXT — the carried frequency the range folds at when no freq field
+        is rendered, and the values of the non-rendered ``context_dests`` a law/limiting reading
+        keys on — then re-fold if the fold point actually moved, preserving the operator's live
+        edits (the same rebuild-and-restore ``_do_refold`` does for a bandwidth change).
+
+        A surgical alternative to ``set_params`` for the sequence step editor: a tune step's
+        carried state depends on where the step sits (which earlier steps precede it), so moving
+        its anchor/offset changes the operating frequency/bridge params without changing the
+        schema. ``cal_freq_default`` is in the freq field's own unit (scaled to Hz here, like the
+        constructor); ``context_defaults`` is ``{dest: value}`` for context params only."""
+        if cal_freq_default is not _UNSET:
+            self._cal_freq_default = (cal_freq_default * self._freq_unit_factor()
+                                      if cal_freq_default is not None else None)
+        for dest, val in (context_defaults or {}).items():
+            if not isinstance(val, (int, float)) or isinstance(val, bool):
+                continue
+            if dest not in self._context_dests:
+                continue                        # only fold-context params carry a seeded default
+            for i, s in enumerate(self._base_specs):
+                if s.get("dest") == dest:
+                    self._base_specs[i] = {**s, "default": val}   # copy — never mutate the cache
+                    break
+        # Nothing to fold yet (params not set), a non-calibrated field, or the fold point didn't
+        # actually move → skip the (re-rendering) refold. Mirrors _on_freq_changed's guard.
+        if not self._base_specs or self._power_mode not in ("absolute", "relative"):
+            return
+        if (self._fold_freq_now() == self._folded_at
+                and self._live_params() == self._folded_params):
+            return
+        self._do_refold(hold_display=True)
 
     def _spec_default_freq(self) -> Optional[float]:
         """The freq field's default from the schema, in Hz — the fold frequency for the FIRST

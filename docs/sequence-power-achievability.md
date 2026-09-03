@@ -1,8 +1,8 @@
 # Sequence power achievability + power control in step/ramp editors
 
-**Status:** Surface A (temporal achievability pass) and Surface B (bridge `params` in the ramp's
-per-step fold) **DONE + tested**. Surface C (the multi-quantity card in run/tune steps) still to
-do. Design locked.
+**Status:** Surface A (temporal achievability pass), Surface B (bridge `params` in the ramp's
+per-step fold) and Surface C (the multi-quantity card in run/tune steps) **DONE + tested**.
+Design locked. Optional follow-ups (§9) remain.
 **Branch:** `claude/sequence-power-achievability` (exists in all three repos; work is
 expected to be **client-only** unless a `paramkit` tweak proves necessary).
 **Owner context:** continues the calibrated `--power` work whose prior phases are recorded in
@@ -188,31 +188,39 @@ so a parameter-dependent chain folded at the law's *representative* bridge value
 - `_ramp_range_error` (`~122`) endpoint check then guarantees the whole monotonic sweep against
   the *correctly* folded interval — the local (single-operating-point) half of the guarantee.
 
-### Surface C — Multi-quantity power card in run/tune steps (UX; do LAST)
+### Surface C — Multi-quantity power card in run/tune steps (UX) — ✅ DONE
 
-Wire the existing power card (`_add_power_unit_ui`, `ui/param_form.py` ~1220 — ALSO READS AS
-companions, `Control in this →`, DEPENDS ON row, family chips, finest-step rounding) into the
-step editor's `ParamForm`. The card is already gated purely on two `set_params` kwargs the step
-editor doesn't pass yet:
+Shipped: the existing power card (`_add_power_unit_ui` — ALSO READS AS companions, `Control in
+this →`, DEPENDS ON row, family chips, finest-step rounding) now renders in the step editor's
+run/tune `ParamForm`, folding through the carried operating point and re-folding when the step is
+moved. The card is gated purely on two `set_params` kwargs the step editor now passes:
 
-- Cache `calibration_power_laws` in `TimelineEditor` (add `_script_power_laws[script]` in
-  `_on_params`, `ui/timeline_editor.py` ~1225, next to `_script_cal_freq_params`).
-- In `StepEditorDialog._build_form` (`~1231`):
-  - **run/bar** step: pass `power_laws=…` (full schema already renders → `context_dests` empty).
-  - **tune** step: pass the **full** schema + `context_dests` = non-live dests + `power_laws=…`,
-    seeding each context dest's `default` from `_carried` (a `_seed_context_from_carried` helper
-    mirroring live-tune's `_prepare_specs`, but sourcing `_carried` instead of a deployed command).
-    Live params still render only. See `live_tune_dialog._prepare_specs`/`_maybe_build`
-    (`ui/live_tune_dialog.py` ~263/287) for the exact pattern.
-- **Position-dependent re-fold:** carried state changes when the step's anchor/offset changes.
-  Add a surgical `ParamForm.set_fold_context(cal_freq_default=…, context_defaults={dest: val})`
-  that updates `_cal_freq_default`/`_render_freq` + the context specs' defaults in `_base_specs`
-  then calls `_do_refold()` (`~1898`, re-folds bounds + companions, preserving live edits). Wire
-  the existing anchor/offset change signals (`ui/timeline_editor.py` ~1052-1053) to recompute
-  `_carried` and call it.
-- Save paths unchanged: run/bar → `build_args()` (`~2436`), tune → `values()` (`~2474`); both
-  already emit `--power` in the base quantity (the `_power_offset` subtraction) and skip context
-  dests (`_effective_specs` ~2118 excludes them). Add a test asserting no context leakage.
+- `TimelineEditor._script_power_laws[script]` caches `calibration_power_laws`, populated in
+  `StepEditorDialog._on_params` (`ui/timeline_editor.py`) next to `_script_cal_freq_params`.
+- In `StepEditorDialog._build_form`:
+  - **run/bar** step: passes `power_laws=…` (full schema already renders → no `context_dests`).
+  - **tune** step: passes the **full** schema + `context_dests` = the non-live dests + `power_laws=…`,
+    seeding each context dest's `default` from `_carried` via the static `_seed_context_from_carried`
+    helper (the tune analogue of `live_tune_dialog._prepare_specs`, sourcing `_carried` not a
+    deployed command; returns fresh spec copies so the shared param cache is never mutated). Live
+    params still render only.
+- **Position-dependent re-fold:** `ParamForm.set_fold_context(cal_freq_default=…,
+  context_defaults={dest: val})` updates `_cal_freq_default` and the context specs' `default`s in
+  `_base_specs` (replacing entries with copies — no cache mutation), then re-folds via
+  `_do_refold(hold_display=True)` **only when the fold point actually moved** (mirrors
+  `_on_freq_changed`'s guard, preserving live edits). `StepEditorDialog._refold_for_position`
+  recomputes `_carried` and calls it; wired to the anchor/offset change signals (which previously
+  only refreshed the clamp caption). A `cal_freq_default` sentinel (`_UNSET`) distinguishes "not
+  passed" from an explicit `None`.
+- Save paths unchanged: run/bar → `build_args()`, tune → `values()`; both already emit `--power`
+  in the base quantity (the `_power_offset` subtraction) and skip context dests (`_effective_specs`
+  excludes them, `_is_input_field` excludes them from the card's own inputs).
+
+Tests: `tests/test_step_editor_power_units.py` — companions render in run + tune steps; the density
+companion + DEPENDS ON track a CARRIED `--bw` (fold context, not a field on the step); moving the
+offset past a state-resetting step re-folds the card; `Control in this →` promotes a companion;
+the tune save emits base-quantity `--power` with no context-dest leakage. Reuses the chirp density↔
+total laws (`FBW`/`PSD`) and the live-tune dialog pattern.
 
 ## 6. Key code map (all in `sdr-client` unless noted)
 
@@ -283,13 +291,11 @@ Headless Qt: `QT_QPA_PLATFORM=offscreen python3 -m pytest -q` (a known teardown 
 ## 9. Immediate next actions for a fresh session
 
 1. Confirm you're on `claude/sequence-power-achievability` in all three repos (client is where the
-   work lives). `main` already carries all prior merged work; Surface A is committed on this branch.
-2. **Surfaces A and B are DONE** (all green: `tests/test_achievability_warnings.py`,
-   `tests/test_ramp_cal_param_fold.py`). Next: **Surface C** — wire the multi-quantity power card
-   (`param_form._add_power_unit_ui`) into the step editor's run/tune steps (cache
-   `calibration_power_laws` in `TimelineEditor._on_params`; pass `power_laws` + `context_dests`
-   seeded from `_carried` in `StepEditorDialog._build_form`; add `ParamForm.set_fold_context` +
-   re-fold on anchor/offset change). See §5 Surface C for the full recipe and live-tune analogue.
+   work lives). `main` already carries all prior merged work; Surfaces A–C are committed here.
+2. **Surfaces A, B and C are DONE** (all green: `tests/test_achievability_warnings.py`,
+   `tests/test_ramp_cal_param_fold.py`, `tests/test_step_editor_power_units.py`). The core feature
+   is complete: temporal achievability warnings + calibrated `--power` control (card + folded
+   ranges) in every sequence surface. Only the optional refinements below remain.
 3. Optional Surface-B follow-up: make a **run-mode** ramp fold at the fixed-value form's
    freq/params instead of the carried state (branch `_op_state` on `self._run_mode`).
 4. Keep `QT_QPA_PLATFORM=offscreen … pytest -q` green (run 3–5×). Client-only; drift guard intact.

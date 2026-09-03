@@ -1048,9 +1048,10 @@ class StepEditorDialog(QDialog):
         self._form = ParamForm()
         self._form.changed.connect(self._update_clamp_warning)
         # Moving the step changes which earlier steps precede it, hence the carried-forward
-        # frequency/power — refresh the clamp warning. (Wired here, after _clamp_warn exists.)
-        self._anchor.currentIndexChanged.connect(lambda *_: self._update_clamp_warning())
-        self._run_off.valueChanged.connect(lambda *_: self._update_clamp_warning())
+        # frequency/power/bridge params — re-fold the --power card and refresh the clamp warning.
+        # (Wired here, after _clamp_warn exists.)
+        self._anchor.currentIndexChanged.connect(lambda *_: self._refold_for_position())
+        self._run_off.valueChanged.connect(lambda *_: self._refold_for_position())
         # The parameter form sits directly in the shared scroll (no inner scroll), so
         # the whole dialog scrolls as one and the form reads white like the Run dialog.
         pcard = QFrame()
@@ -1225,6 +1226,7 @@ class StepEditorDialog(QDialog):
         self._editor.param_cache()[script] = (result or {}).get("params", [])
         self._editor._script_cal_signals[script] = (result or {}).get("calibration_signal")
         self._editor._script_cal_freq_params[script] = (result or {}).get("calibration_freq_param")
+        self._editor._script_power_laws[script] = (result or {}).get("calibration_power_laws", []) or []
         if script == self._current_script:
             self._build_form(script)
 
@@ -1249,28 +1251,40 @@ class StepEditorDialog(QDialog):
         # default (or a mode left over from a previously-selected task).
         mode = power_mode_of_args(prefill)
         freq_param = self._editor._script_cal_freq_params.get(script)
+        # The multi-quantity --power card (companion read-outs + "Control in this →") is offered
+        # whenever the task's SCRIPT declares power-quantity laws, exactly as in the Run/live-tune
+        # forms — the card is gated purely on set_params seeing these laws.
+        power_laws = self._editor._script_power_laws.get(script, [])
         # The frequency (and power) in effect when this step fires — replayed from the
         # task's deployed args and the earlier same-task steps — so the form folds the
         # --power range at that frequency even when this step doesn't set --freq itself.
         self._carried = self._carried_values(task, script, specs)
         carried_freq = self._carried.get(freq_param) if freq_param else None
         if self._is_tune():
-            # Only live-tunable params can be changed mid-run; the checkboxes let
-            # you pick exactly which ones this step sets.
-            specs = [s for s in specs if s.get("live")]
-            self._form.set_params(specs, selectable=True, cal_bounds=bounds,
+            # Only live-tunable params can be changed mid-run; the checkboxes let you pick which
+            # ones this step sets. But the card/limits fold through the FULL schema: a non-live
+            # param (a fixed --freq, or a bridge param carried from an earlier step) and a hidden
+            # derived key (GPS C/A's enbw from --sidelobes) are kept as fold CONTEXT — present in
+            # the schema, seeded from the carried state, but never rendered as an editable field.
+            # (Mirrors live_tune_dialog._prepare_specs, sourcing _carried, not a deployed command.)
+            live_specs = [s for s in specs if s.get("live")]
+            context_dests = [s.get("dest") for s in specs if not s.get("live")]
+            seeded = self._seed_context_from_carried(specs, context_dests, self._carried)
+            self._form.set_params(seeded, selectable=True, cal_bounds=bounds,
                                   absolute_allowed=abs_allowed, default_power_mode=mode,
                                   hint_bounds=hint, caution=caution,
-                                  cal_freq_param=freq_param, cal_freq_default=carried_freq)
+                                  cal_freq_param=freq_param, cal_freq_default=carried_freq,
+                                  power_laws=power_laws, context_dests=context_dests)
             self._set_status(
-                "tick the parameters to set at this offset" if specs
+                "tick the parameters to set at this offset" if live_specs
                 else "this task's script declares no live parameters")
             self._seed_from_params()
         else:
             self._form.set_params(specs, cal_bounds=bounds,
                                   absolute_allowed=abs_allowed, default_power_mode=mode,
                                   hint_bounds=hint, caution=caution,
-                                  cal_freq_param=freq_param, cal_freq_default=carried_freq)
+                                  cal_freq_param=freq_param, cal_freq_default=carried_freq,
+                                  power_laws=power_laws)
             self._set_status(
                 "" if specs else "this script declares no parameters — use extra args")
             self._apply_prefill()
@@ -1278,6 +1292,48 @@ class StepEditorDialog(QDialog):
         if bounds and self._editor.cal_is_stale():
             self._set_status("absolute power uses last-known calibration "
                                         "(unit offline) — refreshes when it reconnects")
+
+    @staticmethod
+    def _seed_context_from_carried(specs: list, context_dests: list, carried: dict) -> list:
+        """Return the schema with each fold-context (non-live) param's ``default`` seeded from the
+        carried sequence state, so the --power range/limits and the companions fold at what the
+        task is actually running with when this step fires — not the schema default. Returns fresh
+        spec copies (never mutates the shared param cache). The tune analogue of
+        live_tune_dialog._prepare_specs, sourcing _carried instead of a deployed command."""
+        ctx = set(context_dests or [])
+        out = []
+        for s in specs:
+            val = (carried or {}).get(s.get("dest"))
+            if s.get("dest") in ctx and isinstance(val, (int, float)) and not isinstance(val, bool):
+                out.append({**s, "default": val})
+            else:
+                out.append(s)
+        return out
+
+    def _refold_for_position(self) -> None:
+        """This step's carried-forward state depends on where it sits (which earlier steps
+        precede it), so a moved anchor/offset can change the fold frequency and bridge params.
+        Recompute the carried state and re-seed the form's fold context (never touching the
+        operator's live edits), then refresh the clamp caption."""
+        script = self._current_script
+        if script and self._editor is not None:
+            task = self._task.currentText().strip()
+            specs = self._editor.param_cache().get(script, [])
+            freq_param = self._editor._script_cal_freq_params.get(script)
+            self._carried = self._carried_values(task, script, specs)
+            carried_freq = self._carried.get(freq_param) if freq_param else None
+            context_defaults = {d: self._carried.get(d)
+                                for d in self._context_dests_now(specs)
+                                if isinstance(self._carried.get(d), (int, float))
+                                and not isinstance(self._carried.get(d), bool)}
+            self._form.set_fold_context(cal_freq_default=carried_freq,
+                                        context_defaults=context_defaults)
+        self._update_clamp_warning()
+
+    def _context_dests_now(self, specs: list) -> list:
+        """The fold-context (non-live) dests for the current step type — the tune step folds the
+        full schema through its non-live params; a run/bar step renders everything (no context)."""
+        return [s.get("dest") for s in specs if not s.get("live")] if self._is_tune() else []
 
     def _current_order_key(self):
         """This step's best-effort position on the task's timeline (see
@@ -1448,6 +1504,7 @@ class TimelineEditor(QWidget):
         self._param_specs: Dict[str, list] = {}
         self._script_cal_signals: Dict[str, str] = {}   # script -> its declared CAL_SIGNAL_ID
         self._script_cal_freq_params: Dict[str, str] = {}  # script -> its CAL_FREQ_PARAM
+        self._script_power_laws: Dict[str, list] = {}   # script -> its CAL_POWER_LAWS (companions)
         self._params_inflight: set = set()
         # Calibration context: params come from the library (same across units), but
         # absolute-power bounds are per-UNIT, so the calibration host is tracked
