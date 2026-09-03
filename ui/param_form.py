@@ -1992,11 +1992,15 @@ class ParamForm(QWidget):
         if cal_freq_default is not _UNSET:
             self._cal_freq_default = (cal_freq_default * self._freq_unit_factor()
                                       if cal_freq_default is not None else None)
+        # Fold-context (non-rendered) params carry a seeded default; so do LIVE bridge params the
+        # --power view keys on (a chirp's --bw), which stay rendered but must fold at the carried
+        # value when the operator isn't setting them here.
+        seedable = set(self._context_dests) | set(self._bridge_param_dests())
         for dest, val in (context_defaults or {}).items():
             if not isinstance(val, (int, float)) or isinstance(val, bool):
                 continue
-            if dest not in self._context_dests:
-                continue                        # only fold-context params carry a seeded default
+            if dest not in seedable:
+                continue
             for i, s in enumerate(self._base_specs):
                 if s.get("dest") == dest:
                     self._base_specs[i] = {**s, "default": val}   # copy — never mutate the cache

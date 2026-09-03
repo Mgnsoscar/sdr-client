@@ -1269,7 +1269,13 @@ class StepEditorDialog(QDialog):
             # (Mirrors live_tune_dialog._prepare_specs, sourcing _carried, not a deployed command.)
             live_specs = [s for s in specs if s.get("live")]
             context_dests = [s.get("dest") for s in specs if not s.get("live")]
-            seeded = self._seed_context_from_carried(specs, context_dests, self._carried)
+            # A LIVE bridge param the operator isn't setting in THIS step (e.g. a chirp's --bw in a
+            # power-only tune step) must still fold at the CARRIED value, not its schema default —
+            # otherwise the spectral-density view/limit folds at the wrong bandwidth and lets you
+            # command a live density the fire-time sweep can't deliver. Seed those from carried too
+            # (they stay RENDERED so the operator can still tick + change them).
+            seed_dests = set(context_dests) | self._fold_bridge_dests(specs, power_laws)
+            seeded = self._seed_context_from_carried(specs, seed_dests, self._carried)
             self._form.set_params(seeded, selectable=True, cal_bounds=bounds,
                                   absolute_allowed=abs_allowed, default_power_mode=mode,
                                   hint_bounds=hint, caution=caution,
@@ -1294,13 +1300,23 @@ class StepEditorDialog(QDialog):
                                         "(unit offline) — refreshes when it reconnects")
 
     @staticmethod
-    def _seed_context_from_carried(specs: list, context_dests: list, carried: dict) -> list:
-        """Return the schema with each fold-context (non-live) param's ``default`` seeded from the
-        carried sequence state, so the --power range/limits and the companions fold at what the
-        task is actually running with when this step fires — not the schema default. Returns fresh
-        spec copies (never mutates the shared param cache). The tune analogue of
+    def _fold_bridge_dests(specs: list, power_laws: list) -> set:
+        """Dests the --power laws key on that ARE fields in this schema (e.g. a chirp's --bw behind
+        the spectral-density view). These must fold at the carried value even when they're live, so
+        a tune step editing only --power still folds the view/limit at the running bandwidth."""
+        spec_dests = {s.get("dest") for s in specs}
+        return {lw.get("param") for lw in (power_laws or [])
+                if lw.get("param") in spec_dests}
+
+    @staticmethod
+    def _seed_context_from_carried(specs: list, seed_dests, carried: dict) -> list:
+        """Return the schema with each named param's ``default`` seeded from the carried sequence
+        state, so the --power range/limits and the companions fold at what the task is actually
+        running with when this step fires — not the schema default. ``seed_dests`` is the fold-
+        context (non-live) params PLUS any live bridge param the view keys on (a chirp's --bw).
+        Returns fresh spec copies (never mutates the shared param cache). The tune analogue of
         live_tune_dialog._prepare_specs, sourcing _carried instead of a deployed command."""
-        ctx = set(context_dests or [])
+        ctx = set(seed_dests or [])
         out = []
         for s in specs:
             val = (carried or {}).get(s.get("dest"))
@@ -1322,8 +1338,15 @@ class StepEditorDialog(QDialog):
             freq_param = self._editor._script_cal_freq_params.get(script)
             self._carried = self._carried_values(task, script, specs)
             carried_freq = self._carried.get(freq_param) if freq_param else None
+            # Re-seed the fold context (non-live params) AND any live bridge param the operator
+            # isn't setting here (a chirp's --bw), so moving the step re-folds the --power view/
+            # limit through the new carried bandwidth — mirrors the seed set in _build_form.
+            power_laws = self._editor._script_power_laws.get(script, [])
+            seed_dests = set(self._context_dests_now(specs))
+            if self._is_tune():
+                seed_dests |= self._fold_bridge_dests(specs, power_laws)
             context_defaults = {d: self._carried.get(d)
-                                for d in self._context_dests_now(specs)
+                                for d in seed_dests
                                 if isinstance(self._carried.get(d), (int, float))
                                 and not isinstance(self._carried.get(d), bool)}
             self._form.set_fold_context(cal_freq_default=carried_freq,
