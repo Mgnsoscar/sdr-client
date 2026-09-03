@@ -205,6 +205,124 @@ def _typed(val_str: str, spec: dict):
     return val_str
 
 
+def eval_formula(formula, get_value) -> Optional[float]:
+    """Evaluate a small derived formula over a SOURCE of field values, or None if any
+    source is missing. ``get_value(name)`` returns a named field's current value (or None);
+    numeric-literal args (a scale, offset, or lookup-table entry baked into the formula) are
+    used as-is. Ops: center=(a+b)/2, span=|last-first|, sum, diff, and the arithmetic-
+    progression / lookup helpers (count/span_to/term/extent/linear/table). Source-agnostic —
+    the param form (reading each source from its widget) and the sequence step editor (reading
+    a flat ``{dest: value}`` state) fold formulas identically, so the two can't drift."""
+    if not formula:
+        return None
+    try:
+        op, args = next(iter(formula.items()))
+    except StopIteration:
+        return None
+    if not isinstance(args, (list, tuple)):
+        return None
+
+    def arg_value(a):
+        # A numeric literal is used as-is; a string names another field, read via get_value.
+        if isinstance(a, (int, float)) and not isinstance(a, bool):
+            return float(a)
+        return get_value(str(a))
+
+    vals = [arg_value(a) for a in args]
+    if any(v is None for v in vals):
+        return None
+    if op == "center":
+        return sum(vals) / len(vals)
+    if op == "span":
+        return abs(vals[-1] - vals[0]) if len(vals) >= 2 else 0.0
+    if op == "sum":
+        return sum(vals)
+    if op == "diff":
+        return vals[0] - vals[1] if len(vals) >= 2 else vals[0]
+    # Arithmetic-progression helpers (a comb's first/spacing/last ↔ count).
+    if op == "count":                      # [a, b, s] terms of a..b step s
+        a, b, s = vals[0], vals[1], vals[2]
+        if s <= 0 or b < a:
+            return None
+        return float(math.floor((b - a) / s + 1e-9) + 1)
+    if op == "span_to":                    # [a, b, s] extent covered a..b step s
+        a, b, s = vals[0], vals[1], vals[2]
+        if s <= 0 or b < a:
+            return None
+        return float(math.floor((b - a) / s + 1e-9) * s)
+    if op == "term":                       # [a, n, s] the n-th term: a + (n-1)s
+        a, n, s = vals[0], vals[1], vals[2]
+        return a + (n - 1) * s
+    if op == "extent":                     # [n, s] span of n terms: (n-1)s
+        n, s = vals[0], vals[1]
+        return (n - 1) * s
+    if op == "linear":                     # [x, scale, offset] = scale·x + offset
+        if len(vals) < 3:
+            return None
+        return vals[0] * vals[1] + vals[2]
+    if op == "table":                      # [i, t0, t1, …] nearest-int lookup t[clamp(i)]
+        tbl = vals[1:]
+        if not tbl:
+            return None
+        idx = int(round(vals[0]))
+        return tbl[max(0, min(len(tbl) - 1, idx))]
+    return None
+
+
+def fold_params_from_values(artifact, specs: list, values: dict) -> Optional[dict]:
+    """The bridge-keyed --power parameters a resolved ``artifact`` folds its ceiling through,
+    resolved over a flat ``{dest: value}`` state instead of a live ParamForm — for a caller
+    with no single form holding the full effective state (the sequence step editor, whose state
+    is carried-forward sequence values layered with a step's own form values, and where a
+    bridge-keyed source may live in the CARRIED state, not the step's form).
+
+    Mirrors ``ParamForm.fold_params``/``_live_params`` for the dict path: a key the
+    reported/limiting reading keys on is read straight from ``values`` when it is a raw
+    parameter, computed from a visible derived stand-in's formula (``provides``) when a mode
+    hides the parameter's own field, or computed from its OWN derived formula when it is an
+    internal quantity (e.g. GPS C/A's ``enbw_mhz``, a table lookup on ``--sidelobes`` that
+    never appears as a raw param). Returns ``{dest: float}``, or None when the artifact has no
+    keyed params or any one can't be resolved to a number — so the fold falls back to the law's
+    representative value rather than a wrong one (a warn-never-block caption must not mis-fire)."""
+    fold = PowerFold.from_artifact(artifact or {})
+    if fold is None:
+        return None
+    keyed = fold.keyed_params()
+    if not keyed:
+        return None
+    by_dest = {s.get("dest"): s for s in specs}
+
+    def keyed_value(dest):
+        # A derived stand-in that ``provides`` this dest wins when the parameter's own field is
+        # hidden by a mode (its formula is evaluable only when its source fields are present in
+        # the state, so it self-selects); else the field's own value; else the dest's own derived
+        # formula (an internal quantity like enbw); else the schema default. Mirrors
+        # ParamForm._keyed_param_value over the flat state.
+        prov = next((s for s in specs
+                     if s.get("kind") == "derived" and s.get("provides") == dest), None)
+        if prov is not None:
+            v = eval_formula(prov.get("formula"), values.get)
+            if v is not None:
+                return v
+        v = values.get(dest)
+        if v is not None:
+            return v
+        spec = by_dest.get(dest)
+        if spec is not None and spec.get("kind") == "derived":
+            v = eval_formula(spec.get("formula"), values.get)
+            if v is not None:
+                return v
+        return spec.get("default") if spec else None
+
+    out = {}
+    for dest in keyed:
+        v = keyed_value(dest)
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            return None
+        out[dest] = float(v)
+    return out
+
+
 def resolve_preset_value(spec: dict, text: str) -> str:
     """Map a presets-combo's text (a preset label/key, or a raw value) to the
     value string that belongs on the command line."""
@@ -2159,65 +2277,12 @@ class ParamForm(QWidget):
             return num_or_none(choice_token(w))
         return None
 
-    def _arg_value(self, arg) -> Optional[float]:
-        """A single derived-formula argument: a numeric literal is used as-is (a scale,
-        offset, or lookup-table entry baked into the formula); a string names another
-        field, read live from its widget."""
-        if isinstance(arg, (int, float)) and not isinstance(arg, bool):
-            return float(arg)
-        return self._source_num(str(arg))
-
     def _eval_formula(self, formula) -> Optional[float]:
-        """Evaluate a small derived formula over other fields' current values, or None
-        if any source is missing. Ops: center=(a+b)/2, span=|last-first|, sum, diff.
-        Args may be field names or numeric literals (see _arg_value)."""
-        if not formula:
-            return None
-        try:
-            op, args = next(iter(formula.items()))
-        except StopIteration:
-            return None
-        if not isinstance(args, (list, tuple)):
-            return None
-        vals = [self._arg_value(a) for a in args]
-        if any(v is None for v in vals):
-            return None
-        if op == "center":
-            return sum(vals) / len(vals)
-        if op == "span":
-            return abs(vals[-1] - vals[0]) if len(vals) >= 2 else 0.0
-        if op == "sum":
-            return sum(vals)
-        if op == "diff":
-            return vals[0] - vals[1] if len(vals) >= 2 else vals[0]
-        # Arithmetic-progression helpers (a comb's first/spacing/last ↔ count).
-        if op == "count":                      # [a, b, s] terms of a..b step s
-            a, b, s = vals[0], vals[1], vals[2]
-            if s <= 0 or b < a:
-                return None
-            return float(math.floor((b - a) / s + 1e-9) + 1)
-        if op == "span_to":                    # [a, b, s] extent covered a..b step s
-            a, b, s = vals[0], vals[1], vals[2]
-            if s <= 0 or b < a:
-                return None
-            return float(math.floor((b - a) / s + 1e-9) * s)
-        if op == "term":                       # [a, n, s] the n-th term: a + (n-1)s
-            a, n, s = vals[0], vals[1], vals[2]
-            return a + (n - 1) * s
-        if op == "extent":                     # [n, s] span of n terms: (n-1)s
-            n, s = vals[0], vals[1]
-            return (n - 1) * s
-        if op == "linear":                     # [x, scale, offset] = scale·x + offset
-            if len(vals) < 3:
-                return None
-            return vals[0] * vals[1] + vals[2]
-        if op == "table":                      # [i, t0, t1, …] nearest-int lookup t[clamp(i)]
-            tbl = vals[1:]
-            if not tbl:
-                return None
-            idx = int(round(vals[0]))
-            return tbl[max(0, min(len(tbl) - 1, idx))]
-        return None
+        """Evaluate a small derived formula over this form's live field values — delegates to
+        the module-level ``eval_formula``, reading each named source from its widget
+        (``_source_num``), so the widget path and the sequence step editor's dict path fold
+        formulas through the exact same code."""
+        return eval_formula(formula, self._source_num)
 
     def _derived_frame(self, spec: dict, top_sep: bool) -> QWidget:
         """A read-only field showing a value computed from other fields — a dashed

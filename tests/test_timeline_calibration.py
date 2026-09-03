@@ -161,3 +161,108 @@ def test_step_editor_clamp_warning_folds_at_hz_not_the_raw_mhz_value():
     assert txt and "clamped down" in txt                    # the warning fires
     assert "1227.600 MHz" in txt                            # folded at the real carrier (Hz→MHz)
     assert "0.001 MHz" not in txt                           # not the raw-MHz-as-Hz mistake
+
+
+# ── the extracted formula evaluator folds over any value source ─────────────────────────
+
+def test_eval_formula_reads_from_a_dict_source():
+    # eval_formula is the source-agnostic core the param form (reading widgets) and the sequence
+    # step editor (reading a flat {dest: value} state) both fold through. Here we drive it from a
+    # plain dict to prove the ops match the widget path and a missing source degrades to None.
+    from ui.param_form import eval_formula
+    from tests.test_live_tune_power import _ENBW
+    get = {"sidelobes": 2, "a": 1200.0, "b": 1300.0}.get
+    assert eval_formula({"table": ["sidelobes", *_ENBW]}, get) == pytest.approx(_ENBW[2])
+    assert eval_formula({"center": ["a", "b"]}, get) == pytest.approx(1250.0)
+    assert eval_formula({"span": ["a", "b"]}, get) == pytest.approx(100.0)
+    assert eval_formula({"linear": ["sidelobes", 2.0, 1.0]}, get) == pytest.approx(5.0)
+    assert eval_formula({"sum": ["a", 50.0]}, get) == pytest.approx(1250.0)
+    # out-of-range table index clamps to the ends; a missing source (or empty formula) → None,
+    # so a partially-typed / incomplete state stays silent rather than raising.
+    assert eval_formula({"table": ["sidelobes", 5.0, 6.0]}, get) == pytest.approx(6.0)
+    assert eval_formula({"span": ["a", "missing"]}, get) is None
+    assert eval_formula(None, get) is None
+
+
+def test_fold_params_from_values_resolves_derived_enbw():
+    # A reading bridge that keys on a DERIVED, hidden quantity (GPS C/A's enbw_mhz — a table
+    # lookup on --sidelobes) is not in the raw effective state, so fold_params_from_values must
+    # compute it from its formula, tracking the live count — exactly what ParamForm.fold_params
+    # does off its widgets, but over a flat dict.
+    from ui.param_form import fold_params_from_values
+    from tests.test_live_tune_power import _ENBW, _GPS_ART, _GPS_PARAMS
+    specs = _GPS_PARAMS["params"]
+    for n in (0, 1, 2):
+        got = fold_params_from_values(_GPS_ART, specs, {"sidelobes": n, "freq": 1227.6})
+        assert got["enbw_mhz"] == pytest.approx(_ENBW[n])
+    # no usable artifact → None; an unresolvable key (no --sidelobes to key enbw on) → None —
+    # either way the caller folds at the law's representative value instead of a wrong one.
+    assert fold_params_from_values({}, specs, {"sidelobes": 0}) is None
+    assert fold_params_from_values(_GPS_ART, specs, {}) is None
+
+
+# ── the sequence step editor's clamp caption folds through the live BRIDGE params ─────────
+# Regression: the step editor passed NO params to clamp_warning, so the caption's ceiling stuck at
+# the limiting law's REPRESENTATIVE value and never tracked the live --sidelobes (or a chirp's
+# --bw) — unlike the run and live-tune forms. The step editor has no single ParamForm holding the
+# full effective state (a bridge-keyed source may be CARRIED from an earlier step, not in this
+# step's form; derived keys like enbw aren't in the raw carried state at all), so it resolves the
+# keyed params over the effective dict (carried ∪ this step's form) via fold_params_from_values.
+
+def _gps_step_dialog(carried, form_values):
+    from PyQt6.QtWidgets import QLabel
+    from ui.timeline_editor import StepEditorDialog
+    from tests.test_live_tune_power import _GPS_ART, _GPS_PARAMS
+
+    specs = _GPS_PARAMS["params"]
+    # GPS C/A: --power in spectral density, the dBm safety ceiling gauged through a limiting law
+    # keyed on enbw (a table lookup on --sidelobes). The chain isn't frequency-dependent but IS
+    # parameter-dependent, so the caption folds through --sidelobes.
+    bounds = {"min_power_dbm": -120.0, "max_power_dbm": -10.0, "quantity": "spectral density",
+              "operating_plane": "sdr_output", "artifact": _GPS_ART}
+
+    class _Editor:
+        _script_cal_freq_params = {"gps.py": "freq"}
+
+        def cal_bounds_for_task(self, task):
+            return bounds
+
+        def script_for_task(self, task):
+            return ("gps.py", [])
+
+        def param_cache(self):
+            return {"gps.py": specs}
+
+    dlg = StepEditorDialog.__new__(StepEditorDialog)         # bypass the heavy dialog build
+    dlg._editor = _Editor()
+    dlg._clamp_warn = QLabel()
+    dlg._task = type("T", (), {"currentText": lambda self_: "gps"})()
+    dlg._form = type("F", (), {"values": lambda self_: dict(form_values)})()
+    dlg._carried_values = lambda task, script, spx: dict(carried)
+    return dlg
+
+
+def _caption_for(carried, form_values):
+    dlg = _gps_step_dialog(carried, form_values)
+    dlg._update_clamp_warning()
+    return dlg._clamp_warn.text().replace("−", "-")
+
+
+def test_step_editor_clamp_warning_folds_through_live_bridge_params():
+    # A −18.15 dBm request clears the 0-sidelobe ceiling (−18.0 dBm) but exceeds the tighter
+    # 2-sidelobe one (≈ −18.30 dBm). So the caption is SILENT at 0 lobes and FIRES — naming the
+    # folded ceiling — at 2. Without the fix (no params) the ceiling folds at the law's
+    # representative value (−18.30) regardless of the count, so it would (wrongly) warn at 0 too.
+    base = {"freq": 1227.6, "power": -18.15}
+
+    # --sidelobes carried from an earlier step:
+    assert _caption_for({**base, "sidelobes": 0}, {}) == ""          # under the 0-lobe ceiling
+    hot = _caption_for({**base, "sidelobes": 2}, {})
+    assert hot and "clamped down" in hot
+    assert "1227.600 MHz" in hot                                     # folded at the carried carrier
+    assert "-18.30" in hot                                           # the 2-lobe ceiling, tracked
+
+    # --sidelobes set on THIS step's form overrides the carried count (both directions):
+    assert _caption_for({**base, "sidelobes": 2}, {"sidelobes": 0}) == ""
+    hot2 = _caption_for({**base, "sidelobes": 0}, {"sidelobes": 2})
+    assert hot2 and "clamped down" in hot2 and "-18.30" in hot2

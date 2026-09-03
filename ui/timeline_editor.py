@@ -1307,7 +1307,7 @@ class StepEditorDialog(QDialog):
         power won't match the number. Effective freq/power = the carried-forward state with
         this step's own set values layered on top."""
         from state.power_fold import clamp_warning
-        from .param_form import find_power_index
+        from .param_form import find_power_index, fold_params_from_values
         lbl = self._clamp_warn
         task = self._task.currentText().strip()
         bounds = self._editor.cal_bounds_for_task(task)
@@ -1329,7 +1329,14 @@ class StepEditorDialog(QDialog):
         freq_hz = (float(freq_val) * hz_per_unit(freq_unit)
                    if isinstance(freq_val, (int, float)) and not isinstance(freq_val, bool)
                    else None)
-        msg = clamp_warning(bounds.get("artifact"), freq_hz, effective.get(power_dest))
+        # Fold the ceiling through the LIVE bridge params too (e.g. a chirp's --bw, GPS C/A's
+        # enbw behind --sidelobes) — the run/live-tune forms already do (via fold_params). The
+        # step editor has no single ParamForm holding the full effective state (a bridge-keyed
+        # source may be CARRIED, not in this step's form, and derived keys like enbw aren't in the
+        # raw carried state at all), so resolve the keyed params over the effective dict instead.
+        params = fold_params_from_values(bounds.get("artifact"), specs, effective)
+        msg = clamp_warning(bounds.get("artifact"), freq_hz, effective.get(power_dest),
+                            params=params)
         lbl.setText("⚠ " + msg if msg else "")
         lbl.setVisible(bool(msg))
 

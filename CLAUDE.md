@@ -140,6 +140,23 @@ editor — so no fold path can carry a mis-scaled carrier. (Audited every `refol
 `clamp_warning`/`bounds_at` caller: the run form (`_render_freq`), live tune (`fold_freq_hz`) and ramp
 editor (`_op_freq_hz`) were already Hz.) Tests: `test_timeline_calibration.py`
 (`..._clamp_warning_folds_at_hz_not_the_raw_mhz_value`, `test_hz_per_unit_maps_field_units_to_hz`).
+The SEQUENCE step editor's clamp caption also folds through the live BRIDGE PARAMS now (a chirp's
+`--bw`, GPS C/A's `enbw_mhz` behind `--sidelobes`), matching the run/live-tune forms. It used to pass
+NO `params` to `clamp_warning`, so its ceiling stuck at the limiting law's REPRESENTATIVE value and
+never tracked the knob. The step editor has no single `ParamForm` holding the full effective state
+(a bridge-keyed source may be CARRIED from an earlier same-task step, not in this step's form; and a
+DERIVED key like `enbw_mhz` — a table lookup on `--sidelobes` — isn't in the raw carried state at
+all), so `fold_params()` off `_form`'s widgets alone is insufficient. Instead `timeline_editor.
+_update_clamp_warning` resolves the keyed params over the `effective` dict (carried ∪ this step's
+form) via the new `param_form.fold_params_from_values(artifact, specs, values)` — the dict-path mirror
+of `fold_params`/`_live_params` (`provides` stand-in → own value → own derived `formula` → default;
+None when unresolvable → representative fold). Its `formula` evaluation shares ONE source-agnostic
+`param_form.eval_formula(formula, get_value)` extracted from `_eval_formula`/`_arg_value` — the widget
+path passes `_source_num`, the timeline passes `effective.get`, so the two can't drift (same principle
+as the `hz_per_unit` consolidation). `_live_params`/`_keyed_param_value` behaviour is byte-identical.
+Client-only; no agent/scripts/capability change; drift-guarded files untouched. Tests:
+`test_timeline_calibration.py` (`..._folds_through_live_bridge_params`, `test_eval_formula_reads_from_
+a_dict_source`, `test_fold_params_from_values_resolves_derived_enbw`).
 
 ## Current state — start/stop sweep folds at the real span (`provides`): COMPLETE
 `ui/param_form.py` resolves a law-keyed parameter through a visible derived stand-in when the
