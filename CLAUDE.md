@@ -78,9 +78,21 @@ context_defaults=)` updates `_cal_freq_default` + the context specs' defaults th
 recomputes `_carried` and calls it, wired to the anchor/offset change signals. Saves are unchanged
 (run/bar → `build_args`, tune → `values`, both base-quantity `--power`, no context leakage). Tests:
 `tests/test_step_editor_power_units.py`. Client-only; no agent/scripts/capability change; drift
-guard intact. **Optional follow-ups remain** (design doc §9): a proactive sequence-task params
-prefetch so the achievability banner shows without opening a dialog first; a run-mode ramp folding
-at the fixed-value form's freq/params instead of the carried state.
+guard intact.
+**Post-review fixes (owner testing).** (1) **Power card vanished in the step editor after a ramp
+editor was opened**: the param cache had two writers (`StepEditorDialog._on_params`,
+`ramp_editor._on_params`) and only the step one recorded `_script_power_laws`, so a ramp-warmed
+cache left the step editor with no laws → no card (and `--bw` no longer re-folded the limits). Now
+BOTH write through one `TimelineEditor.cache_script_meta(script, result)` that populates params +
+cal signal + freq param + power laws together, so a warm cache is always complete. (2) **Held-power
+achievability** (`timeline_model` step 4): a fixed `--power` (e.g. spectral density at its max) set
+by one tune is now flagged when a LATER tune changes freq/bandwidth and pushes it out of range — the
+walk re-checks the standing power on freq/bridge-param events (`_held_power_issue`). Tests:
+`test_step_editor_power_units.py` (ramp-warmed cache still yields the card),
+`test_achievability_warnings.py` (held-power clamps / silent / warn-once).
+**Optional follow-ups remain** (design doc §9): a proactive sequence-task params prefetch so the
+achievability banner shows without opening a dialog first; a run-mode ramp folding at the
+fixed-value form's freq/params instead of the carried state; the ramped-bridge achievability case.
 
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY

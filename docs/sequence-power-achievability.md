@@ -95,12 +95,14 @@ range folds that currently omit them.
 
 Implemented in `ui/timeline_model.py` (pure; next to `sequence_effective_values`) as
 `achievability_warnings(items, resolve)`, wired into `TimelineEditor`. What follows is the design
-it was built to; the code matches it. Deviations from the original plan: **held-power re-check
-(step 4) was deliberately NOT implemented** — it is the deferred "fixed power, carrier moves
-underneath" case (§8), which the owner asked to hold. Only POWER ramps on freq-/param-dependent
-chains are analysed. Params resolution is **best-effort**: a task whose script params aren't
-cached yet (no step/ramp dialog opened for it) is skipped and picked up on the next edit — a
-proactive prefetch of sequence-task params is a possible follow-up.
+it was built to; the code matches it. **Step 4 (held-power re-check) is now implemented** (added
+after the owner reported that a fixed spectral density set by one tune wasn't warned when a later
+tune doubled the sweep bandwidth): the walk tracks the standing `--power` and, on any freq/bridge-
+param event that does NOT itself set `--power`, re-folds and flags the transition INTO violation
+(`_held_power_issue`, `points=[(-1, level, fire_s)]`). Only the **ramped** bridge-param case (a
+min/max-over-sweep check) remains deferred (§8). Params resolution is **best-effort**: a task whose
+script params aren't cached yet (no step/ramp dialog opened for it) is skipped and picked up on the
+next edit — a proactive prefetch of sequence-task params is a possible follow-up.
 
 A pure function over the sequence, taking a calibration-resolver callback so the model stays
 calibration-agnostic.
@@ -281,9 +283,9 @@ Headless Qt: `QT_QPA_PLATFORM=offscreen python3 -m pytest -q` (a known teardown 
 ## 8. Open edge cases (decide when reached)
 
 - **Bridge-param ramp with fixed `--power`** (e.g. ramp `--bw` while power fixed): power
-  achievability moves *across* the swept param. The temporal pass's step-4 standing-power
-  re-check partially covers it if the bridge change is a discrete event; a *ramped* bridge needs
-  a min/max-over-sweep check. Owner deferred this ("we'll get back to this") — leave a clear TODO.
+  achievability moves *across* the swept param. A *discrete* bridge/freq change under a held power
+  is now covered (step 4, `_held_power_issue`); a *ramped* bridge still needs a min/max-over-sweep
+  check. Owner deferred the ramped-bridge case ("we'll get back to this") — TODO.
 - **Companion-quantity ramps**: ramp From/To are currently base-quantity only. If Surface C makes
   the ramp offer companion quantities, the temporal comparison must convert. Out of scope now.
 - **Window-dependent timing precision**: see §5 caveats.

@@ -1223,10 +1223,7 @@ class StepEditorDialog(QDialog):
             if script == self._current_script:
                 self._set_status(f"could not load parameters: {result}", error=True)
             return
-        self._editor.param_cache()[script] = (result or {}).get("params", [])
-        self._editor._script_cal_signals[script] = (result or {}).get("calibration_signal")
-        self._editor._script_cal_freq_params[script] = (result or {}).get("calibration_freq_param")
-        self._editor._script_power_laws[script] = (result or {}).get("calibration_power_laws", []) or []
+        self._editor.cache_script_meta(script, result)
         if script == self._current_script:
             self._build_form(script)
 
@@ -1692,6 +1689,19 @@ class TimelineEditor(QWidget):
 
     def param_cache(self) -> Dict[str, list]:
         return self._param_specs
+
+    def cache_script_meta(self, script: str, result) -> None:
+        """Populate ALL per-script caches from one get_script_params result, so whichever dialog
+        (step or ramp) fetches a script FIRST leaves the caches COMPLETE — the params, the
+        calibration signal, the fold frequency AND the power-quantity laws are all available to
+        every later dialog that finds the param cache warm. Keep this the single writer: the ramp
+        editor used to populate only a subset, so a step editor opened after it saw no power laws
+        and silently dropped the multi-quantity --power card (companions + 'Control in this →')."""
+        r = result or {}
+        self._param_specs[script] = r.get("params", [])
+        self._script_cal_signals[script] = r.get("calibration_signal")
+        self._script_cal_freq_params[script] = r.get("calibration_freq_param")
+        self._script_power_laws[script] = r.get("calibration_power_laws", []) or []
 
     # ── Task list (populated once the unit's tasks are fetched) ──────────────
 

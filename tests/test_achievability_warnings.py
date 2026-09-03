@@ -145,6 +145,83 @@ def test_ramp_clamps_when_a_bridge_param_retune_tightens_the_ceiling():
     assert "dBm/MHz" in iss.message and "clamped down" in iss.message
 
 
+# ── HELD --power: a fixed level pushed out of range by a LATER freq/bridge-param change (§5 step 4) ──
+# The owner's report: set the spectral density to its MAX, then a later tune doubles the sweep
+# bandwidth — the held density is now unachievable (density drops as the sweep widens), so the
+# runtime clamps it. No ramp is involved; the walk re-checks the STANDING power on the bw event.
+
+from tests.test_param_form_power_units import _artifact, _density_reported   # noqa: E402
+
+_CHIRP_ART = _artifact(_density_reported())          # spectral-density chirp; density tracks --bw
+_CHIRP_SPECS = [
+    {"dest": "freq", "flags": ["--freq"], "type": "float", "unit": "MHz", "is_freq": True},
+    {"dest": "power", "flags": ["--power"], "type": "float", "unit": "dBm/MHz", "snap_role": "power"},
+    {"dest": "bw", "flags": ["--bw"], "type": "float", "unit": "MHz"},
+]
+_CHIRP_BASE = ["--freq", "1575.42", "--power", "-22", "--bw", "10"]
+
+
+def _chirp_resolve(task):
+    if task != "chirp":
+        return None
+    return {"artifact": _CHIRP_ART, "specs": _CHIRP_SPECS, "base_args": _CHIRP_BASE,
+            "freq_param": "freq", "freq_factor": 1e6, "power_dest": "power"}
+
+
+def _chirp_bar():
+    return tlm.BarItem(task_name="chirp", args=_CHIRP_BASE, start_offset=0.0, stop_offset=600.0)
+
+
+def test_held_power_clamps_when_a_later_tune_doubles_the_bandwidth():
+    # density max at bw 10 is −16.71 dBm/MHz; doubling to bw 20 drops it to −16.71 − 10·log10(2).
+    set_max = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=5.0,
+                          params={"power": -16.71})
+    double_bw = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=10.0,
+                            params={"bw": 20})
+    issues = tlm.achievability_warnings([_chirp_bar(), set_max, double_bw], _chirp_resolve)
+    assert len(issues) == 1
+    iss = issues[0]
+    assert iss.direction == "high"
+    assert iss.bound == pytest.approx(-16.71 - 10 * math.log10(2.0), abs=0.02)
+    assert iss.points == [(-1, -16.71, 10.0)]           # the held point (−1 = not a ramp step)
+    m = iss.message
+    assert "held" in m and "clamped down" in m
+    assert "-16.71" in m.replace("−", "-")              # the held level, named
+    assert "0:10" in m                                  # when it goes out of range
+    assert "‘bw’ change to 20" in m                     # what pushed it out
+
+
+def test_held_power_silent_without_the_later_change():
+    # The whole point: the SAME held density is fine until a later step widens the sweep — no tune,
+    # no warning (a single per-step fold at author time could never catch the cross-step clamp).
+    set_max = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=5.0,
+                          params={"power": -16.71})
+    assert tlm.achievability_warnings([_chirp_bar(), set_max], _chirp_resolve) == []
+
+
+def test_held_power_no_warning_when_it_stays_in_range():
+    # A density comfortably within range stays achievable after doubling → no false positive.
+    low = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=5.0,
+                      params={"power": -25.0})
+    double_bw = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=10.0,
+                            params={"bw": 20})
+    assert tlm.achievability_warnings([_chirp_bar(), low, double_bw], _chirp_resolve) == []
+
+
+def test_held_power_warns_once_not_at_every_later_event():
+    # Once flagged, a still-clamped held power must not re-warn at each subsequent event — only the
+    # transition into violation is reported.
+    set_max = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=5.0,
+                          params={"power": -16.71})
+    double_bw = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=10.0,
+                            params={"bw": 20})
+    widen_more = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=15.0,
+                             params={"bw": 40})
+    issues = tlm.achievability_warnings([_chirp_bar(), set_max, double_bw, widen_more],
+                                        _chirp_resolve)
+    assert len(issues) == 1                              # one transition, not one per later event
+
+
 # ── small formatting helpers ────────────────────────────────────────────────────────────────
 
 def test_steps_phrase_and_mmss():

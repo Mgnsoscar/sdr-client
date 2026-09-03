@@ -230,6 +230,31 @@ def test_tune_save_emits_base_quantity_power_without_context_leakage():
     assert params["power"] == pytest.approx(-6.71, abs=0.05)
 
 
+def test_a_ramp_warmed_cache_still_yields_the_power_card():
+    # Regression (owner-reported): the param cache is populated ONLY through
+    # TimelineEditor.cache_script_meta (used by BOTH the step and ramp editors), so a cache warmed
+    # by a ramp editor still carries the script's power laws. A step editor opened AFTER a ramp
+    # editor then finds the cache warm and STILL renders the multi-quantity card — previously the
+    # ramp editor populated only a subset, so the step card silently vanished.
+    ed = TimelineEditor()
+    ed.set_context(FakeHub(), "unit")
+    ed.set_task_commands({"chirp": list(_CMD)})
+    ed.set_task_signals({"chirp": "chirp"})
+    ed._cal_hostname = "unit"
+    ed._calibration = {"unit_type": "broadcaster", "valid": True, "signals": {"chirp": _SIGNAL}}
+    # One fetch (whichever dialog does it) populates EVERY per-script cache atomically.
+    ed.cache_script_meta("chirp.py", {
+        "params": _SPECS, "calibration_signal": "chirp", "calibration_freq_param": "freq",
+        "calibration_power_laws": [FBW, PSD]})
+    assert ed._script_power_laws["chirp.py"] == [FBW, PSD]
+    assert set(ed.param_cache()) == {"chirp.py"}                      # cache is warm
+
+    tune = _tune()
+    ed._canvas.set_items([_bar(), tune])
+    dlg = StepEditorDialog(tune, ed, new=False)                      # finds the cache warm
+    assert len(_companion_cards(dlg)) == 1                           # card still renders (was 0)
+
+
 def test_run_save_emits_no_context_dests():
     # A run/bar step renders the full schema (no context dests), so build_args carries the real
     # fields and nothing spurious. The offset subtraction still lands --power in the base quantity.

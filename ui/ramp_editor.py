@@ -583,14 +583,14 @@ class RampEditorDialog(QDialog):
         self._editor._params_inflight.discard(script)
         if isinstance(result, Exception):
             return
-        self._editor.param_cache()[script] = (result or {}).get("params", [])
-        # Record the script's calibration freq param (like the step editor does) so the
-        # power range can be folded at the frequency the ramped task runs at.
-        for attr, key in (("_script_cal_signals", "calibration_signal"),
-                          ("_script_cal_freq_params", "calibration_freq_param")):
-            store = getattr(self._editor, attr, None)
-            if store is not None:
-                store[script] = (result or {}).get(key)
+        # Populate ALL per-script caches (params, calibration signal, fold freq AND power laws)
+        # through the editor's single writer, so a step editor opened after this ramp editor
+        # still finds the power laws and renders the multi-quantity --power card.
+        cache_meta = getattr(self._editor, "cache_script_meta", None)
+        if cache_meta is not None:
+            cache_meta(script, result)
+        else:                                    # older editor without the shared writer
+            self._editor.param_cache()[script] = (result or {}).get("params", [])
         if script == self._current_script:
             self._set_params(self._editor.param_cache()[script])
 
