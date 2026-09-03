@@ -54,7 +54,16 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
-## Current state — param-form "control in" honours `restates_measurement`: COMPLETE
+## Current state — start/stop sweep folds at the real span (`provides`): COMPLETE
+`ui/param_form.py` resolves a law-keyed parameter through a visible derived stand-in when the
+parameter's own field is hidden by a mode: `_provider_spec`/`_keyed_param_value` back a rewritten
+`_live_params`, and `_wire_freq_refold` wires the stand-in's source fields so an edit re-folds.
+Fixes the chirp reading total power at the stale `--bw` in start/stop mode instead of the actual
+stop − start span. Driven by a new `paramkit` `.derived(provides="<dest>")` kwarg (the bandwidth
+analogue of `is_freq`), carried through the drift-guarded `argspec`. Tests:
+`test_param_form_provides.py`. Client-only display fix (the transmit fold was already correct).
+
+## Prior state — param-form "control in" honours `restates_measurement`: COMPLETE
 `ui/param_form.py` `_power_views` drops the raw MEASURED quantity from the --power "control in"
 picker when a script law is flagged `restates_measurement` (and there's no reported override) —
 the law re-expresses the measured reading live (e.g. a chirp's spectral density at the live sweep

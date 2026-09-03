@@ -1170,27 +1170,49 @@ class ParamForm(QWidget):
                 keyed.update(view["law"].params())
         return [p for p in keyed if any(s.get("dest") == p for s in self._base_specs)]
 
+    def _provider_spec(self, dest: str) -> Optional[dict]:
+        """A currently-rendered DERIVED field that STANDS IN FOR ``dest`` (its ``provides``) —
+        e.g. a start/stop sweep span standing in for the hidden --bw a power law keys on. None
+        when the parameter's own field is the active source. The bandwidth analogue of the
+        is_freq frequency fallback (`_freq_source_dest`)."""
+        for _d, info in self._derived.items():
+            if info["spec"].get("provides") == dest:
+                return info["spec"]
+        return None
+
+    def _keyed_param_value(self, dest: str, cur: dict):
+        """The value of a law-keyed parameter at the live fields: a visible derived stand-in
+        (``provides``) wins when the parameter's own field is hidden by a mode (e.g. a
+        start/stop span for --bw); else the field's own value; else a derived formula on
+        ``dest`` itself (an internal quantity, e.g. an equivalent-noise bandwidth from
+        --sidelobes); else the schema default (first render)."""
+        prov = self._provider_spec(dest)
+        if prov is not None:
+            v = self._eval_formula(prov.get("formula"))
+            if v is not None:
+                return v
+        v = cur.get(dest)
+        if v is not None:
+            return v
+        spec = next((s for s in self._base_specs if s.get("dest") == dest), None)
+        if spec is not None and spec.get("kind") == "derived":
+            v = self._eval_formula(spec.get("formula"))
+            if v is not None:
+                return v
+        return spec.get("default") if spec else None
+
     def _live_params(self) -> Optional[dict]:
         """The current values of the bridge's keyed parameters, or None when they can't all be
         resolved as numbers (the fold then uses the law's representative value). Read from the
-        live fields, falling back to each field's schema default (for the first render)."""
+        live fields — a mode-hidden parameter resolved through its derived stand-in (``provides``)
+        or its own formula — falling back to each field's schema default (for the first render)."""
         dests = self._bridge_param_dests()
         if not dests:
             return None
         cur = self.values() if self._widgets else {}
         out = {}
         for d in dests:
-            v = cur.get(d)
-            if v is None:
-                spec = next((s for s in self._base_specs if s.get("dest") == d), None)
-                # A bridge may key on a value the FORM derives from other fields (e.g. the
-                # GPS L1 C/A full-power law keys on a non-analytic equivalent-noise bandwidth
-                # computed from --sidelobes). Compute it from the derived spec's formula so the
-                # fold tracks the source field even though there is no input widget for it.
-                if spec is not None and spec.get("kind") == "derived":
-                    v = self._eval_formula(spec.get("formula"))
-                if v is None:
-                    v = spec.get("default") if spec else None
+            v = self._keyed_param_value(d, cur)
             if not isinstance(v, (int, float)) or isinstance(v, bool):
                 return None
             out[d] = float(v)
@@ -1397,17 +1419,22 @@ class ParamForm(QWidget):
                 if self._selectable and pdest in self._checks:
                     self._checks[pdest].toggled.connect(self._on_freq_changed)
             else:
-                # A bridge parameter with no input widget of its own is a value the form
-                # DERIVES from other fields (e.g. an equivalent-noise bandwidth from
-                # --sidelobes). Re-fold when those source fields move so --power tracks it.
-                spec = next((s for s in self._base_specs
-                             if s.get("dest") == pdest and s.get("kind") == "derived"), None)
-                if spec is not None:
-                    for src in self._formula_sources(spec):
-                        if src in self._widgets:
-                            self._connect_commit(self._widgets[src][0], self._on_freq_changed)
-                            self._connect_live(self._widgets[src][0])
-                            self._connect_companion_live(self._widgets[src][0])
+                # A bridge parameter with no input widget of its own is resolved from other
+                # fields: a derived field UNDER that dest (e.g. an equivalent-noise bandwidth
+                # from --sidelobes), or a visible derived field that STANDS IN FOR it via
+                # ``provides`` (e.g. a start/stop span for a hidden --bw). Re-fold when the
+                # source fields of whichever is active move, so --power tracks them.
+                srcs = set()
+                own = next((s for s in self._base_specs
+                            if s.get("dest") == pdest and s.get("kind") == "derived"), None)
+                for src_spec in (own, self._provider_spec(pdest)):
+                    if src_spec is not None:
+                        srcs.update(self._formula_sources(src_spec))
+                for src in srcs:
+                    if src in self._widgets:
+                        self._connect_commit(self._widgets[src][0], self._on_freq_changed)
+                        self._connect_live(self._widgets[src][0])
+                        self._connect_companion_live(self._widgets[src][0])
         if not self._is_freq_dependent():
             return
         dest = self._freq_source_dest()
