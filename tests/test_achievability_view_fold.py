@@ -17,10 +17,31 @@ real output), so these tests pin the structure the fixture tests in test_achieva
 missed (that file's ``_CHIRP_ART`` uses a param-dependent reported-bridge density instead).
 """
 import math
+import os
 
 import pytest
 
+pytest.importorskip("PyQt6")
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PyQt6.QtCore import QEvent
+from PyQt6.QtWidgets import QApplication
+
 from ui import timeline_model as tlm
+
+# A module-level app (as in test_step_editor_carried_bw.py) stabilises headless-Qt teardown for the
+# one editor-wiring test in this file; the pure model tests ignore it.
+_app = QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _flush_deferred_deletes():
+    """Drain Qt's DeferredDelete queue after each test (the editor-wiring test builds real Qt
+    widgets; a pre-existing headless-Qt teardown SIGABRT otherwise leaks to process exit)."""
+    yield
+    _app.processEvents()
+    _app.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+    _app.processEvents()
 
 
 # psd_live: live spectral density = base + coeff·log10(bw/ref); coeff −10, ref 10 (dBm/MHz).
@@ -61,8 +82,14 @@ def _resolve(task, view=True):
     info = {"artifact": _ART, "specs": _SPECS, "base_args": _BASE,
             "freq_param": "freq", "freq_factor": 1e6, "power_dest": "power"}
     if view:
-        info["view_law"] = _PSD
+        info["view_law"] = _PSD                       # default control view = live density
+        info["view_laws"] = {"psd_live": _PSD, "fbw_power": _FBW}   # per-step lookup
     return info
+
+
+def _set_power_view(dbm, offset, view):
+    return tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=offset,
+                       params={"power": dbm}, power_view=view)
 
 
 def _bar():
@@ -171,6 +198,41 @@ def test_run_step_commanding_an_over_max_base_density_clamps_at_its_bandwidth():
     assert len(issues) == 1
     assert issues[0].direction == "high"
     assert "set to" in issues[0].message
+
+
+# ── per-step control view (latest-set-wins): the SAME base value warns as density, not as total ─
+# The held quantity is whatever the LATEST power-setting step was authored in (its power_view). A
+# density (bw-keyed) view is re-checked at each --bw; a total-power view is bandwidth-invariant, so
+# holding it never clamps on a --bw change even at the same base value.
+
+def test_total_power_step_is_not_warned_when_the_sweep_widens():
+    # Controlling in TOTAL POWER: base −7.38 = the chain max, held across a --bw widen. Total power
+    # is bandwidth-invariant, so it stays deliverable at bw 20 → no warning.
+    set_total = _set_power_view(-7.38, 5.0, "fbw_power")
+    double_bw = _set_bw(20, 10.0)
+    assert tlm.achievability_warnings([_bar(), set_total, double_bw], _resolve) == []
+
+
+def test_density_step_at_the_same_base_value_does_warn_when_the_sweep_widens():
+    # The contrast: the SAME base −7.38, but controlled in the DENSITY view, IS pushed out of range
+    # at bw 20 (max ≈ −10.39) — so the ONLY difference from the total-power case is power_view.
+    set_density = _set_power_view(-7.38, 5.0, "psd_live")
+    double_bw = _set_bw(20, 10.0)
+    issues = tlm.achievability_warnings([_bar(), set_density, double_bw], _resolve)
+    assert len(issues) == 1
+    assert issues[0].direction == "high"
+    assert issues[0].bound == pytest.approx(_psd_max(20), abs=0.02)
+
+
+def test_latest_set_view_wins_total_then_density():
+    # Latest-set-wins: a total-power step (silent), then a LATER density step re-commands the same
+    # base — from then on density is held, so a still-later widen clamps it.
+    set_total = _set_power_view(-7.38, 5.0, "fbw_power")     # total power held → no warn on widen
+    set_density = _set_power_view(-7.38, 10.0, "psd_live")   # now density is held
+    double_bw = _set_bw(20, 15.0)
+    issues = tlm.achievability_warnings([_bar(), set_total, set_density, double_bw], _resolve)
+    assert len(issues) == 1
+    assert issues[0].points == [(-1, -7.38, 15.0)]          # the held density, flagged at the widen
 
 
 # ── the TimelineEditor surfaces the controlled-view law to the walk (wiring end-to-end) ─────────

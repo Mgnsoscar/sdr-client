@@ -423,10 +423,16 @@ Work items:
   restores it on reopen (`ParamForm.set_power_view()` after `set_params`), so the operator's control
   quantity sticks. Client-only authoring metadata; --power is still SENT in base; the agent never
   reads it. Tests: `tests/test_step_power_view_persistence.py`.
-- **Stage 1b — walk honours the per-step view (latest-set-wins) — TODO.** The achievability walk
-  currently assumes the leading restates view (Surface #1 default — correct while no step records a
-  non-default view). It must read each power-setting step's `power_view` and hold THAT quantity, so a
-  total-power step (bw-invariant) never false-warns on a `--bw` widen while a density step does.
+- **Stage 1b — walk honours the per-step view (latest-set-wins) — ✅ DONE.** `achievability_warnings`
+  now tracks the held control view as power-setting steps fire: the resolver surfaces `view_laws`
+  ({view_id: spec} for every declared view) alongside `view_law` (the default for a step with no
+  recorded view); the walk keeps only the bw-keyed ones (total power / gain / dBm → base held), and
+  a mutable `active` law is updated to `_law_for_view(step.power_view)` at each directly-set / ramp
+  event, so `_view_delta`/`_clamp` fold in whatever quantity the latest power-setting step chose. A
+  total-power step (bw-invariant) never false-warns on a `--bw` widen; a density step at the SAME base
+  value does. With no `view_laws`/`view_law` the walk is byte-identical (all base-fold paths
+  unchanged). Tests: `tests/test_achievability_view_fold.py` (total-power silent vs density warns at
+  the same base; latest-set total→density wins).
 - **Stage 2 — the hold (client precompute) — TODO (confirm the re-edit UX first).** A pure timeline
   transform (reusing the walk) that, at each `--bw`/`--freq` change under a held quantity, sets/injects
   the step's base `--power` to hold the set-time value of the latest-set control quantity, clamping to

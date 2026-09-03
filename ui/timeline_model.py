@@ -636,11 +636,15 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
           "freq_param":  dest of the CAL_FREQ_PARAM field (str | None),
           "freq_factor": Hz per unit of that freq field (float; e.g. 1e6 for MHz),
           "power_dest":  dest of the --power field (str),
-          "view_law":    the controlled-view law spec the operator authors --power in — a
+          "view_law":    the DEFAULT controlled-view law spec (a step recording no power_view) — a
                          restates_measurement CAL_POWER_LAWS entry keyed on a live param (a chirp's
                          psd_live on --bw), or None. When present the achievable range is folded in
                          THAT view at each event's fire-time param, so a held/commanded live density
                          is checked at the live sweep width even though the base range is invariant.
+          "view_laws":   {view_id: law_spec} for every declared control view, so the walk holds
+                         whichever quantity the LATEST power-setting step was authored in (its
+                         ``power_view``); the walk keeps only the bw-keyed ones (total power / gain /
+                         dBm resolve to base-held). Optional; omit for a single default view.
         }
 
     The model stays calibration-agnostic: the caller (the editor) owns cal lookup + unit scaling.
@@ -681,12 +685,29 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
         fold = PowerFold.from_artifact(artifact or {})
         if fold is None:
             continue
-        # The CONTROLLED-view law (a restates_measurement law the operator authors --power in, e.g.
+        # The CONTROLLED-view law: the restates_measurement law the operator authors --power in (e.g.
         # a chirp's live spectral density keyed on --bw). The BASE range is bandwidth-invariant for
-        # such a signal, but the controlled view moves with --bw, so a held/commanded live density
-        # can become undeliverable at a later sweep width even though the base fold can't see it.
-        view_law = _view_law_of(info.get("view_law"))
-        view_moves = bool(view_law is not None and view_law.params())
+        # such a signal, but the controlled view moves with --bw, so a held/commanded live density can
+        # become undeliverable at a later sweep width even though the base fold can't see it. The held
+        # quantity is the LATEST-SET step's control view (its ``power_view``): ``default_view_law`` is
+        # the signal default (a step with no recorded view), ``laws_by_id`` maps a recorded view id to
+        # its law, and ``active`` tracks the current one as power-setting steps fire. A view that is
+        # NOT bw-keyed (total power, gain, dBm) resolves to None → the base is held (no --bw effect).
+        default_view_law = _view_law_of(info.get("view_law"))
+        laws_by_id = {vid: _view_law_of(spec)
+                      for vid, spec in (info.get("view_laws") or {}).items()}
+        laws_by_id = {vid: law for vid, law in laws_by_id.items()
+                      if law is not None and law.params()}       # keep only bw-keyed views
+
+        def _law_for_view(pv):
+            """The controlled-view law a step's ``power_view`` selects: the signal default when the
+            step records no view (None — a legacy step or the default quantity), else the recorded
+            view's law, or None when that view isn't a bw-keyed density (→ hold base)."""
+            return default_view_law if pv is None else laws_by_id.get(pv)
+
+        active = [default_view_law]                              # the currently-held view law (cell)
+        view_moves = bool((default_view_law is not None and default_view_law.params())
+                          or laws_by_id)
         # A constant chain never moves under a ramp/retune — its fixed range is enforced by the
         # From/To field; the temporal pass stays out unless something (frequency, a bridge param,
         # or a keyed controlled view) actually moves the achievable power at a point in time.
@@ -698,17 +719,18 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
         unit = (artifact or {}).get("operating_unit") or "dBm"
 
         def _view_delta(eval_state) -> float:
-            """dB the controlled view adds over the BASE quantity at ``eval_state``'s live bridge
-            params — 0.0 when there is no controlled-view law (so every non-chirp path is
-            byte-identical). The chirp's psd_live view keys on --bw, so this shift moves with the
-            live sweep width even though the base range does not."""
-            if view_law is None:
+            """dB the currently-held controlled view adds over the BASE quantity at ``eval_state``'s
+            live bridge params — 0.0 when the held quantity is the base (no view law, or a non-bw
+            view), so every non-density path is byte-identical. The chirp's psd_live view keys on
+            --bw, so this shift moves with the live sweep width even though the base range does not."""
+            law = active[0]
+            if law is None:
                 return 0.0
-            keyed = resolve_keyed_values(specs, eval_state, view_law.params())
+            keyed = resolve_keyed_values(specs, eval_state, law.params())
             try:
-                return view_law.delta_db(keyed) if keyed else view_law.rep_delta_db()
+                return law.delta_db(keyed) if keyed else law.rep_delta_db()
             except (ValueError, TypeError):
-                return view_law.rep_delta_db()
+                return law.rep_delta_db()
 
         def _view_value_of(eval_state):
             """The commanded --power (base quantity) expressed in the CONTROLLED view at
@@ -752,16 +774,19 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
             if getattr(it, "task_name", None) != task:
                 continue
             act = getattr(it, "action", "run")
+            pv = getattr(it, "power_view", None)
             if getattr(it, "kind", None) == "bar":
                 events.append((_fire_time_s("start", getattr(it, "start_offset", 0.0), window),
                                seq_idx, "args",
-                               {"replace": getattr(it, "replace_args", True), "args": list(it.args)}))
+                               {"replace": getattr(it, "replace_args", True), "args": list(it.args),
+                                "power_view": pv}))
             elif act == "tune":
                 events.append((_fire_time_s(it.anchor, it.offset, window), seq_idx, "tune",
-                               {"params": dict(getattr(it, "params", {}) or {})}))
+                               {"params": dict(getattr(it, "params", {}) or {}), "power_view": pv}))
             elif act == "run":
                 events.append((_fire_time_s(it.anchor, it.offset, window), seq_idx, "args",
-                               {"replace": getattr(it, "replace_args", True), "args": list(it.args)}))
+                               {"replace": getattr(it, "replace_args", True), "args": list(it.args),
+                                "power_view": pv}))
             elif act == "ramp":
                 r = dict(getattr(it, "ramp", None) or {})
                 rdest = name_to_dest.get(r.get("param")) or flag_to_dest.get(r.get("flag"))
@@ -779,7 +804,8 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
                     events.append((_fire_time_s(fa, foff, window), seq_idx, "ramp_point",
                                    {"uid": getattr(it, "uid", seq_idx), "i": i, "n": len(fires),
                                     "val": float(val), "rdest": rdest, "param": r.get("param"),
-                                    "run_mode": run_mode, "run_state": run_state}))
+                                    "run_mode": run_mode, "run_state": run_state,
+                                    "power_view": pv}))
         events.sort(key=lambda e: (e[0], e[1]))
 
         # Labels for the held-power message: the --power field's name, and each field's name (so a
@@ -841,8 +867,10 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
                 else:
                     state[p["rdest"]] = p["val"]
                     eval_state = state
-                # A ramp point COMMANDS --power at its fire moment; check its controlled-view value
-                # against the achievable range there (base check when no view law → existing paths).
+                # A ramp point COMMANDS --power at its fire moment; the ramp's control view becomes
+                # the held quantity. Check its controlled-view value against the achievable range
+                # there (base check when no view law → existing paths).
+                active[0] = _law_for_view(p.get("power_view"))
                 dval = float(p["val"]) + _view_delta(eval_state)
                 viol = _clamp(dval, eval_state)
                 if viol:
@@ -877,8 +905,10 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
                         freq_hz, _fire_s, _changed_desc(touched)))
                 held_flagged = bool(viol)
             else:
-                # DIRECTLY-SET: this step commands --power; its controlled-view value becomes the new
-                # standing density and is flagged if it can't be delivered at this moment's --bw.
+                # DIRECTLY-SET: this step commands --power; its control view becomes the held
+                # quantity (latest-set-wins), and its controlled-view value the new standing value,
+                # flagged if it can't be delivered at this moment's --bw.
+                active[0] = _law_for_view(p.get("power_view"))
                 held_view = _view_value_of(state)
                 viol = _clamp(held_view, state)
                 if viol:

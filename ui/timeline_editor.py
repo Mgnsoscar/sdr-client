@@ -1798,10 +1798,17 @@ class TimelineEditor(QWidget):
                 return None
             freq_param = self._script_cal_freq_params.get(script)
             freq_unit = next((s.get("unit") for s in specs if s.get("dest") == freq_param), None)
+            power_laws = self._script_power_laws.get(script) or []
+            view_laws = {spec.get("id"): spec for spec in power_laws
+                         if isinstance(spec, dict) and spec.get("id")}
             return {"artifact": artifact, "specs": specs, "base_args": base_args,
                     "freq_param": freq_param, "freq_factor": hz_per_unit(freq_unit),
                     "power_dest": specs[pidx]["dest"],
-                    "view_law": self._controlled_view_law(artifact, script)}
+                    # The default controlled view (a step recording no power_view), plus every
+                    # declared view by id so the walk can hold whichever a step was authored in
+                    # (latest-set-wins); the walk itself keeps only the bw-keyed ones.
+                    "view_law": self._controlled_view_law(artifact, script),
+                    "view_laws": view_laws}
 
         return resolve
 
