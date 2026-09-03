@@ -146,3 +146,39 @@ def test_out_of_range_value_clamps_the_handle():
     r = _rail(-135.0, 0.0)
     r.set_value(10.0);   assert r.track._fraction == pytest.approx(1.0)   # above max → full
     r.set_value(-200.0); assert r.track._fraction == pytest.approx(0.0)   # below min → empty
+
+
+def test_power_lineedit_rail_drag_rounds_to_the_finest_step_decimals():
+    # A --power field with no default renders as a QLineEdit (not a spinbox). A rail drag lands on
+    # a real achievable level (full float precision); the field must show it at the chain's finest
+    # DEVICE-step resolution — a 0.25 dB gain grid → 2 decimals — never raw ':g' precision.
+    import re
+
+    from PyQt6.QtWidgets import QLineEdit
+
+    from state.power_fold import PowerFold
+    # slope ≈ 1.0008 over a 0.25 dB grid ⇒ achievable levels 0.2502 dB apart — genuinely 4-decimal
+    # values, so ':g' and a 2-decimal round visibly differ.
+    art = {"anchor_curve": [[0.0, -50.0], [89.75, 39.82]], "min_gain_db": 0.0,
+           "max_gain_db": 89.75, "gain_ceiling_db": 89.75, "gain_step_db": 0.25,
+           "readings": {"limiting": {"kind": "same"}}, "center_freq_hz": 1.57542e9}
+    bounds = {"min_power_dbm": -50.0, "max_power_dbm": 39.82, "quantity": "spectral density",
+              "operating_plane": "sdr_output", "artifact": art}
+    specs = [{"dest": "freq", "flags": ["--freq"], "type": "float", "unit": "MHz",
+              "default": 1575.42, "is_freq": True},
+             {"dest": "power", "flags": ["--power"], "type": "float", "step": 0.01,
+              "unit": "dBm/MHz", "snap_role": "power"}]                # NO default → QLineEdit
+    f = ParamForm()
+    f.set_params(specs, cal_bounds=bounds, absolute_allowed=True,
+                 default_power_mode="absolute", cal_freq_param="freq")
+    w = f._widgets["power"][0]
+    assert isinstance(w, QLineEdit)                                    # the crux: a text box
+    assert f._power_decimals() == 2                                    # 0.25 dB grid → 2 decimals
+
+    drag = -5.3137
+    snapped = PowerFold.from_artifact(art).snap_power(drag, 1.57542e9)
+    # premise: the snapped level really does carry more than 2 decimals (so ':g' would leak them).
+    assert len(repr(round(snapped, 6)).split(".")[1].rstrip("0")) > 2
+    _rails(f)[0].valueChanged.emit(drag)                              # a raw drag value (pre-snap)
+    assert re.fullmatch(r"-?\d+\.\d{2}", w.text().replace("−", "-"))  # exactly 2 decimals, not ':g'
+    assert w.text().replace("−", "-") == f"{snapped:.2f}"            # …the snapped level, rounded

@@ -293,24 +293,22 @@ def test_livetune_power_ceiling_tracks_sidelobes():
     assert got[0] > got[1] > got[2]
 
 
-# ── the --power decimals don't swing with the deployed carrier (rounding regression) ─────
-# A calibrated --power field shows its MIN/MAX and companions at the decimals of the chain's
-# FINEST achievable step. That step is a device property (gain step × local curve slope) — on a
-# MULTI-segment curve with a frequency-dependent ceiling the operating gain lands in different
-# segments at different carriers, so folding the step at the live/deployed frequency makes the
-# decimal count swing (a clean segment reads 1 decimal, a steeper one 4–5). The live-tune form
-# folds the BOUNDS at the deployed carrier (correct, and matches the running task), so before the
-# fix the chirp's MIN/MAX suddenly grew to 4–5 decimals in Tune while the run form (folding at the
-# default carrier) and the field's own spinbox stayed at 1. The decimals are now pinned to the
-# artifact's REPRESENTATIVE frequency (the same step the editable field is built with), so they no
-# longer track the fold frequency; only the bounds do.
+# ── the --power decimals read the DEVICE step, not the slope-folded power increment ─────
+# A calibrated --power field shows its value / MIN/MAX / companions at the decimals of the chain's
+# finest DEVICE step (the SDR gain step, or an active component's step — in dB). It deliberately
+# does NOT fold that gain step through the calibration curve: a non-unit slope turns a clean 0.5 dB
+# grid into a messy 0.5042 dB power increment (4–5 decimals) that implies a precision the hardware
+# lacks, and on a multi-segment / frequency-dependent chain that folded step even swings with the
+# carrier. The device step is clean and frequency-independent, so the field reads at a stable
+# resolution (0.5 dB → 1 decimal) in both Run and Tune; only the bounds/levels fold at the carrier.
 
 _CDEP = 1700.0                                  # the deployed carrier (a steep-segment fold)
 _CCEN = 1575.42                                 # the calibration's representative carrier (default)
-# Density (dBm/MHz) anchor with two DISTINCT slopes: seg1 (40–60) slope 1.0 → step 0.5 (1 decimal);
-# seg2 (60–70) slope 1.0084 → step 0.5042 (4 decimals). A dBm ceiling that inverts on the shared
-# anchor lands the operating gain at 55 (seg1) at the representative carrier and 65 (seg2) at the
-# deployed carrier, so the finest step — and its decimal count — differs between the two.
+# Density (dBm/MHz) anchor with two DISTINCT slopes: seg1 (40–60) slope 1.0; seg2 (60–70) slope
+# 1.0084 → a folded 0.5042 dB power step (4 decimals) across the 0.5 dB gain grid. A dBm ceiling
+# that inverts on the shared anchor lands the operating gain at 55 (seg1) at the representative
+# carrier and 65 (seg2) at the deployed one — so the FOLDED step is both messy and carrier-varying,
+# yet the field's DEVICE step stays a clean 0.5 dB (1 decimal) throughout.
 _ROUND_ANCHOR = [[40, -100.0], [60, -80.0], [70, -69.916]]
 _ROUND_ART = {
     "schema_version": 1, "signal_id": "fm_chirp", "operating_plane": "sdr_output",
@@ -370,19 +368,24 @@ def _run_form_at(freq_mhz):
     return f
 
 
-def test_livetune_chirp_power_decimals_track_the_representative_step():
-    # The scenario's premise: the finest step genuinely swings with the carrier — 1 decimal at the
-    # representative frequency, 4 at the deployed one — so a decimals-from-render-freq would break.
+def test_livetune_chirp_power_decimals_read_the_device_step():
     fold = PowerFold.from_artifact(_ROUND_ART)
-    assert _decimals_for(fold.finest_step()) == 1                    # representative (default)
-    assert _decimals_for(fold.finest_step(_CDEP * 1e6)) == 4         # deployed (steeper segment)
+    # At the deployed carrier the operating gain sits in the steep top segment, where the FOLDED
+    # power increment across one 0.5 dB gain step is a messy 0.5042 dB (≥ 4 decimals) …
+    g = fold.max_gain_db(_CDEP * 1e6)
+    folded = abs(fold.power_for_gain(g, _CDEP * 1e6) - fold.power_for_gain(g - 0.5, _CDEP * 1e6))
+    assert _decimals_for(round(folded, 6)) >= 4
+    # … but the field reads at the DEVICE step's resolution instead: the 0.5 dB gain grid → 1
+    # decimal, independent of the curve slope or the fold frequency.
+    assert fold.finest_step() == pytest.approx(0.5)
+    assert _decimals_for(fold.finest_step()) == 1
 
     dlg = LiveTuneDialog(FakeHub(RoundClient(cal=_ROUND_CAL)), "u", "chirp")
     f = dlg._form
-    # The BOUNDS still fold at the deployed carrier (the 8424085 win is preserved) …
+    # The BOUNDS still fold at the deployed carrier (the deployed-freq fold is preserved) …
     assert f._render_freq == pytest.approx(_CDEP * 1e6)
     assert f._widgets["power"][1]["max"] == pytest.approx(-74.958, abs=0.05)
-    # … but the DECIMALS are the representative step's, not the deployed one's (the fix).
+    # … but the DECIMALS are the device step's (1), not the folded 0.5042 (the fix).
     assert f._power_decimals() == 1
     # and they match the editable field's own spinbox decimals (built from finest_step()).
     assert f._widgets["power"][0].decimals() == f._power_decimals()

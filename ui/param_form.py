@@ -935,17 +935,15 @@ class ParamForm(QWidget):
         return s.replace("-", "−")
 
     def _power_decimals(self) -> int:
-        """Display precision for the calibrated --power field: the decimals of the chain's
-        finest achievable step (what the value snaps to), so every power read-out — the
-        value, MIN/MAX and the companions — shows at that resolution, not raw fold output.
-
-        Evaluated at the artifact's REPRESENTATIVE frequency (``finest_step()``), NOT the live
-        fold frequency, so it matches the editable field's own step/decimals (set once from
-        ``finest_step()`` in ``apply_power_bounds``) and stays stable as the operator tunes. On a
-        multi-segment chain with a frequency-dependent ceiling the finest step — and thus the
-        decimal count — can differ between frequencies; pinning it here keeps the MIN/MAX and
-        companions from suddenly showing 4–5 decimals when the form folds at a deployed carrier
-        (live tune) instead of the default (run), while the bounds themselves still fold live."""
+        """Display precision for the calibrated --power field: the decimals of the chain's finest
+        DEVICE step (``finest_step`` — the SDR gain step / an active component's step, in dB), so
+        every power read-out — the value, MIN/MAX and the companions — shows at the hardware's
+        resolution, not raw fold output. A 0.25 dB gain grid reads at 2 decimals, a 0.001 dB
+        attenuator at 3; the number never gains the spurious digits a non-unit calibration slope
+        would fold into the power increment (0.25 × 1.005 = 0.25125 → 5). Device-domain, so it
+        matches the editable field's own step/decimals (set from the same ``finest_step()`` in
+        ``apply_power_bounds``) and is stable across frequency, --bw and Run/Tune — only the
+        bounds/levels fold live."""
         fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
         return _decimals_for(fold.finest_step()) if fold is not None else 2
 
@@ -1391,9 +1389,15 @@ class ParamForm(QWidget):
             if isinstance(widget, QSpinBox):
                 widget.setValue(int(round(value)))
             elif isinstance(widget, QDoubleSpinBox):
-                widget.setValue(value)
+                widget.setValue(value)                       # a power spinbox is already at the
+                                                             # finest-step decimals (setDecimals)
             elif isinstance(widget, QLineEdit):
-                widget.setText(str(int(round(value))) if is_int else f"{value:g}")
+                if is_int:
+                    widget.setText(str(int(round(value))))
+                elif spec.get("snap_role") == "power":       # match the field's finest-step display
+                    widget.setText(f"{value:.{self._power_decimals()}f}")
+                else:
+                    widget.setText(f"{value:g}")
 
         def update(*_):
             v = read()

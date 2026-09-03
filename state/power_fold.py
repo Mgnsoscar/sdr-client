@@ -286,18 +286,19 @@ class PowerFold:
             out["min_power_dbm"], out["max_power_dbm"] = lo + dr, hi + dr
         return out
 
-    def finest_step(self, freq: Optional[float] = None) -> float:
-        """The finest achievable power increment across the range — the smallest of the active
-        components' device steps and the SDR grid's own power step. Used for the power field's
-        display resolution (decimals) so a snapped level like −55.25 renders exactly."""
-        f = self._eff(freq)
+    def finest_step(self) -> float:
+        """The finest DEVICE step in the chain, in dB — the smaller of the SDR's own gain step and
+        each active component's step (e.g. a programmable attenuator). Its decimal count sets the
+        --power field's DISPLAY resolution: a 0.25 dB gain grid reads at 2 decimals, a 0.001 dB
+        attenuator at 3. Deliberately the DEVICE step, not the curve-folded power increment — a
+        non-unit calibration slope folds the gain step into a power step with many spurious digits
+        (0.25 dB × 1.005 = 0.25125 → 5 decimals) that imply a precision the hardware doesn't have.
+        Device-domain, so frequency-independent; the achievable LEVELS themselves (snapping, the
+        range bounds) still come from the folded grid — only the DISPLAY precision keys on this."""
         cands = [a["step_db"] for a in self._actives
                  if isinstance(a.get("step_db"), (int, float)) and a["step_db"] > 0]
         if self._gain_step:
-            g = self.max_gain_db(f)
-            d = abs(self.power_for_gain(g, f) - self.power_for_gain(g - self._gain_step, f))
-            if d > 1e-12:
-                cands.append(round(d, 6))
+            cands.append(self._gain_step)
         return min(cands) if cands else 0.5
 
     @property

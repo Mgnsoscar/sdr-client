@@ -189,6 +189,22 @@ def test_no_active_component_keeps_the_plain_gain_grid():
     assert fold.finest_step() == pytest.approx(1.0)
 
 
+def test_finest_step_is_the_device_step_not_the_slope_folded_increment():
+    # finest_step sets the --power field's DISPLAY resolution. It is the DEVICE gain step (here
+    # 0.25 dB → 2 decimals), NEVER the curve-folded power increment: this SDR's 0..89.75 dB grid
+    # has a slope ≈ 1.0008, so folding 0.25 dB through it gives ≈ 0.2502 dB — 4 spurious decimals
+    # that imply a precision the hardware lacks. The step, and thus the decimals, stay clean.
+    art = {"anchor_curve": [[0.0, -120.0], [89.75, -30.18]], "min_gain_db": 0.0,
+           "max_gain_db": 89.75, "gain_step_db": 0.25}
+    fold = PowerFold.from_artifact(art)
+    assert fold.finest_step() == pytest.approx(0.25)
+    # A finer active component wins: a 0.001 dB programmable attenuator → 3-decimal resolution.
+    art_att = {**art, "active_components": [
+        {"plane": "atten_out", "task": "atten_set", "param": "attenuation", "sense": "attenuation",
+         "min_db": 0.0, "max_db": 30.0, "step_db": 0.001, "engage_pct": 0.0}]}
+    assert PowerFold.from_artifact(art_att).finest_step() == pytest.approx(0.001)
+
+
 def test_no_active_nonlinear_curve_snaps_to_the_real_gain_grid():
     # NO active components: a nonlinear curve with fractional powers. The universal slider must
     # snap/quantize to the real (non-uniform) SDR gain grid, with the minimum-gain level

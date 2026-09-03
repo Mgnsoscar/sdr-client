@@ -98,16 +98,22 @@ rendered; `_dep_specs` still names a context-only `--freq` in DEPENDS ON. Tests:
 `test_live_tune_power.py` (only-live knobs render; ceiling tracks `--sidelobes`; deployed freq
 parsed). Its autouse `_flush_deferred_deletes` fixture drains Qt's DeferredDelete queue after each
 dialog test (a pre-existing headless-Qt teardown SIGABRT that leaked into a later module).
-The `--power` DISPLAY DECIMALS are pinned to the artifact's REPRESENTATIVE frequency, not the live
-fold frequency: `_power_decimals` now calls `fold.finest_step()` (no freq), matching the editable
-field's own step/decimals (set once from `finest_step()` in `apply_power_bounds`). On a
-multi-segment chain with a frequency-dependent ceiling the finest step — gain-step × local curve
-slope — differs between carriers (a clean segment reads 1 decimal, a steeper one 4–5), so folding
-the DECIMAL COUNT at the live carrier made the chirp's MIN/MAX and companions suddenly show 4–5
-decimals in Tune (which folds at the deployed carrier) while the run form and the field's spinbox
-stayed at 1. Only the BOUNDS fold live now; the decimals are stable and consistent across Run/Tune.
-Tests: `test_live_tune_power.py` (`..._power_decimals_track_the_representative_step`,
-`..._power_decimals_match_the_run_form`).
+The `--power` DISPLAY DECIMALS read the chain's finest DEVICE step, NOT the slope-folded power
+increment. `PowerFold.finest_step()` returns the smaller of the SDR gain step and each active
+component's step, in dB (a 0.25 dB gain grid → 2 decimals, a 0.001 dB attenuator → 3); it no longer
+folds the gain step through the calibration curve. A non-unit slope turned 0.25 dB into a messy
+0.25125 dB power step, so the field showed 4–5 spurious decimals (a slider stop read −21.2325, the
+limits −26.7600 / −12.51000) implying a precision the hardware lacks — and on a multi-segment,
+frequency-dependent chain that folded step even swung with the carrier. The device step is clean and
+frequency-independent, so `_power_decimals` (= `_decimals_for(finest_step())`) is stable across
+frequency, `--bw` and Run/Tune; only the BOUNDS/levels fold at the live carrier. Every power
+read-out honors it: the spinbox (`setDecimals` from the same `finest_step()` in `apply_power_bounds`),
+MIN/MAX + companions (`_power_bound_fmt`/`_fmt_power`), and a rail drag into a `QLineEdit` power
+field (`_wire_rail`'s `set_widget` now formats a `snap_role="power"` value at `_power_decimals()`
+instead of `:g`). `finest_step` dropped its unused `freq` arg. Tests: `test_power_fold.py`
+(`..._finest_step_is_the_device_step_not_the_slope_folded_increment`), `test_range_rail.py`
+(`..._power_lineedit_rail_drag_rounds_...`), `test_live_tune_power.py`
+(`..._power_decimals_read_the_device_step`, `..._power_decimals_match_the_run_form`).
 The clamp warning tolerates a MID-TYPED value: an uncalibrated-default `--power`/`--freq` renders
 as a `QLineEdit`, so `_form.values()` hands `clamp_warning` the raw text — a lone `-` (or `''`,
 `'1e'`) while the operator is still typing. `state/power_fold.py` `clamp_warning` now coerces
