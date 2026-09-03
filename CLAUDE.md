@@ -54,7 +54,16 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
-## Current state — stage limits gauged through the limiting reading: COMPLETE
+## Current state — param-form "control in" honours `restates_measurement`: COMPLETE
+`ui/param_form.py` `_power_views` drops the raw MEASURED quantity from the --power "control in"
+picker when a script law is flagged `restates_measurement` (and there's no reported override) —
+the law re-expresses the measured reading live (e.g. a chirp's spectral density at the live sweep
+vs the fixed calibration sweep), so the bw-frozen measured density no longer sits confusingly
+beside its live twin. Explicit flag, never inferred from unit/family, so a same-unit distinct
+reading (main-lobe vs total-in-band, both dBm) keeps the measured view. Tests:
+`test_param_form_power_units.py`. Script side: `sdr-scripts` `fm_chirp_tx.py`.
+
+## Prior state — stage limits gauged through the limiting reading: COMPLETE
 The client mirror of the agent 1.13.0 fix: `state/power_fold.py` `_ceiling()` folds a stage
 limit's `via_limiting` entry (or its own dBm `anchor_curve`) through the signal's limiting reading
 at the live task parameter — so the form's `--power` range/ceiling match the transmit path. Saving

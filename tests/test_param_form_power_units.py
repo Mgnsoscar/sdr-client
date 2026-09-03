@@ -261,6 +261,55 @@ def test_no_laws_means_no_dropdown_or_companion():
     assert _companions(f) == []
 
 
+# ── restates_measurement: drop the raw measured density from the control views ──
+
+def _retired_bounds(quantity="Passband spectral density", unit="dBm/MHz"):
+    # Reported retired: no reported reading, so the measured quantity IS the base --power axis.
+    art = {
+        "operating_unit": unit, "quantity": quantity,
+        "min_gain_db": 60.0, "max_gain_db": 70.0,
+        "min_power_dbm": -26.76, "max_power_dbm": -16.71,
+        "anchor_curve": [[60, -26.76], [70, -16.71]], "passive_hops": [],
+        "readings": {"limiting": {"kind": "same"}},
+    }
+    return {"min_power_dbm": -26.76, "max_power_dbm": -16.71, "quantity": quantity,
+            "operating_plane": "sdr_output", "amplitude": 0.5, "artifact": art}
+
+
+def _view_ids(power_laws, bounds):
+    f = ParamForm()
+    f.set_params(_specs("dBm/MHz"), cal_bounds=bounds, absolute_allowed=True,
+                 default_power_mode="absolute", cal_freq_param="freq", power_laws=power_laws)
+    return [v["id"] for v in f._power_views()]
+
+
+_FLAG_PSD = {**PSD, "restates_measurement": True}
+_FLAG_PSD_HZ = {**PSD_HZ, "restates_measurement": True}
+
+
+def test_restates_measurement_drops_the_raw_measured_view():
+    # The flagged psd laws re-express the measured density → the raw measured quantity (id None)
+    # is dropped; only the live restatements + the distinct total-power reading remain.
+    ids = _view_ids([_FLAG_PSD, FBW, _FLAG_PSD_HZ], _retired_bounds())
+    assert None not in ids
+    assert set(ids) == {"psd_live", "fbw_power", "psd_hz"}
+
+
+def test_unflagged_laws_keep_the_measured_view():
+    # Without the flag, today's behaviour: the measured quantity stays as a control view.
+    ids = _view_ids([PSD, FBW, PSD_HZ], _retired_bounds())
+    assert None in ids                                   # the raw measured quantity is offered
+
+
+def test_same_unit_distinct_reading_is_not_dropped():
+    # A DIFFERENT reading that merely shares the measured unit (main-lobe vs total-in-band power,
+    # both dBm) must NOT drop the measured view — the drop is explicit (the law isn't flagged).
+    total = {"id": "total_in_band", "name": "Total in-band power", "unit": "dBm",
+             "in": "abs", "out": "abs", "k": 0.4}
+    ids = _view_ids([total], _retired_bounds(quantity="Main-lobe power", unit="dBm"))
+    assert None in ids and "total_in_band" in ids        # measured (main-lobe) view kept
+
+
 # ── the "quantity [unit]" label beside POWER (review item #5) ───────────────────
 
 def test_power_chip_is_quantity_bracket_unit_with_real_spaces():

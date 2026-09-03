@@ -1216,7 +1216,9 @@ class ParamForm(QWidget):
         if not self._power_laws:
             return []
         base_id, base_unit, base_name = self._reported_base()
-        views = [{"id": None, "name": base_name, "unit": base_unit, "law": None}]
+        base_view = {"id": None, "name": base_name, "unit": base_unit, "law": None}
+        law_views: List[dict] = []
+        drop_base = False
         for spec in self._power_laws:
             try:
                 law = parse_law(spec)
@@ -1226,9 +1228,24 @@ class ParamForm(QWidget):
                 continue
             # A law may declare its own display unit (e.g. dBm/Hz); else default by family.
             unit = str(spec.get("unit") or ("dBm" if law.out_fam == "abs" else "dBm/MHz"))
-            views.append({"id": law.id, "name": spec.get("name", law.id),
-                          "unit": unit, "law": law})
-        return views if len(views) > 1 else []
+            law_views.append({"id": law.id, "name": spec.get("name", law.id),
+                              "unit": unit, "law": law})
+            # Explicit per-law opt-out: this law RE-EXPRESSES the measured reading itself (e.g. a
+            # chirp's live spectral density restating the density measured at the reference sweep).
+            # The raw measured quantity is then just that reading at a fixed reference point, so
+            # offering it as its own control view only confuses (two "dBm/MHz" densities that
+            # differ only by the sweep width). Drop the measured base view and let the restatement
+            # law stand in. It is DECLARED, never inferred, so a same-unit-but-genuinely-different
+            # reading (e.g. main-lobe vs total-in-band power, both dBm) keeps the measured view.
+            if spec.get("restates_measurement"):
+                drop_base = True
+        if not law_views:
+            return []
+        # Only the RAW measured quantity (base_id None) is a restatement target; a declared
+        # reported reading is the operator's chosen axis and is never dropped.
+        if drop_base and base_id is None:
+            return law_views
+        return [base_view] + law_views
 
     def _reported_delta(self, params: Optional[dict]) -> float:
         """dB the embedded --power (reported) reading adds to the MEASURED value at ``params``."""
