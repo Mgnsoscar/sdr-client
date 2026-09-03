@@ -20,6 +20,15 @@ from typing import Optional
 from state.power_law import parse_bridge
 
 
+def _as_float(x) -> Optional[float]:
+    """``float(x)`` or None — coerce a value that may still be a partially-typed form entry
+    (a lone '-', '', '1e') without raising."""
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
 def _interp(x: float, xs: list, ys: list) -> float:
     """Piecewise-linear y(x) over strictly-increasing xs, endpoint-clamped; a single
     sample degrades to a slope-1 line (1 dB gain ≈ 1 dB power) — matches calkit._interp."""
@@ -357,12 +366,17 @@ def clamp_warning(artifact: Optional[dict], freq_hz: Optional[float],
     is unknown. Used to warn (never block) when a tune places the frequency/parameter where
     the power can't follow."""
     fold = PowerFold.from_artifact(artifact or {})
+    # freq_hz / power_dbm come straight from the form and may be a partially-typed entry — a lone
+    # '-' mid-keystroke, an empty string, a stray '1e' — not yet a number. Treat anything that
+    # doesn't parse as "unknown" and stay silent: this is a warn-never-block caption, so it must
+    # never raise on an in-progress value.
+    fq, p = _as_float(freq_hz), _as_float(power_dbm)
     if (fold is None or not (fold.freq_dependent or fold.param_dependent)
-            or freq_hz is None or power_dbm is None):
+            or fq is None or p is None):
         return None
-    b = fold.bounds_at(float(freq_hz), params)
-    lo, hi, p = b["min_power_dbm"], b["max_power_dbm"], float(power_dbm)
-    mhz = float(freq_hz) / 1e6
+    b = fold.bounds_at(fq, params)
+    lo, hi = b["min_power_dbm"], b["max_power_dbm"]
+    mhz = fq / 1e6
     if p > hi + tol:
         return (f"at {mhz:.3f} MHz this unit delivers at most {hi:.2f} dBm — the requested "
                 f"{p:.2f} dBm will be clamped down to it.")

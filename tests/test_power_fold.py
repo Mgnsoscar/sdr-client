@@ -105,6 +105,18 @@ def test_clamp_warning_silent_when_not_frequency_dependent_or_unknown():
     assert clamp_warning(None, 1.0e9, 27.5) is None            # no artifact
 
 
+def test_clamp_warning_tolerates_partially_typed_values():
+    # The warning is recomputed on every keystroke from the raw form value, which can be a
+    # not-yet-a-number entry mid-typing (a lone '-', an empty box, a stray '1e'). It must read
+    # that as "unknown" and stay silent — never raise (regression: float('-') crashed the dialog).
+    art = _v2_artifact()
+    for bad in ("-", "", "1e", ".", "-.", "abc"):
+        assert clamp_warning(art, 1.0e9, bad) is None          # partial --power
+        assert clamp_warning(art, bad, 27.5) is None           # partial --freq
+    # a numeric STRING (a line-edit hands its value as text) is still evaluated normally.
+    assert clamp_warning(art, 1.0e9, "27.5") and "clamped down" in clamp_warning(art, 1.0e9, "27.5")
+
+
 def test_refold_bounds_is_a_noop_without_frequency_or_artifact():
     bounds = {"min_power_dbm": -3.0, "max_power_dbm": 27.0, "artifact": _v2_artifact()}
     assert refold_bounds(bounds, None) is bounds            # no frequency → unchanged

@@ -108,6 +108,12 @@ decimals in Tune (which folds at the deployed carrier) while the run form and th
 stayed at 1. Only the BOUNDS fold live now; the decimals are stable and consistent across Run/Tune.
 Tests: `test_live_tune_power.py` (`..._power_decimals_track_the_representative_step`,
 `..._power_decimals_match_the_run_form`).
+The clamp warning tolerates a MID-TYPED value: an uncalibrated-default `--power`/`--freq` renders
+as a `QLineEdit`, so `_form.values()` hands `clamp_warning` the raw text — a lone `-` (or `''`,
+`'1e'`) while the operator is still typing. `state/power_fold.py` `clamp_warning` now coerces
+`freq_hz`/`power_dbm` via `_as_float` (unparseable → treated as "unknown" → silent) instead of a
+bare `float()`, which raised `ValueError` and crashed the tune dialog on every keystroke of a
+negative power. Tests: `test_power_fold.py` (`..._tolerates_partially_typed_values`).
 
 ## Current state — start/stop sweep folds at the real span (`provides`): COMPLETE
 `ui/param_form.py` resolves a law-keyed parameter through a visible derived stand-in when the
