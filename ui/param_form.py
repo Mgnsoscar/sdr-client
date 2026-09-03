@@ -28,10 +28,11 @@ import shlex
 from typing import Any, Dict, List, Optional
 
 from PyQt6.QtCore import QEvent, QLocale, QObject, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QAbstractScrollArea, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
-    QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QSizePolicy, QSpinBox,
-    QVBoxLayout, QWidget,
+    QDoubleSpinBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from .theme import Palette, mono_font
@@ -569,6 +570,47 @@ def _fmt_bound(v) -> str:
     return s.replace("-", "−")
 
 
+# ── Power card building blocks (the Run/tune power redesign) ─────────────────────
+# The calibrated --power field is a whole card: one PRIMARY quantity you set, every
+# other quantity as its own read-only live field. Unit chips are family-coloured
+# (slate = absolute dBm, teal = a spectral density) to match the Calibration tab.
+
+def _unit_family(unit: str) -> str:
+    """The unit family of a display unit — ``density`` for a spectral density (dBm/Hz,
+    dBm/kHz, dBm/MHz), ``abs`` for an absolute dBm (the default). A tiny local twin of
+    calibration_panel._unit_family, kept here to avoid a UI import cycle."""
+    return "density" if (unit or "").strip().startswith("dBm/") else "abs"
+
+
+def _family_chip(text: str, unit: str) -> QLabel:
+    """A unit chip coloured by family — slate for an absolute dBm, teal for a spectral
+    density — matching the mockup's ``.chip.abs``/``.chip.den`` (and the Calibration tab)."""
+    if _unit_family(unit) == "density":
+        fg, bg, border = "#0D6B57", Palette.ONLINE_SOFT, "#C3E7DB"
+    else:
+        fg, bg, border = "#3B4A5C", "#EEF2F6", "#DFE6EE"
+    lbl = QLabel(text)
+    lbl.setFont(mono_font(10, 600))
+    lbl.setStyleSheet(
+        f"color: {fg}; background: {bg}; border: 1px solid {border}; "
+        f"border-radius: 5px; padding: 1px 6px;")
+    return lbl
+
+
+def _controlling_tag() -> QLabel:
+    """The small accent 'CONTROLLING' pill marking the primary quantity you set."""
+    lbl = QLabel("CONTROLLING")
+    f = QFont("IBM Plex Sans")
+    f.setPixelSize(9)
+    f.setWeight(QFont.Weight.Bold)
+    lbl.setFont(f)
+    lbl.setStyleSheet(
+        f"color: {Palette.ACCENT}; background: {Palette.SURFACE}; "
+        f"border: 1px solid {Palette.ACCENT_SOFT}; border-radius: 5px; "
+        f"padding: 1px 6px; letter-spacing: 0.6px;")
+    return lbl
+
+
 class BoundedNumberField(QWidget):
     """A numeric input with a live range rail + limit chip — the parameter form's bounded
     field, reusable on its own. For a calibrated --power spec (``snap_role`` 'power' with a
@@ -891,6 +933,33 @@ class ParamForm(QWidget):
         s = str(int(f)) if f.is_integer() else f"{f:g}"
         return s.replace("-", "−")
 
+    def _power_decimals(self) -> int:
+        """Display precision for the calibrated --power field: the decimals of the chain's
+        finest achievable step (what the value snaps to), so every power read-out — the
+        value, MIN/MAX and the companions — shows at that resolution, not raw fold output."""
+        fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
+        return _decimals_for(fold.finest_step(self._render_freq)) if fold is not None else 2
+
+    def _power_bound_fmt(self):
+        """A ``_fmt_bound`` twin that rounds a power range end to the finest achievable step's
+        decimals (a proper minus sign), so a shifted view's bound reads −86.4 not −86.4127."""
+        dec = self._power_decimals()
+
+        def fmt(v) -> str:
+            try:
+                return f"{float(v):.{dec}f}".replace("-", "−")
+            except (TypeError, ValueError):
+                return str(v)
+        return fmt
+
+    def _fmt_power(self, v) -> str:
+        """A single power value (a companion read-out) rounded to the achievable-step decimals,
+        with a proper minus sign; ``—`` when it can't be read as a number."""
+        try:
+            return f"{float(v):.{self._power_decimals()}f}".replace("-", "−")
+        except (TypeError, ValueError):
+            return "—"
+
     def _display_name(self, spec: dict) -> str:
         """The field's human name: the long flag without dashes, spaces for hyphens,
         a trailing * when required (units live in their own chip)."""
@@ -948,14 +1017,25 @@ class ParamForm(QWidget):
         if chk is not None:
             chk.setText("")                       # the name is shown separately
             lrow.addWidget(chk)
+        is_power = spec.get("snap_role") == "power"
         lrow.addWidget(field_name_label(self._display_name(spec)))
-        if spec.get("unit"):
-            # The calibrated --power field shows its quantity as "quantity [unit]" with the
-            # quantity's real spaces; every other field's unit chip keeps the " · " styling.
-            if spec.get("snap_role") == "power":
-                lrow.addWidget(unit_chip(self._power_chip_label()))
-            else:
-                lrow.addWidget(unit_chip(spec["unit"].replace(" ", " · ")))
+        # The calibrated --power field is the PRIMARY control of a multi-quantity power card:
+        # a "CONTROLLING" tag (when it offers other quantities) + a family-coloured
+        # "quantity [unit]" chip (slate = absolute dBm, teal = a spectral density). Every
+        # other field keeps a plain " · "-styled unit chip.
+        if is_power:
+            if self._power_views():
+                lrow.addWidget(_controlling_tag())
+            lrow.addWidget(_family_chip(self._power_chip_label(),
+                                        (self._selected_view() or {}).get("unit", spec["unit"])))
+            # The primary quantity you set reads large — the prominent thing on the card, with
+            # the companions kept small. Styled directly so both widget shapes (a spinbox when
+            # the field has a default, a text box when it doesn't) get the big value.
+            widget.setObjectName("powerPrimaryInput")
+            widget.setFont(mono_font(20, 500))
+            widget.setMinimumHeight(46)
+        elif spec.get("unit"):
+            lrow.addWidget(unit_chip(spec["unit"].replace(" ", " · ")))
         lrow.addStretch(1)
         if spec.get("live"):
             lrow.addWidget(LiveBadge())
@@ -970,20 +1050,25 @@ class ParamForm(QWidget):
         # picker). Gate on the actual widget being a spinbox or line edit.
         bounded = (spec.get("type") in ("int", "float") and lo is not None and hi is not None
                    and isinstance(widget, (QSpinBox, QDoubleSpinBox, QLineEdit)))
+        # The power field's rail/chip round MIN/MAX to the chain's finest achievable step
+        # (the same grid the value snaps to), never raw fold precision (no "−86.4127").
+        bfmt = self._power_bound_fmt() if is_power else self._fmt_bound
         chip = None
         if bounded:
             chip = LimitChip()
-            chip.set_range(self._fmt_bound(lo), self._fmt_bound(hi))
+            chip.set_range(bfmt(lo), bfmt(hi))
             crow.addWidget(chip)
         v.addLayout(crow)
 
         if bounded:
             rail = RangeRail()
-            rail.set_bounds(float(lo), float(hi), self._fmt_bound)
+            rail.set_bounds(float(lo), float(hi), bfmt)
             # On a frequency-dependent calibration, the power/gain range moves with the
             # carrier — note the frequency it was folded at (the note lives inside the rail
-            # and is rebuilt, so re-folded, when the frequency changes).
-            if (self._is_power_or_gain(spec) and self._is_freq_dependent()
+            # and is rebuilt, so re-folded, when the frequency changes). The --power field
+            # surfaces the fold frequency (and every bridge-keyed param) in its own DEPENDS ON
+            # row instead (_add_power_unit_ui), so the note is only for --gain here.
+            if (self._is_power_or_gain(spec) and not is_power and self._is_freq_dependent()
                     and isinstance(self._folded_at, (int, float))):
                 mhz = self._folded_at / 1e6
                 rail.set_note(
@@ -999,44 +1084,50 @@ class ParamForm(QWidget):
         return frame
 
     def _add_power_unit_ui(self, layout, widget) -> None:
-        """The calibrated --power field's unit control: a dropdown to choose which quantity the
-        field/slider is CONTROLLED in (the base reported quantity or any declared companion law)
-        plus a live read-out of every other view, all tracking the sweep bandwidth. --power is
-        always SENT in the base quantity (build_args removes the display offset); the dropdown
-        and read-outs are a display/entry convenience. Every reading is
-        ``measured + view_delta(params)``, so a view's value is the controlled value plus the
-        gap between the two views' deltas at the live parameters."""
+        """Finish the calibrated --power card the primary control (built above) belongs to: a
+        DEPENDS ON row of the fold inputs, then — when the signal declares other power quantities
+        — an "ALSO READS AS" grid of read-only companion fields, each with a "Control in this →"
+        button that promotes it to the primary. --power is always SENT in the base quantity
+        (build_args removes the display offset); the companions and the switch are a
+        display/entry convenience. Every reading is ``measured + view_delta(params)``, so a
+        companion value is the controlled value plus the gap between the two views' deltas at the
+        live parameters."""
         views = self._power_views()
-        if not views:
-            return
         selected = self._selected_view()
 
-        row = QHBoxLayout(); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(8)
-        lab = QLabel("control in")
-        lab.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
-        combo = QComboBox()
-        for v in views:
-            combo.addItem(f"{v['name']} ({v['unit']})", v["id"])
-        idx = combo.findData(selected["id"])
-        combo.setCurrentIndex(idx if idx >= 0 else 0)
-        combo.currentIndexChanged.connect(lambda _=0, c=combo: self._on_power_view_changed(c))
-        self._guard_scroll(combo)
-        row.addWidget(lab); row.addWidget(combo, 1)
-        layout.addLayout(row)
+        # DEPENDS ON — the fold inputs surfaced like the frequency (the fold frequency + every
+        # bridge-keyed parameter), so the operator sees what moves the range. Rebuilt each render;
+        # its values also refresh live (below) as a bridge param is dragged/typed.
+        dep_lbls: List[tuple] = []
+        deps = self._dep_specs()
+        if deps:
+            deps_row, dep_lbls = self._deps_row(deps)
+            layout.addWidget(deps_row)
 
         def _current() -> Optional[float]:
             if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
                 return float(widget.value())
             return num_or_none(widget.text())
 
-        rows = []
-        for v in views:
-            if v["id"] == selected["id"]:
-                continue
-            lbl = QLabel(); lbl.setWordWrap(True)
-            lbl.setStyleSheet(f"font-size: 11px; color: {Palette.ONLINE}; padding: 1px 2px 0;")
-            layout.addWidget(lbl)
-            rows.append((lbl, v))
+        # ALSO READS AS — one read-only field per OTHER quantity, each promotable to the primary.
+        cards: List[tuple] = []
+        if views and selected is not None:
+            layout.addWidget(self._reads_divider())
+            grid = QGridLayout()
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(10)
+            grid.setVerticalSpacing(10)
+            cell = 0
+            for v in views:
+                if v["id"] == selected["id"]:
+                    continue
+                card, val_lbl = self._companion_card(v)
+                grid.addWidget(card, cell // 2, cell % 2)
+                cards.append((v, val_lbl))
+                cell += 1
+            if grid.count() == 1:                        # a single companion shouldn't span 2 cols
+                grid.setColumnStretch(1, 1)
+            layout.addLayout(grid)
 
         def _update(*_):
             # Recompute at the LIVE bridge parameters, not the render-time capture, so the
@@ -1046,15 +1137,18 @@ class ParamForm(QWidget):
             # a mid-restore read would use a stale bandwidth); the caller fires it once at the end.
             if self._loading or self._refolding:
                 return
+            cur = self.values() if self._widgets else {}
+            for dep, dv in dep_lbls:                     # keep DEPENDS ON in step with the fields
+                val = self._dep_value(dep, cur)
+                dv.setText(self._fmt_bound(val) if val is not None else "—")
+            if not cards:
+                return
             lp = self._live_params()
             s_d = self._view_delta(selected, lp)
             pv = _current()
-            for lbl, v in rows:
-                if pv is None:
-                    lbl.setText(f"= — {v['unit']}  ·  {v['name']}")
-                    continue
-                cv = pv + (self._view_delta(v, lp) - s_d)
-                lbl.setText(f"= {self._fmt_bound(round(cv, 2))} {v['unit']}  ·  {v['name']}")
+            for v, val_lbl in cards:
+                val_lbl.setText("—" if pv is None
+                                else self._fmt_power(pv + (self._view_delta(v, lp) - s_d)))
 
         self._pw_companion_update = _update
         if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
@@ -1063,12 +1157,138 @@ class ParamForm(QWidget):
             widget.textChanged.connect(_update)
         _update()
 
-    def _on_power_view_changed(self, combo) -> None:
-        """Swap the quantity --power is controlled in. The sent value (base quantity) is
-        preserved across the swap: build_args removes the old unit's offset, the re-render
-        settles the new offset, and set_values re-applies it — so only the displayed unit and
-        the achievable grid change, never the commanded output."""
-        vid = combo.currentData()
+    # ── power-card building blocks ─────────────────────────────────────────────
+    def _dep_specs(self) -> List[dict]:
+        """The fold inputs to surface under the --power range as ``{kind, dest, name, unit}``:
+        the fold frequency (only when the range actually moves with it, shown in MHz like the
+        old note), then each bridge-keyed parameter (e.g. a chirp's --bw, in its own unit). The
+        generalisation of the old 'moves with frequency' note — it names every input that moves
+        the range. Empty for a constant, bridge-less chain (nothing re-folds)."""
+        out: List[dict] = []
+        fsrc = self._freq_source_dest()
+        if fsrc and self._is_freq_dependent():
+            spec = next((s for s in self._base_specs if s.get("dest") == fsrc), None)
+            name = self._display_name(spec).rstrip(" *") if spec else "frequency"
+            out.append({"kind": "freq", "dest": fsrc, "name": name, "unit": "MHz"})
+        for d in self._bridge_param_dests():
+            spec = next((s for s in self._base_specs if s.get("dest") == d), None)
+            if spec is None:
+                continue
+            out.append({"kind": "param", "dest": d,
+                        "name": self._display_name(spec).rstrip(" *"),
+                        "unit": (spec.get("unit") or "").strip()})
+        return out
+
+    def _dep_value(self, dep: dict, cur: dict):
+        """The current value of a DEPENDS ON entry: the fold frequency in MHz (the frequency the
+        range is actually folded at), or a bridge-keyed parameter's live value in its own unit."""
+        if dep.get("kind") == "freq":
+            f = self._folded_at
+            return round(f / 1e6, 4) if isinstance(f, (int, float)) else None
+        return self._keyed_param_value(dep["dest"], cur)
+
+    def _deps_row(self, deps: List[dict]):
+        """The 'DEPENDS ON' chip row (a label + one value chip per fold input). Returns
+        ``(widget, [(dest, value_label), ...])`` so the caller can refresh the values live as a
+        fold input moves, the same way the companion read-outs update."""
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 3, 0, 0)
+        h.setSpacing(8)
+        lbl = QLabel("DEPENDS ON")
+        lf = QFont("IBM Plex Sans"); lf.setPixelSize(9); lf.setWeight(QFont.Weight.Bold)
+        lbl.setFont(lf)
+        lbl.setStyleSheet(f"color: {Palette.TEXT_FAINT}; letter-spacing: 0.7px;")
+        h.addWidget(lbl)
+        cur = self.values() if self._widgets else {}
+        value_lbls: List[tuple] = []
+        for d in deps:
+            chip = QFrame(); chip.setObjectName("depChip")
+            chip.setStyleSheet(
+                f"#depChip {{ background: {Palette.INSET}; border: 1px solid {Palette.BORDER}; "
+                f"border-radius: 11px; }}")
+            ch = QHBoxLayout(chip); ch.setContentsMargins(10, 3, 10, 3); ch.setSpacing(6)
+            k = QLabel(d["name"])
+            kf = QFont("IBM Plex Sans"); kf.setPixelSize(10); kf.setWeight(QFont.Weight.DemiBold)
+            k.setFont(kf); k.setStyleSheet(f"color: {Palette.ACCENT_INK};")
+            val = self._dep_value(d, cur)
+            dv = QLabel(self._fmt_bound(val) if val is not None else "—")
+            dv.setObjectName("depValue")
+            dv.setFont(mono_font(11, 500)); dv.setStyleSheet(f"color: {Palette.TEXT};")
+            ch.addWidget(k); ch.addWidget(dv)
+            if d["unit"]:
+                du = QLabel(d["unit"]); du.setFont(mono_font(10))
+                du.setStyleSheet(f"color: {Palette.TEXT_FAINT};")
+                ch.addWidget(du)
+            h.addWidget(chip)
+            value_lbls.append((d, dv))
+        h.addStretch(1)
+        return row, value_lbls
+
+    def _reads_divider(self) -> QWidget:
+        """The 'ALSO READS AS' section header — an uppercase label + a hairline rule."""
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 8, 0, 2)
+        h.setSpacing(10)
+        lbl = QLabel("ALSO READS AS")
+        f = QFont("IBM Plex Sans"); f.setPixelSize(10); f.setWeight(QFont.Weight.Bold)
+        lbl.setFont(f)
+        lbl.setStyleSheet(f"color: {Palette.TEXT_FAINT}; letter-spacing: 0.9px;")
+        rule = QFrame(); rule.setFrameShape(QFrame.Shape.HLine); rule.setFixedHeight(1)
+        rule.setStyleSheet(f"background: {Palette.BORDER}; border: none;")
+        h.addWidget(lbl); h.addWidget(rule, 1)
+        return row
+
+    def _companion_card(self, view: dict):
+        """A read-only companion field: the view's name + family unit chip, a big mono value +
+        unit, a '● live' marker, and a 'Control in this →' button that promotes it to the
+        primary. Returns ``(card, value_label)`` so the caller can refresh the value live."""
+        card = QFrame(); card.setObjectName("pwrCompanionCard")
+        card.setProperty("pwrViewId", "__base__" if view["id"] is None else view["id"])
+        card.setStyleSheet(
+            f"#pwrCompanionCard {{ background: {Palette.SURFACE_ALT}; "
+            f"border: 1px solid {Palette.BORDER}; border-radius: 7px; }}")
+        cv = QVBoxLayout(card); cv.setContentsMargins(13, 11, 13, 11); cv.setSpacing(7)
+
+        top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(8)
+        name = QLabel(view["name"]); name.setObjectName("pwrCompanionName"); name.setWordWrap(True)
+        nf = QFont("IBM Plex Sans"); nf.setPixelSize(12); nf.setWeight(QFont.Weight.DemiBold)
+        name.setFont(nf); name.setStyleSheet(f"color: {Palette.TEXT};")
+        top.addWidget(name, 1)
+        top.addWidget(_family_chip(view["unit"], view["unit"]))
+        cv.addLayout(top)
+
+        valrow = QHBoxLayout(); valrow.setContentsMargins(0, 0, 0, 0); valrow.setSpacing(7)
+        val = QLabel("—"); val.setObjectName("pwrCompanionValue")
+        val.setFont(mono_font(19, 500)); val.setStyleSheet(f"color: {Palette.TEXT};")
+        unit = QLabel(view["unit"]); unit.setObjectName("pwrCompanionUnit")
+        unit.setFont(mono_font(12)); unit.setStyleSheet(f"color: {Palette.TEXT_MUTED};")
+        valrow.addWidget(val); valrow.addWidget(unit); valrow.addStretch(1)
+        cv.addLayout(valrow)
+
+        foot = QHBoxLayout(); foot.setContentsMargins(0, 0, 0, 0); foot.setSpacing(8)
+        live = QLabel("● live")
+        lvf = QFont("IBM Plex Sans"); lvf.setPixelSize(10)
+        live.setFont(lvf); live.setStyleSheet(f"color: {Palette.ONLINE};")
+        foot.addWidget(live); foot.addStretch(1)
+        btn = QPushButton("Control in this →"); btn.setObjectName("pwrControlIn")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(
+            f"QPushButton#pwrControlIn {{ color: {Palette.ACCENT}; background: transparent; "
+            f"border: none; padding: 3px 4px; font-size: 11px; font-weight: 500; }}"
+            f"QPushButton#pwrControlIn:hover {{ background: {Palette.ACCENT_SOFT}; "
+            f"border-radius: 5px; text-decoration: underline; }}")
+        btn.clicked.connect(lambda _=False, vid=view["id"]: self._set_power_view(vid))
+        foot.addWidget(btn)
+        cv.addLayout(foot)
+        return card, val
+
+    def _set_power_view(self, vid) -> None:
+        """Promote a companion quantity to the primary (the quantity --power is controlled in).
+        The sent value (base quantity) is preserved across the swap: build_args removes the old
+        unit's offset, the re-render settles the new offset, and set_values re-applies it — so
+        only the displayed unit and the achievable grid change, never the commanded output."""
         if vid == self._power_view or self._refolding or self._loading:
             return
         self._power_view = vid

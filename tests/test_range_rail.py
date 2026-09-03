@@ -1,7 +1,8 @@
 """The always-visible limit rail under a bounded numeric field: it renders for a bounded
-field, tracks the value, carries the frequency note on a frequency-dependent power field,
-and re-folds (via the form re-render) when the frequency changes. Its handle position is
-value-proportional (a mid-range value sits at the middle, whatever the step distribution)."""
+field, tracks the value, and re-folds (via the form re-render) when the frequency changes.
+The calibrated --power field surfaces the fold frequency in its DEPENDS ON row instead of a
+rail note; --gain keeps the note. Its handle position is value-proportional (a mid-range value
+sits at the middle, whatever the step distribution)."""
 import os
 
 import pytest
@@ -69,22 +70,29 @@ def test_bounded_field_without_a_step_still_gets_a_rail():
     assert len(_rails(f)) == 3                                    # power, rate, dur
 
 
-def test_power_rail_carries_the_frequency_note():
+def _dep_values(f):
+    return [l.text() for l in f.findChildren(QLabel) if l.objectName() == "depValue"]
+
+
+def test_power_field_surfaces_the_fold_frequency_in_depends_on():
+    # The --power redesign replaces the rail's "moves with frequency" note with a DEPENDS ON
+    # row that names the fold frequency (in MHz), the fold input the range moves with.
     f = ParamForm()
     f.set_params(_specs(), cal_bounds=_bounds(), absolute_allowed=True,
                  default_power_mode="absolute", cal_freq_param="freq")
     notes = [l.text() for rail in _rails(f) for l in rail.findChildren(QLabel)]
-    assert any("moves with frequency" in t and "1575.42 MHz" in t for t in notes)
+    assert not any("moves with frequency" in t for t in notes)     # note replaced by DEPENDS ON
+    assert "1575.42" in _dep_values(f)                             # the fold frequency
 
 
-def test_rail_note_refolds_when_frequency_changes():
+def test_depends_on_frequency_refolds_when_frequency_changes():
     f = ParamForm()
     f.set_params(_specs(), cal_bounds=_bounds(), absolute_allowed=True,
                  default_power_mode="absolute", cal_freq_param="freq")
     f.set_values(["--freq", "1.2276e9", "--power", "24"])         # switch to L2
-    notes = [l.text() for rail in _rails(f) for l in rail.findChildren(QLabel)]
-    assert any("1227.60 MHz" in t for t in notes)                 # note re-folded
-    assert not any("1575.42 MHz" in t for t in notes)
+    deps = _dep_values(f)
+    assert "1227.6" in deps                                       # re-folded to L2
+    assert "1575.42" not in deps
 
 
 def test_no_frequency_note_without_a_freq_dependent_calibration():

@@ -16,7 +16,7 @@ import pytest
 pytest.importorskip("PyQt6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication, QComboBox, QLabel
+from PyQt6.QtWidgets import QApplication, QFrame, QLabel, QPushButton
 
 from ui.param_form import ParamForm
 
@@ -78,20 +78,33 @@ def _form(reported, lo, hi, unit):
     return f
 
 
+def _cards(f):
+    """The rendered 'ALSO READS AS' companion fields (one per non-controlled quantity)."""
+    return [c for c in f.findChildren(QFrame) if c.objectName() == "pwrCompanionCard"]
+
+
 def _companions(f):
-    return [w.text() for w in f.findChildren(QLabel) if w.text().startswith("=")]
+    """Each companion field as a "value unit · name" string (the redesign's own read-only
+    field per quantity, replacing the old '= value unit · name' QLabels)."""
+    out = []
+    for c in _cards(f):
+        name = c.findChild(QLabel, "pwrCompanionName").text()
+        val = c.findChild(QLabel, "pwrCompanionValue").text()
+        unit = c.findChild(QLabel, "pwrCompanionUnit").text()
+        out.append(f"{val} {unit} · {name}")
+    return out
 
 
-def _view_combo(f):
-    for w in f.findChildren(QComboBox):
-        if any(w.itemData(i) == "fbw_power" for i in range(w.count())):
-            return w
-    return None
+def _card_for(f, view_id):
+    key = "__base__" if view_id is None else view_id
+    return next((c for c in _cards(f) if c.property("pwrViewId") == key), None)
 
 
-def _select(combo, view_id):
-    combo.setCurrentIndex(next(i for i in range(combo.count())
-                               if combo.itemData(i) == view_id))
+def _control_in(f, view_id):
+    """Click a companion field's 'Control in this →' button to promote it to the primary."""
+    card = _card_for(f, view_id)
+    assert card is not None, f"no companion field for view {view_id!r}"
+    card.findChild(QPushButton, "pwrControlIn").click()
 
 
 # ── companion read-out ────────────────────────────────────────────────────────
@@ -100,25 +113,25 @@ def test_density_base_shows_total_companion_tracking_bw():
     f = _form(_density_reported(), -26.76, -16.71, "dBm/MHz")
     f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-22"])   # in range at both bw
     _app.processEvents()
-    # density -22 dBm/MHz at bw 10 -> total -22 + 10*log10(10) = -12 dBm
-    assert any("−12 dBm" in t and "Full-bandwidth" in t for t in _companions(f))
+    # density -22 dBm/MHz at bw 10 -> total -22 + 10*log10(10) = -12 dBm (rounded to the 0.5 step)
+    assert any("−12.0 dBm" in t and "Full-bandwidth" in t for t in _companions(f))
     f._widgets["bw"][0].setValue(20.0)
     f._widgets["bw"][0].editingFinished.emit()
     _app.processEvents()
     # density held at -22 (selected unit stays put); total companion = -22 + 10*log10(20) = -8.99
-    assert any("−8.99 dBm" in t for t in _companions(f))
+    assert any("−9.0 dBm" in t for t in _companions(f))
 
 
 def test_total_base_shows_density_companion_tracking_bw():
     f = _form(_total_reported(), -16.76, -6.71, "dBm")
     f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-6.71"])
     _app.processEvents()
-    assert any("−16.71 dBm/MHz" in t for t in _companions(f))
+    assert any("−16.7 dBm/MHz" in t for t in _companions(f))
     f._widgets["bw"][0].setValue(20.0)
     f._widgets["bw"][0].editingFinished.emit()
     _app.processEvents()
     # total held (bandwidth-invariant); density drops 10*log10(20/10)=3.01 dB
-    assert any("−19.72 dBm/MHz" in t for t in _companions(f))
+    assert any("−19.7 dBm/MHz" in t for t in _companions(f))
 
 
 def test_companion_read_outs_track_bw_live_without_a_commit():
@@ -127,38 +140,52 @@ def test_companion_read_outs_track_bw_live_without_a_commit():
     f = _form(_total_reported(), -16.76, -6.71, "dBm")
     f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-6.71"])
     _app.processEvents()
-    assert any("−16.71 dBm/MHz" in t for t in _companions(f))
+    assert any("−16.7 dBm/MHz" in t for t in _companions(f))
     f._widgets["bw"][0].setValue(20.0)          # ← what a rail drag / keystroke does; no commit
-    assert any("−19.72 dBm/MHz" in t for t in _companions(f))
+    assert any("−19.7 dBm/MHz" in t for t in _companions(f))
     f._widgets["bw"][0].setValue(40.0)
-    assert any("−22.73 dBm/MHz" in t for t in _companions(f))
+    assert any("−22.7 dBm/MHz" in t for t in _companions(f))
 
 
-# ── control-unit dropdown ─────────────────────────────────────────────────────
+# ── one read-only field per other quantity + control switching ────────────────
 
-def test_dropdown_lists_both_views():
-    f = _form(_density_reported(), -26.76, -16.71, "dBm/MHz")
-    combo = _view_combo(f)
-    assert combo is not None
-    ids = {combo.itemData(i) for i in range(combo.count())}
-    assert ids == {None, "fbw_power"}       # base (density) + total companion
+def test_each_non_controlled_quantity_renders_its_own_field():
+    # Three views (density base + total power + dBm/Hz density): the base is the primary, so the
+    # OTHER two each render their own companion field.
+    f = ParamForm()
+    f.set_params(_specs("dBm/MHz"),
+                 cal_bounds=_bounds(_density_reported(), -26.76, -16.71, "dBm/MHz"),
+                 absolute_allowed=True, default_power_mode="absolute", cal_freq_param="freq",
+                 power_laws=[FBW, PSD, PSD_HZ])
+    f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-22"])
+    _app.processEvents()
+    ids = {c.property("pwrViewId") for c in _cards(f)}
+    assert ids == {"fbw_power", "psd_hz"}                # every non-controlled view, its own field
+    units = {c.findChild(QLabel, "pwrCompanionUnit").text() for c in _cards(f)}
+    assert units == {"dBm", "dBm/Hz"}
 
 
-def test_swapping_control_unit_keeps_sent_value_in_base_quantity():
+def test_control_in_this_switches_the_controlled_quantity_keeping_the_sent_value():
     f = _form(_density_reported(), -26.76, -16.71, "dBm/MHz")
     f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-16.71"])
     _app.processEvents()
     assert "-16.71" in f.build_args()       # density base sent
+    # total power starts as its own companion field, not the primary
+    assert _card_for(f, "fbw_power") is not None
+    assert _card_for(f, None) is None       # the controlled (density) view has no companion field
 
-    _select(_view_combo(f), "fbw_power")    # control in total power
+    _control_in(f, "fbw_power")             # promote total power to the primary
     _app.processEvents()
     sp = f._widgets["power"][1]
     assert sp["unit"] == "dBm"
     assert sp["max"] == pytest.approx(-6.71, abs=1e-3)   # density max -16.71 + 10 dB
     # the value SENT is still the base density, unchanged by the display swap
     assert "-16.71" in f.build_args()
+    # density is now the companion; total power no longer is
+    assert _card_for(f, None) is not None
+    assert _card_for(f, "fbw_power") is None
 
-    _select(_view_combo(f), None)           # back to density
+    _control_in(f, None)                    # back to density
     _app.processEvents()
     assert f._widgets["power"][1]["unit"] == "dBm/MHz"
     assert "-16.71" in f.build_args()
@@ -168,7 +195,7 @@ def test_editing_in_total_unit_sends_converted_base_value():
     f = _form(_density_reported(), -26.76, -16.71, "dBm/MHz")
     f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-16.71"])
     _app.processEvents()
-    _select(_view_combo(f), "fbw_power")
+    _control_in(f, "fbw_power")
     _app.processEvents()
     # type a total-power value; at bw 10 the base density is total - 10 dB
     f._widgets["power"][0].setText("-6.71")
@@ -212,7 +239,7 @@ def test_total_value_held_across_bandwidth_change():
     f = _form(_density_reported(), -26.76, -16.71, "dBm/MHz")
     f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-20"])
     _app.processEvents()
-    _select(_view_combo(f), "fbw_power")     # control in total power
+    _control_in(f, "fbw_power")              # control in total power
     _app.processEvents()
     _set_power(f, -10.0)
     _set_bw(f, 20)
@@ -239,11 +266,12 @@ def test_declared_unit_adds_a_dbm_per_hz_view():
                  power_laws=[FBW, PSD, PSD_HZ])
     f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-22"])
     _app.processEvents()
-    combo = _view_combo(f)
-    units = {combo.itemData(i): combo.itemText(i) for i in range(combo.count())}
-    assert "psd_hz" in units and "dBm/Hz" in units["psd_hz"]
+    # dBm/Hz is offered as its own companion field
+    card = _card_for(f, "psd_hz")
+    assert card is not None
+    assert card.findChild(QLabel, "pwrCompanionUnit").text() == "dBm/Hz"
     # control in dBm/Hz: dBm/Hz = dBm/MHz − 60, so the range shifts down 60 dB
-    _select(combo, "psd_hz")
+    _control_in(f, "psd_hz")
     _app.processEvents()
     sp = f._widgets["power"][1]
     assert sp["unit"] == "dBm/Hz"
@@ -251,13 +279,14 @@ def test_declared_unit_adds_a_dbm_per_hz_view():
     assert "-22" in f.build_args()                        # base density unchanged
 
 
-def test_no_laws_means_no_dropdown_or_companion():
+def test_no_laws_means_no_companion_fields():
     f = ParamForm()
     f.set_params(_specs("dBm/MHz"), cal_bounds=_bounds(_density_reported(), -26.76, -16.71, "dBm/MHz"),
                  absolute_allowed=True, default_power_mode="absolute", cal_freq_param="freq",
                  power_laws=[])
     _app.processEvents()
-    assert _view_combo(f) is None
+    assert f._power_views() == []
+    assert _cards(f) == []
     assert _companions(f) == []
 
 
@@ -320,9 +349,48 @@ def test_power_chip_is_quantity_bracket_unit_with_real_spaces():
     labels = [w.text() for w in f.findChildren(QLabel)]
     assert "spectral density [dBm/MHz]" in labels
     assert not any("·" in t and "spectral" in t for t in labels)   # quantity not dotted
-    combo = _view_combo(f); _select(combo, "fbw_power"); _app.processEvents()
+    _control_in(f, "fbw_power"); _app.processEvents()
     labels = [w.text() for w in f.findChildren(QLabel)]
     assert "Full-bandwidth (total) power [dBm]" in labels
+
+
+# ── round every power read-out to the achievable step ──────────────────────────
+
+def test_power_values_round_to_the_finest_achievable_step():
+    # Every displayed power — the companions, and the rail/chip MIN & MAX — is shown at the
+    # decimals of the chain's finest achievable step (0.5 dB → 1 decimal here), never at raw
+    # fold precision.
+    f = _form(_density_reported(), -26.76, -16.71, "dBm/MHz")
+    f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-22"])
+    _app.processEvents()
+    dec = f._power_decimals()
+    assert dec == 1
+    for c in _cards(f):
+        v = c.findChild(QLabel, "pwrCompanionValue").text().replace("−", "-")
+        assert "." in v and len(v.split(".")[1]) == dec      # exactly the step's resolution
+    # MIN/MAX (and a shifted view's bound) round to the step, never raw fold output.
+    fmt = f._power_bound_fmt()
+    assert fmt(-26.76) == "−26.8"
+    assert fmt(-16.71) == "−16.7"
+    assert fmt(-86.4127) == "−86.4"
+
+
+# ── DEPENDS ON: the fold inputs surfaced like the frequency ────────────────────
+
+def test_depends_on_row_lists_the_bridge_keyed_param():
+    # This chirp's --power range moves with the sweep bandwidth, not the carrier (a
+    # bandwidth-, not frequency-, dependent chain), so DEPENDS ON names --bw and tracks it live.
+    f = _form(_density_reported(), -26.76, -16.71, "dBm/MHz")
+    f.set_values(["--freq", "1575.42", "--bw", "10", "--power", "-22"])
+    _app.processEvents()
+
+    def _deps():
+        return [l.text() for l in f.findChildren(QLabel) if l.objectName() == "depValue"]
+
+    assert "10" in _deps()                  # the chirp's sweep bandwidth (a bridge-keyed param)
+    # the bridge-param chip tracks the field live, no commit — like the companions
+    f._widgets["bw"][0].setValue(20.0)
+    assert "20" in _deps()
 
 
 def test_power_chip_when_operating_unit_absent_falls_back_to_dbm():
