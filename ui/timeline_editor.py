@@ -1224,6 +1224,9 @@ class StepEditorDialog(QDialog):
                 self._set_status(f"could not load parameters: {result}", error=True)
             return
         self._editor.cache_script_meta(script, result)
+        # These params may be the last thing the sequence-level achievability banner was waiting on
+        # (a clamp can only be judged once the task's --power range is foldable), so refresh it.
+        self._editor._update_achievability()
         if script == self._current_script:
             self._build_form(script)
 
@@ -1512,6 +1515,12 @@ class TimelineEditor(QWidget):
         self._cal_stale = False                  # True when served from the offline cache
         self._task_signals: Dict[str, str] = {}
         self._cal_connected = False
+        # Proactive params prefetch (for the achievability banner): fetch a sequence task's
+        # script params even when no step/ramp dialog has been opened for it, so the banner can
+        # appear on load. Kept separate from the dialog's _params_inflight/labels so the two
+        # never cross-route a result.
+        self._prefetch_inflight: set = set()
+        self._prefetch_connected = False
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1766,14 +1775,64 @@ class TimelineEditor(QWidget):
 
     def _update_achievability(self) -> None:
         """Refresh the sequence-level power-achievability warning. Best-effort: a task whose params
-        aren't cached yet is skipped and picked up on the next edit once a step/ramp dialog has
-        fetched them. Never raises — a warning helper must not break the editor."""
+        aren't cached yet is skipped, and a proactive prefetch is kicked off so it's picked up as
+        soon as the params land (no need to open a step/ramp dialog first). Never raises — a warning
+        helper must not break the editor."""
         try:
             issues = tlm.achievability_warnings(self._canvas.items(), self._achievability_resolver())
         except Exception:                          # noqa: BLE001
             issues = []
         self._achv_warn.setText("\n".join(i.message for i in issues))
         self._achv_warn.setVisible(bool(issues))
+        try:
+            self._prefetch_seq_params()            # fill any missing params → banner appears on load
+        except Exception:                          # noqa: BLE001
+            pass
+
+    def _prefetch_seq_params(self) -> None:
+        """Fetch script params for every sequence task whose params aren't cached yet, so the
+        achievability banner can surface WITHOUT the operator first opening a step/ramp dialog for
+        that task (the top follow-up in docs/sequence-power-achievability.md §9). Demand-driven —
+        called from _update_achievability, so only uncached scripts fire, once each; the result
+        lands in _on_prefetch_params, which caches it and re-runs the banner. Best-effort: no hub,
+        no targeted unit, or an unresolvable host just leaves the task skipped."""
+        if self._hub is None or not self._hostname:
+            return
+        fleet = getattr(self._hub, "fleet", None)
+        if fleet is None or fleet.get(self._hostname) is None:
+            return
+        cache = self.param_cache()
+        seen: List[str] = []
+        for it in self._canvas.items():
+            task = getattr(it, "task_name", None)
+            if not task or task in seen:
+                continue
+            seen.append(task)
+            script, _ = self.script_for_task(task)
+            if not script or script in cache or script in self._prefetch_inflight:
+                continue
+            if not self._prefetch_connected:
+                self._hub.task_done.connect(self._on_prefetch_params)
+                self._prefetch_connected = True
+            self._prefetch_inflight.add(script)
+            self._hub.run_async(
+                f"tl_prefetch:{self._hostname}:{script}",
+                lambda s=script: self._hub.fleet.get(self._hostname).get_script_params(s))
+
+    def _on_prefetch_params(self, label: str, result) -> None:
+        """Cache a prefetched script's params and refresh the achievability banner. Routed by a
+        distinct ``tl_prefetch:`` label so it never collides with the step dialog's own fetch."""
+        if not isinstance(label, str) or not label.startswith("tl_prefetch:"):
+            return
+        parts = label.split(":", 2)
+        if len(parts) < 3 or parts[1] != self._hostname:
+            return
+        script = parts[2]
+        self._prefetch_inflight.discard(script)
+        if isinstance(result, Exception):
+            return                                 # best-effort — leave the task uncached
+        self.cache_script_meta(script, result)
+        self._update_achievability()               # params arrived — surface any clamps now
 
     # ── Add / load / read steps ──────────────────────────────────────────────
 

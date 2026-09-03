@@ -334,3 +334,73 @@ def test_timeline_editor_surfaces_the_ramp_clamp_warning():
     ed._update_achievability()
     assert ed._achv_warn.text() == ""
     assert ed._achv_warn.isHidden()                   # explicitly hidden when nothing clamps
+
+
+def test_timeline_editor_prefetches_params_so_the_banner_shows_without_opening_a_dialog():
+    # The owner-reported "I get no warning": a freshly-loaded sequence whose task params haven't been
+    # fetched yet (no step/ramp dialog opened) left the banner blank because resolve() had no specs.
+    # _update_achievability now PROACTIVELY prefetches each sequence task's script params; when they
+    # land the banner appears on its own — here the held-density clamp after a later --bw doubling.
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PyQt6")
+    from PyQt6.QtCore import QObject, pyqtSignal
+    from PyQt6.QtWidgets import QApplication
+    from ui.timeline_editor import TimelineEditor
+    QApplication.instance() or QApplication([])
+
+    served = {"params": _CHIRP_SPECS, "calibration_signal": "sig",
+              "calibration_freq_param": "freq", "calibration_power_laws": []}
+
+    class _Client:
+        def get_script_params(self, script):
+            _Hub.fetched.append(script)
+            return served
+
+    class _Fleet:
+        def get(self, host):
+            return _Client()
+
+    class _Hub(QObject):
+        task_done = pyqtSignal(str, object)
+        fetched: list = []
+
+        def __init__(self):
+            super().__init__()
+            self.fleet = _Fleet()
+
+        def run_async(self, label, fn):              # synchronous stand-in for the threaded hub
+            try:
+                res = fn()
+            except Exception as exc:                 # noqa: BLE001
+                res = exc
+            self.task_done.emit(label, res)
+
+    _Hub.fetched = []
+    hub = _Hub()
+    ed = TimelineEditor()
+    ed.set_context(hub, "unit")
+    ed._task_commands = {"chirp": ["python3", "chirp.py", "--freq", "1575.42", "--power",
+                                   "-22", "--bw", "10"]}
+    ed._task_signals = {"chirp": "sig"}
+    ed._cal_hostname = "unit"
+    ed._calibration = {"valid": True, "signals": {"sig": {"artifact": _CHIRP_ART}}}
+    # NOTE: param cache is deliberately EMPTY — no dialog has fetched params.
+    assert ed.param_cache() == {}
+
+    set_max = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=5.0,
+                          params={"power": -16.71})
+    double_bw = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=10.0,
+                            params={"bw": 20})
+    ed._canvas.set_items([_chirp_bar(), set_max, double_bw])
+    ed._update_achievability()
+
+    assert _Hub.fetched == ["chirp.py"]              # prefetched exactly once, on demand
+    assert "chirp.py" in ed.param_cache()            # and cached for every later dialog
+    assert "held" in ed._achv_warn.text()            # the banner surfaced without any dialog
+    assert "clamped down" in ed._achv_warn.text()
+    assert not ed._achv_warn.isHidden()
+
+    # A second refresh doesn't re-fetch (already cached) — no request spam.
+    ed._update_achievability()
+    assert _Hub.fetched == ["chirp.py"]
