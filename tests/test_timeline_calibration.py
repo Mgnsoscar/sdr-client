@@ -100,3 +100,64 @@ def test_script_calibratable_reflects_declared_signal():
     assert t.script_calibratable("tx") is True            # script declares a signal
     t._script_cal_signals["tx.py"] = None
     assert t.script_calibratable("tx") is False           # script declares none → raw by design
+
+
+# ── frequency units reach the fold as Hz (not the raw field value) ──────────────────────
+
+def test_hz_per_unit_maps_field_units_to_hz():
+    from ui.param_form import hz_per_unit
+    assert hz_per_unit("Hz") == 1.0
+    assert hz_per_unit("kHz") == 1e3
+    assert hz_per_unit("MHz") == 1e6
+    assert hz_per_unit("GHz") == 1e9
+    assert hz_per_unit("mhz") == 1e6                       # case-insensitive
+    assert hz_per_unit(None) == 1.0 and hz_per_unit("") == 1.0 and hz_per_unit("dBm") == 1.0
+
+
+def test_step_editor_clamp_warning_folds_at_hz_not_the_raw_mhz_value():
+    # Regression: the sequence step editor passed the freq field's RAW value (in MHz) to
+    # clamp_warning, which expects Hz — so it folded at ~0 Hz and the caption read "0.001 MHz" for
+    # a 1227.6 MHz carrier. It must convert through the field's unit first (hz_per_unit), so the
+    # fold — and the caption — use the real carrier.
+    from PyQt6.QtWidgets import QLabel
+
+    from ui.param_form import find_power_index                # noqa: F401 (import parity w/ editor)
+    from ui.timeline_editor import StepEditorDialog
+
+    # Frequency-dependent chain (a passive hop that varies with freq), so the fold frequency
+    # actually matters; a −18.15 dBm request overshoots the ceiling at the real carrier.
+    art = {"anchor_curve": [[40, -60.0], [80, -30.0]], "min_gain_db": 40.0, "max_gain_db": 80.0,
+           "gain_ceiling_db": 80.0, "gain_step_db": 1.0,
+           "passive_hops": [{"delta_db_by_freq": [[1.0e9, 0.0], [1.3e9, -5.0]]}],
+           "readings": {"limiting": {"kind": "same"}}, "center_freq_hz": 1.2276e9}
+    bounds = {"min_power_dbm": -180.0, "max_power_dbm": -30.0, "quantity": "EIRP",
+              "operating_plane": "sdr_output", "artifact": art}
+    specs = [{"dest": "freq", "flags": ["--freq"], "type": "float", "unit": "MHz", "is_freq": True},
+             {"dest": "power", "flags": ["--power"], "type": "float", "unit": "dBm",
+              "snap_role": "power"}]
+
+    class _Editor:
+        _script_cal_freq_params = {"chirp.py": "freq"}
+
+        def cal_bounds_for_task(self, task):
+            return bounds
+
+        def script_for_task(self, task):
+            return ("chirp.py", [])
+
+        def param_cache(self):
+            return {"chirp.py": specs}
+
+    dlg = StepEditorDialog.__new__(StepEditorDialog)         # bypass the heavy dialog build
+    dlg._editor = _Editor()
+    dlg._clamp_warn = QLabel()
+    dlg._task = type("T", (), {"currentText": lambda self_: "mocktask"})()
+    dlg._form = type("F", (), {"values": lambda self_: {}})()
+    # the running step is at 1227.6 (its field unit, MHz) with a −18.15 dBm request
+    dlg._carried_values = lambda task, script, spx: {"freq": 1227.6, "power": -18.15}
+
+    dlg._update_clamp_warning()
+    txt = dlg._clamp_warn.text()
+    assert txt and "clamped down" in txt                    # the warning fires
+    assert "1227.600 MHz" in txt                            # folded at the real carrier (Hz→MHz)
+    assert "0.001 MHz" not in txt                           # not the raw-MHz-as-Hz mistake

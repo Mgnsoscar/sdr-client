@@ -35,7 +35,7 @@ from . import timeline_model as tlm
 from .duration_spin import DurationSpinBox
 from .param_form import (
     BoundedNumberField, ParamForm, apply_power_bounds, find_power_index,
-    fmt_duration, fmt_value, range_hint,
+    fmt_duration, fmt_value, hz_per_unit, range_hint,
 )
 from .theme import Palette
 
@@ -436,8 +436,7 @@ class RampEditorDialog(QDialog):
         value in its own unit (MHz etc.) converts to the Hz that refold_bounds expects."""
         for s in self._all_params:
             if s.get("dest") == freq_param:
-                unit = (s.get("unit") or "").strip().lower()
-                return {"hz": 1.0, "khz": 1e3, "mhz": 1e6, "ghz": 1e9}.get(unit, 1.0)
+                return hz_per_unit(s.get("unit"))
         return 1.0
 
     def _op_freq_hz(self, task: str) -> Optional[float]:

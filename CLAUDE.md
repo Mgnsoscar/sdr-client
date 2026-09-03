@@ -129,6 +129,17 @@ Hz — the live field scaled, a context carrier, or the schema default) and `fol
 `clamp_warning` through both, so the caption's ceiling matches the displayed range (tracks the live
 `--sidelobes`/`--bw`, at the deployed carrier). Tests: `test_live_tune_power.py`
 (`..._clamp_warning_folds_at_the_range_frequency_and_params`).
+Frequency units reach the fold as Hz everywhere now. The fold helpers (`refold_bounds`, `snap_power`,
+`clamp_warning`) all expect **Hz**, but a freq field's value is in its OWN unit (usually MHz), so it
+must be scaled first. The SEQUENCE step editor (`timeline_editor._update_clamp_warning`) was the one
+path that skipped the scale — it passed the raw MHz value straight in, so the caption folded at ~0 Hz
+and read "0.001 MHz" for a 1227.6 MHz carrier. It now converts via `hz_per_unit(freq_unit)` before
+folding. The field-unit→Hz map (`{hz,khz,mhz,ghz}`) is consolidated into ONE `param_form.hz_per_unit`
+helper, used by `ParamForm._freq_unit_factor`, `ramp_editor._freq_unit_factor` and the timeline
+editor — so no fold path can carry a mis-scaled carrier. (Audited every `refold_bounds`/`snap_power`/
+`clamp_warning`/`bounds_at` caller: the run form (`_render_freq`), live tune (`fold_freq_hz`) and ramp
+editor (`_op_freq_hz`) were already Hz.) Tests: `test_timeline_calibration.py`
+(`..._clamp_warning_folds_at_hz_not_the_raw_mhz_value`, `test_hz_per_unit_maps_field_units_to_hz`).
 
 ## Current state — start/stop sweep folds at the real span (`provides`): COMPLETE
 `ui/param_form.py` resolves a law-keyed parameter through a visible derived stand-in when the

@@ -56,7 +56,7 @@ from api import ramp as _ramp
 from api.fleet import LIBRARY_HOST
 
 from .duration_spin import DurationSpinBox
-from .param_form import ParamForm, fmt_duration, fmt_value, power_mode_of_args
+from .param_form import ParamForm, fmt_duration, fmt_value, hz_per_unit, power_mode_of_args
 from .ramp_editor import RampEditorDialog
 from .theme import Palette
 
@@ -1322,8 +1322,14 @@ class StepEditorDialog(QDialog):
             lbl.setVisible(False); return
         carried = self._carried_values(task, script, specs)
         effective = {**carried, **self._form.values()}   # this step's set values win
-        msg = clamp_warning(bounds.get("artifact"), effective.get(freq_param),
-                            effective.get(power_dest))
+        # The effective carrier is in the freq field's OWN unit (e.g. MHz); the fold expects Hz.
+        # Convert before folding — a raw MHz value folded as Hz would clamp against ~0 Hz.
+        freq_unit = next((s.get("unit") for s in specs if s.get("dest") == freq_param), None)
+        freq_val = effective.get(freq_param)
+        freq_hz = (float(freq_val) * hz_per_unit(freq_unit)
+                   if isinstance(freq_val, (int, float)) and not isinstance(freq_val, bool)
+                   else None)
+        msg = clamp_warning(bounds.get("artifact"), freq_hz, effective.get(power_dest))
         lbl.setText("⚠ " + msg if msg else "")
         lbl.setVisible(bool(msg))
 

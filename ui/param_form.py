@@ -168,6 +168,18 @@ def num_or_none(s):
         return None
 
 
+# Hz per unit of a frequency field's declared unit. The ONE place a field-frequency unit maps to
+# Hz — every fold path (refold_bounds / snap_power / clamp_warning all expect Hz) multiplies a
+# field value by this, so a carrier can't reach the fold mis-scaled (a raw MHz value folded as Hz
+# would fold at ~0 Hz). Unknown/empty ⇒ 1.0 (treat as Hz), the old fallback.
+_HZ_PER_UNIT = {"hz": 1.0, "khz": 1e3, "mhz": 1e6, "ghz": 1e9}
+
+
+def hz_per_unit(unit) -> float:
+    """Hz per unit of ``unit`` ('Hz'/'kHz'/'MHz'/'GHz', case-insensitive); 1.0 for anything else."""
+    return _HZ_PER_UNIT.get((unit or "").strip().lower(), 1.0)
+
+
 def _flex_int(s: str) -> int:
     """Parse an int, honouring a 0x/0o/0b prefix (base 0) but also accepting a plain
     decimal with leading zeros ('08', '0123') — which base 0 rejects, an easy trap for
@@ -1906,7 +1918,7 @@ class ParamForm(QWidget):
                 break
             if s.get("is_freq") and fallback is None:
                 fallback = u
-        return {"hz": 1.0, "khz": 1e3, "mhz": 1e6, "ghz": 1e9}.get((unit or fallback or "hz"), 1.0)
+        return hz_per_unit(unit or fallback)
 
     def _current_freq_hz(self) -> Optional[float]:
         """The transmit frequency in Hz the form is currently at, from the active freq source
