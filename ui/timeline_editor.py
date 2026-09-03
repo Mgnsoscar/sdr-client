@@ -1294,6 +1294,10 @@ class StepEditorDialog(QDialog):
             self._set_status(
                 "" if specs else "this script declares no parameters — use extra args")
             self._apply_prefill()
+        # Restore the control quantity the operator authored this step in (persisted power_view),
+        # so reopening shows --power in that quantity. No-op for a new step, a form with no power
+        # views, or a legacy/mismatched view (falls back to the signal's default quantity).
+        self._form.set_power_view(getattr(self._src, "power_view", None))
         self._update_clamp_warning()
         if bounds and self._editor.cal_is_stale():
             self._set_status("absolute power uses last-known calibration "
@@ -1472,6 +1476,10 @@ class StepEditorDialog(QDialog):
             return
         uid = self._src.uid
         mode = self._type.currentData()
+        # The calibrated --power CONTROL QUANTITY the operator authored this step in (a
+        # CAL_POWER_LAWS view id, or None), recorded so it is remembered on reopen and HELD from
+        # this step forward. None when the form has no power card (uncalibrated / no views).
+        pview = self._form.power_view() if self._form is not None else None
         if mode == "tune":
             params = self._form.values()
             if not params:
@@ -1487,17 +1495,17 @@ class StepEditorDialog(QDialog):
                     return
             self.result_item = tlm.RunItem(
                 task_name=task, action="tune", params=params,
-                anchor=anchor, offset=offset, uid=uid)
+                anchor=anchor, offset=offset, uid=uid, power_view=pview)
         elif mode == "bar":
             self.result_item = tlm.BarItem(
                 task_name=task, args=self._build_args(), replace_args=True,
                 start_offset=round(self._start_off.value(), 1),
-                stop_offset=round(self._stop_off.value(), 1), uid=uid)
+                stop_offset=round(self._stop_off.value(), 1), uid=uid, power_view=pview)
         else:
             self.result_item = tlm.RunItem(
                 task_name=task, args=self._build_args(), replace_args=True,
                 anchor=self._anchor.currentData(),
-                offset=round(self._run_off.value(), 1), uid=uid)
+                offset=round(self._run_off.value(), 1), uid=uid, power_view=pview)
         self.accept()
 
     def _disconnect(self) -> None:
@@ -1896,6 +1904,7 @@ class TimelineEditor(QWidget):
                 "params": dict(getattr(s, "params", {}) or {}),
                 "ramp": (ramp.model_dump() if hasattr(ramp, "model_dump")
                          else dict(ramp)) if ramp else None,
+                "power_view": getattr(s, "power_view", None),
             })
         self._canvas.set_items(tlm.steps_to_items(dicts))
 
@@ -1912,7 +1921,8 @@ class TimelineEditor(QWidget):
                 args=list(d.get("args") or []),
                 replace_args=bool(d.get("replace_args", False)),
                 params=dict(d.get("params") or {}),
-                ramp=m.RampSpec(**ramp) if ramp else None))
+                ramp=m.RampSpec(**ramp) if ramp else None,
+                power_view=d.get("power_view")))
         return out
 
     # ── Validation (mirrors the agent's _validate_steps) ─────────────────────

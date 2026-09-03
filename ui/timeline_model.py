@@ -52,6 +52,9 @@ class BarItem:
     # If the run is armed with a resume offset, pass it to this task's start (only a
     # resumable duration task honours it). Carried through edit so it isn't reset.
     inject_resume_offset: bool = False
+    # The calibrated --power CONTROL QUANTITY this step is authored in (a CAL_POWER_LAWS view id,
+    # or None for the signal default) — the quantity HELD from this step forward. See SequenceStep.
+    power_view: Optional[str] = None
     uid: int = 0
     kind: str = "bar"
 
@@ -79,6 +82,9 @@ class RunItem:
     action: str = "run"         # "run" | "tune" | "ramp"
     params: Dict[str, object] = field(default_factory=dict)   # tune: {name: value}
     ramp: Optional[Dict[str, object]] = None                  # ramp: the RampSpec dict
+    # The calibrated --power CONTROL QUANTITY this step is authored in (a CAL_POWER_LAWS view id,
+    # or None for the signal default) — the quantity HELD from this step forward. See SequenceStep.
+    power_view: Optional[str] = None
     uid: int = 0
     kind: str = "run"
 
@@ -252,18 +258,20 @@ def _action_of(step: dict) -> str:
 def item_to_steps(it) -> List[dict]:
     """Flatten one item to sequence-step dicts (anchor/offset_s/action/task_name/
     args/replace_args)."""
+    pv = getattr(it, "power_view", None)
     if it.kind == "bar":
         return [
             {"anchor": "start", "offset_s": it.start_offset, "action": "start",
              "task_name": it.task_name, "args": list(it.args), "replace_args": it.replace_args,
-             "inject_resume_offset": bool(getattr(it, "inject_resume_offset", False))},
+             "inject_resume_offset": bool(getattr(it, "inject_resume_offset", False)),
+             "power_view": pv},
             {"anchor": "stop", "offset_s": it.stop_offset, "action": "stop",
              "task_name": it.task_name, "args": [], "replace_args": False},
         ]
     if getattr(it, "action", "run") == "tune":
         return [
             {"anchor": it.anchor, "offset_s": it.offset, "action": "tune",
-             "task_name": it.task_name, "params": dict(it.params or {})},
+             "task_name": it.task_name, "params": dict(it.params or {}), "power_view": pv},
         ]
     if getattr(it, "action", "run") == "ramp":
         # A run-mode ramp carries the OTHER params' fixed values as args; a tune ramp
@@ -273,11 +281,12 @@ def item_to_steps(it) -> List[dict]:
              "offset_end_s": getattr(it, "offset_end", 0.0),
              "task_name": it.task_name, "ramp": dict(it.ramp or {}),
              "args": list(getattr(it, "args", []) or []),
-             "replace_args": bool(getattr(it, "replace_args", True))},
+             "replace_args": bool(getattr(it, "replace_args", True)), "power_view": pv},
         ]
     return [
         {"anchor": it.anchor, "offset_s": it.offset, "action": "run",
-         "task_name": it.task_name, "args": list(it.args), "replace_args": it.replace_args},
+         "task_name": it.task_name, "args": list(it.args), "replace_args": it.replace_args,
+         "power_view": pv},
     ]
 
 
@@ -301,12 +310,14 @@ def steps_to_items(steps: List[dict]) -> List:
             items.append(RunItem(
                 task_name=s["task_name"], args=list(s.get("args") or []),
                 replace_args=bool(s.get("replace_args", True)),
-                anchor=s.get("anchor", "start"), offset=float(s["offset_s"])))
+                anchor=s.get("anchor", "start"), offset=float(s["offset_s"]),
+                power_view=s.get("power_view")))
         elif action == "tune":
             items.append(RunItem(
                 task_name=s["task_name"], action="tune",
                 params=dict(s.get("params") or {}),
-                anchor=s.get("anchor", "start"), offset=float(s["offset_s"])))
+                anchor=s.get("anchor", "start"), offset=float(s["offset_s"]),
+                power_view=s.get("power_view")))
         elif action == "ramp":
             items.append(RunItem(
                 task_name=s["task_name"], action="ramp",
@@ -314,7 +325,8 @@ def steps_to_items(steps: List[dict]) -> List:
                 args=list(s.get("args") or []),
                 replace_args=bool(s.get("replace_args", True)),
                 anchor=s.get("anchor", "start"), offset=float(s["offset_s"]),
-                offset_end=float(s.get("offset_end_s") or 0.0)))
+                offset_end=float(s.get("offset_end_s") or 0.0),
+                power_view=s.get("power_view")))
         elif action == "start":
             starts.append(s)
         elif action == "stop":
@@ -329,7 +341,8 @@ def steps_to_items(steps: List[dict]) -> List:
             replace_args=bool(st.get("replace_args", True)),
             start_offset=float(st["offset_s"]),
             stop_offset=float(stop["offset_s"]) if stop else 0.0,
-            inject_resume_offset=bool(st.get("inject_resume_offset", False))))
+            inject_resume_offset=bool(st.get("inject_resume_offset", False)),
+            power_view=st.get("power_view")))
 
     # A stop with no matching start → a bar whose start sits at on-air (0s).
     for task, rem in stops_by_task.items():

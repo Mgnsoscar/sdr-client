@@ -1368,6 +1368,26 @@ class ParamForm(QWidget):
         self._power_view = vid
         self._do_refold()
 
+    def power_view(self):
+        """The CAL_POWER_LAWS view id the calibrated --power field is currently controlled in
+        (e.g. ``'psd_live'`` live spectral density, ``'fbw_power'`` total power), or None when the
+        field offers no unit views. Persisted per sequence step so the operator's chosen control
+        quantity is remembered and HELD from that step forward (see SequenceStep.power_view)."""
+        sel = self._selected_view()
+        return sel.get("id") if sel else None
+
+    def set_power_view(self, vid) -> None:
+        """Restore the controlled --power view (from a persisted step) after ``set_params`` — so
+        reopening a step editor shows --power in the quantity the operator authored it in. A no-op
+        when the field offers no views, ``vid`` is None/the default, or ``vid`` isn't among the
+        offered views (a legacy step or a signal whose laws changed falls back to the default)."""
+        if vid is None:
+            return
+        views = self._power_views()
+        if not views or not any(v.get("id") == vid for v in views):
+            return
+        self._set_power_view(vid)
+
     def _warn_line(self) -> QLabel:
         """A hidden clamp warning; _wire_rail fills in the message and shows it when a
         value is above the max or below the min."""

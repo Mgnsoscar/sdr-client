@@ -373,15 +373,26 @@ so it's always fine" — that's technically true of the stored base value but NO
 intent.
 
 **Owner decisions (branch `claude/temporal-power-warnings-zemu9p`):**
-- **Transmit path:** *also change it* — the runtime must actually hold live density across `--bw`
-  changes (not just warn). This is a cross-repo change (breaks the client-only guardrail; needs a
-  capability + version bump). **Its mechanism is being confirmed before implementation** — see the
-  transmit-path design block below.
-- **Intended-density model:** *set-time bandwidth* — the intended density is the value the operator
-  set, `intended_live = base + view_delta(bw-in-effect-when-SET)`, re-checked against the view range
-  at each later fire-time `--bw`. NOT the §10 "reference bandwidth" reading (which spuriously flags a
-  density authored while a non-reference `--bw` was carried, since the step editor already folds the
-  view at the carried bw).
+- **Hold quantity = the LATEST-SET control quantity.** Each power-setting step (bar/run/tune/ramp)
+  is authored in a control quantity (density / total-power / relative-gain / dBm), exactly the
+  Run/Tune power card. The quantity HELD at any moment is whichever the most recent power-setting
+  step chose, held across `--bw`/`--freq` until the next power-setting step. "The Run/Tune parameter
+  form, laid out on a timeline rather than live."
+- **Mechanism = CLIENT PRECOMPUTE (client-only), NOT a runtime change.** Key finding: the Run/Tune
+  form already holds the quantity *client-side* — on a `--bw`/`--freq` change it keeps the displayed
+  value in the selected unit (`_do_refold(hold_display=True)`, "re-maps the commanded output") and
+  re-sends `--power` as the recomputed **base** (`values()` subtracts the view offset at the new
+  `--bw`). The unit's `PowerMap` has no concept of the view law; it just applies the base it's handed.
+  So a sequence holds the quantity the same way: the client derives/injects the base `--power` at
+  each operating-point change to hold the latest-set control quantity. **No agent/scripts/capability
+  change** (the agent already replays `--bw`+`--power` commands); the hold math (`view_delta =
+  coeff·log10(bw/ref)`) is a *script constant*, so it is portable across units.
+- **On undeliverable = CLAMP + WARN (keep on air).** Deliver the closest achievable value (base
+  clamped to max) and surface the amber warning — warn-never-block, unchanged.
+- **Intended-density model = SET-TIME bandwidth** — the intended value is what the operator set,
+  `intended = base + view_delta(bw-in-effect-when-SET)`, re-checked at each later fire-time `--bw`.
+  NOT the reference-bandwidth reading (which spuriously flags a density authored while a
+  non-reference `--bw` was carried, since the step editor folds the view at the carried bw).
 
 Work items:
 
@@ -403,25 +414,35 @@ Work items:
    `tests/test_achievability_view_fold.py` (real verbatim artifact: held-density clamp; silent without
    the widen; set-time-model non-false-positive; warns-once; editor surfaces the view law end-to-end),
    `tests/test_achievability_warnings.py` (all 16 still green).
-2. **Ramp editor — PENDING the transmit-path mechanism.** It shows/folds From/To in the BASE quantity
-   (bw-invariant for the chirp), with no view support. It needs the same `psd_live`-view fold at the
-   carried bandwidth as the step editor AND to feed its points into the walk in the controlled
-   quantity — but whether a "density ramp" stores the view or the base (and how its points are checked
-   against a moving bw) depends on the transmit-path contract, so it is designed alongside #3.
-3. **Transmit-path change (cross-repo) — MECHANISM BEING CONFIRMED.** "Hold live density" strictly
-   means the delivered live density stays fixed as `--bw` changes; the runtime does NOT do that today
-   (it holds base — `fm_chirp_tx.py`'s `--bw` handler re-maps `gain_for_power(state["power"], …)`,
-   which is bandwidth-invariant for the chirp, so the gain doesn't move and the density drifts). The
-   transmit-side `PowerMap` has NO concept of the `psd_live` VIEW law (only the reported/limiting
-   bridges, both bw-invariant here), so making the runtime hold live density needs a new client→agent→
-   script contract carrying WHICH quantity to hold. See the transmit-path design block below.
+**Build stages (client-only):**
 
-Note (verified): when a density is UNDELIVERABLE, the current runtime (holds base) and a
-hold-live-density runtime BOTH clamp base to `base_max` and deliver the **same** reduced density
-(`base_max + view_delta(fire_bw)`) — so the WARN in #1 is identical under either transmit model. The
-transmit change only affects the deliverable-but-drifting case (bw changes while the density is still
-in range: hold-live re-derives base to keep it constant; today it drifts). So #1 shipped independent
-of the transmit decision.
+- **Stage 1a — per-step control view persisted — ✅ DONE.** `SequenceStep.power_view` (+ `BarItem`/
+  `RunItem.power_view`, round-tripped through `item_to_steps`/`steps_to_items`/`TimelineEditor.steps`/
+  `set_steps`) records the CAL_POWER_LAWS view id the step was authored in (or None = signal default).
+  The step editor saves the currently-controlled view (`ParamForm.power_view()`) on `_accept` and
+  restores it on reopen (`ParamForm.set_power_view()` after `set_params`), so the operator's control
+  quantity sticks. Client-only authoring metadata; --power is still SENT in base; the agent never
+  reads it. Tests: `tests/test_step_power_view_persistence.py`.
+- **Stage 1b — walk honours the per-step view (latest-set-wins) — TODO.** The achievability walk
+  currently assumes the leading restates view (Surface #1 default — correct while no step records a
+  non-default view). It must read each power-setting step's `power_view` and hold THAT quantity, so a
+  total-power step (bw-invariant) never false-warns on a `--bw` widen while a density step does.
+- **Stage 2 — the hold (client precompute) — TODO (confirm the re-edit UX first).** A pure timeline
+  transform (reusing the walk) that, at each `--bw`/`--freq` change under a held quantity, sets/injects
+  the step's base `--power` to hold the set-time value of the latest-set control quantity, clamping to
+  `[base_min, base_max]` (→ the same amber warning where it clamps). UX consequence to confirm: since
+  a sequence is stored on the agent and re-edit loads it back, the held `--power` is baked into a
+  `--bw`-only step and reappears on reopen (naturally, rendered in the step editor's power card in the
+  held quantity) — "the Run/Tune form on a timeline." Recomputed on each save.
+- **Stage 3 — ramp editor power card — TODO.** The ramp editor has no control-view switch today. Give
+  it the `_add_power_unit_ui` card so a density ramp is authored + limited in the view at the carried
+  bw, and its points precompute base per point.
+
+Note (verified): the client-precompute hold delivers exactly what the current runtime already does on
+an UNDELIVERABLE value — base clamped to `base_max`, delivering `base_max + view_delta(fire_bw)` — so
+the WARN (#1, shipped) is consistent with the hold. The hold only changes the deliverable-but-drifting
+case (a `--bw` change while the value is still in range: re-derive base to keep the quantity constant
+instead of letting it drift).
 
 **Key files/functions for the next session:**
 - `ui/timeline_model.py`: `achievability_warnings` (the walk), `_set_power_issue`/`_held_power_issue`,

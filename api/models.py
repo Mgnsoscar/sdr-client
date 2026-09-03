@@ -314,6 +314,13 @@ class SequenceStep(BaseModel):
     params: Dict[str, Any] = {}
     # RAMP step: the parametric sweep (expanded into tunes on the unit at arm time).
     ramp: Optional[RampSpec] = None
+    # The calibrated --power CONTROL QUANTITY the operator authored this step in — a
+    # CAL_POWER_LAWS view id (e.g. "psd_live" spectral density, "fbw_power" total power) or
+    # None for the signal's default quantity. Client-only authoring metadata: --power is still
+    # sent in the base quantity; this records which quantity is HELD from this step forward, so a
+    # later --bw/--freq change re-derives base to keep THAT quantity constant (a chirp's live
+    # density), matching the Run/Tune power card. The agent never reads it.
+    power_view: Optional[str] = None
 
 
 class Sequence(BaseModel):
