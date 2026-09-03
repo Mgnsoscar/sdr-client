@@ -217,6 +217,8 @@ class LibraryClient:
                     out["calibration_signal"] = spec["calibration_signal"]
                 if spec.get("calibration_freq_param"):  # freq field the --power range folds at
                     out["calibration_freq_param"] = spec["calibration_freq_param"]
+                if spec.get("calibration_power_laws"):  # power-quantity laws → the --power card's
+                    out["calibration_power_laws"] = spec["calibration_power_laws"]  # companions
                 return out
             except Exception:  # noqa: BLE001 — a script we can't parse: use stored
                 pass

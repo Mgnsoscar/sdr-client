@@ -87,9 +87,15 @@ BOTH write through one `TimelineEditor.cache_script_meta(script, result)` that p
 cal signal + freq param + power laws together, so a warm cache is always complete. (2) **Held-power
 achievability** (`timeline_model` step 4): a fixed `--power` (e.g. spectral density at its max) set
 by one tune is now flagged when a LATER tune changes freq/bandwidth and pushes it out of range — the
-walk re-checks the standing power on freq/bridge-param events (`_held_power_issue`). Tests:
+walk re-checks the standing power on freq/bridge-param events (`_held_power_issue`). (3) **The card
+never appeared in a PLAN's step editor** (the real owner-reported case): a plan/sequence fetches
+script params from the offline **LibraryClient**, not the unit, and `LibraryClient.get_script_params`
+passed through `calibration_signal` + `calibration_freq_param` but DROPPED `calibration_power_laws` —
+so the plan step editor got no laws (the Run/live-tune forms, talking to the unit directly, were
+unaffected). Now it surfaces the laws too. Tests:
 `test_step_editor_power_units.py` (ramp-warmed cache still yields the card),
-`test_achievability_warnings.py` (held-power clamps / silent / warn-once).
+`test_achievability_warnings.py` (held-power clamps / silent / warn-once),
+`test_library_script_params_cal.py` (the library surfaces `calibration_power_laws`).
 **Optional follow-ups remain** (design doc §9): a proactive sequence-task params prefetch so the
 achievability banner shows without opening a dialog first; a run-mode ramp folding at the
 fixed-value form's freq/params instead of the carried state; the ramped-bridge achievability case.
