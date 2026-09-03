@@ -110,9 +110,26 @@ step dialog's `_on_params` also refreshes the banner after caching. Together the
 report "I set the spectral density to max at bw 10, later doubled the bw / re-set the same power,
 and got no warning." Tests: `test_achievability_warnings.py` (directly-set clamp at the carried bw;
 held-then-re-set → two warnings; in-range silent; run step folds at its own args; prefetch surfaces
-the banner from an empty cache without a dialog). **Optional follow-up remaining** (design doc §9):
-a run-mode ramp folding at the fixed-value form's freq/params instead of the carried state; the
-ramped-bridge (min/max-over-sweep) achievability case.
+the banner from an empty cache without a dialog).
+**ROOT CAUSE found — the chirp base density is BANDWIDTH-INVARIANT (design doc §10).** The owner still
+saw no chirp warning/limit because none of the above helped: the real FM-chirp calibration's operating
+/base quantity is the FIXED-reference measured density, and (constant-amplitude ⇒ bw-invariant total
+power, ceiling via the constant `fbw` law) `PowerFold.param_dependent` is **False** — `bounds_at` is the
+same at every `--bw`. The bandwidth dependence lives ONLY in the `psd_live` `restates_measurement` VIEW
+law (`param_form._view_delta`), so the whole base-quantity machinery (`achievability_warnings`, the step
+/ramp limits) can't see it and the walk's `param_dependent` gate skips the task. Fixture tests missed
+this because their `_CHIRP_ART` puts the density as a *reported bridge* (making it param_dependent);
+`tests/test_step_editor_carried_bw.py` pins the REAL structure (artifact verbatim from the resolver).
+**Fixed this session (committed):** the STEP-EDITOR limit now folds the `psd_live` view at the CARRIED
+sweep bandwidth — a live bridge param the view keys on (`--bw`) that a power-only tune step isn't
+setting is seeded from carried on open (`StepEditorDialog._fold_bridge_dests` in `_build_form`) and on
+move (`_refold_for_position`); `ParamForm.set_fold_context` accepts those bridge dests. So a step
+carrying bw 20 caps the density ~3 dB below the bw-10 max, blocking an undeliverable density from being
+authored. **NEXT (owner chose HOLD-LIVE-DENSITY + WARN — design doc §10):** make `achievability_warnings`
+and the RAMP editor fold the CONTROLLED (view) quantity at each step's fire-time `--bw` and warn when a
+held/commanded density is undeliverable there; decide whether the transmit path must actually hold live
+density (agent/scripts change) or client-only limit+warn suffices. Reproduce real artifacts via
+`PYTHONPATH=/home/user/sdr-agent … agent.calibration.resolve`.
 
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY

@@ -326,3 +326,93 @@ Headless Qt: `QT_QPA_PLATFORM=offscreen python3 -m pytest -q` (a known teardown 
   param-ramp** min/max-over-sweep check is the one deferred case that remains.
 - **Per-issue placement**: the banner currently concatenates messages above the canvas; a future
   pass could also echo the subset for the ramp being edited inside the ramp dialog preview.
+
+## 10. THE BANDWIDTH-INVARIANT-BASE PROBLEM (chirp density) — root cause + chosen plan
+
+**Owner report (two rounds, screenshots):** on the FM chirp (`--power` controlled in LIVE spectral
+density, dBm/MHz), setting the density to the bw-10 max (−7.38) at a step that fires AFTER an
+earlier step widened the sweep to 20 MHz gave *no limit and no warning*; a power ramp near the
+bw-10 max after a bandwidth tune likewise didn't warn.
+
+**Root cause (verified against the REAL resolver output — this is the crux the fixture tests all
+missed):** the chirp's calibration operating/**base** quantity is the *fixed-reference* measured
+density (measured at `CAL_MEAS_BW_MHZ = 10`). A constant-amplitude chirp has **bandwidth-invariant
+total power**, and the dBm ceiling is gauged through the *constant* `fbw_power` law (`k=10`, no
+`param`). So:
+- `PowerFold.from_artifact(real_chirp_artifact).param_dependent` is **False**, and
+  `bounds_at(freq, {bw: X})` returns the **same** base range at every `--bw` (min/max −27.38/−7.38).
+  Confirmed by resolving `mock_fm_chirp_tx.py --make-sample-calibration`'s doc through
+  `agent.calibration.resolve`. `tests/test_step_editor_carried_bw.py::…_base_quantity_stays_bandwidth_invariant`
+  pins it, with the artifact copied **verbatim** from that resolver output.
+- The bandwidth dependence lives **entirely** in the `psd_live` **view law** (`restates_measurement:
+  True`, keyed on `bw`), which `param_form._power_views` promotes to the primary control (the raw
+  measured density is dropped). `--power` is SENT in the base quantity; the client converts the
+  chosen view → base at the fold `--bw` (`_power_offset`), and the transmit script folds base → gain
+  **bw-independently** (mock note: "the base quantity maps bw-independently; the client converts your
+  chosen quantity to it").
+
+**Consequence:** the whole Surface-A/B/C machinery folds the BASE quantity, so for the chirp it can
+never see the bandwidth dependence — the achievability walk (`achievability_warnings`) skips the task
+(the `param_dependent`/`freq_dependent` gate), the step-editor limit and the ramp From/To range all
+sit at the base (bw-invariant) bounds. The GPS-C/A case worked only because *its* ceiling is gauged
+through a param-keyed limiting law (`enbw` behind `--sidelobes`) → `param_dependent` True.
+
+**What this session already fixed (committed):** the **step-editor limit** now folds the `psd_live`
+view at the CARRIED sweep bandwidth. A LIVE bridge param the view keys on (a chirp's `--bw`) that a
+power-only tune step isn't setting is seeded from the carried state — on open (`_build_form` via new
+`StepEditorDialog._fold_bridge_dests`) and on move (`_refold_for_position`); `ParamForm.set_fold_context`
+now accepts those bridge dests alongside the non-live context dests. Result: a step carrying bw 20
+caps the density ~3 dB below the bw-10 max (−10.4 vs −7.4), so an undeliverable density can no longer
+be **authored** in the step editor. Tests: `tests/test_step_editor_carried_bw.py`.
+
+**Owner's chosen direction (this is the spec for the next session):** *HOLD LIVE DENSITY + WARN.*
+Treat a commanded spectral density as the **live** density the operator wants delivered, re-evaluated
+at each step's **fire-time** sweep bandwidth, and WARN (the runtime would clamp) when a later bandwidth
+change makes a held/commanded density undeliverable. i.e. don't accept "the base density is invariant
+so it's always fine" — that's technically true of the stored base value but NOT of the operator's
+intent. Concretely, still-open work:
+
+1. **Achievability WALK (the banner).** Make `achievability_warnings` fold the operator's CONTROLLED
+   quantity (the leading `restates_measurement` view / the reported view) at each event's fire-time
+   bridge params, and compare the commanded density expressed in THAT quantity against its achievable
+   range at that bandwidth. The clean way: the range of the controlled view at bandwidth `bw` is
+   `[base_min + view_delta(bw), base_max + view_delta(bw)]` (`view_delta = coeff·log10(bw/ref)`), which
+   MOVES with bw even though the base range doesn't. The walk must know (a) the controlled view/law
+   and (b) the operator's intended density. Today only the base value is stored per step — so the
+   walk needs the resolver/editor to also supply the controlling law (from `CAL_POWER_LAWS`), and it
+   must decide what "intended density" means: interpret the stored base as the density at the fold-
+   `--bw` when the step was authored, i.e. `intended_live(fire_bw) = base + view_delta(authoring_bw)`.
+   Since the authoring bw isn't stored, the pragmatic model the owner wants is: **the stored base IS
+   the intended live density at the reference bandwidth** (base == psd_live at `ref`), so at a later
+   `fire_bw` the required base to hold it is `base − view_delta(fire_bw)`; warn when that exceeds
+   `base_max`. Validate this against the GPS path (which must keep working) and the currently-passing
+   `tests/test_achievability_warnings.py` (whose `_CHIRP_ART` uses a *reported-bridge* density that IS
+   `param_dependent` — decide whether to keep that fixture or replace it with the real bw-invariant
+   structure; the real-structure fixture lives in `tests/test_step_editor_carried_bw.py`).
+2. **Ramp editor.** It currently shows/folds From/To in the BASE quantity (bw-invariant for the
+   chirp), with no view support — so a density ramp isn't limited or warned at the carried bw. Give it
+   the same `psd_live`-view fold at the carried bandwidth as the step editor (`_with_cal_bounds` /
+   `_op_params` fold the base; add the view offset + a carried-`--bw` seed), and feed the ramp's points
+   into the temporal walk in the controlled quantity.
+3. **Decide the transmit-path question.** "Hold live density" strictly means the delivered live
+   density stays fixed as bw changes, which the runtime does NOT do today (it holds base). If the
+   product wants the runtime to actually hold live density (re-fold base at the live bw per step),
+   that is an **agent/scripts** change (out of the client-only guardrail) — confirm with the owner
+   whether "warn" is enough (client-only) or the runtime behavior must change too. The client-only
+   reading: keep sending base, but LIMIT (can't author an undeliverable live density) + WARN (a held
+   density that a later bw makes undeliverable) so the operator is never surprised.
+
+**Key files/functions for the next session:**
+- `ui/timeline_model.py`: `achievability_warnings` (the walk), `_set_power_issue`/`_held_power_issue`,
+  the `param_dependent/freq_dependent` skip gate (~line 648) — the gate is what silences the chirp.
+- `state/power_fold.py`: `PowerFold.param_dependent`/`keyed_params`/`bounds_at` — base is bw-invariant;
+  the view delta is NOT in the fold (it's in `param_form._view_delta` / the law).
+- `ui/param_form.py`: `_power_views` (drops base when `restates_measurement`), `_selected_view`,
+  `_view_delta`, `_power_offset`/`_power_display_offset`, `_live_params`/`_keyed_param_value`,
+  `set_fold_context`, `BoundedNumberField`.
+- `ui/timeline_editor.py`: `StepEditorDialog._build_form` (tune branch, `_fold_bridge_dests`),
+  `_refold_for_position`, `_achievability_resolver` (must also surface the controlling law to the walk).
+- `ui/ramp_editor.py`: `_with_cal_bounds`, `_op_state`/`_op_params`/`_op_freq_hz`, `_power_fold_ctx`.
+- Real structure + resolver: `sdr-scripts/Raspberry pi + b206 mini-i/Other Signals/fm_chirp_tx.py`
+  (`CAL_POWER_LAWS`, `CAL_MEAS_BW_MHZ=10`) and `mock_fm_chirp_tx.py::_make_sample_calibration`;
+  `agent.calibration.resolve` in `sdr-agent` (PYTHONPATH=/home/user/sdr-agent to reproduce artifacts).
