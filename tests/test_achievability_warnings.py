@@ -222,6 +222,71 @@ def test_held_power_warns_once_not_at_every_later_event():
     assert len(issues) == 1                              # one transition, not one per later event
 
 
+# ── DIRECTLY-SET --power: a tune/run/baseline step commanding a level unachievable HERE ──────────
+# The owner's second report: after a step has widened the sweep to 20 MHz, setting the density to
+# the bw-10 max (−16.71 dBm/MHz) in a LATER tune step is not deliverable — the runtime clamps it,
+# but nothing warned. Unlike held-power (a standing level pushed out by a later change), this is the
+# operator's own explicit command, checked against the operating point in effect when it fires.
+
+def test_directly_set_power_clamps_at_the_carried_bandwidth():
+    # bar starts at bw 10; a tune widens it to 20 at 0:05; a LATER tune (5:10) sets the density to
+    # −16.71 (bw-10's max) — unachievable at bw 20 (max ≈ −19.72), so it clamps. Warn on the command.
+    widen = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=5.0,
+                        params={"bw": 20})
+    set_bad = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=310.0,
+                          params={"power": -16.71})
+    issues = tlm.achievability_warnings([_chirp_bar(), widen, set_bad], _chirp_resolve)
+    assert len(issues) == 1
+    iss = issues[0]
+    assert iss.direction == "high"
+    assert iss.bound == pytest.approx(-16.71 - 10 * math.log10(2.0), abs=0.02)
+    assert iss.points == [(-1, -16.71, 310.0)]           # the commanded point (−1 = not a ramp step)
+    m = iss.message
+    assert "set to" in m and "clamped down" in m
+    assert "-16.71" in m.replace("−", "-")
+    assert "5:10" in m                                    # when the command fires
+
+
+def test_owner_scenario_held_then_re_set_yields_two_warnings():
+    # The full report: set the density to bw-10's max, widen the sweep (the HELD level now clamps),
+    # then re-command that same max in a still-later tune (the COMMAND clamps too). Both are flagged:
+    # one held-power transition, one directly-set command — each at its own time.
+    set_max = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=0.0,
+                          params={"power": -16.71})
+    widen = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=5.0,
+                        params={"bw": 20})
+    set_again = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=310.0,
+                            params={"power": -16.71})
+    issues = tlm.achievability_warnings([_chirp_bar(), set_max, widen, set_again], _chirp_resolve)
+    assert len(issues) == 2
+    held = [i for i in issues if "held" in i.message]
+    setc = [i for i in issues if "set to" in i.message]
+    assert len(held) == 1 and len(setc) == 1
+    assert held[0].points == [(-1, -16.71, 5.0)]         # flagged at the widen event
+    assert setc[0].points == [(-1, -16.71, 310.0)]       # flagged at the re-set command
+
+
+def test_directly_set_power_in_range_is_silent():
+    # A density comfortably within range at the carried bandwidth → no warning (no false positive).
+    widen = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=5.0,
+                        params={"bw": 20})
+    set_ok = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=310.0,
+                         params={"power": -25.0})
+    assert tlm.achievability_warnings([_chirp_bar(), widen, set_ok], _chirp_resolve) == []
+
+
+def test_directly_set_power_flags_a_run_step_at_its_own_operating_point():
+    # A run step (replace_args) re-invokes the task with its OWN args, so its --power is folded at
+    # the run step's own --bw — 20 here → −16.71 is above the bw-20 max and clamps.
+    run = tlm.RunItem(task_name="chirp", action="run", anchor="start", offset=30.0,
+                      args=["--freq", "1575.42", "--power", "-16.71", "--bw", "20"])
+    issues = tlm.achievability_warnings([_chirp_bar(), run], _chirp_resolve)
+    assert len(issues) == 1
+    assert issues[0].direction == "high"
+    assert "set to" in issues[0].message
+    assert issues[0].points == [(-1, -16.71, 30.0)]
+
+
 # ── small formatting helpers ────────────────────────────────────────────────────────────────
 
 def test_steps_phrase_and_mmss():

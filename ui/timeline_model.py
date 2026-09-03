@@ -614,10 +614,13 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
 
     The model stays calibration-agnostic: the caller (the editor) owns cal lookup + unit scaling.
     Analysed on a FREQUENCY- or PARAMETER-dependent chain (a constant chain's fixed range is already
-    enforced by the From/To field): every POWER-ramp point, AND a HELD --power (set by an earlier
-    step) that a LATER freq/bridge-param event pushes out of range (§5 step 4 — e.g. a fixed spectral
-    density that clamps once a later tune doubles the sweep bandwidth). Bridge-param RAMPS remain a
-    deferred case (docs/sequence-power-achievability.md §8)."""
+    enforced by the From/To field): every POWER-ramp point; a directly-SET --power (a tune/run/
+    baseline step) that clamps at the operating point in effect when it fires (e.g. a spectral
+    density set to the bw-10 max while an earlier step has already widened the sweep to 20); AND a
+    HELD --power (set by an earlier step, not re-commanded) that a LATER freq/bridge-param event
+    pushes out of range (§5 step 4 — e.g. a fixed density that clamps once a later tune doubles the
+    sweep bandwidth). Bridge-param RAMPS remain a deferred case (docs/sequence-power-achievability.md
+    §8)."""
     from state.power_fold import PowerFold, fold_params_from_values   # pure (no Qt); lazy
 
     issues: List[AchievabilityIssue] = []
@@ -776,11 +779,15 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
                 # event re-checks it correctly (a ramp point sets --power directly).
                 held_flagged = bool(_clamp(state)) if not p["run_mode"] else held_flagged
                 continue
-            # Held-power re-check (achievability §5 step 4): a freq/bridge-param event that does NOT
-            # set --power itself can push the STANDING power out of range — the runtime then clamps
-            # it. Warn on the transition INTO violation only (never re-warn while it stays clamped;
-            # a directly-set --power is the operator's own per-step choice, so it only refreshes the
-            # flag). A constant chain is already skipped above, so a transition means a real retune.
+            # Two temporal checks, split on whether THIS event commands --power itself:
+            #   • it does NOT (a freq/bridge-param event): re-check the STANDING power — a later
+            #     retune/bandwidth change can push a HELD --power out of range (§5 step 4). Warn on
+            #     the transition INTO violation only (never re-warn while it stays clamped).
+            #   • it DOES (a tune/run/baseline step setting --power): flag the COMMAND when it clamps
+            #     at this moment's operating point — the operator asked for a level the unit can't
+            #     deliver *here* (e.g. a density set to bw-10's max after an earlier step widened the
+            #     sweep to 20). Each explicit command is its own warning, at its own fire time.
+            # A constant chain is already skipped above, so any violation means a real retune/command.
             if power_dest not in touched:
                 viol = _clamp(state)
                 if viol and not held_flagged:
@@ -790,7 +797,13 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
                         freq_hz, _fire_s, _changed_desc(touched)))
                 held_flagged = bool(viol)
             else:
-                held_flagged = bool(_clamp(state))
+                viol = _clamp(state)
+                if viol:
+                    direction, bound, freq_hz = viol
+                    issues.append(_set_power_issue(
+                        task, power_label, unit, float(state[power_dest]), direction, bound,
+                        freq_hz, _fire_s))
+                held_flagged = bool(viol)
         for uid, hitlist in hits.items():
             issues.extend(_ramp_issues(task, meta[uid]["param"], unit, hitlist))
     return issues
@@ -811,6 +824,26 @@ def _held_power_issue(task: str, param: str, unit: str, power: float, direction:
                 f"raised up to it")
     msg = (f"⚠ {task}: the held ‘{param}’ {power:.2f} {unit} {tail} after the {_mmss(fire_s)} "
            f"{changed}.")
+    return AchievabilityIssue(task=task, param=param, direction=direction, bound=bound, unit=unit,
+                              freq_hz=freq_hz, points=[(-1, power, fire_s)], message=msg)
+
+
+def _set_power_issue(task: str, param: str, unit: str, power: float, direction: str,
+                     bound: float, freq_hz: Optional[float], fire_s: float) -> AchievabilityIssue:
+    """A --power COMMAND (a tune/run/baseline step) whose level the unit can't deliver at the
+    operating point in effect when it fires — named specifically: the level, when it's commanded,
+    the carrier folded at, and the bound it hits. Distinct from a HELD power pushed out of range by
+    a later change (``_held_power_issue``): this is the operator's own explicit command clamping.
+    ``points`` carries the single commanded point as ``(-1, level, fire_s)`` (−1 = not a ramp
+    step)."""
+    at_f = f" at {freq_hz / 1e6:.3f} MHz" if freq_hz is not None else ""
+    if direction == "high":
+        tail = (f"exceeds what this unit can deliver{at_f} (max {bound:.2f} {unit}) and will be "
+                f"clamped down to it")
+    else:
+        tail = (f"falls below what this unit can deliver{at_f} (min {bound:.2f} {unit}) and will be "
+                f"raised up to it")
+    msg = f"⚠ {task}: ‘{param}’ set to {power:.2f} {unit} at {_mmss(fire_s)} {tail}."
     return AchievabilityIssue(task=task, param=param, direction=direction, bound=bound, unit=unit,
                               freq_hz=freq_hz, points=[(-1, power, fire_s)], message=msg)
 
