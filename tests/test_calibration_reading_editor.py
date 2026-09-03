@@ -234,7 +234,8 @@ def test_limiting_coerces_same_to_derived_for_a_density(monkeypatch):
 
 
 def test_limiting_coerces_to_own_for_a_density_without_a_dbm_law(monkeypatch):
-    # A density with no dBm-returning law can only limit via a separate dBm measurement.
+    # A density with no dBm-returning law AND no saved law can only limit via a separate dBm
+    # measurement. (kind "same" here carries no embedded law.)
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     monkeypatch.setattr(p, "_declared_laws_for_signal", lambda sid: {})
     p._set_doc(_base_doc({"measurement": {"unit": "dBm/MHz", "quantity": "density"},
@@ -242,6 +243,22 @@ def test_limiting_coerces_to_own_for_a_density_without_a_dbm_law(monkeypatch):
     entry = p._f["signals"]["fm_chirp"]
     p._limiting_section("fm_chirp", entry)
     assert entry["reading"]["limiting"]["kind"] == "own"
+
+
+def test_saved_law_survives_while_declared_laws_still_loading(monkeypatch):
+    # Regression: a saved Derived (law) limiting must NOT flip to "Separate measurement" just
+    # because the unit's declared laws haven't arrived yet — the embedded law keeps it valid,
+    # so opening the signal before the async fetch completes leaves the reading unchanged.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    monkeypatch.setattr(p, "_declared_laws_for_signal", lambda sid: {})   # not loaded yet
+    p._set_doc(_base_doc({"measurement": {"unit": "dBm/MHz", "quantity": "density"},
+                          "limiting": {"kind": "law", "law": FBW}}))
+    entry = p._f["signals"]["fm_chirp"]
+    p._limiting_section("fm_chirp", entry)
+    assert entry["reading"]["limiting"]["kind"] == "law"          # stayed Derived
+    assert entry["reading"]["limiting"]["law"]["id"] == "fbw"     # embedded law preserved
+    # and a round-trip still writes the law reading (not an "own" curve)
+    assert p._read_form(strict=False)["signals"]["fm_chirp"]["limiting"]["kind"] == "law"
 
 
 def test_limiting_stays_same_for_dbm_measurement(monkeypatch):
@@ -305,3 +322,32 @@ def test_no_measurement_not_gated():
     p._set_doc(_base_doc())
     assert p._doc_uses_measurement_quantity(p._doc) is False
     assert p._blocks_on_measurement_quantity() is False
+
+
+# ── declared laws load reliably (async plumbing) ────────────────────────────────
+
+def test_handle_tasks_prefetches_params_and_rerenders(monkeypatch):
+    # When tasks.yaml lands, the panel must fetch each calibration task's script params (which
+    # carry the laws) and re-render — so a signal's Derived law picker fills in on its own,
+    # without the user navigating around to trigger a render.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    fetched, rendered = [], []
+    monkeypatch.setattr(p, "_fetch_task_params", lambda t: fetched.append(t))
+    monkeypatch.setattr(p, "_render_detail", lambda: rendered.append(True))
+    p._handle_tasks("tasks:\n"
+                    "- name: tx_gps\n  env:\n    SDR_CAL_SIGNAL_ID: gps\n"
+                    "- name: tx_chirp\n  env:\n    SDR_CAL_SIGNAL_ID: chirp\n")
+    assert set(fetched) == {"tx_gps", "tx_chirp"}   # both calibration tasks prefetched
+    assert rendered                                  # detail re-rendered so laws surface
+
+
+def test_refresh_drops_cached_task_params_and_laws(monkeypatch):
+    # Re-opening the tab must re-fetch script params/laws so a task edit made elsewhere (e.g. a
+    # changed CAL_POWER_LAWS) is reflected — the cache is cleared and re-fetched on refresh.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._task_params = {"gps.py": [{"dest": "bw"}]}
+    p._task_laws = {"gps.py": [{"id": "old", "in": "density", "out": "abs"}]}
+    p._task_params_inflight = {"gps.py"}
+    monkeypatch.setattr(p.hub, "run_async", lambda *a, **k: None)   # isolate the cache clear
+    p._refresh()
+    assert p._task_params == {} and p._task_laws == {} and p._task_params_inflight == set()

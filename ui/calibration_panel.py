@@ -3229,11 +3229,19 @@ class CalibrationPanel(QWidget):
         lim_laws = self._limiting_laws_for(sid, unit)
         is_abs = _unit_family(unit) == "abs"
         # Coerce a stored kind this measurement can't offer (a density can't be a dBm
-        # "same"; "derived" needs a dBm-returning law), preserving an own curve.
+        # "same"; "derived" needs a dBm-returning law), preserving an own curve. A saved
+        # "law" carries its embedded law dict, so it stays valid even before the unit's
+        # declared laws have loaded (they arrive asynchronously) — otherwise a Derived reading
+        # would be silently flipped to "Separate measurement" every time the signal is opened.
         kind = sub.get("kind", "same")
+        has_law = isinstance(sub.get("law"), dict)
 
         def _ok(k):
-            return (k == "same" and is_abs) or (k == "law" and bool(lim_laws)) or k == "own"
+            if k == "same":
+                return is_abs
+            if k == "law":
+                return bool(lim_laws) or has_law
+            return k == "own"
         if not _ok(kind):
             kind = "law" if lim_laws else ("same" if is_abs else "own")
             keep = sub.get("curve")
@@ -3251,8 +3259,8 @@ class CalibrationPanel(QWidget):
                 combo.model().item(combo.count() - 1).setEnabled(False)
         _add("same", "Same as measurement" if is_abs else "Same as measurement (needs dBm)",
              is_abs)
-        _add("law", "Derived (convert → dBm)" if lim_laws else "Derived (no dBm law)",
-             bool(lim_laws))
+        law_ok = bool(lim_laws) or has_law           # a declared law, or the embedded one
+        _add("law", "Derived (convert → dBm)" if law_ok else "Derived (no dBm law)", law_ok)
         _add("own", "Separate measurement (dBm)", True)
         i = combo.findData(kind); combo.setCurrentIndex(i if i >= 0 else 0)
         combo.currentIndexChanged.connect(
@@ -3267,15 +3275,21 @@ class CalibrationPanel(QWidget):
             read_q = meas.get("quantity", "").strip() or "measured quantity"
         elif kind == "law":
             law = sub.get("law") or {}
-            lid = law.get("id") if law.get("id") in lim_laws else next(iter(lim_laws), None)
+            # Offer the declared laws PLUS the signal's embedded one — so while the unit's
+            # laws are still loading the picker still shows the saved law (selected), rather
+            # than emptying and re-picking a different one.
+            options = dict(lim_laws)
+            if has_law and law.get("id") and law["id"] not in options:
+                options[law["id"]] = law
+            lid = law.get("id") if law.get("id") in options else next(iter(options), None)
             if lid and law.get("id") != lid:
-                sub["kind"] = "law"; sub["law"] = dict(lim_laws[lid]); law = sub["law"]
+                sub["kind"] = "law"; sub["law"] = dict(options[lid]); law = sub["law"]
             picker = QComboBox()
-            for llid, lw in lim_laws.items():
+            for llid, lw in options.items():
                 picker.addItem(lw.get("name", llid), llid)
             k = picker.findData(law.get("id")); picker.setCurrentIndex(k if k >= 0 else 0)
             picker.currentIndexChanged.connect(
-                lambda _=0, c=picker, s=sub, L=lim_laws: self._on_limiting_law(c, s, L))
+                lambda _=0, c=picker, s=sub, L=options: self._on_limiting_law(c, s, L))
             lr = QHBoxLayout(); lr.setContentsMargins(0, 0, 0, 0)
             ll = QLabel("law"); ll.setFixedWidth(80)
             ll.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_MUTED};")
@@ -3856,6 +3870,13 @@ class CalibrationPanel(QWidget):
 
     def _refresh(self) -> None:
         self._set_status("loading…")
+        # Drop cached script params/laws so re-opening the tab reflects task edits made
+        # elsewhere (e.g. a changed CAL_POWER_LAWS or a newly-deployed task); they re-fetch
+        # once tasks.yaml lands (_handle_tasks). A saved signal keeps its embedded law shown
+        # in the meantime, so the Limiting picker never blanks or flips (see _limiting_section).
+        self._task_params = {}
+        self._task_laws = {}
+        self._task_params_inflight = set()
         self.hub.run_async(
             f"cal_get:{self.hostname}",
             lambda: self.hub.fleet.get(self.hostname).get_calibration(),
@@ -4334,6 +4355,13 @@ class CalibrationPanel(QWidget):
             self._task_signal_ids = sorted(set(self._task_signals.values()))
         except Exception:  # noqa: BLE001 — a broken tasks file shouldn't break the panel
             return
+        # Now that we know which task references which signal, fetch each task's script params
+        # (which carry CAL_POWER_LAWS) up front, and re-render — so a signal's Derived law
+        # picker populates automatically once the unit answers, without the user navigating
+        # around to trigger a render. _fetch_task_params de-dupes per script (cached/inflight).
+        for tname in self._task_signals:
+            self._fetch_task_params(tname)
+        self._render_detail()
 
     def _handle_components(self, result) -> None:
         """Merge the unit's stored catalog into the local one (additive — never clobbers
