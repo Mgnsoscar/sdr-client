@@ -54,6 +54,14 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## In progress — Run/tune power control redesign (mockup only, not built)
+The operator's `--power` control (calibrated task Run/tune form) is getting a cleaner layout:
+one primary quantity you set + each other quantity as its own read-only live display field,
+replacing the `control in` dropdown + green `= … · name` lines. Design is locked as a mockup;
+client implementation not started. See `docs/param-form-power-redesign.md` (handoff + code map)
+and `docs/param-form-power-mockup.html` (the interactive mockup). Lives in
+`ui/param_form.py` `_add_power_unit_ui` (+ `_field_row`). Client-only, no agent change.
+
 ## Current state — start/stop sweep folds at the real span (`provides`): COMPLETE
 `ui/param_form.py` resolves a law-keyed parameter through a visible derived stand-in when the
 parameter's own field is hidden by a mode: `_provider_spec`/`_keyed_param_value` back a rewritten

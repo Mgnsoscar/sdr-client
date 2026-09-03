@@ -1,0 +1,306 @@
+<title>Power Control Redesign</title>
+<meta name="description" content="Proposed Run/tune power control for sdr-client: one primary quantity you set, the others as their own live read-only display fields.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  /* Palette lifted from sdr-client/ui/theme.py so the mockup reads as the real app.
+     Deliberately single-theme: this is a faithful view of the light desktop client. */
+  :root{
+    --ground:#F2F3F5; --surface:#FFFFFF; --surface-alt:#FAFBFC; --inset:#F1F4F7;
+    --border:#E2E5EA; --border-strong:#CDD2DA;
+    --text:#1E2530; --muted:#5C6675; --faint:#8A93A2;
+    --accent:#2C6E9B; --accent-soft:#E8F0F6; --accent-ink:#1F5476;
+    --online:#1D9E75; --online-soft:#E1F5EE;
+    --armed:#BA7517; --armed-soft:#FAEEDA;
+    --crash:#C23B3B; --crash-soft:#FBE9E9;
+    --sans:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+    --mono:"IBM Plex Mono","DejaVu Sans Mono",ui-monospace,monospace;
+    --radius:10px; --radius-sm:7px;
+    --shadow:0 1px 2px rgba(22,32,48,.05), 0 2px 8px rgba(22,32,48,.05);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ground);color:var(--text);font-family:var(--sans);
+       font-size:13px;line-height:1.5;padding:24px 18px 64px;}
+  .wrap{max-width:640px;margin:0 auto;}
+  .tabnum{font-variant-numeric:tabular-nums;}
+
+  /* ── run-dialog chrome (context only) ── */
+  .dlg{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+       box-shadow:var(--shadow);overflow:hidden;}
+  .dlg-head{display:flex;align-items:center;gap:10px;padding:14px 18px;
+       border-bottom:1px solid var(--border);background:var(--surface-alt);}
+  .dlg-head .run{width:26px;height:26px;border-radius:7px;background:var(--accent);color:#fff;
+       display:grid;place-items:center;flex:none;}
+  .dlg-head .run svg{width:13px;height:13px;fill:#fff;margin-left:1px;}
+  .dlg-title{font-weight:650;font-size:14px;}
+  .dlg-title .sub{color:var(--faint);font-weight:500;}
+  .dlg-note{margin-left:auto;font-size:10.5px;color:var(--faint);
+       background:var(--inset);border:1px solid var(--border);border-radius:20px;padding:3px 10px;}
+  .dlg-body{padding:16px 18px 20px;}
+
+  /* collapsed sibling fields, to situate the power section in the real form */
+  .other-fields{display:flex;flex-direction:column;gap:8px;margin-bottom:16px;}
+  .ofield{display:grid;grid-template-columns:96px 1fr auto;gap:12px;align-items:center;
+       padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);
+       background:var(--surface-alt);color:var(--muted);}
+  .ofield .k{color:var(--accent-ink);font-weight:600;font-size:11px;}
+  .ofield .v{font-family:var(--mono);color:var(--text);}
+  .ofield .u{font-family:var(--mono);color:var(--faint);font-size:11px;}
+
+  /* ── the POWER card ── */
+  .pwr{border:1px solid var(--accent-soft);border-radius:var(--radius);background:var(--surface);
+       box-shadow:0 0 0 3px rgba(44,110,155,.05);overflow:hidden;}
+  .pwr-head{display:flex;align-items:center;gap:10px;padding:12px 15px 10px;}
+  .eyebrow{font-size:11px;font-weight:700;letter-spacing:.12em;color:var(--accent);}
+  .pwr-head .lead{color:var(--faint);font-size:11.5px;}
+  .live{margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:10.5px;
+       font-weight:600;color:var(--online);background:var(--online-soft);
+       border:1px solid #bfe6d7;border-radius:20px;padding:3px 9px 3px 7px;}
+  .live .dot{width:7px;height:7px;border-radius:50%;background:var(--online);
+       box-shadow:0 0 0 0 rgba(29,158,117,.5);animation:pulse 2s infinite;}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(29,158,117,.45)}70%{box-shadow:0 0 0 6px rgba(29,158,117,0)}100%{box-shadow:0 0 0 0 rgba(29,158,117,0)}}
+  @media (prefers-reduced-motion:reduce){.live .dot{animation:none}}
+
+  /* primary control (the quantity you set) */
+  .primary{margin:2px 15px 4px;padding:14px;border:1px solid var(--border-strong);
+       border-radius:var(--radius);background:linear-gradient(180deg,var(--accent-soft),var(--surface) 62%);}
+  .p-topline{display:flex;align-items:center;gap:9px;margin-bottom:2px;}
+  .p-controlling{font-size:9.5px;font-weight:700;letter-spacing:.09em;color:var(--accent);
+       background:var(--surface);border:1px solid var(--accent-soft);border-radius:5px;padding:2px 7px;}
+  .p-name{font-weight:650;font-size:14.5px;letter-spacing:-.01em;}
+  .chip{font-family:var(--mono);font-size:10.5px;font-weight:600;border-radius:5px;
+       padding:2px 7px;letter-spacing:.01em;white-space:nowrap;}
+  .chip.abs{color:#3b4a5c;background:#eef2f6;border:1px solid #dfe6ee;}
+  .chip.den{color:#0d6b57;background:var(--online-soft);border:1px solid #c3e7db;}
+
+  .p-value{display:flex;align-items:baseline;gap:10px;margin:10px 0 4px;}
+  .p-input{display:inline-flex;align-items:stretch;border:1px solid var(--border-strong);
+       border-radius:9px;background:var(--surface);overflow:hidden;
+       box-shadow:0 1px 2px rgba(22,32,48,.04);}
+  .p-input:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
+  .p-input input{width:150px;border:0;outline:0;background:none;font-family:var(--mono);
+       font-size:26px;font-weight:500;color:var(--text);padding:6px 4px 6px 14px;text-align:right;
+       font-variant-numeric:tabular-nums;}
+  .p-input .u{display:flex;align-items:center;padding:0 12px 0 6px;font-family:var(--mono);
+       font-size:13px;color:var(--muted);border-right:1px solid var(--border);}
+  .step{display:flex;flex-direction:column;border-left:1px solid var(--border);}
+  .step button{flex:1;width:34px;border:0;background:var(--surface);color:var(--muted);
+       cursor:pointer;font-size:13px;line-height:1;padding:0;}
+  .step button:hover{background:var(--accent-soft);color:var(--accent-ink);}
+  .step button:first-child{border-bottom:1px solid var(--border);}
+  .step button:focus-visible,.linkbtn:focus-visible,.q-set:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+
+  /* range rail */
+  .rail{margin-top:12px;}
+  .rail-ends{display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;
+       color:var(--muted);font-variant-numeric:tabular-nums;margin-bottom:3px;}
+  .rail-ends b{color:var(--faint);font-family:var(--sans);font-weight:700;font-size:9.5px;
+       letter-spacing:.08em;margin-right:5px;}
+  input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:6px;border-radius:6px;
+       background:var(--inset);outline:none;margin:6px 0 0;cursor:pointer;}
+  input[type=range]::-webkit-slider-runnable-track{height:6px;border-radius:6px;background:transparent;}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;margin-top:-6px;
+       border-radius:50%;background:var(--surface);border:2px solid var(--accent);cursor:grab;
+       box-shadow:0 1px 3px rgba(22,32,48,.25);}
+  input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:var(--surface);
+       border:2px solid var(--accent);cursor:grab;box-shadow:0 1px 3px rgba(22,32,48,.25);}
+  .rail-note{margin-top:8px;font-size:11px;color:var(--muted);}
+  .rail-note b{color:var(--accent-ink);font-weight:600;}
+  .rail-note .mv{color:var(--faint);}
+  .warn{display:none;margin-top:9px;font-size:11.5px;color:#8a5a12;background:var(--armed-soft);
+       border:1px solid #ecd3a3;border-radius:8px;padding:8px 10px;}
+  .warn.show{display:block;}
+
+  /* companions */
+  .reads{display:flex;align-items:center;gap:10px;margin:16px 15px 9px;}
+  .reads .lbl{font-size:10px;font-weight:700;letter-spacing:.1em;color:var(--faint);}
+  .reads .rule{flex:1;height:1px;background:var(--border);}
+  .comp-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(255px,1fr));gap:10px;
+       padding:0 15px 16px;}
+  .comp{border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-alt);
+       padding:11px 13px;display:flex;flex-direction:column;gap:8px;}
+  .comp-top{display:flex;align-items:center;gap:8px;}
+  .comp-name{font-weight:600;font-size:12px;color:var(--text);line-height:1.25;}
+  .comp-val{display:flex;align-items:baseline;gap:7px;}
+  .comp-val .n{font-family:var(--mono);font-size:20px;font-weight:500;color:var(--text);
+       font-variant-numeric:tabular-nums;}
+  .comp-val .u{font-family:var(--mono);font-size:12px;color:var(--muted);}
+  .comp-foot{display:flex;align-items:center;gap:8px;margin-top:1px;}
+  .comp-live{display:inline-flex;align-items:center;gap:5px;font-size:10px;color:var(--online);}
+  .comp-live .d{width:6px;height:6px;border-radius:50%;background:var(--online);}
+  .q-set{margin-left:auto;font-family:var(--sans);font-size:11px;color:var(--accent);
+       background:none;border:0;cursor:pointer;padding:3px 4px;border-radius:5px;font-weight:500;}
+  .q-set:hover{background:var(--accent-soft);text-decoration:underline;}
+
+  /* footer explainer */
+  .legend{max-width:640px;margin:20px auto 0;padding:14px 16px;background:var(--surface);
+       border:1px solid var(--border);border-radius:var(--radius);color:var(--muted);font-size:11.5px;}
+  .legend b{color:var(--text);} .legend ul{margin:8px 0 0;padding-left:18px;} .legend li{margin:4px 0;}
+  code{font-family:var(--mono);font-size:11px;background:var(--inset);padding:1px 5px;border-radius:4px;color:var(--accent-ink);}
+  .ribbon{display:flex;align-items:center;gap:9px;max-width:640px;margin:0 auto 14px;padding:7px 12px;
+       background:var(--accent-soft);border:1px solid #cfe0ee;border-radius:8px;color:var(--accent-ink);font-size:11.5px;}
+  .ribbon .d{width:7px;height:7px;border-radius:50%;background:var(--accent);flex:none;}
+</style>
+
+<div class="ribbon"><span class="d"></span>
+  <span><b>Mockup — proposed Run/tune power control.</b> Example values from a GPS C/A signal; drag the slider or switch which quantity you control.</span></div>
+
+<div class="wrap">
+  <div class="dlg">
+    <div class="dlg-head">
+      <span class="run"><svg viewBox="0 0 16 16"><path d="M4 2.5v11l9-5.5z"/></svg></span>
+      <div class="dlg-title">Run <span class="sub">· gps_ca_code_1023 · rpi-gnss-01</span></div>
+      <span class="dlg-note">calibrated · example values</span>
+    </div>
+    <div class="dlg-body">
+      <!-- sibling fields, collapsed for context -->
+      <div class="other-fields">
+        <div class="ofield"><span class="k">Frequency</span><span class="v tabnum">1575.42</span><span class="u">MHz</span></div>
+        <div class="ofield"><span class="k">Sweep&nbsp;BW</span><span class="v tabnum">10</span><span class="u">MHz</span></div>
+        <div class="ofield"><span class="k">Rate</span><span class="v tabnum">200</span><span class="u">kHz</span></div>
+      </div>
+
+      <div class="pwr">
+        <div class="pwr-head">
+          <span class="eyebrow">POWER</span>
+          <span class="lead">set it in any one quantity — the rest track it live</span>
+          <span class="live"><span class="dot"></span>LIVE</span>
+        </div>
+
+        <!-- primary control, rendered by JS -->
+        <div class="primary" id="primary"></div>
+
+        <div class="reads"><span class="lbl">ALSO READS AS</span><span class="rule"></span></div>
+        <div class="comp-grid" id="companions"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <b>What changed vs today</b>
+    <ul>
+      <li>The quantity you're <b>setting</b> is one clear primary control — big editable value, unit, a range rail with labelled <b>MIN / MAX</b>, and the fold-frequency note.</li>
+      <li>Every other quantity gets its <b>own read-only display field</b> (name, live value, unit) instead of a run of <code>= … · name</code> lines — so it's obvious what each number is.</li>
+      <li><b>Control in this</b> on any field promotes it to the primary; the commanded output never changes, only which quantity you type in (today's <code>control in</code> dropdown).</li>
+      <li>Unit chips are colour-coded by family — slate for absolute <code>dBm</code>, teal for a spectral density — matching the Calibration tab.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  // Three ways to express the same physical power (example: a GPS C/A chirp). Each carries a
+  // fixed dB offset from a shared reference (the "base" quantity); switching which one you
+  // control keeps the physical power constant and recomputes the rest — exactly the model in
+  // ui/param_form.py (_power_views + view_delta): value(q) = base + off(q).
+  var Q = [
+    {id:"mainlobe", name:"Main-lobe integrated power", unit:"dBm",    fam:"abs", off:0.0,    prec:4},
+    {id:"density",  name:"Spectral density at main lobe peak", unit:"dBm/Hz", fam:"den", off:-59.65, prec:2},
+    {id:"fullsig",  name:"Full signal power (filter passband)", unit:"dBm", fam:"abs", off:-0.003, prec:2}
+  ];
+  var BASE_MIN = -76.9552, BASE_MAX = -2.7152;   // range in the reference quantity
+  var base = -26.2272;                            // current value, in the reference quantity
+  var active = "mainlobe";
+  var FREQ_MHZ = 1575.42;
+
+  function q(id){ return Q.find(function(x){return x.id===id;}); }
+  function val(x){ return base + x.off; }
+  function vmin(x){ return BASE_MIN + x.off; }
+  function vmax(x){ return BASE_MAX + x.off; }
+  function fmt(n,p){ return (n>=0?"":"−") + Math.abs(n).toFixed(p); }   // real minus sign
+  function chip(x){ return '<span class="chip '+(x.fam==="den"?"den":"abs")+'">'+x.unit+'</span>'; }
+
+  var primary = document.getElementById("primary");
+  var companions = document.getElementById("companions");
+
+  function render(){
+    var a = q(active);
+    primary.innerHTML =
+      '<div class="p-topline">'+
+        '<span class="p-controlling">CONTROLLING</span>'+
+        '<span class="p-name">'+a.name+'</span>'+ chip(a) +
+      '</div>'+
+      '<div class="p-value">'+
+        '<span class="p-input">'+
+          '<input id="pv" type="text" inputmode="decimal" aria-label="'+a.name+' value" value="'+fmt(val(a),a.prec)+'">'+
+          '<span class="u">'+a.unit+'</span>'+
+          '<span class="step"><button id="up" aria-label="increase">▲</button>'+
+          '<button id="dn" aria-label="decrease">▼</button></span>'+
+        '</span>'+
+      '</div>'+
+      '<div class="rail">'+
+        '<div class="rail-ends"><span><b>MIN</b>'+fmt(vmin(a),a.prec)+'</span>'+
+          '<span><b>MAX</b>'+fmt(vmax(a),a.prec)+'</span></div>'+
+        '<input id="slider" type="range" min="'+BASE_MIN+'" max="'+BASE_MAX+'" step="0.0001" value="'+base+'" '+
+          'aria-label="'+a.name+'">'+
+        '<div class="rail-note">Range at <b>'+FREQ_MHZ.toFixed(2)+' MHz</b> <span class="mv">· moves with frequency</span></div>'+
+        '<div class="warn" id="warn"></div>'+
+      '</div>';
+
+    companions.innerHTML = "";
+    Q.filter(function(x){return x.id!==active;}).forEach(function(x){
+      var el = document.createElement("div"); el.className="comp";
+      el.innerHTML =
+        '<div class="comp-top"><span class="comp-name">'+x.name+'</span>'+chip(x)+'</div>'+
+        '<div class="comp-val"><span class="n">'+fmt(val(x),x.prec)+'</span><span class="u">'+x.unit+'</span></div>'+
+        '<div class="comp-foot"><span class="comp-live"><span class="d"></span>live</span>'+
+          '<button class="q-set" data-id="'+x.id+'">Control in this →</button></div>';
+      companions.appendChild(el);
+    });
+    wire();
+  }
+
+  function setBaseFromActive(displayVal){
+    var a = q(active);
+    var v = parseFloat(String(displayVal).replace("−","-"));
+    if(isNaN(v)) return;
+    base = Math.min(Math.max(v - a.off, BASE_MIN), BASE_MAX);
+  }
+
+  function wire(){
+    var a = q(active);
+    var pv = document.getElementById("pv");
+    var slider = document.getElementById("slider");
+    var warn = document.getElementById("warn");
+
+    function refreshCompanions(){
+      var tiles = companions.querySelectorAll(".comp");
+      var others = Q.filter(function(x){return x.id!==active;});
+      tiles.forEach(function(t,i){ t.querySelector(".n").textContent = fmt(val(others[i]),others[i].prec); });
+    }
+    function showClamp(typed){
+      var v = parseFloat(String(typed).replace("−","-"));
+      if(isNaN(v)){ warn.classList.remove("show"); return; }
+      if(v > vmax(a)+1e-9){ warn.textContent = "Above the maximum this unit can deliver ("+fmt(vmax(a),a.prec)+" "+a.unit+") — the request is clamped down to it."; warn.classList.add("show"); }
+      else if(v < vmin(a)-1e-9){ warn.textContent = "Below the minimum this unit can deliver ("+fmt(vmin(a),a.prec)+" "+a.unit+") — the request is clamped up to it."; warn.classList.add("show"); }
+      else warn.classList.remove("show");
+    }
+
+    pv.addEventListener("input", function(){
+      showClamp(pv.value);
+      setBaseFromActive(pv.value);
+      slider.value = base;
+      refreshCompanions();
+    });
+    pv.addEventListener("blur", function(){ pv.value = fmt(val(a),a.prec); warn.classList.remove("show"); });
+    slider.addEventListener("input", function(){
+      base = parseFloat(slider.value);
+      pv.value = fmt(val(a),a.prec);
+      warn.classList.remove("show");
+      refreshCompanions();
+    });
+    function bump(d){ base = Math.min(Math.max(base + d, BASE_MIN), BASE_MAX);
+      pv.value = fmt(val(a),a.prec); slider.value = base; warn.classList.remove("show"); refreshCompanions(); }
+    document.getElementById("up").addEventListener("click", function(){ bump(0.25); });
+    document.getElementById("dn").addEventListener("click", function(){ bump(-0.25); });
+
+    companions.querySelectorAll(".q-set").forEach(function(b){
+      b.addEventListener("click", function(){ active = b.getAttribute("data-id"); render(); });
+    });
+  }
+
+  render();
+})();
+</script>
