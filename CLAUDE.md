@@ -54,16 +54,20 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
-## NEXT UP — Sequence power achievability + step/ramp power control: PLANNED (multi-session)
+## NEXT UP — Sequence power achievability + step/ramp power control: IN PROGRESS (multi-session)
 Active branch `claude/sequence-power-achievability` (all three repos; expected client-only). Full
 design + code map + next actions live in **`docs/sequence-power-achievability.md`** — read it
 before starting. In one line: sequence power achievability is **temporal** (a power ramp's top
 levels can become unachievable when a *later* tune step retunes the carrier), so the guarantee is
 a sequence-level, time-ordered **`achievability_warnings`** pass (warn, never block; name the
-clamped points/times/ceiling), NOT a per-step fold. Then thread bridge `params` into the ramp's
-per-step range fold (`ramp_editor._with_cal_bounds`/`BoundedNumberField`), then wire the
-multi-quantity power card into run/tune steps. Reuses the already-shipped
-`param_form.fold_params_from_values` / `eval_formula` (below).
+clamped points/times/ceiling), NOT a per-step fold.
+**DONE:** Surface A — `timeline_model.achievability_warnings(items, resolve)` + `TimelineEditor`
+wiring (amber banner above the canvas), tests in `tests/test_achievability_warnings.py`. The pure
+fold helpers `eval_formula` / `fold_params_from_values` now live in **`state/power_fold.py`**
+(re-exported from `param_form` for compatibility).
+**NEXT:** Surface B — thread bridge `params` into the ramp's per-step From/To fold
+(`ramp_editor._with_cal_bounds` / `BoundedNumberField`); then Surface C — the multi-quantity power
+card in run/tune steps.
 
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY

@@ -1498,9 +1498,22 @@ class TimelineEditor(QWidget):
         bar.addWidget(self._zoom_btn)
         outer.addLayout(bar)
 
+        # Sequence-level POWER ACHIEVABILITY warning (warn, never block): a ramp point that the
+        # unit can't deliver at the frequency/params in effect when it fires — e.g. a power ramp
+        # whose top steps clamp after a LATER tune retunes the carrier. Refreshed on every edit.
+        self._achv_warn = QLabel("")
+        self._achv_warn.setWordWrap(True)
+        self._achv_warn.setVisible(False)
+        self._achv_warn.setStyleSheet(
+            f"font-size: 11px; color: {Palette.ARMED}; font-weight: 600; "
+            f"background: {Palette.ARMED_SOFT}; border: 1px solid {Palette.ARMED}; "
+            f"border-radius: 8px; padding: 7px 10px;")
+        outer.addWidget(self._achv_warn)
+
         self._canvas = _TimelineCanvas(self)
         self._canvas.changed.connect(self.changed.emit)
         self._canvas.changed.connect(self._update_mindur)
+        self._canvas.changed.connect(self._update_achievability)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)   # canvas stretches to fill a wider window
         scroll.setWidget(self._canvas)
@@ -1569,6 +1582,7 @@ class TimelineEditor(QWidget):
             # Reachable but uncalibrated (404) or invalid — no absolute, don't use cache.
             self._calibration = None
             self._cal_stale = False
+        self._update_achievability()      # bounds just arrived — surface any ramp clamps now
 
     def absolute_allowed(self) -> bool:
         """Absolute (calibrated dBm) power is offered only when a unit is targeted."""
@@ -1657,6 +1671,42 @@ class TimelineEditor(QWidget):
     def _update_mindur(self) -> None:
         d = self.min_on_air_duration()
         self._mindur.setText(f"min on-air {fmt_duration(d)}" if d > 0 else "")
+
+    def _achievability_resolver(self):
+        """Build the ``resolve(task)`` callback ``tlm.achievability_warnings`` needs — the
+        per-task calibration context, from what the editor already has cached. Returns None for a
+        task with no targeted-unit calibration, no fetched params, or no --power field (so that
+        task is simply skipped). Kept here (not in the pure model) so the model stays cal-agnostic."""
+        from .param_form import find_power_index, hz_per_unit
+
+        def resolve(task: str):
+            bounds = self.cal_bounds_for_task(task)
+            artifact = (bounds or {}).get("artifact")
+            if not artifact:
+                return None
+            script, base_args = self.script_for_task(task)
+            specs = self.param_cache().get(script, [])
+            pidx = find_power_index(specs)
+            if pidx is None:
+                return None
+            freq_param = self._script_cal_freq_params.get(script)
+            freq_unit = next((s.get("unit") for s in specs if s.get("dest") == freq_param), None)
+            return {"artifact": artifact, "specs": specs, "base_args": base_args,
+                    "freq_param": freq_param, "freq_factor": hz_per_unit(freq_unit),
+                    "power_dest": specs[pidx]["dest"]}
+
+        return resolve
+
+    def _update_achievability(self) -> None:
+        """Refresh the sequence-level power-achievability warning. Best-effort: a task whose params
+        aren't cached yet is skipped and picked up on the next edit once a step/ramp dialog has
+        fetched them. Never raises — a warning helper must not break the editor."""
+        try:
+            issues = tlm.achievability_warnings(self._canvas.items(), self._achievability_resolver())
+        except Exception:                          # noqa: BLE001
+            issues = []
+        self._achv_warn.setText("\n".join(i.message for i in issues))
+        self._achv_warn.setVisible(bool(issues))
 
     # ── Add / load / read steps ──────────────────────────────────────────────
 

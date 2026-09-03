@@ -506,6 +506,258 @@ def sequence_effective_values(items, task: str, base_args: List[str], specs: Lis
     return state
 
 
+# ── Power achievability across the sequence (a TEMPORAL check) ────────────────────────────────
+# Whether a commanded --power is deliverable depends on the transmit FREQUENCY and the calibration
+# BRIDGE PARAMS (--bw, --sidelobes/enbw, …) in effect AT THE MOMENT it is commanded. In a sequence
+# those change over time as steps fire, so a power RAMP's top levels can become unachievable
+# partway through when a LATER tune step retunes the carrier — something a single per-step fold
+# can't express. This walks each task's timeline in fire-time order, folds the achievable range at
+# the state in effect at each ramp point, and flags any point that will clamp. Warn, never block;
+# the fold math mirrors state.power_fold (the runtime/transmit path), so the warning agrees with
+# what the unit will actually do. Held-power (fixed --power under a later retune) and bridge-param
+# RAMPS are a separate, deferred case — see docs/sequence-power-achievability.md §8.
+
+
+@dataclass
+class AchievabilityIssue:
+    """One contiguous group of power-ramp points that won't be delivered as asked (the runtime
+    clamps them). ``message`` is the operator-facing line; the structured fields let callers
+    regroup/reformat and let tests assert precisely. ``points`` = (step_index 0-based, level,
+    fire_time_s)."""
+    task: str
+    param: str
+    direction: str                   # "high" (clamped down to a ceiling) | "low" (raised to a floor)
+    bound: float                     # the ceiling (high) / floor (low) the points hit, operating unit
+    unit: str
+    freq_hz: Optional[float]         # the carrier the fold used (None when unknown / constant)
+    points: List[Tuple[int, float, float]]
+    message: str
+
+
+def _fire_time_s(anchor: str, offset: float, window_s: float) -> float:
+    """Absolute seconds from ON-AIR (T0) a point fires at. start → offset; stop → window+offset
+    (offset ≤ 0). Stop/'both' timing is approximate until the schedule fixes the on-air window;
+    ``window_s`` is the minimum window that still fits the sequence."""
+    return float(offset) if anchor != "stop" else float(window_s) + float(offset)
+
+
+def _mmss(sec: float) -> str:
+    sec = int(round(sec))
+    sign, sec = ("-", -sec) if sec < 0 else ("", sec)
+    return f"{sign}{sec // 60}:{sec % 60:02d}"
+
+
+def _steps_phrase(idxs: List[int], n: int) -> str:
+    """Human phrase for a set of 0-based step indices out of ``n`` — 1-based, a contiguous run
+    collapsed to a range ('steps 9–11 of 11')."""
+    ones = sorted({i + 1 for i in idxs})
+    if len(ones) == 1:
+        return f"step {ones[0]} of {n}"
+    if ones == list(range(ones[0], ones[-1] + 1)):
+        return f"steps {ones[0]}–{ones[-1]} of {n}"
+    return "steps " + ", ".join(str(o) for o in ones) + f" of {n}"
+
+
+def _ramp_issues(task: str, param: str, unit: str,
+                 hits: List[Tuple[int, float, float, str, float, Optional[float], int]]
+                 ) -> List[AchievabilityIssue]:
+    """Group one ramp's clamped points into issues keyed by (direction, bound, carrier) — so
+    distinct retunes that each clamp a stretch read as distinct warnings, each naming its own
+    ceiling/floor and carrier. Each hit = (step_index, level, fire_s, direction, bound, freq_hz,
+    total_points)."""
+    total = max((h[6] for h in hits), default=0)
+    groups: Dict[tuple, list] = defaultdict(list)
+    for (i, val, fire_s, direction, bound, freq_hz, _n) in hits:
+        groups[(direction, round(bound, 3), None if freq_hz is None else round(freq_hz))].append(
+            (i, val, fire_s, bound, freq_hz))
+    out: List[AchievabilityIssue] = []
+    for _key, grp in sorted(groups.items(), key=lambda kv: min(g[0] for g in kv[1])):
+        grp.sort()
+        idxs = [g[0] for g in grp]
+        vals = [g[1] for g in grp]
+        times = [g[2] for g in grp]
+        direction = _key[0]
+        bound, freq_hz = grp[0][3], grp[0][4]
+        at_f = f" at {freq_hz / 1e6:.3f} MHz" if freq_hz is not None else ""
+        tspan = _mmss(times[0]) if len(times) == 1 else f"{_mmss(min(times))}–{_mmss(max(times))}"
+        span = _steps_phrase(idxs, total)
+        vlo, vhi = min(vals), max(vals)
+        if direction == "high":
+            msg = (f"⚠ {task}: ramp ‘{param}’ — {span} exceed what this unit can deliver{at_f} "
+                   f"(max {bound:.2f} {unit}); levels {vlo:.2f}–{vhi:.2f} {unit} at {tspan} "
+                   f"will be clamped down to it.")
+        else:
+            msg = (f"⚠ {task}: ramp ‘{param}’ — {span} fall below what this unit can deliver{at_f} "
+                   f"(min {bound:.2f} {unit}); levels {vlo:.2f}–{vhi:.2f} {unit} at {tspan} "
+                   f"will be raised up to it.")
+        out.append(AchievabilityIssue(
+            task=task, param=param, direction=direction, bound=bound, unit=unit, freq_hz=freq_hz,
+            points=[(g[0], g[1], g[2]) for g in grp], message=msg))
+    return out
+
+
+def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
+    """Flag every power-RAMP point a unit can't deliver at the frequency/params in effect when it
+    fires — the runtime clamps it, so it delivers a different power than the ramp asks. Warn, never
+    block; each returned issue carries an operator-facing ``message`` plus structured fields.
+
+    ``resolve(task_name)`` returns the task's calibration context, or None to skip the task::
+
+        {
+          "artifact":    resolved-calibration artifact dict,
+          "specs":       the script's param specs (list[dict]; includes derived/hidden fields),
+          "base_args":   the task's deployed command args (its on-air baseline; list[str]),
+          "freq_param":  dest of the CAL_FREQ_PARAM field (str | None),
+          "freq_factor": Hz per unit of that freq field (float; e.g. 1e6 for MHz),
+          "power_dest":  dest of the --power field (str),
+        }
+
+    The model stays calibration-agnostic: the caller (the editor) owns cal lookup + unit scaling.
+    Only a POWER ramp on a FREQUENCY- or PARAMETER-dependent chain is analysed — a constant chain's
+    fixed range is already enforced by the From/To field, and held-power / bridge-param ramps are a
+    deferred case (docs/sequence-power-achievability.md §8)."""
+    from state.power_fold import PowerFold, fold_params_from_values   # pure (no Qt); lazy
+
+    issues: List[AchievabilityIssue] = []
+    items = list(items)
+    try:
+        window = min_on_air_duration(items)
+    except Exception:                      # noqa: BLE001 — a warning helper must never break
+        window = 0.0
+    tol = 0.05
+
+    tasks: List[str] = []
+    for it in items:
+        t = getattr(it, "task_name", None)
+        if t and t not in tasks:
+            tasks.append(t)
+
+    for task in tasks:
+        info = resolve(task) if resolve else None
+        if not info:
+            continue
+        artifact = info.get("artifact")
+        specs = info.get("specs") or []
+        power_dest = info.get("power_dest")
+        if power_dest is None:
+            continue
+        fold = PowerFold.from_artifact(artifact or {})
+        # A constant chain never moves under a ramp — its fixed range is enforced by the field.
+        if fold is None or not (fold.freq_dependent or fold.param_dependent):
+            continue
+        freq_param = info.get("freq_param")
+        freq_factor = float(info.get("freq_factor") or 1.0)
+        base_args = list(info.get("base_args") or [])
+        unit = (artifact or {}).get("operating_unit") or "dBm"
+
+        flag_to_dest = {f: (s.get("dest") or s.get("name"))
+                        for s in specs for f in (s.get("flags") or [])}
+        name_to_dest = {(s.get("name") or s.get("dest")): s.get("dest") for s in specs}
+
+        def _clamp(eval_state):
+            """(direction, bound, freq_hz) if eval_state's --power clamps here, else None. Mirrors
+            state.power_fold.clamp_warning's over/under test so the number matches the caption."""
+            p = eval_state.get(power_dest)
+            if not isinstance(p, (int, float)) or isinstance(p, bool):
+                return None
+            fv = eval_state.get(freq_param) if freq_param else None
+            freq_hz = (float(fv) * freq_factor
+                       if isinstance(fv, (int, float)) and not isinstance(fv, bool) else None)
+            params = fold_params_from_values(artifact, specs, eval_state)
+            b = fold.bounds_at(freq_hz, params)
+            lo, hi = b["min_power_dbm"], b["max_power_dbm"]
+            if p > hi + tol:
+                return ("high", hi, freq_hz)
+            if p < lo - tol:
+                return ("low", lo, freq_hz)
+            return None
+
+        # Build fire-time-ordered events for this task.
+        events: list = []                        # (fire_s, seq_idx, kind, payload)
+        for seq_idx, it in enumerate(items):
+            if getattr(it, "task_name", None) != task:
+                continue
+            act = getattr(it, "action", "run")
+            if getattr(it, "kind", None) == "bar":
+                events.append((_fire_time_s("start", getattr(it, "start_offset", 0.0), window),
+                               seq_idx, "args",
+                               {"replace": getattr(it, "replace_args", True), "args": list(it.args)}))
+            elif act == "tune":
+                events.append((_fire_time_s(it.anchor, it.offset, window), seq_idx, "tune",
+                               {"params": dict(getattr(it, "params", {}) or {})}))
+            elif act == "run":
+                events.append((_fire_time_s(it.anchor, it.offset, window), seq_idx, "args",
+                               {"replace": getattr(it, "replace_args", True), "args": list(it.args)}))
+            elif act == "ramp":
+                r = dict(getattr(it, "ramp", None) or {})
+                rdest = name_to_dest.get(r.get("param")) or flag_to_dest.get(r.get("flag"))
+                if rdest != power_dest:
+                    continue                     # only a POWER ramp is analysed (see docstring)
+                try:
+                    resolved = _resolve_ramp_points(r, it.anchor, window)
+                    fires = _place_ramp_points(r, it.anchor, float(it.offset), resolved)
+                except (ValueError, TypeError):
+                    continue
+                run_mode = r.get("mode") == "run"
+                run_state = _args_to_values(list(getattr(it, "args", []) or []), flag_to_dest) \
+                    if run_mode else None
+                for i, (fa, foff, val) in enumerate(fires):
+                    events.append((_fire_time_s(fa, foff, window), seq_idx, "ramp_point",
+                                   {"uid": getattr(it, "uid", seq_idx), "i": i, "n": len(fires),
+                                    "val": float(val), "rdest": rdest, "param": r.get("param"),
+                                    "run_mode": run_mode, "run_state": run_state}))
+        events.sort(key=lambda e: (e[0], e[1]))
+
+        # Walk in fire-time order, maintaining the running task state; collect ramp-point clamps.
+        state = _args_to_values(base_args, flag_to_dest)
+        hits: Dict[object, list] = defaultdict(list)
+        meta: Dict[object, dict] = {}
+        for _fire_s, _si, kind, p in events:
+            if kind == "args":
+                if p["replace"]:
+                    state = _args_to_values(p["args"], flag_to_dest)
+                else:
+                    state.update(_args_to_values(p["args"], flag_to_dest))
+            elif kind == "tune":
+                for k, v in p["params"].items():
+                    try:
+                        state[name_to_dest.get(k, k)] = float(v)
+                    except (TypeError, ValueError):
+                        pass
+            elif kind == "ramp_point":
+                if p["run_mode"]:
+                    eval_state = dict(p["run_state"] or {})
+                    eval_state[p["rdest"]] = p["val"]
+                else:
+                    state[p["rdest"]] = p["val"]
+                    eval_state = state
+                viol = _clamp(eval_state)
+                if viol:
+                    direction, bound, freq_hz = viol
+                    hits[p["uid"]].append((p["i"], p["val"], _fire_s, direction, bound, freq_hz,
+                                           p["n"]))
+                    meta[p["uid"]] = {"param": p["param"] or power_dest}
+        for uid, hitlist in hits.items():
+            issues.extend(_ramp_issues(task, meta[uid]["param"], unit, hitlist))
+    return issues
+
+
+def _resolve_ramp_points(r: dict, anchor: str, window_s: float):
+    """resolve_ramp for a ramp spec; a 'both' (window-filling) ramp resolves against the minimum
+    on-air window (its point TIMES are then approximate until the schedule fixes the window)."""
+    from api import ramp as _ramp
+    return _ramp.resolve_ramp(
+        r.get("start"), r.get("stop"), steps=r.get("steps"), step=r.get("step"),
+        hold_s=r.get("hold_s"), duration_s=r.get("duration_s"),
+        window_s=(window_s if anchor == "both" else None),
+        include_first=r.get("include_first", True), include_last=r.get("include_last", True))
+
+
+def _place_ramp_points(r: dict, anchor: str, offset: float, resolved):
+    from api import ramp as _ramp
+    return _ramp.place_ramp("start" if anchor == "both" else anchor, offset, resolved)
+
+
 def min_on_air_duration(items) -> float:
     """The shortest on-air window this item set fits in (seconds). Delegates to the
     shared api.ramp math after normalising items to step-shaped objects."""

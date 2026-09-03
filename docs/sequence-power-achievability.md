@@ -1,6 +1,7 @@
 # Sequence power achievability + power control in step/ramp editors
 
-**Status:** PLANNED — design locked, no implementation started yet on this branch.
+**Status:** Surface A (temporal achievability pass) **DONE + wired + tested**. Surfaces B and C
+still to do. Design locked.
 **Branch:** `claude/sequence-power-achievability` (exists in all three repos; work is
 expected to be **client-only** unless a `paramkit` tweak proves necessary).
 **Owner context:** continues the calibrated `--power` work whose prior phases are recorded in
@@ -64,19 +65,24 @@ are explicitly *not* the guarantee.
 
 ## 4. What is ALREADY shipped (on `main`) that this builds on
 
-Landed by the clamp-caption fix (commit `c53d432`, now on `main`):
+Landed by the clamp-caption fix (commit `c53d432`, now on `main`) and Surface A here:
 
-- **`param_form.eval_formula(formula, get_value)`** (`ui/param_form.py` ~208) — source-agnostic
-  derived-formula evaluator (center/span/sum/diff/count/span_to/term/extent/linear/table). The
-  widget path passes `_source_num`; a dict path passes `dict.get`. Single implementation, so the
-  two can't drift.
-- **`param_form.fold_params_from_values(artifact, specs, values)`** (`ui/param_form.py` ~272) —
-  the **dict-path** resolver for the bridge-keyed `--power` params over a flat `{dest: value}`
-  state. Handles `provides` stand-ins and derived keys (e.g. `enbw_mhz` = table lookup on
-  `--sidelobes`). Returns `{dest: float}` or None. **This is the reusable core for BOTH the
-  temporal pass and threading params into per-step folds.**
-- The **sequence step editor's clamp caption** already folds through carried bridge params via
-  the above (`timeline_editor._update_clamp_warning`, `ui/timeline_editor.py` ~1304).
+- **`eval_formula(formula, get_value)`** and **`fold_params_from_values(artifact, specs, values)`**
+  now live in **`state/power_fold.py`** (pure, no Qt — they moved here as part of Surface A so the
+  pure `timeline_model` pass can use them). `ui/param_form.py` **re-exports both** names, so
+  `param_form.eval_formula` / `param_form.fold_params_from_values` still resolve for existing
+  callers/tests. `eval_formula` is the source-agnostic derived-formula evaluator
+  (center/span/sum/diff/count/span_to/term/extent/linear/table); `fold_params_from_values` is the
+  **dict-path** resolver for the bridge-keyed `--power` params over a flat `{dest: value}` state
+  (handles `provides` stand-ins and derived keys like `enbw_mhz`). **The reusable core for the
+  temporal pass AND for threading params into per-step folds (Surface B).**
+- The **sequence step editor's clamp caption** folds through carried bridge params via the above
+  (`timeline_editor._update_clamp_warning`).
+- **Surface A shipped:** `timeline_model.achievability_warnings(items, resolve)` + helpers
+  (`AchievabilityIssue`, `_ramp_issues`, `_steps_phrase`, `_mmss`, `_fire_time_s`), wired into
+  `TimelineEditor` (`_achievability_resolver` + `_update_achievability` → the amber `_achv_warn`
+  banner above the canvas, refreshed on every edit and when calibration arrives). Tests:
+  `tests/test_achievability_warnings.py`.
 
 So the mechanism to resolve "what bridge params apply given a flat effective state" exists and is
 tested. The remaining work is (a) applying it *over time*, and (b) threading `params` into the
@@ -84,11 +90,19 @@ range folds that currently omit them.
 
 ## 5. The three surfaces
 
-### Surface A — Temporal achievability pass (NEW; the guarantee) — DO FIRST
+### Surface A — Temporal achievability pass (the guarantee) — ✅ DONE
+
+Implemented in `ui/timeline_model.py` (pure; next to `sequence_effective_values`) as
+`achievability_warnings(items, resolve)`, wired into `TimelineEditor`. What follows is the design
+it was built to; the code matches it. Deviations from the original plan: **held-power re-check
+(step 4) was deliberately NOT implemented** — it is the deferred "fixed power, carrier moves
+underneath" case (§8), which the owner asked to hold. Only POWER ramps on freq-/param-dependent
+chains are analysed. Params resolution is **best-effort**: a task whose script params aren't
+cached yet (no step/ramp dialog opened for it) is skipped and picked up on the next edit — a
+proactive prefetch of sequence-task params is a possible follow-up.
 
 A pure function over the sequence, taking a calibration-resolver callback so the model stays
-calibration-agnostic. Suggested home: `ui/timeline_model.py` (next to `sequence_effective_values`
-~466 and `validate` ~344).
+calibration-agnostic.
 
 ```
 achievability_warnings(items, resolve) -> list[Warning]
@@ -252,8 +266,22 @@ Headless Qt: `QT_QPA_PLATFORM=offscreen python3 -m pytest -q` (a known teardown 
 ## 9. Immediate next actions for a fresh session
 
 1. Confirm you're on `claude/sequence-power-achievability` in all three repos (client is where the
-   work lives). `main` already carries all prior merged work.
-2. Start with **Surface A**: add `achievability_warnings` to `timeline_model.py` + a stub-resolver
-   unit test reproducing §2's scenario. Get the warning wording right first (owner cares about it).
-3. Then **Surface B** (thread `params`), then **Surface C** (the card).
+   work lives). `main` already carries all prior merged work; Surface A is committed on this branch.
+2. **Surface A is DONE** (`achievability_warnings` + editor wiring + `tests/test_achievability_
+   warnings.py`, all green). Next: **Surface B** — thread bridge `params` into the ramp's
+   per-step From/To fold (`ramp_editor._with_cal_bounds` add `params=`; `BoundedNumberField` add a
+   `fold_params=` ctor arg threaded into `snap_power`/`quantize_up`/`quantize_down`; add
+   `_op_params(task)` mirroring `_op_freq_hz`, sourcing carried state for a tune ramp and the
+   fixed form for a run ramp). Reuse `state.power_fold.fold_params_from_values`.
+3. Then **Surface C** (the multi-quantity card in run/tune steps).
 4. Keep `QT_QPA_PLATFORM=offscreen … pytest -q` green (run 3–5×). Client-only; drift guard intact.
+
+### Possible refinements to Surface A (not blockers)
+- **Proactive params prefetch**: today a task's ramp clamps only show once its script params are
+  cached (a step/ramp dialog fetched them). Prefetching sequence-task params when calibration is
+  set would make the banner appear without opening a dialog first.
+- **Held-power / bridge-param-ramp checks** (§8) — the deferred cases; the walk already visits
+  every event, so held-power is a small addition (re-check the standing power at each freq/param
+  change) once the owner wants it.
+- **Per-issue placement**: the banner currently concatenates messages above the canvas; a future
+  pass could also echo the subset for the ramp being edited inside the ramp dialog preview.
