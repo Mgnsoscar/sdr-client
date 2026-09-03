@@ -82,7 +82,22 @@ script's `calibration_power_laws` from `get_script_params` and forwards it as `p
 `ParamForm.set_params` (it already forwarded `cal_freq_param`), so the ALSO READS AS companions +
 `Control in this →` switch render while retuning — a companion tracks a live bridge param (e.g.
 the chirp's `--bw`) exactly as in Run. Was missing because the dialog dropped `power_laws` from
-the `set_params` call. Tests: `test_live_tune_power.py`.
+the `set_params` call.
+It also folds against the DEPLOYED FIXED PARAMS, not just the live ones. The tune form edits only
+live params, but a law/limiting reading can key on a quantity behind a NON-live knob — GPS C/A's
+LIMITING reading keys on `enbw_mhz`, a hidden derived table lookup on the (live) `--sidelobes`,
+and the carrier `--freq` is fixed per run. So `set_params` gained `context_dests=`: dests kept in
+`_base_specs` for FOLDING but never rendered as editable fields (`_effective_specs` skips them,
+`_is_input_field` excludes them). `live_tune_dialog` now passes the FULL schema + its non-live
+dests as `context_dests`, seeds each fixed param's DEPLOYED value (parsed from the task command)
+onto its spec default, and passes the deployed `--freq` as `cal_freq_default`. Result: retuning
+`--sidelobes` re-folds the `--power` range/ceiling through the limiting reading (enbw tracks the
+live count), and the range folds at the deployed carrier — the limits/power match the running
+task. `_fold_freq_now` falls back to the schema-default freq (never `None`) when no freq field is
+rendered; `_dep_specs` still names a context-only `--freq` in DEPENDS ON. Tests:
+`test_live_tune_power.py` (only-live knobs render; ceiling tracks `--sidelobes`; deployed freq
+parsed). Its autouse `_flush_deferred_deletes` fixture drains Qt's DeferredDelete queue after each
+dialog test (a pre-existing headless-Qt teardown SIGABRT that leaked into a later module).
 
 ## Current state — start/stop sweep folds at the real span (`provides`): COMPLETE
 `ui/param_form.py` resolves a law-keyed parameter through a visible derived stand-in when the

@@ -705,6 +705,12 @@ class ParamForm(QWidget):
         self._rebuilding_cond = False             # re-entrancy guard for a show_when rebuild
         # Power mode (relative gain vs absolute dBm) — see _compute_power_modes.
         self._base_specs: List[dict] = []
+        # Dests kept in _base_specs for FOLDING (the power range/limits + companions re-fold
+        # against them) but never rendered as editable fields — e.g. the live-tune form, which
+        # edits only live params yet must still fold at the deployed --freq and resolve a law's
+        # derived key (a chirp's --bw span, GPS C/A's enbw from --sidelobes). Empty in the run
+        # form, where every param is an editable field.
+        self._context_dests: set = set()
         self._cal_bounds = None
         self._power_laws: List[dict] = []       # script CAL_POWER_LAWS (companion --power units)
         self._power_view = None                 # law id the --power field is CONTROLLED in
@@ -755,7 +761,7 @@ class ParamForm(QWidget):
                    cal_bounds=None, absolute_allowed: bool = False,
                    default_power_mode=None, hint_bounds=None, caution=None,
                    cal_freq_param=None, cal_freq_default=None,
-                   power_laws=None) -> None:
+                   power_laws=None, context_dests=None) -> None:
         """Rebuild the form for a parameter schema (clears existing widgets).
 
         selectable=True prefixes each row with an include checkbox: values() then
@@ -766,8 +772,15 @@ class ParamForm(QWidget):
         `absolute_allowed` (a unit is known) + `cal_bounds` (that unit is calibrated
         for the signal) unlock the Absolute option; otherwise only Relative (gain)
         is offered — which is the correct default in the Library, where no unit is
-        attached. `default_power_mode` ('absolute'/'relative') picks the initial one."""
+        attached. `default_power_mode` ('absolute'/'relative') picks the initial one.
+
+        `context_dests`: dests present in `specs` for FOLDING only — the power range,
+        limits and companions re-fold against them, but they are not rendered as editable
+        fields. The live-tune form passes the full schema and lists its non-live params
+        here, so the fold still sees the deployed --freq and a law's derived key (e.g. GPS
+        C/A's enbw from --sidelobes) while only live knobs are shown."""
         self._base_specs = list(specs)
+        self._context_dests = set(context_dests or [])
         self._selectable = selectable
         self._cal_bounds = cal_bounds
         # Power-quantity conversion laws the SCRIPT declares (CAL_POWER_LAWS, surfaced by the
@@ -1149,7 +1162,8 @@ class ParamForm(QWidget):
         loop, so a check against ``_widgets`` would miss a field built after --power)."""
         s = next((x for x in self._base_specs if x.get("dest") == dest), None)
         return (s is not None and s.get("kind") != "derived"
-                and not s.get("hidden") and self._show_when_visible(s))
+                and not s.get("hidden") and dest not in self._context_dests
+                and self._show_when_visible(s))
 
     def _dep_param_dests(self) -> List[str]:
         """The user-facing fields the --power range depends on. Each bridge-keyed parameter,
@@ -1194,7 +1208,12 @@ class ParamForm(QWidget):
         the old 'moves with frequency' note — it names every input that moves the range. Empty
         for a constant, bridge-less chain (nothing re-folds)."""
         out: List[dict] = []
-        fsrc = self._freq_source_dest()
+        # The rendered freq source, else the CAL_FREQ_PARAM field even when it's fold context only
+        # (a fixed --freq in live tune) — the range still moves with it, so name it (its value is
+        # the fold frequency, read from _folded_at, so it reads right whether or not it's editable).
+        fsrc = self._freq_source_dest() or (
+            self._freq_dest() if any(s.get("dest") == self._freq_dest()
+                                     for s in self._base_specs) else None)
         if fsrc and self._is_freq_dependent():
             spec = next((s for s in self._base_specs if s.get("dest") == fsrc), None)
             name = self._display_name(spec).rstrip(" *") if spec else "frequency"
@@ -1905,7 +1924,11 @@ class ParamForm(QWidget):
                 v = self._current_freq_hz()
                 if v is not None:
                     return v
-        return self._cal_freq_default
+        # No live freq source (e.g. a fixed --freq held as fold context in live tune): fold at the
+        # carried step frequency, else the schema default — never None, which would drop the fold.
+        if self._cal_freq_default is not None:
+            return self._cal_freq_default
+        return self._spec_default_freq()
 
     def _spec_default_freq(self) -> Optional[float]:
         """The freq field's default from the schema, in Hz — the fold frequency for the FIRST
@@ -1943,6 +1966,8 @@ class ParamForm(QWidget):
         cal_bounds = self._effective_cal_bounds()
         out: List[dict] = []
         for i, s in enumerate(self._base_specs):
+            if s.get("dest") in self._context_dests:
+                continue                    # fold context only (e.g. a fixed --freq in live tune)
             if not self._show_when_visible(s):
                 continue                    # hidden by its mode → not rendered/emitted
             if i == aidx and self._cal_amplitude is not None:

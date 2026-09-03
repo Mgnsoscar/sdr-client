@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .dialog_style import scrollbar_qss
-from .param_form import ParamForm, fmt_value, power_mode_of_args
+from .param_form import ParamForm, fmt_value, num_or_none, power_mode_of_args
 from .qt_adapter import DataHub
 from .theme import Palette
 
@@ -60,7 +60,11 @@ class LiveTuneDialog(QDialog):
         self.hostname = hostname
         self.task_name = task_name
         self._script_name = ""
+        self._command: List[str] = []             # the deployed task command (its fixed args)
         self._live_specs: List[dict] = []
+        self._all_specs: List[dict] = []          # full schema (live + fixed) — the fold context
+        self._context_dests: List[str] = []       # non-live dests: folded against, never rendered
+        self._deployed_freq = None                # the deployed --freq (fold context), its own unit
         self._script_power_laws: List[dict] = []  # CAL_POWER_LAWS: companion --power quantities
         self._loading = True          # suppress the dirty marker while we seed
         self._applying = False
@@ -187,9 +191,9 @@ class LiveTuneDialog(QDialog):
             self._parse_command(result if isinstance(result, str) else "")
         elif op == "livetune_params":
             specs = (result or {}).get("params", [])
-            self._live_specs = [s for s in specs if s.get("live")]
             self._script_cal_freq_param = (result or {}).get("calibration_freq_param")
             self._script_power_laws = (result or {}).get("calibration_power_laws", []) or []
+            self._prepare_specs(specs)
             self._params_ready = True
             self._maybe_build()
         elif op == "livetune_get":
@@ -204,6 +208,7 @@ class LiveTuneDialog(QDialog):
                       if t.get("name") == self.task_name), None)
         self._cal_signal_id = (entry.get("env") or {}).get("SDR_CAL_SIGNAL_ID") if entry else None
         command = list(entry.get("command", [])) if entry else []
+        self._command = command          # deployed args → the fold's fixed (non-live) param values
         # Open in the mode the deployed command used (absolute if it set --power, relative
         # if --gain), so a task running in one mode doesn't open showing the other's control.
         self._default_power_mode = power_mode_of_args(command)
@@ -230,14 +235,65 @@ class LiveTuneDialog(QDialog):
             lambda: self.hub.fleet.get(self.hostname).get_calibration(),
         )
 
+    def _deployed_values(self, specs: List[dict]) -> Dict[str, Any]:
+        """The deployed task command parsed into ``{dest: value}`` (numeric where possible), so a
+        fixed (non-live) param folds at what the running task actually set — not the schema
+        default. Mirrors ParamForm's own flag→value walk."""
+        flag_to_dest = {f: s["dest"] for s in specs for f in (s.get("flags") or [])}
+        is_flag = {s["dest"] for s in specs if s.get("is_flag")}
+        out: Dict[str, Any] = {}
+        cmd = self._command
+        i = 0
+        while i < len(cmd):
+            a = cmd[i]
+            dest = flag_to_dest.get(a) if isinstance(a, str) else None
+            if dest is None:
+                i += 1
+            elif dest in is_flag:
+                out[dest] = True
+                i += 1
+            elif i + 1 < len(cmd):
+                raw = str(cmd[i + 1])
+                out[dest] = num_or_none(raw) if num_or_none(raw) is not None else raw
+                i += 2
+            else:
+                i += 1
+        return out
+
+    def _prepare_specs(self, specs: List[dict]) -> None:
+        """Split the script schema into what the live-tune form renders vs. what it only folds
+        against. LIVE params are the editable knobs; every other param (and derived field) is fold
+        CONTEXT — kept in the schema so the --power range/limits and companions fold correctly, but
+        never rendered. A fixed (non-live) param carries its DEPLOYED value, so the fold matches
+        the running task: a law's derived key (e.g. GPS C/A's enbw from --sidelobes) resolves
+        through the live knob behind it, and a fixed --freq folds at the deployed carrier."""
+        deployed = self._deployed_values(specs)
+        prepared: List[dict] = []
+        context: List[str] = []
+        for s in specs:
+            if s.get("live"):
+                prepared.append(s)
+                continue
+            context.append(s.get("dest"))
+            val = deployed.get(s.get("dest"))
+            prepared.append({**s, "default": val} if isinstance(val, (int, float))
+                            and not isinstance(val, bool) else s)
+        self._all_specs = prepared
+        self._live_specs = [s for s in prepared if s.get("live")]
+        self._context_dests = context
+        fp = self._script_cal_freq_param
+        self._deployed_freq = deployed.get(fp) if fp else None
+
     def _maybe_build(self) -> None:
         if not (self._params_ready and self._cal_ready):
             return
-        self._form.set_params(self._live_specs, cal_bounds=self._cal_bounds,
+        self._form.set_params(self._all_specs, cal_bounds=self._cal_bounds,
                               absolute_allowed=True,
                               default_power_mode=getattr(self, "_default_power_mode", None),
                               cal_freq_param=self._script_cal_freq_param,
-                              power_laws=self._script_power_laws)
+                              cal_freq_default=self._deployed_freq,
+                              power_laws=self._script_power_laws,
+                              context_dests=self._context_dests)
         if not self._live_specs:
             self._set_result("This task declares no live parameters.")
             self._form.setEnabled(False)
