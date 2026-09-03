@@ -98,6 +98,16 @@ rendered; `_dep_specs` still names a context-only `--freq` in DEPENDS ON. Tests:
 `test_live_tune_power.py` (only-live knobs render; ceiling tracks `--sidelobes`; deployed freq
 parsed). Its autouse `_flush_deferred_deletes` fixture drains Qt's DeferredDelete queue after each
 dialog test (a pre-existing headless-Qt teardown SIGABRT that leaked into a later module).
+The `--power` DISPLAY DECIMALS are pinned to the artifact's REPRESENTATIVE frequency, not the live
+fold frequency: `_power_decimals` now calls `fold.finest_step()` (no freq), matching the editable
+field's own step/decimals (set once from `finest_step()` in `apply_power_bounds`). On a
+multi-segment chain with a frequency-dependent ceiling the finest step — gain-step × local curve
+slope — differs between carriers (a clean segment reads 1 decimal, a steeper one 4–5), so folding
+the DECIMAL COUNT at the live carrier made the chirp's MIN/MAX and companions suddenly show 4–5
+decimals in Tune (which folds at the deployed carrier) while the run form and the field's spinbox
+stayed at 1. Only the BOUNDS fold live now; the decimals are stable and consistent across Run/Tune.
+Tests: `test_live_tune_power.py` (`..._power_decimals_track_the_representative_step`,
+`..._power_decimals_match_the_run_form`).
 
 ## Current state — start/stop sweep folds at the real span (`provides`): COMPLETE
 `ui/param_form.py` resolves a law-keyed parameter through a visible derived stand-in when the

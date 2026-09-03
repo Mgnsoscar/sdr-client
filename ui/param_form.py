@@ -937,9 +937,17 @@ class ParamForm(QWidget):
     def _power_decimals(self) -> int:
         """Display precision for the calibrated --power field: the decimals of the chain's
         finest achievable step (what the value snaps to), so every power read-out — the
-        value, MIN/MAX and the companions — shows at that resolution, not raw fold output."""
+        value, MIN/MAX and the companions — shows at that resolution, not raw fold output.
+
+        Evaluated at the artifact's REPRESENTATIVE frequency (``finest_step()``), NOT the live
+        fold frequency, so it matches the editable field's own step/decimals (set once from
+        ``finest_step()`` in ``apply_power_bounds``) and stays stable as the operator tunes. On a
+        multi-segment chain with a frequency-dependent ceiling the finest step — and thus the
+        decimal count — can differ between frequencies; pinning it here keeps the MIN/MAX and
+        companions from suddenly showing 4–5 decimals when the form folds at a deployed carrier
+        (live tune) instead of the default (run), while the bounds themselves still fold live."""
         fold = PowerFold.from_artifact((self._cal_bounds or {}).get("artifact") or {})
-        return _decimals_for(fold.finest_step(self._render_freq)) if fold is not None else 2
+        return _decimals_for(fold.finest_step()) if fold is not None else 2
 
     def _power_bound_fmt(self):
         """A ``_fmt_bound`` twin that rounds a power range end to the finest achievable step's
