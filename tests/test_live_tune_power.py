@@ -9,7 +9,7 @@ pytest.importorskip("PyQt6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QEvent, QObject, pyqtSignal
-from PyQt6.QtWidgets import QApplication, QFrame, QPushButton
+from PyQt6.QtWidgets import QApplication, QFrame, QLineEdit, QPushButton
 
 from api.client import AgentHTTPError
 from state.power_fold import PowerFold
@@ -399,3 +399,60 @@ def test_livetune_chirp_power_decimals_match_the_run_form():
     tune_dec = dlg._form._power_decimals()
     assert tune_dec == _run_form_at(_CCEN)._power_decimals() == 1    # Run at the default carrier
     assert tune_dec == _run_form_at(_CDEP)._power_decimals() == 1    # Run driven to the deployed one
+
+
+# ── the clamp caption folds at the SAME frequency + params as the --power range ──────────
+# The "this unit delivers at most … / raised to …" caption re-derives a fold from the current form
+# state. It must fold at the range's own frequency (in Hz — the raw freq field is in MHz) and its
+# live bridge params (GPS C/A's enbw behind --sidelobes), so the caption and the displayed ceiling
+# agree. Before: the caption read the freq field in MHz (folding at ~0 Hz) and passed no params, so
+# for a fixed-carrier signal like GPS C/A (freq is fold context, absent from values()) it never
+# fired at all, and it never tracked --sidelobes.
+
+def _gps_lineedit_params():
+    # GPS C/A with --power carrying NO default → it renders as a plain QLineEdit (unclamped), so a
+    # request CAN exceed the folded ceiling and the caption has something to warn about (a bounded
+    # spinbox would just clamp the value silently).
+    return {**_GPS_PARAMS, "params": [
+        s if s["dest"] != "power" else {k: v for k, v in s.items() if k != "default"}
+        for s in _GPS_PARAMS["params"]]}
+
+
+class GpsLineEditClient(GpsClient):
+    def get_script_params(self, name):
+        return _gps_lineedit_params()
+
+    def get_task_params(self, name):
+        return {"current": {"sidelobes": 0}, "applied": {}}
+
+
+def test_livetune_clamp_warning_folds_at_the_range_frequency_and_params():
+    dlg = LiveTuneDialog(FakeHub(GpsLineEditClient(cal=_GPS_CAL)), "u", "gps")
+    f = dlg._form
+    assert isinstance(f._widgets["power"][0], QLineEdit)              # unclamped power entry
+    # The form exposes the range's fold inputs: the carrier in Hz (not the 1227.6 MHz field value)
+    # and the live bridge params (enbw tracks --sidelobes).
+    assert f.fold_freq_hz() == pytest.approx(1227.6e6)
+    assert f.fold_params()["enbw_mhz"] == pytest.approx(_ENBW[0])
+
+    warn = dlg._clamp_warn
+
+    def caption_at(n, power_txt):
+        f._widgets["sidelobes"][0].setValue(n)
+        f._on_freq_changed()                                         # re-fold the ceiling
+        f._widgets["power"][0].setText(power_txt)
+        dlg._update_clamp_warning()
+        return warn.text()
+
+    # A −18.15 dBm request clears the 0-lobe ceiling (−18.0) but exceeds the tighter 2-lobe one
+    # (≈ −18.30): the caption is silent at 0 sidelobes and fires — naming the folded ceiling — at 2.
+    assert caption_at(0, "-18.15") == ""
+    assert f.fold_params()["enbw_mhz"] == pytest.approx(_ENBW[0])
+    msg = caption_at(2, "-18.15")
+    assert msg and "clamped down" in msg
+    assert "1227.600 MHz" in msg                                     # folded in Hz, shown in MHz
+    assert "-18.30" in msg.replace("−", "-")                         # the 2-lobe ceiling, not -18.0
+    assert f.fold_params()["enbw_mhz"] == pytest.approx(_ENBW[2])    # params tracked the live count
+
+    # A partially-typed request stays silent (never raises — the mid-keystroke guard).
+    assert caption_at(2, "-") == ""

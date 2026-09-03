@@ -1938,6 +1938,22 @@ class ParamForm(QWidget):
             return self._cal_freq_default
         return self._spec_default_freq()
 
+    # ── public fold inputs (so a caller re-folds at exactly the range's frequency/params) ──
+    def fold_freq_hz(self) -> Optional[float]:
+        """The transmit frequency in Hz the --power/--gain range is currently folded at — the
+        live freq field scaled to Hz, a fixed carrier held as fold context, or the schema
+        default; never a partially-typed field entry. A caller that re-derives a fold (e.g. the
+        live-tune clamp caption) should fold at THIS so its result matches the displayed range —
+        the raw freq-field value is in the field's own unit (MHz), not Hz."""
+        return self._fold_freq_now()
+
+    def fold_params(self) -> Optional[dict]:
+        """The bridge-keyed parameter values (e.g. a chirp's --bw span, GPS C/A's enbw behind
+        --sidelobes) the --power range is currently folded at, or None when none apply or one
+        can't be read as a number — the same params ``refold_bounds``/``clamp_warning`` need so
+        the ceiling tracks the live knobs exactly as the displayed range does."""
+        return self._live_params()
+
     def _spec_default_freq(self) -> Optional[float]:
         """The freq field's default from the schema, in Hz — the fold frequency for the FIRST
         render, before the widget (and any prefilled value) exists."""

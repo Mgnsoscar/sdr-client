@@ -114,6 +114,15 @@ as a `QLineEdit`, so `_form.values()` hands `clamp_warning` the raw text — a l
 `freq_hz`/`power_dbm` via `_as_float` (unparseable → treated as "unknown" → silent) instead of a
 bare `float()`, which raised `ValueError` and crashed the tune dialog on every keystroke of a
 negative power. Tests: `test_power_fold.py` (`..._tolerates_partially_typed_values`).
+The clamp warning also folds at the SAME frequency + params as the `--power` range now. It used to
+read the freq field straight from `values()` (in MHz, so it folded at ~0 Hz) and passed NO params,
+so a fixed-carrier signal (GPS C/A — `--freq` is fold context, absent from `values()`) never warned
+at all and it never tracked `--sidelobes`. `ParamForm` exposes `fold_freq_hz()` (=`_fold_freq_now`,
+Hz — the live field scaled, a context carrier, or the schema default) and `fold_params()`
+(=`_live_params`, the bridge-keyed values), and `live_tune_dialog._update_clamp_warning` folds
+`clamp_warning` through both, so the caption's ceiling matches the displayed range (tracks the live
+`--sidelobes`/`--bw`, at the deployed carrier). Tests: `test_live_tune_power.py`
+(`..._clamp_warning_folds_at_the_range_frequency_and_params`).
 
 ## Current state — start/stop sweep folds at the real span (`provides`): COMPLETE
 `ui/param_form.py` resolves a law-keyed parameter through a visible derived stand-in when the

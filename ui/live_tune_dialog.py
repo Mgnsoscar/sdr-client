@@ -359,9 +359,12 @@ class LiveTuneDialog(QDialog):
         self._set_result("Unsaved changes — press Update to apply.")
 
     def _update_clamp_warning(self) -> None:
-        """Warn (never block) when the current --power can't be delivered at the current
-        frequency — the running task clamps it, so it delivers less than the number says.
-        The power field re-bounds to the achievable range too; this spells out the clamp."""
+        """Warn (never block) when the current --power can't be delivered at the frequency and
+        live parameters the form is folding at — the running task clamps it, so it delivers less
+        than the number says. Folds at the SAME frequency (Hz) and bridge params (a chirp's --bw,
+        GPS C/A's enbw behind --sidelobes) as the --power range itself (fold_freq_hz / fold_params),
+        so the caption and the displayed range always agree; the power field re-bounds too, this
+        spells out the clamp."""
         from state.power_fold import clamp_warning
         from .param_form import find_power_index
         lbl = getattr(self, "_clamp_warn", None)
@@ -370,9 +373,10 @@ class LiveTuneDialog(QDialog):
         vals = self._form.values()
         pidx = find_power_index(self._live_specs)
         power_dest = self._live_specs[pidx]["dest"] if pidx is not None else None
-        freq = vals.get(self._script_cal_freq_param) if self._script_cal_freq_param else None
         power = vals.get(power_dest) if power_dest else None
-        msg = clamp_warning((self._cal_bounds or {}).get("artifact"), freq, power)
+        msg = clamp_warning((self._cal_bounds or {}).get("artifact"),
+                            self._form.fold_freq_hz(), power,
+                            params=self._form.fold_params())
         lbl.setText("⚠ " + msg if msg else "")
         lbl.setVisible(bool(msg))
 
