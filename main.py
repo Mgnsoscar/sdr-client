@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import sys
 
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
 import paths
@@ -67,6 +68,9 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("SDR Broadcaster Control")
+    _icon = paths.resource_dir() / "ui" / "assets" / "app.ico"
+    if _icon.exists():
+        app.setWindowIcon(QIcon(str(_icon)))   # window + taskbar (frozen and source)
     apply_theme(app)
     # Commit any focused input when the user clicks outside it (app-wide).
     app.installEventFilter(ClickFocusFilter(app))
