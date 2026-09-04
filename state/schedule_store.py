@@ -18,10 +18,11 @@ from pathlib import Path
 from typing import List, Optional
 
 from api import models as m
+from paths import data_file
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SCHEDULE_FILE = Path(__file__).resolve().parent.parent / "schedule.json"
+DEFAULT_SCHEDULE_FILE = data_file("schedule.json")
 
 
 def new_scheduled_id() -> str:

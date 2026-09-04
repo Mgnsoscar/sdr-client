@@ -20,9 +20,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
+from paths import data_file
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_CACHE_FILE = Path(__file__).resolve().parent.parent / "calibration_cache.json"
+DEFAULT_CACHE_FILE = data_file("calibration_cache.json")
 
 
 class CalibrationCache:

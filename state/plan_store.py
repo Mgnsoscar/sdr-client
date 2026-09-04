@@ -17,10 +17,11 @@ from pathlib import Path
 from typing import List, Optional
 
 from api import models as m
+from paths import data_file
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PLANS_FILE = Path(__file__).resolve().parent.parent / "plans.json"
+DEFAULT_PLANS_FILE = data_file("plans.json")
 
 
 def new_plan_id() -> str:

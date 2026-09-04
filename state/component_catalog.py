@@ -21,9 +21,11 @@ from typing import Dict, List, Optional, Tuple
 
 import yaml
 
+from paths import data_file
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_COMPONENTS_FILE = Path(__file__).resolve().parent.parent / "components.json"
+DEFAULT_COMPONENTS_FILE = data_file("components.json")
 COMPONENTS_WIRE_NAME = "components.yaml"     # the reserved name in the unit's data store
 KINDS = ("cable", "antenna", "pad")
 

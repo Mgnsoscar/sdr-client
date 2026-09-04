@@ -15,6 +15,7 @@ import sys
 
 from PyQt6.QtWidgets import QApplication
 
+import paths
 from api import AgentClient, Fleet
 from config import ClientConfig
 from state import LibraryStore, LibraryClient
@@ -58,6 +59,10 @@ def migrate_plan_refs(cfg: ClientConfig) -> None:
 
 
 def main() -> int:
+    # Seed a starter units.yaml into the per-user data dir on first run of a
+    # frozen build (a no-op running from source). Best-effort — see paths.py.
+    paths.seed_defaults()
+
     cfg = ClientConfig.load()
 
     app = QApplication(sys.argv)

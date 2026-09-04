@@ -26,9 +26,11 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional
 
+from paths import data_file
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_LEDGER_FILE = Path(__file__).resolve().parent.parent / "unit_ledger.json"
+DEFAULT_LEDGER_FILE = data_file("unit_ledger.json")
 
 
 class UnitLedger:

@@ -25,9 +25,13 @@ from typing import List
 
 import yaml
 
+from paths import data_file
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_UNITS_FILE = Path(__file__).parent / "units.yaml"
+# Writable state lives in the per-user data dir when frozen, or the repo root in
+# a source/dev checkout (see paths.py). units.yaml is seeded there on first run.
+DEFAULT_UNITS_FILE = data_file("units.yaml")
 
 # Unit types + library-scope helpers live in api.models (the dependency-free layer);
 # re-exported here so `config.UNIT_TYPES` etc. keep working for the UI.
