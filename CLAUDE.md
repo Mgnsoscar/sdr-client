@@ -130,6 +130,25 @@ and the RAMP editor fold the CONTROLLED (view) quantity at each step's fire-time
 held/commanded density is undeliverable there; decide whether the transmit path must actually hold live
 density (agent/scripts change) or client-only limit+warn suffices. Reproduce real artifacts via
 `PYTHONPATH=/home/user/sdr-agent … agent.calibration.resolve`.
+**HOLD-LIVE-DENSITY: COMPLETE (branch `claude/temporal-power-warnings-zemu9p`, client-only).** Owner
+decided: hold the LATEST-SET control quantity (density / total power / gain — the Run/Tune power card
+on a timeline), via CLIENT PRECOMPUTE (key finding: the Run/Tune form already holds the quantity
+client-side — `_do_refold(hold_display=True)` keeps the displayed value and `values()` re-sends the
+recomputed base; the unit just applies base), clamp+warn, SET-TIME-bandwidth intended value. Shipped:
+(1) **Warn** — `achievability_warnings` folds the controlled view at each event's fire-time `--bw`
+(`_view_law_of`/`_view_delta`/`_clamp`; resolver surfaces `view_law`+`view_laws`); the real bw-invariant
+chirp now warns (`state/power_fold.resolve_keyed_values` factored out). (2) **Persist** the per-step
+control view (`SequenceStep.power_view` + `BarItem`/`RunItem`, round-tripped; `ParamForm.power_view()`/
+`set_power_view()`; step editor saves/restores it). (3) **Latest-set-wins** — the walk holds whichever
+view the latest power-setting step chose (bw-keyed → density held; total power/gain → base held, no
+false warn). (4) **The hold** — `timeline_model.hold_control_quantity` injects the base `--power` the
+unit needs at each `--bw` change to keep the density constant, clamped; wired into
+`TimelineEditor.steps()` (deploy), stripped on load (`power_hold_dest`) so the canvas stays clean and
+upstream edits propagate (idempotent). (5) **Ramp editor** authors `--power` in the live-density view
+(`BoundedNumberField(view_offset)`, `_control_view`/`_view_offset`; stores base, records `power_view`).
+No agent/scripts/capability change; drift-guarded files untouched. Tests: `test_achievability_view_fold`,
+`test_step_power_view_persistence`, `test_hold_control_quantity`, `test_ramp_view_fold`. Docs: §10.
+**Owner testing: Stage 2 "mostly works, a few minor things to fix" — TBD (list pending from owner).**
 
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY
