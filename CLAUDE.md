@@ -189,16 +189,34 @@ height inside that shared scroll — so a long ramp shows every step and the dia
 The dialog is capped to ~90% of screen height so the scroll engages when the body is tall. Test:
 `test_ramp_view_fold.py` (`…_step_listing_shares_the_form_scroll_and_expands`).
 
-## Packaging as a standalone no-admin app: NOT STARTED (context ready)
-Owner wants an installer to send coworkers who install `sdr-client` as a desktop app, under two hard
-constraints: **no admin rights** (per-user install/run only) and **unknown-publisher execution is
-often blocked** (SmartScreen/Gatekeeper). Full handoff context — entry point (`main.py`, app name
-"SDR Broadcaster Control"), the real runtime deps (`requirements.txt`, NOT the agent-test list),
-data files to collect (`ui/assets/fonts/*.ttf`; optional `bundles/sdr-agent-*.tar.gz`), the
-load-bearing prerequisite (**relocate writable state off `Path(__file__).parent` to a per-user data
-dir** — `units.yaml`, `plans.json`, `schedule.json`, `library.json`, `components.json`, the caches,
-`unit_ledger.json`), open decisions to confirm with the owner, and the honest no-admin/unsigned
-options — lives in **`docs/packaging-standalone.md`**. Start there.
+## Packaging as a standalone no-admin Windows app: COMPLETE (branch `claude/packaging-standalone`)
+Owner decisions: **Windows 10/11 x64 only · no code-signing cert · Provision-unit IN scope · build on
+the owner's own Windows PC** (I write the config; they run it). Full build/install/distribute guide is
+**`docs/packaging-standalone.md`**. Shipped, client-only, additive (no capability/version bump, drift
+guard intact):
+- **Writable-state relocation (the load-bearing prerequisite)** — new **`paths.py`** is the single
+  source of truth: `data_dir()` = `$SDR_CLIENT_DATA_DIR` override → per-user OS dir when **frozen**
+  (`%APPDATA%\SDR Broadcaster Control`) → **repo root from source**. Every store's default now reads
+  `paths.data_file(...)` (`units.yaml`, `plans.json`, `schedule.json`, `library.json`,
+  `components.json`, `address_cache.json`, `calibration_cache.json`, `unit_ledger.json`).
+  `resource_dir()`/`seed_defaults()` seed a starter `units.yaml` on first frozen launch; `main()`
+  calls it and sets the window icon. **Source mode returns the repo root byte-for-byte**, so dev + the
+  whole suite are unaffected (tests: `tests/test_paths.py`; 680 passed, zero edits to existing tests).
+  Fonts + agent bundle stay resource-relative (read-only), not moved.
+- **Freeze** — **`sdr_client.spec`** (force-added past the `*.spec` gitignore): PyInstaller `--onedir`,
+  windowed, icon; collects Qt plugins, IBM Plex fonts, icon, starter `units.yaml`, and staged
+  `bundles/sdr-agent-*.tar.gz`; whole-package submodule collection for the native-wheel gotchas
+  (`zeroconf`, `paramiko`, `cryptography` — collected whole so the floating version's paramiko-optional
+  submodules like `hazmat.decrepit` are present — `pydantic`, `pydantic_core`); UPX off. **`packaging/
+  make_icon.py`** generates the placeholder `ui/assets/app.{ico,png}` (swap the files to rebrand).
+  Validated by a **Linux `--onedir` smoke build**: frozen app boots headless, seeds `units.yaml`,
+  loads fonts, starts zeroconf discovery + poller, no import errors.
+- **Installer** — **`packaging/installer.iss`** (Inno Setup, `PrivilegesRequired=lowest`,
+  `%LOCALAPPDATA%\Programs\…`, per-user shortcuts + uninstall, unsigned) and **`packaging/build.ps1`**
+  (venv → pip → PyInstaller → portable ZIP fallback → ISCC). **Unknown-publisher (no cert):** honest
+  mitigations only — IT allow-list / software portal first, portable ZIP + shortcut over the installer
+  exe, "Run anyway"; self-signed doesn't help. **Open:** must still be smoke-tested on a clean Windows
+  10/11 VM (no-admin install, icon, real-unit discovery, Provision) — the Linux build can't cover that.
 
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY
