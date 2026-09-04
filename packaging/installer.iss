@@ -1,8 +1,8 @@
-; Inno Setup script — per-user, NO-ADMIN installer for SDR Broadcaster Control.
+; Inno Setup script - per-user, NO-ADMIN installer for SDR Broadcaster Control.
 ;
 ; Wraps the PyInstaller --onedir output (dist\SDR Broadcaster Control\) into a
 ; single Setup.exe that installs entirely per-user:
-;   * PrivilegesRequired=lowest  — never prompts for admin, never elevates.
+;   * PrivilegesRequired=lowest  - never prompts for admin, never elevates.
 ;   * installs into %LOCALAPPDATA%\Programs\SDR Broadcaster Control
 ;   * per-user Start-menu (and optional desktop) shortcut + per-user uninstall.
 ; No service, no machine-wide registry, no writes to Program Files.
@@ -13,7 +13,7 @@
 ;
 ; NOTE ON SIGNING: this Setup.exe is UNSIGNED. Windows SmartScreen will warn
 ; ("unknown publisher") on a freshly-downloaded copy. There is no cert here to
-; fix that — see docs\packaging-standalone.md §"Unknown publisher / SmartScreen"
+; fix that - see docs\packaging-standalone.md, "Unknown publisher / SmartScreen"
 ; for the honest distribution options (IT allow-list / software portal, the
 ; onedir ZIP + shortcut route, "More info -> Run anyway"). If a code-signing
 ; cert is obtained later, add a [Setup] SignTool + sign the exe/installer.
@@ -26,7 +26,7 @@
 #define DistDir "..\dist\SDR Broadcaster Control"
 
 [Setup]
-; A stable, unique id for this app — keeps upgrades/uninstall coherent. Do NOT
+; A stable, unique id for this app - keeps upgrades/uninstall coherent. Do NOT
 ; change it across releases.
 AppId={{E0801016-8FBC-4D7C-A81A-BCBCAF4A0C10}
 AppName={#AppName}
@@ -34,17 +34,17 @@ AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 VersionInfoVersion={#AppVersion}
 
-; ── Per-user, no-admin install ───────────────────────────────────────────────
+; ---- Per-user, no-admin install -------------------------------------------
 PrivilegesRequired=lowest
 DefaultDirName={localappdata}\Programs\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 
-; ── Target ───────────────────────────────────────────────────────────────────
+; ---- Target ----------------------------------------------------------------
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
-; ── Output + look ────────────────────────────────────────────────────────────
+; ---- Output + look ---------------------------------------------------------
 OutputDir=Output
 OutputBaseFilename=SDR-Broadcaster-Control-{#AppVersion}-Setup
 SetupIconFile=..\ui\assets\app.ico
