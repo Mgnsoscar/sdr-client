@@ -450,9 +450,21 @@ Work items:
   capability change**. Tests: `tests/test_hold_control_quantity.py` (hold keeps density constant;
   clamp agrees with the warning; propagation; idempotent-after-strip; total-power/freq/no-view no-op;
   editor steps→set_steps→steps round-trip).
-- **Stage 3 — ramp editor power card — TODO.** The ramp editor has no control-view switch today. Give
-  it the `_add_power_unit_ui` card so a density ramp is authored + limited in the view at the carried
-  bw, and its points precompute base per point.
+- **Stage 3 — ramp editor authors --power in the controlled view — ✅ DONE.** The ramp editor's
+  From/To now fold + display in the controlled view (a chirp's live spectral density at the carried
+  `--bw`), replacing the bw-frozen measured base — matching the Run/Tune power card (the operator's
+  clarification: the `restates_measurement` law replaces the measured quantity here too). Implemented
+  as: `BoundedNumberField(view_offset=…)` displays the view but snaps in base (`snap_power(p−off)+off`);
+  `RampEditorDialog._control_view()` picks the leading `restates_measurement` law (drop-base rule
+  mirroring `_power_views`), `_view_offset()` folds its `delta_db` through the ramp's carried bridge
+  params (`_op_state`), and `_with_cal_bounds`/`_power_fold_ctx` shift the range + relabel the unit.
+  The STORED ramp start/stop stay BASE — `_accept` subtracts the view offset (constant over a fixed-bw
+  ramp, so a linear density sweep is a linear base sweep), and the ramp records `power_view` so the
+  walk/hold treat its points as the live density (the walk already folds each ramp point in the active
+  view). Load converts base→view (`_seeded_view` re-seeds once params are in, after the params-less
+  fallback build). Tests: `tests/test_ramp_view_fold.py` (range is the live density at the carried bw;
+  tracks the bw; field displays view / snaps in base; save stores base + records the view; save→load
+  round-trips the density).
 
 Note (verified): the client-precompute hold delivers exactly what the current runtime already does on
 an UNDELIVERABLE value — base clamped to `base_max`, delivering `base_max + view_delta(fire_bw)` — so

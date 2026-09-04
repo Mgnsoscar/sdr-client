@@ -29,7 +29,9 @@ from PyQt6.QtWidgets import (
 )
 
 from api import ramp as _ramp
-from state.power_fold import PowerFold, fold_params_from_values, refold_bounds
+from state.power_fold import (PowerFold, fold_params_from_values, refold_bounds,
+                              resolve_keyed_values)
+from state.power_law import parse_law
 
 from . import timeline_model as tlm
 from .duration_spin import DurationSpinBox
@@ -222,6 +224,8 @@ class RampEditorDialog(QDialog):
         # with real achievable-level snapping are all in view. Seeded from the saved ramp.
         self._init_start = r.get("start")
         self._init_stop = r.get("stop")
+        self._seeded_view = False   # have the From/To been seeded WITH params (so the view offset
+                                    # is known)? until then re-seed from the saved base, converted
         self._start_field = None
         self._stop_field = None
         self._start_box = QWidget(); self._start_lay = QVBoxLayout(self._start_box)
@@ -423,7 +427,20 @@ class RampEditorDialog(QDialog):
         # against what the unit can actually deliver at the operating point — not the law's
         # representative value. refold_bounds is a no-op when neither applies.
         bounds = refold_bounds(bounds, self._op_freq_hz(task), self._op_params(task))
-        return apply_power_bounds([spec], bounds)[0]
+        out = apply_power_bounds([spec], bounds)[0]
+        # Author a density ramp in the CONTROLLED view (a chirp's live spectral density), like the
+        # Run/Tune power card: shift the base range into the view at the carried bw and relabel the
+        # unit, so the operator ramps the live density and it stays honest at that sweep width.
+        view = self._control_view()
+        if view is not None and find_power_index([out]) is not None:
+            off = self._view_offset(task, view)
+            out = dict(out)
+            out["unit"] = view["unit"]
+            for k in ("min", "max"):
+                v = out.get(k)
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    out[k] = round(float(v) + off, 4)
+        return out
 
     def _ramp_order_key(self):
         """This ramp's best-effort position on its task's timeline (mirrors
@@ -489,6 +506,54 @@ class RampEditorDialog(QDialog):
         if not artifact:
             return None
         return fold_params_from_values(artifact, self._all_params, self._op_state(task))
+
+    def _control_view(self):
+        """The CONTROLLED --power view the ramp authors in — the leading ``restates_measurement``
+        law from the script's CAL_POWER_LAWS (a chirp's live spectral density), or None when
+        --power is authored in the base/measured quantity. Mirrors ``ParamForm._power_views``'
+        drop-base rule: a restatement law stands in only when the reported reading is the measured
+        base (a declared reported axis is the operator's chosen quantity and is never dropped)."""
+        laws = (getattr(self._editor, "_script_power_laws", None) or {}).get(
+            self._current_script) or []
+        task = self._task.currentText().strip()
+        getter = getattr(self._editor, "cal_bounds_for_task", None)
+        art = ((getter(task) if getter is not None else None) or {}).get("artifact") or {}
+        rep = (art.get("readings") or {}).get("reported") or {}
+        if rep.get("kind") == "law":
+            return None
+        for spec in laws:
+            if isinstance(spec, dict) and spec.get("restates_measurement"):
+                try:
+                    law = parse_law(spec)
+                except (ValueError, TypeError):
+                    continue
+                unit = str(spec.get("unit") or ("dBm" if law.out_fam == "abs" else "dBm/MHz"))
+                return {"id": law.id, "unit": unit, "law": law}
+        return None
+
+    def _view_offset(self, task: str, view: Optional[dict]) -> float:
+        """dB the control ``view`` adds over the base --power quantity at the ramp's carried
+        operating point (a chirp's live --bw) — the shift that turns the base range into the live
+        density range and the operator's typed density into the base --power sent. 0 with no view
+        law; folds through the ramp's carried bridge params (``_op_state``)."""
+        law = (view or {}).get("law") if view else None
+        if law is None:
+            return 0.0
+        keyed = resolve_keyed_values(self._all_params, self._op_state(task), law.params())
+        try:
+            return law.delta_db(keyed) if keyed else law.rep_delta_db()
+        except (ValueError, TypeError):
+            return law.rep_delta_db()
+
+    def _ramp_view_offset(self) -> float:
+        """The controlled-view offset (dB) when the RAMPED param is the calibrated --power field,
+        else 0. From/To are DISPLAYED in the view (base + offset); the STORED ramp start/stop are
+        base (offset removed on save, added back on load)."""
+        view = self._control_view()
+        spec = self._ramped_spec()
+        if view is None or not spec or find_power_index([spec]) is None:
+            return 0.0
+        return self._view_offset(self._task.currentText().strip(), view)
 
     def _rebuild_run_form(self) -> None:
         if not self._run_mode:
@@ -658,33 +723,39 @@ class RampEditorDialog(QDialog):
         return None
 
     def _power_fold_ctx(self, spec: dict):
-        """(PowerFold, freq_hz, fold_params, rail_note) for the swept parameter when it's the
-        calibrated --power field, so the bounded field snaps to real achievable levels at the
-        operating frequency + bridge params and notes what the range moves with — exactly as the
-        parameter form does. (None, None, None, "") otherwise."""
+        """(PowerFold, freq_hz, fold_params, rail_note, view_offset) for the swept parameter when
+        it's the calibrated --power field, so the bounded field snaps to real achievable levels at
+        the operating frequency + bridge params, notes what the range moves with, and (for a chirp)
+        displays the controlled density view — exactly as the parameter form does. ``view_offset``
+        (dB) shifts the displayed view over the base quantity the fold snaps in. (None, None, None,
+        "", 0.0) otherwise."""
         task = self._task.currentText().strip()
         getter = getattr(self._editor, "cal_bounds_for_task", None)
         bounds = getter(task) if getter is not None else None
         if not bounds or find_power_index([spec]) is None:
-            return None, None, None, ""
+            return None, None, None, "", 0.0
         fold = PowerFold.from_artifact((bounds.get("artifact") or {}))
         freq = self._op_freq_hz(task)
         params = self._op_params(task)
+        view = self._control_view()
+        view_off = self._view_offset(task, view) if view is not None else 0.0
         note = "Calibrated for this unit"
-        if fold is not None and fold.freq_dependent and isinstance(freq, (int, float)):
+        if view is not None:
+            note = "Range at the live sweep bandwidth"
+        elif fold is not None and fold.freq_dependent and isinstance(freq, (int, float)):
             note = f"Range at {freq / 1e6:.2f} MHz · moves with frequency"
         elif fold is not None and fold.param_dependent:
             note = "Range moves with the live parameters"
-        return fold, freq, params, note
+        return fold, freq, params, note, view_off
 
     def _make_value_field(self, spec: Optional[dict], value, placeholder: str):
         """A From/To widget for the swept parameter: a bounded numeric field (spinbox + rail
         + limit chip) when the parameter has a numeric min/max, else a plain line edit."""
         if spec and spec.get("type") in ("int", "float") \
                 and spec.get("min") is not None and spec.get("max") is not None:
-            fold, freq, params, note = self._power_fold_ctx(spec)
+            fold, freq, params, note, view_off = self._power_fold_ctx(spec)
             field = BoundedNumberField(spec, fold=fold, fold_freq=freq, note=note,
-                                       fold_params=params)
+                                       fold_params=params, view_offset=view_off)
             if isinstance(value, (int, float)):
                 field.setValue(value)
             field.valueChanged.connect(self._update_preview)
@@ -699,8 +770,21 @@ class RampEditorDialog(QDialog):
         over. Called when the parameter, task or its params change so the fields always show
         the right range/unit and (for --power) the calibrated, frequency-folded bound."""
         spec = self._ramped_spec()
-        cur_start = self._val(self._start_field) if self._start_field is not None else self._init_start
-        cur_stop = self._val(self._stop_field) if self._stop_field is not None else self._init_stop
+        # The saved ramp's start/stop are BASE; show them in the controlled view (+off). The FIRST
+        # build runs before params load (offset unknown), so re-seed from the saved base — converted
+        # at the now-known offset — until the params are in; after that carry the operator's current
+        # (already-view) value across rebuilds so their edits aren't lost.
+        off = self._ramp_view_offset()
+        seed_start = (self._init_start + off if isinstance(self._init_start, (int, float))
+                      else self._init_start)
+        seed_stop = (self._init_stop + off if isinstance(self._init_stop, (int, float))
+                     else self._init_stop)
+        if self._seeded_view and self._start_field is not None:
+            cur_start, cur_stop = self._val(self._start_field), self._val(self._stop_field)
+        else:
+            cur_start, cur_stop = seed_start, seed_stop
+            if self._all_params:                     # params are in → this seed is the real one
+                self._seeded_view = True
         self._start_field = self._make_value_field(spec, cur_start, "start value")
         self._stop_field = self._make_value_field(spec, cur_stop, "stop value")
         _swap_only(self._start_lay, self._start_field)
@@ -864,11 +948,23 @@ class RampEditorDialog(QDialog):
                 if span_err:
                     return self._set_preview(span_err, error=True)
 
+        # A density ramp is AUTHORED in the controlled view (From/To are live density); store the
+        # ramp start/stop in the BASE quantity the unit is commanded in (subtract the view offset at
+        # the carried bw — constant over a fixed-bw ramp, so a linear density sweep stays a linear
+        # base sweep), and record the control view so the walk/hold treat it as that quantity.
+        view = self._control_view()
+        off = self._ramp_view_offset()
+        if off:
+            for k in ("start", "stop"):
+                if isinstance(spec.get(k), (int, float)):
+                    spec[k] = round(spec[k] - off, 4)
         ramp = {k: v for k, v in spec.items() if v is not None}
+        power_view = view["id"] if (view is not None and find_power_index(
+            [self._ramped_spec() or {}]) is not None) else None
         self.result_item = tlm.RunItem(
             task_name=task, action="ramp", ramp=ramp, anchor=anchor,
             offset=offset, offset_end=offset_end,
-            args=args, replace_args=True, uid=self._src.uid)
+            args=args, replace_args=True, uid=self._src.uid, power_view=power_view)
         self.accept()
 
     def _disconnect(self) -> None:

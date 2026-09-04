@@ -625,7 +625,7 @@ class BoundedNumberField(QWidget):
 
     def __init__(self, spec: dict, fold: Optional["PowerFold"] = None,
                  fold_freq: Optional[float] = None, note: str = "", parent=None,
-                 fold_params: Optional[dict] = None):
+                 fold_params: Optional[dict] = None, view_offset: float = 0.0):
         super().__init__(parent)
         self._spec = dict(spec)
         self._is_int = self._spec.get("type") == "int"
@@ -637,13 +637,19 @@ class BoundedNumberField(QWidget):
         # For a calibrated --power spec the achievable-level snapping folds at ``fold_freq`` AND
         # ``fold_params`` (the bridge-keyed params — a chirp's --bw, GPS C/A's enbw behind
         # --sidelobes), so a ramp's From/To snaps to the levels the unit can really reach at the
-        # operating point, matching its (params-folded) min/max bounds.
+        # operating point, matching its (params-folded) min/max bounds. ``view_offset`` (dB) shifts
+        # a CONTROLLED-VIEW field (e.g. a chirp's live spectral density) over the base quantity the
+        # fold snaps in: the field DISPLAYS view values (spec min/max/value are already view-shifted),
+        # but snapping converts view→base→snap→view so it lands on real achievable levels. 0 = base.
+        self._view_off = float(view_offset or 0.0)
         if self._spec.get("snap_role") == "power" and fold is not None:
-            self._psnap = lambda p: fold.snap_power(p, fold_freq, fold_params)
+            off = self._view_off
+            self._psnap = lambda p: fold.snap_power(p - off, fold_freq, fold_params) + off
             if isinstance(self._spin, _AchievableSpin):
-                self._spin.set_snappers(self._psnap,
-                                        lambda p: fold.quantize_up(p, fold_freq, fold_params),
-                                        lambda p: fold.quantize_down(p, fold_freq, fold_params))
+                self._spin.set_snappers(
+                    self._psnap,
+                    lambda p: fold.quantize_up(p - off, fold_freq, fold_params) + off,
+                    lambda p: fold.quantize_down(p - off, fold_freq, fold_params) + off)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
