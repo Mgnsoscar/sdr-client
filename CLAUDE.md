@@ -189,6 +189,17 @@ height inside that shared scroll — so a long ramp shows every step and the dia
 The dialog is capped to ~90% of screen height so the scroll engages when the body is tall. Test:
 `test_ramp_view_fold.py` (`…_step_listing_shares_the_form_scroll_and_expands`).
 
+## Packaging as a standalone no-admin app: NOT STARTED (context ready)
+Owner wants an installer to send coworkers who install `sdr-client` as a desktop app, under two hard
+constraints: **no admin rights** (per-user install/run only) and **unknown-publisher execution is
+often blocked** (SmartScreen/Gatekeeper). Full handoff context — entry point (`main.py`, app name
+"SDR Broadcaster Control"), the real runtime deps (`requirements.txt`, NOT the agent-test list),
+data files to collect (`ui/assets/fonts/*.ttf`; optional `bundles/sdr-agent-*.tar.gz`), the
+load-bearing prerequisite (**relocate writable state off `Path(__file__).parent` to a per-user data
+dir** — `units.yaml`, `plans.json`, `schedule.json`, `library.json`, `components.json`, the caches,
+`unit_ledger.json`), open decisions to confirm with the owner, and the honest no-admin/unsigned
+options — lives in **`docs/packaging-standalone.md`**. Start there.
+
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY
 quantity you set (large step-rounded value + range rail with labelled MIN/MAX + a family-coloured
