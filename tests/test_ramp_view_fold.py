@@ -123,3 +123,89 @@ def test_save_then_load_round_trips_the_density():
     # the reopened From/To show the SAME densities the operator authored
     assert dlg2._val(dlg2._start_field) == pytest.approx(-25.0, abs=0.06)
     assert dlg2._val(dlg2._stop_field) == pytest.approx(-18.0, abs=0.06)
+
+
+# ── Issue 2: the "Set power in" picker offers the OTHER quantities (dBm, dBm/Hz), not just density ─
+# The ramp editor previously locked --power to the leading restates_measurement view (live density);
+# the operator could not author the ramp in total power or dBm/Hz. It now surfaces a picker (the ramp
+# analogue of the Run/Tune card's "Control in this →") that lists every declared view and re-folds.
+
+def _total(base):     # full-bandwidth total power = base + view_delta(fbw) = base + 10 dB (bw-invariant)
+    return base + 10.0
+
+
+def test_power_view_picker_lists_every_view_and_defaults_to_density():
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    assert dlg._power_unit.isVisibleTo(dlg)                       # shown for calibrated --power
+    ids = [dlg._power_unit.itemData(i) for i in range(dlg._power_unit.count())]
+    assert ids == ["psd_live", "fbw_power", "psd_hz"]            # the chirp's CAL_POWER_LAWS, base dropped
+    assert dlg._power_view == "psd_live"                         # the leading restatement is the default
+    labels = [dlg._power_unit.itemText(i) for i in range(dlg._power_unit.count())]
+    assert "dBm/MHz" in labels[0] and "dBm" == labels[1].split("[")[-1].rstrip("] ") and "dBm/Hz" in labels[2]
+
+
+def test_power_view_picker_hidden_for_a_non_power_param():
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    dlg._param.setCurrentText("bw")
+    _app.processEvents()
+    assert not dlg._power_unit.isVisibleTo(dlg)                  # a non-power ramp has no quantity choice
+    dlg._param.setCurrentText("power")
+    _app.processEvents()
+    assert dlg._power_unit.isVisibleTo(dlg)                      # ...and it returns when --power is swept
+
+
+def test_switching_to_total_power_relabels_the_range_and_converts_the_values():
+    # Author density −25 → −18 at bw 20, then switch the picker to Full-bandwidth (total) power.
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    dlg._mode.setCurrentIndex(dlg._mode.findData("step_hold"))
+    dlg._step.setText("1"); dlg._hold.setText("10")
+    dlg._start_field.setValue(-25.0)
+    dlg._stop_field.setValue(-18.0)
+    _app.processEvents()
+    idx = next(i for i in range(dlg._power_unit.count()) if dlg._power_unit.itemData(i) == "fbw_power")
+    dlg._power_unit.setCurrentIndex(idx)
+    _app.processEvents()
+    assert dlg._power_view == "fbw_power"
+    spec = dlg._ramped_spec()
+    assert spec.get("unit") == "dBm"                             # relabelled to total-power dBm
+    assert spec.get("max") == pytest.approx(_total(-7.38), abs=0.06)   # base max −7.38 → +2.62 dBm
+    # the SAME physical power, re-expressed: density −25 at bw 20 is base −21.99 → total −11.99 dBm.
+    off = -10 * math.log10(2)                                    # view_delta(psd_live, 20) ≈ −3.01
+    assert dlg._val(dlg._start_field) == pytest.approx(_total(-25.0 - off), abs=0.06)   # ≈ −11.99
+    assert dlg._val(dlg._stop_field) == pytest.approx(_total(-18.0 - off), abs=0.06)    # ≈ −4.99
+
+
+def test_saving_in_a_switched_view_stores_base_and_records_that_view():
+    # Whatever quantity the operator authors in, the STORED ramp is base and power_view records the
+    # chosen view — so switching density → total power doesn't change the base the unit is commanded.
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    dlg._mode.setCurrentIndex(dlg._mode.findData("step_hold"))
+    dlg._step.setText("1"); dlg._hold.setText("10")
+    dlg._start_field.setValue(-25.0)
+    dlg._stop_field.setValue(-18.0)
+    _app.processEvents()
+    idx = next(i for i in range(dlg._power_unit.count()) if dlg._power_unit.itemData(i) == "fbw_power")
+    dlg._power_unit.setCurrentIndex(idx)
+    _app.processEvents()
+    dlg._accept()
+    off = -10 * math.log10(2)
+    assert dlg.result_item.power_view == "fbw_power"
+    # base is unchanged by the view switch (density −25/−18 at bw 20 → base −21.99/−14.99).
+    assert dlg.result_item.ramp["start"] == pytest.approx(-25.0 - off, abs=0.06)
+    assert dlg.result_item.ramp["stop"] == pytest.approx(-18.0 - off, abs=0.06)
+
+
+def test_reopening_a_total_power_ramp_selects_that_view():
+    # A ramp saved in the total-power view reopens with the picker on total power, showing dBm.
+    ed = _chirp_editor([_bar(10), _set_bw(20, 5.0)])
+    src = tlm.RunItem(task_name="chirp", action="ramp", anchor="start", offset=10.0,
+                      ramp={"start": -21.99, "stop": -14.99, "step": 1.0, "hold_s": 5.0},
+                      power_view="fbw_power")
+    ed._canvas.set_items([_bar(10), _set_bw(20, 5.0), src])
+    dlg = RampEditorDialog(src, ed, new=False)
+    dlg._param.setCurrentText("power")
+    _app.processEvents()
+    assert dlg._power_unit.currentData() == "fbw_power"
+    assert dlg._ramped_spec().get("unit") == "dBm"
+    # base stop −14.99 → total power −4.99 dBm.
+    assert dlg._val(dlg._stop_field) == pytest.approx(_total(-14.99), abs=0.06)

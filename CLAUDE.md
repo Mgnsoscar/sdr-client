@@ -156,6 +156,26 @@ step in the over/under checks (`ParamForm._wire_rail`, `BoundedNumberField._on_c
 `test_bounded_number_field.py`. (B) **The tune pill showed the raw base** (−7.something) not the
 controlled density. `TimelineEditor._pill_power_display` now shows a bw-keyed --power in its view (base
 + view_delta at the carried bw) with its unit; `_run_label` uses it; test `test_step_editor_carried_bw.py`.
+**Owner testing fixes (round 2, branch `claude/temporal-power-warnings-fixes-je1r9b`, client-only).**
+Three bugs from the hold-live-density testing (see `docs/sequence-power-achievability.md` §10). (1) **A
+density RAMP going undeliverable after a LATER `--bw` widen wasn't warned.** The walk's `ramp_point`
+branch expressed each point as `base + view_delta(FIRE-time bw)` while `_clamp` shifted the range by the
+SAME delta → they CANCELLED to a bare base-range check (bandwidth-invariant → never fires). A ramp is
+AUTHORED once at its start width, so its intended density is CONSTANT across the ramp: `achievability_
+warnings` now captures the authoring view-delta at the ramp's first point (`ramp_auth_vd[uid]`) and
+checks `base + view_delta(authoring_bw)` against the range folded at each point's OWN fire-time `--bw`.
+Static-bw ramps and the no-view path stay byte-identical. Tests: `test_achievability_view_fold.py`.
+(2) **The ramp step editor couldn't author `--power` in other quantities.** Added a "Set power in"
+picker (the ramp analogue of the card's `Control in this →`): `ramp_editor._power_views`/`_selected_view`
+/`_populate_power_views`/`_on_power_view_changed` let the operator ramp in density / total power / dBm/Hz
+(base still stored, `power_view` recorded, values convert on switch). Tests: `test_ramp_view_fold.py`.
+(3) **The max density still couldn't be selected.** A calibrated `--power` field with no default renders
+as a **QLineEdit** (the real chirp `--power` has no `step`); round 1's half-display-step tolerance only
+covered spinboxes, so the QLineEdit view-max (−10.3903 shown as −10.39) still tripped the amber over-warn
+AND failed `validate()` ("out of range"), blocking the save. `_wire_rail` now applies the same
+`0.5·10^-_power_decimals()` tolerance to a QLineEdit power field, and `ParamForm.validate()` tolerates it
+when range-checking a `snap_role="power"` field. A genuine overage still warns/blocks. Tests:
+`test_range_rail.py`. No agent/scripts/capability/version change; drift-guarded files untouched.
 
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY

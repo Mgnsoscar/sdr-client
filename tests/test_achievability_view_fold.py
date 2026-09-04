@@ -200,6 +200,60 @@ def test_run_step_commanding_an_over_max_base_density_clamps_at_its_bandwidth():
     assert "set to" in issues[0].message
 
 
+# ── DENSITY RAMP whose top points become undeliverable after a mid-ramp --bw widen (Issue 1) ────
+# The owner authored a live-density ramp up to the bw-10 max (−7.38) and added a LATER tune doubling
+# the sweep to 20 MHz. The top ramp points can no longer hold their intended density (max ≈ −10.39),
+# so the runtime clamps them — but no warning appeared. The ramp is authored ONCE at the start width,
+# so each point's intended density is held CONSTANT across the ramp; the walk must check that
+# intended density against the achievable range at each point's own fire-time --bw.
+
+def _density_ramp(start=-16.24, stop=-7.38, steps=11, hold=12.0, offset=0.0, view="psd_live"):
+    return tlm.RunItem(task_name="chirp", action="ramp", anchor="start", offset=offset,
+                       ramp={"param": "power", "flag": "--power", "start": start, "stop": stop,
+                             "steps": steps, "hold_s": hold}, power_view=view)
+
+
+def test_density_ramp_top_points_clamp_after_a_midramp_widen():
+    # −16.24 → −7.38 dBm/MHz density ramp; a tune at +36 s doubles the sweep to 20 MHz mid-ramp.
+    # Points whose INTENDED density exceeds the bw-20 max (−10.39) clamp; the lower ones don't.
+    widen = _set_bw(20, 36.0)
+    issues = tlm.achievability_warnings([_bar(), _density_ramp(), widen], _resolve)
+    assert len(issues) == 1
+    iss = issues[0]
+    assert iss.direction == "high"
+    assert iss.bound == pytest.approx(_psd_max(20), abs=0.02)      # ≈ −10.39 dBm/MHz, the bw-20 max
+    assert iss.unit == "dBm/MHz"
+    # every flagged level is a real intended density above the ceiling; the top (−7.38) is included.
+    levels = [v for (_i, v, _t) in iss.points]
+    assert all(v > _psd_max(20) - 0.02 for v in levels)
+    assert max(levels) == pytest.approx(-7.38, abs=0.02)
+    # and the lower ramp points (comfortably below the ceiling) are NOT flagged.
+    assert min(levels) > _psd_max(20) - 1.0
+    assert "clamped down" in iss.message and "ramp" in iss.message
+
+
+def test_density_ramp_silent_without_the_later_widen():
+    # Same ramp at bw 10 (max −7.38) with no widen → every point is deliverable → no warning.
+    assert tlm.achievability_warnings([_bar(), _density_ramp()], _resolve) == []
+
+
+def test_density_ramp_authored_at_the_wide_sweep_stays_silent():
+    # Widen to 20 FIRST, then draw the ramp: it is authored at bw 20, so its intended densities are
+    # the base values read at bw 20 (top −7.38 base → −10.39, the bw-20 max). All deliverable at the
+    # width they were drawn — the set-time model must NOT spuriously flag them.
+    assert tlm.achievability_warnings([_bar(), _set_bw(20, -1.0), _density_ramp(offset=0.0)],
+                                      _resolve) == []
+
+
+def test_density_ramp_top_matches_a_directly_set_density_at_the_same_widen():
+    # Sanity: the ramp's top point (−7.38 intended density, held to bw 20) clamps to the SAME ceiling
+    # as a directly-set −7.38 density held to bw 20 — the two code paths agree on the operating point.
+    ramp_iss = tlm.achievability_warnings([_bar(), _density_ramp(), _set_bw(20, 36.0)], _resolve)
+    set_iss = tlm.achievability_warnings([_bar(), _set_power(-7.38, 5.0), _set_bw(20, 36.0)], _resolve)
+    assert ramp_iss and set_iss
+    assert ramp_iss[0].bound == pytest.approx(set_iss[0].bound, abs=0.001)
+
+
 # ── per-step control view (latest-set-wins): the SAME base value warns as density, not as total ─
 # The held quantity is whatever the LATEST power-setting step was authored in (its power_view). A
 # density (bw-keyed) view is re-checked at each --bw; a total-power view is bandwidth-invariant, so

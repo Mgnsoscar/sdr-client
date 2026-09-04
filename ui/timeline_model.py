@@ -845,6 +845,11 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
         state = _args_to_values(base_args, flag_to_dest)
         hits: Dict[object, list] = defaultdict(list)
         meta: Dict[object, dict] = {}
+        # The controlled-view delta a ramp was AUTHORED at (per ramp uid). A ramp is drawn once, at
+        # the sweep width carried when it starts, so every point's intended controlled-view value is
+        # constant across the ramp; captured at the ramp's first (earliest-firing) point — see the
+        # ramp_point branch below.
+        ramp_auth_vd: Dict[object, float] = {}
         held_flagged = False           # is the current standing --power already known to clamp?
         # The standing --power expressed in the CONTROLLED view (the density the operator holds),
         # captured at set-time so a LATER --bw change re-checks the intended density, not the base.
@@ -875,20 +880,31 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
                     state[p["rdest"]] = p["val"]
                     eval_state = state
                 # A ramp point COMMANDS --power at its fire moment; the ramp's control view becomes
-                # the held quantity. Check its controlled-view value against the achievable range
-                # there (base check when no view law → existing paths).
+                # the held quantity. The ramp was AUTHORED once, at the sweep width in effect when it
+                # starts (the ramp editor folds its From/To in the controlled view at THAT --bw), so
+                # each point's intended controlled-view value (the density the operator drew) is
+                # base + view_delta(authoring --bw) — CONSTANT across the ramp, not re-derived at each
+                # point's fire-time --bw. Capture the authoring delta at the ramp's first (earliest-
+                # firing) point, which fires at the start width, and hold it; then _clamp folds the
+                # achievable range at each point's own fire-time --bw, so a mid-ramp --bw change makes
+                # the later points clamp (the temporal case, Issue 1). Using the fire-time delta here
+                # would cancel against _clamp's own +view_delta shift and never flag anything, because
+                # the base range is bandwidth-invariant.
                 active[0] = _law_for_view(p.get("power_view"))
-                dval = float(p["val"]) + _view_delta(eval_state)
+                if p["uid"] not in ramp_auth_vd:
+                    ramp_auth_vd[p["uid"]] = _view_delta(eval_state)
+                dval = float(p["val"]) + ramp_auth_vd[p["uid"]]
                 viol = _clamp(dval, eval_state)
                 if viol:
                     direction, bound, freq_hz = viol
-                    hits[p["uid"]].append((p["i"], p["val"], _fire_s, direction, bound, freq_hz,
+                    hits[p["uid"]].append((p["i"], dval, _fire_s, direction, bound, freq_hz,
                                            p["n"]))
                     meta[p["uid"]] = {"param": p["param"] or power_dest}
-                # keep the held-power state in step with the ramp's last value, so a later freq/param
-                # event re-checks it correctly (a tune-mode ramp point sets --power directly).
+                # keep the held-power state in step with the ramp's last value (its intended
+                # controlled-view value at the authoring width), so a later freq/param event re-checks
+                # the standing density correctly (a tune-mode ramp point sets --power directly).
                 if not p["run_mode"]:
-                    held_view = _view_value_of(state)
+                    held_view = float(p["val"]) + ramp_auth_vd[p["uid"]]
                     held_flagged = bool(_clamp(held_view, state))
                 continue
             # Two temporal checks, split on whether THIS event commands --power itself:

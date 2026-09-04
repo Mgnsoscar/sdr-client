@@ -173,6 +173,10 @@ class RampEditorDialog(QDialog):
         self._has_dur = bool(_sequence_tasks(self._editor))
         self._run_mode = ((getattr(self._src, "ramp", None) or {}).get("mode") == "run"
                           or not self._has_dur)
+        # The --power quantity the ramp is authored in (a CAL_POWER_LAWS view id, or None for the
+        # signal's base/measured quantity). Seeded from the saved ramp; the "Set power in" picker
+        # lets the operator switch it, exactly like the Run/Tune power card's "Control in this →".
+        self._power_view = getattr(self._src, "power_view", None)
         self._ready = False   # suppress preview callbacks until every widget exists
 
         self.setWindowTitle("New ramp" if new else "Edit ramp")
@@ -217,6 +221,15 @@ class RampEditorDialog(QDialog):
 
         self._param = Dropdown()
         form.addRow("Parameter", self._param)
+
+        # Which quantity to author a calibrated --power ramp in (spectral density / total power /
+        # dBm-per-Hz …) — the ramp analogue of the Run/Tune power card's "Control in this →". Shown
+        # only when the swept parameter is the calibrated --power field AND the signal offers more
+        # than one view; the From/To range re-folds + relabels into the chosen quantity.
+        self._power_unit = Dropdown()
+        self._power_unit_lbl = _row(form, "Set power in", self._power_unit)
+        self._power_unit_lbl.setVisible(False)
+        self._power_unit.setVisible(False)
 
         # From/To render as bounded numeric fields (spinbox + range rail + limit chip) —
         # the same widget the parameter form uses — rebuilt for the swept parameter so its
@@ -349,6 +362,7 @@ class RampEditorDialog(QDialog):
         self._run_chk.toggled.connect(self._sync_target_mode)
         self._task.currentTextChanged.connect(lambda t: self._select_task(t))
         self._param.currentTextChanged.connect(lambda _t: self._on_param_changed())
+        self._power_unit.currentIndexChanged.connect(self._on_power_view_changed)
         for w in (self._steps, self._step, self._hold, self._duration):
             w.textChanged.connect(self._update_preview)
         self._inc_first.toggled.connect(self._update_preview)
@@ -507,29 +521,101 @@ class RampEditorDialog(QDialog):
             return None
         return fold_params_from_values(artifact, self._all_params, self._op_state(task))
 
-    def _control_view(self):
-        """The CONTROLLED --power view the ramp authors in — the leading ``restates_measurement``
-        law from the script's CAL_POWER_LAWS (a chirp's live spectral density), or None when
-        --power is authored in the base/measured quantity. Mirrors ``ParamForm._power_views``'
-        drop-base rule: a restatement law stands in only when the reported reading is the measured
-        base (a declared reported axis is the operator's chosen quantity and is never dropped)."""
+    def _power_views(self) -> List[dict]:
+        """Selectable --power unit views for a calibrated ramp — the base (embedded reported)
+        quantity plus each declared CAL_POWER_LAW that reads DIFFERENTLY, with the SAME drop-base
+        rule as ``ParamForm._power_views``: a ``restates_measurement`` law re-expresses the raw
+        measured reading, so that measured base is dropped and the restatement stands in (a declared
+        reported axis is the operator's chosen quantity and is never dropped). Empty unless the
+        signal declares ≥1 differing law. Each view: ``{id, name, unit, law}`` (``law`` None for
+        the base). Powers the "Set power in" picker AND the fold — ``_selected_view`` chooses one."""
         laws = (getattr(self._editor, "_script_power_laws", None) or {}).get(
             self._current_script) or []
+        if not laws:
+            return []
         task = self._task.currentText().strip()
         getter = getattr(self._editor, "cal_bounds_for_task", None)
         art = ((getter(task) if getter is not None else None) or {}).get("artifact") or {}
         rep = (art.get("readings") or {}).get("reported") or {}
-        if rep.get("kind") == "law":
-            return None
+        base_law_id = (rep.get("law") or {}).get("id") if rep.get("kind") == "law" else None
+        base_unit = (art.get("operating_unit") or "").strip() or "dBm"
+        base_name = art.get("quantity") or (rep.get("law") or {}).get("name") or "power"
+        base_view = {"id": None, "name": base_name, "unit": base_unit, "law": None}
+        law_views: List[dict] = []
+        drop_base = False
         for spec in laws:
-            if isinstance(spec, dict) and spec.get("restates_measurement"):
-                try:
-                    law = parse_law(spec)
-                except (ValueError, TypeError):
-                    continue
-                unit = str(spec.get("unit") or ("dBm" if law.out_fam == "abs" else "dBm/MHz"))
-                return {"id": law.id, "unit": unit, "law": law}
-        return None
+            if not isinstance(spec, dict):
+                continue
+            try:
+                law = parse_law(spec)
+            except (ValueError, TypeError):
+                continue
+            if law.id == base_law_id:
+                continue
+            unit = str(spec.get("unit") or ("dBm" if law.out_fam == "abs" else "dBm/MHz"))
+            law_views.append({"id": law.id, "name": spec.get("name", law.id),
+                              "unit": unit, "law": law})
+            if spec.get("restates_measurement"):
+                drop_base = True
+        if not law_views:
+            return []
+        if drop_base and base_law_id is None:   # only the RAW measured quantity is a restatement target
+            return law_views
+        return [base_view] + law_views
+
+    def _selected_view(self) -> Optional[dict]:
+        """The view the ramp is currently authored in — the one whose id matches ``_power_view``,
+        else the first (default) view, or None when the signal offers no views."""
+        views = self._power_views()
+        if not views:
+            return None
+        return next((v for v in views if v["id"] == self._power_view), views[0])
+
+    def _control_view(self):
+        """The CONTROLLED --power view the ramp authors in (the operator's "Set power in" choice —
+        a chirp's live spectral density by default), or None when --power is authored in the
+        base/measured quantity / the signal offers no view."""
+        return self._selected_view()
+
+    def _populate_power_views(self) -> None:
+        """(Re)fill the "Set power in" picker for the currently-swept parameter and show it only
+        when that parameter is the calibrated --power field and the signal offers ≥2 views. Keeps
+        the current selection valid (falls back to the default view). Signals are blocked so
+        repopulating never spuriously re-folds; the caller rebuilds the From/To fields afterwards."""
+        spec = self._ramped_spec()
+        views = self._power_views() if (spec and find_power_index([spec]) is not None) else []
+        show = len(views) >= 2
+        self._power_unit_lbl.setVisible(show)
+        self._power_unit.setVisible(show)
+        self._power_unit.blockSignals(True)
+        self._power_unit.clear()
+        for v in views:
+            unit = (v.get("unit") or "dBm").strip()
+            name = (v.get("name") or "").strip()
+            label = f"{name} [{unit}]" if name and name.lower() != "power" else unit
+            self._power_unit.addItem(label, v["id"])
+        if views:
+            idx = next((i for i, v in enumerate(views) if v["id"] == self._power_view), 0)
+            self._power_unit.setCurrentIndex(idx)
+            self._power_view = views[idx]["id"]   # snap a stale/absent selection to the default
+        self._power_unit.blockSignals(False)
+
+    def _on_power_view_changed(self, *_) -> None:
+        """The operator picked a different --power quantity: convert the current From/To through the
+        base quantity into the new view (hold the same physical power, re-expressed — like the card's
+        "Control in this →"), then rebuild the range/unit and re-preview."""
+        if not self._ready:
+            return
+        old_off = self._ramp_view_offset()
+        cur_start, cur_stop = self._val(self._start_field), self._val(self._stop_field)
+        self._power_view = self._power_unit.currentData()
+        delta = self._ramp_view_offset() - old_off   # base is unchanged; the display shifts by Δoffset
+        self._rebuild_value_fields()                 # new view's shifted range + unit
+        if isinstance(cur_start, (int, float)) and isinstance(self._start_field, BoundedNumberField):
+            self._start_field.setValue(cur_start + delta)
+        if isinstance(cur_stop, (int, float)) and isinstance(self._stop_field, BoundedNumberField):
+            self._stop_field.setValue(cur_stop + delta)
+        self._update_preview()
 
     def _view_offset(self, task: str, view: Optional[dict]) -> float:
         """dB the control ``view`` adds over the base --power quantity at the ramp's carried
@@ -567,6 +653,7 @@ class RampEditorDialog(QDialog):
 
     def _on_param_changed(self) -> None:
         self._rebuild_run_form()      # the ramped param leaves the fixed-value form
+        self._populate_power_views()  # the picker only applies to the calibrated --power field
         self._rebuild_value_fields()  # From/To take the new parameter's range/unit
         self._update_preview()
 
@@ -671,6 +758,7 @@ class RampEditorDialog(QDialog):
             self._param.setCurrentText(want)
         self._param.blockSignals(False)
         self._rebuild_run_form()
+        self._populate_power_views()   # the swept param's --power views (before the fold reads them)
         self._rebuild_value_fields()   # now the swept param's real range/unit is known
         self._update_preview()
 
@@ -739,8 +827,12 @@ class RampEditorDialog(QDialog):
         params = self._op_params(task)
         view = self._control_view()
         view_off = self._view_offset(task, view) if view is not None else 0.0
+        view_law = (view or {}).get("law")
         note = "Calibrated for this unit"
-        if view is not None:
+        if view_law is not None and view_law.params():
+            # A bandwidth-keyed view (a chirp's live spectral density): the displayed range is the
+            # live density at the carried sweep width. A view with no keyed param (total power) or
+            # the base quantity keeps the ordinary freq/param note below.
             note = "Range at the live sweep bandwidth"
         elif fold is not None and fold.freq_dependent and isinstance(freq, (int, float)):
             note = f"Range at {freq / 1e6:.2f} MHz · moves with frequency"

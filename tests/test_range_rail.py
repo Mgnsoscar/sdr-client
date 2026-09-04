@@ -182,3 +182,53 @@ def test_power_lineedit_rail_drag_rounds_to_the_finest_step_decimals():
     _rails(f)[0].valueChanged.emit(drag)                              # a raw drag value (pre-snap)
     assert re.fullmatch(r"-?\d+\.\d{2}", w.text().replace("−", "-"))  # exactly 2 decimals, not ':g'
     assert w.text().replace("−", "-") == f"{snapped:.2f}"            # …the snapped level, rounded
+
+
+def test_power_lineedit_max_in_a_log10_view_is_selectable_not_flagged_out_of_range():
+    # Issue 3: a calibrated --power field with no default renders as a QLineEdit; controlled in a
+    # log10 spectral-density VIEW its max bound is finer than the display (−10.3903 dBm/MHz shown as
+    # −10.39). Setting the DISPLAYED max must NOT flag "over" (the rail chip/warn) or fail validate()
+    # — otherwise the operator can't select the max at all. A genuinely-over value still warns/fails.
+    # Round-1 fixed only the spinbox path; the QLineEdit --power field (no default) was still bitten.
+    from PyQt6.QtWidgets import QLineEdit
+    psd = {"id": "psd_live", "name": "Spectral density", "unit": "dBm/MHz", "in": "density",
+           "out": "density", "param": "bw", "coeff": -10.0, "ref": 10.0, "rep": 10.0,
+           "restates_measurement": True}
+    fbw = {"id": "fbw_power", "name": "Full-bandwidth (total) power", "unit": "dBm", "in": "density",
+           "out": "abs", "k": 10.0, "rep": 10.0}
+    art = {"anchor_curve": [[0.0, -26.76], [70.0, -7.38]], "min_gain_db": 0.0, "max_gain_db": 70.0,
+           "gain_ceiling_db": 70.0, "gain_step_db": 0.25, "operating_unit": "dBm/MHz",
+           "min_power_dbm": -26.76, "max_power_dbm": -7.38,
+           "readings": {"reported": {"kind": "same"},
+                        "limiting": {"kind": "law",
+                                     "law": {"id": "fbw_power", "name": "fbw", "in": "density",
+                                             "out": "abs", "k": 10.0}, "max_dbm": 50.0},
+                        "reported_delta_db": 0.0, "limiting_delta_db": 10.0},
+           "center_freq_hz": 1.57542e9}
+    bounds = {"min_power_dbm": -26.76, "max_power_dbm": -7.38, "quantity": "spectral density",
+              "operating_plane": "sdr_output", "artifact": art}
+    specs = [{"dest": "power", "flags": ["-Power", "--power"], "type": "float", "unit": "dBm",
+              "snap_role": "power"},                                       # NO default → QLineEdit
+             {"dest": "bw", "flags": ["--bw"], "type": "float", "unit": "MHz", "default": 20.0}]
+    f = ParamForm()
+    f.set_params(specs, cal_bounds=bounds, power_laws=[psd, fbw], cal_freq_param=None)
+    f.set_power_view("psd_live")                                           # control in live density
+    _app.processEvents()
+    w, wspec = f._widgets["power"]
+    assert isinstance(w, QLineEdit)                                        # QLineEdit (no default)
+    pmax = wspec.get("max")
+    assert round(pmax, 2) != pmax                                          # bound finer than display
+
+    def amber():
+        return any("clamped down" in lb.text() and not lb.isHidden()
+                   for lb in f.findChildren(QLabel))
+
+    w.setText(f"{pmax:.2f}")                                               # the DISPLAYED max, −10.39
+    _app.processEvents()
+    assert not amber()                                                     # not falsely flagged over
+    assert f.validate() is None                                           # …and the save is accepted
+
+    w.setText("-9.0")                                                      # genuinely above the max
+    _app.processEvents()
+    assert amber()                                                        # a real overage still warns
+    assert f.validate() is not None                                       # …and still blocks the save

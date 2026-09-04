@@ -1449,12 +1449,19 @@ class ParamForm(QWidget):
                 else:
                     widget.setText(f"{value:g}")
 
-        # Tolerate the field's own display rounding: a spinbox reads its value back rounded to its
-        # decimals, so a bound with finer precision than the display (a --power view shifted by a
-        # log10 view_delta, e.g. a −10.2503 dBm/MHz max shown as −10.25) would flag a value AT the
-        # max as "over" and stop the operator selecting it. Half the display step is below the
-        # device resolution, so a value within it of a bound is treated as ON the bound.
-        tol = 0.5 * 10.0 ** (-widget.decimals()) if isinstance(widget, QDoubleSpinBox) else 1e-9
+        # Tolerate the field's own display rounding: a field reads its value back rounded to its
+        # displayed decimals, so a bound with finer precision than the display (a --power view
+        # shifted by a log10 view_delta, e.g. a −10.3903 dBm/MHz max shown as −10.39) would flag a
+        # value AT the max as "over" and stop the operator selecting it. Half the display step is
+        # below the device resolution, so a value within it of a bound is treated as ON the bound.
+        # A calibrated --power field with no default renders as a QLineEdit (not a spinbox), so it
+        # needs the SAME tolerance, keyed on the power display decimals (_power_decimals).
+        if isinstance(widget, QDoubleSpinBox):
+            tol = 0.5 * 10.0 ** (-widget.decimals())
+        elif isinstance(widget, QLineEdit) and spec.get("snap_role") == "power":
+            tol = 0.5 * 10.0 ** (-self._power_decimals())
+        else:
+            tol = 1e-9
 
         def update(*_):
             v = read()
@@ -2497,7 +2504,13 @@ class ParamForm(QWidget):
                     bad_type.append(f"{flag} ({spec['type']})")
                     continue
                 lo, hi = spec.get("min"), spec.get("max")
-                if (lo is not None and num < lo) or (hi is not None and num > hi):
+                # Tolerate the field's display rounding on a calibrated --power field: shifted into a
+                # log10 view its bound is finer than the shown decimals (a −10.3903 dBm/MHz max shown
+                # as −10.39), so the displayed max must not read as out of range and block the save.
+                # Half a display step is below the device resolution (mirrors _wire_rail / _on_change).
+                rtol = (0.5 * 10.0 ** (-self._power_decimals())
+                        if spec.get("snap_role") == "power" else 0.0)
+                if (lo is not None and num < lo - rtol) or (hi is not None and num > hi + rtol):
                     unit = f" {spec['unit']}" if spec.get("unit") else ""
                     bad_range.append(f"{flag} (allowed {range_hint(spec)}{unit})")
         if missing:

@@ -466,6 +466,51 @@ Work items:
   tracks the bw; field displays view / snaps in base; save stores base + records the view; save→load
   round-trips the density).
 
+**Owner testing fixes (round 2) — ✅ DONE (branch `claude/temporal-power-warnings-fixes-je1r9b`).**
+Three bugs from testing the hold-live-density feature (screenshots in the owner's issues doc):
+
+1. **A density RAMP whose top points go undeliverable after a LATER `--bw` widen was NOT warned.**
+   A ramp −16.24 → −7.38 dBm/MHz (the bw-10 max) plus a later "Sweep bw = 20" tune: the top points
+   can't hold their density at bw 20 (max ≈ −10.39), but the banner stayed silent unless the tune
+   landed at one exact spot. ROOT CAUSE: the walk's `ramp_point` branch expressed each point as
+   `base + _view_delta(fire_bw)` while `_clamp` shifts the achievable range by the SAME
+   `_view_delta(fire_bw)` — the deltas CANCEL, so it only ever re-checked `base ∈ base_range`, which
+   is bandwidth-invariant (never fires). A ramp is AUTHORED once, at the sweep width carried when it
+   starts, so each point's intended controlled-view value is CONSTANT across the ramp. Fix
+   (`timeline_model.achievability_warnings`): capture the authoring view-delta at the ramp's first
+   (earliest-firing) point (`ramp_auth_vd[uid]`) and hold it; the intended density is
+   `base + view_delta(authoring_bw)`, checked against the range folded at each point's OWN fire-time
+   `--bw`. So a mid-ramp widen clamps the later points (they exceed the shrunken ceiling) while a
+   static-bw ramp stays byte-identical (authoring delta == fire delta → base check, no false
+   positives), and the no-view path is unchanged (delta 0). The reported/held levels are the intended
+   densities. Tests: `tests/test_achievability_view_fold.py` (top points clamp after a mid-ramp widen;
+   silent without it; authored-at-wide-sweep silent; ramp top matches a directly-set density).
+2. **The ramp step editor didn't let you author `--power` in the other quantities.** It locked the
+   ramp to the leading `restates_measurement` view (live density); you couldn't ramp in total power
+   or dBm/Hz. Fix (`ui/ramp_editor.py`): a "Set power in" picker — the ramp analogue of the Run/Tune
+   card's "Control in this →". `_power_views()` mirrors `ParamForm._power_views` (base + each declared
+   law, same drop-base rule); `_selected_view`/`_power_view` back `_control_view()`; `_populate_power_
+   views()` fills + shows the picker only for the calibrated `--power` field with ≥2 views;
+   `_on_power_view_changed()` converts the current From/To through the base into the newly-chosen view
+   (hold the same physical power, re-expressed) and re-folds/relabels. The STORED ramp stays BASE and
+   `power_view` records the chosen view (already wired via `_control_view`). Tests:
+   `tests/test_ramp_view_fold.py` (picker lists every view + defaults to density; hidden for a
+   non-power param; switching relabels + converts; save stores base + records the view; reopen selects
+   the saved view).
+3. **The max density still couldn't be selected (rounding).** A calibrated `--power` field with NO
+   default renders as a **QLineEdit** (not a spinbox — the real chirp `--power` has no `step`), and its
+   view-shifted max is finer than the display (−10.3903 dBm/MHz shown as −10.39). Round 1 added the
+   half-display-step tolerance only to the `QDoubleSpinBox` paths, so the QLineEdit `--power` field
+   still (a) showed the amber "Above the maximum…" (the `_wire_rail` over-check used `1e-9` for a
+   QLineEdit) and (b) FAILED `validate()` with a red "out of range: -Power (allowed …−10.3903)" that
+   blocked the save. Fix (`ui/param_form.py`): `_wire_rail` uses `0.5·10^-_power_decimals()` for a
+   QLineEdit power field too, and `ParamForm.validate()` tolerates the same half display step when
+   range-checking a `snap_role="power"` field. The displayed max is now selectable and saves; a
+   genuinely-over value still warns and still fails validation. Tests: `tests/test_range_rail.py`
+   (`…_max_in_a_log10_view_is_selectable_not_flagged_out_of_range`).
+
+Client-only; no agent/scripts/capability/version change; drift-guarded files untouched.
+
 Note (verified): the client-precompute hold delivers exactly what the current runtime already does on
 an UNDELIVERABLE value — base clamped to `base_max`, delivering `base_max + view_delta(fire_bw)` — so
 the WARN (#1, shipped) is consistent with the hold. The hold only changes the deliverable-but-drifting
