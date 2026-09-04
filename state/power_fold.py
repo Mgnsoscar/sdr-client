@@ -46,6 +46,22 @@ def _interp(x: float, xs: list, ys: list) -> float:
     return ys[-1]
 
 
+def _interp_ex(x: float, xs: list, ys: list, mode: str) -> float:
+    """Like :func:`_interp`, but linearly EXTRAPOLATES past an endpoint at that end's
+    segment slope when ``mode`` permits the direction (``down``/``up``/``both``); ``none``
+    or empty clamps like ``_interp``. Mirrors the agent's ``calkit._interp_ex`` /
+    ``calibration._interp_extrap`` so the form shows exactly the range the unit delivers.
+    Applied ONLY to the operating anchor curve; frequency/bias/own-limit tables clamp."""
+    n = len(xs)
+    if n < 2 or not mode or mode == "none":
+        return _interp(x, xs, ys)
+    if x < xs[0] and mode in ("down", "both"):
+        return ys[0] + (ys[1] - ys[0]) / (xs[1] - xs[0]) * (x - xs[0])
+    if x > xs[-1] and mode in ("up", "both"):
+        return ys[-1] + (ys[-1] - ys[-2]) / (xs[-1] - xs[-2]) * (x - xs[-1])
+    return _interp(x, xs, ys)
+
+
 def _table_at(freqs: list, deltas: list, freq: Optional[float]) -> float:
     """A delta table's value at ``freq``: constant if single-point; unknown frequency on a
     multi-point table falls back to its lowest-frequency value (matches calkit._table_at)."""
@@ -79,7 +95,7 @@ class PowerFold:
     def __init__(self, gains, powers, min_gain_db, ceiling_const,
                  hops=(), freq_limits=(), center_freq=None, gain_step_db=None,
                  actives=(), source_bias=(), reported=None, limiting=None,
-                 limiting_cap=None, reported_applies=False):
+                 limiting_cap=None, reported_applies=False, extrapolate="none"):
         pairs = sorted(zip((float(g) for g in gains), (float(p) for p in powers)))
         self._gains = [g for g, _ in pairs]
         self._powers = [p for _, p in pairs]
@@ -122,6 +138,10 @@ class PowerFold:
         self._limiting = limiting
         self._limiting_cap = None if limiting_cap is None else float(limiting_cap)
         self._reported_applies = bool(reported_applies and reported is not None)
+        # Extrapolation past the measured gain endpoints (docs/calibration.md §7.4): continue
+        # the operating anchor's end slope when set, matching the resolver/calkit. Applied only
+        # to the operating anchor folds; the gain is still clamped to [min_gain, ceiling].
+        self._extrapolate = str(extrapolate or "none").strip().lower()
 
     # ── the fold, at a frequency ──────────────────────────────────────────────────
     def _eff(self, freq: Optional[float]) -> Optional[float]:
@@ -185,8 +205,8 @@ class PowerFold:
             hi, lo = _active_applied(a)
             actives.append(Active(hi, lo, a["step_db"], a.get("engage_pct", 0.0), meta=a))
         grid = AchievableGrid(
-            power_for_gain=lambda g: _interp(g, self._gains, self._powers) + od + b,
-            gain_for_power=lambda p: _interp(p - od - b, self._powers, self._gains),
+            power_for_gain=lambda g: _interp_ex(g, self._gains, self._powers, self._extrapolate) + od + b,
+            gain_for_power=lambda p: _interp_ex(p - od - b, self._powers, self._gains, self._extrapolate),
             min_gain=self.min_gain_db, ceiling=self._ceiling(f, params),
             gain_step=self._gain_step, actives=actives)
         return grid, actives
@@ -238,11 +258,11 @@ class PowerFold:
             if ag is not None:                    # own (downstream) limiting curve → no bias
                 cap = min(cap, _interp(target, ap, ag))
             else:                                 # shared operating anchor = the biased source
-                cap = min(cap, _interp(target - b, self._powers, self._gains))
+                cap = min(cap, _interp_ex(target - b, self._powers, self._gains, self._extrapolate))
         # Ceiling on the operating node's LIMITING reading, at the live parameter value.
         if self._limiting_cap is not None:
             target = self._limiting_cap - self._reading_delta(self._limiting, params)
-            cap = min(cap, _interp(target - b, self._powers, self._gains))
+            cap = min(cap, _interp_ex(target - b, self._powers, self._gains, self._extrapolate))
         return cap
 
     def _snap(self, gain: float, freq: Optional[float], params: Optional[dict] = None) -> float:
@@ -261,7 +281,7 @@ class PowerFold:
                        params: Optional[dict] = None) -> float:
         f = self._eff(freq)
         g = self._snap(float(gain_db), f, params)
-        op = _interp(g, self._gains, self._powers) + self._op_delta(f) + self._source_bias_at(f)
+        op = _interp_ex(g, self._gains, self._powers, self._extrapolate) + self._op_delta(f) + self._source_bias_at(f)
         return op + self._reported_shift(params)
 
     def max_gain_db(self, freq: Optional[float] = None, params: Optional[dict] = None) -> float:
@@ -317,6 +337,7 @@ class PowerFold:
         if not isinstance(art, dict):
             return None
         step = art.get("gain_step_db")
+        extrapolate = art.get("extrapolate", "none")   # operating-curve extrapolation, if any
         actives = art.get("active_components") or ()
         reported = limiting = None
         limiting_cap = None
@@ -346,7 +367,7 @@ class PowerFold:
                        actives=actives,
                        source_bias=art.get("source_bias_delta_by_freq") or (),
                        reported=reported, limiting=limiting, limiting_cap=limiting_cap,
-                       reported_applies=True)
+                       reported_applies=True, extrapolate=extrapolate)
 
         curve = art.get("curve") or []                # v1: pre-flattened operating curve
         gains = [pt[0] for pt in curve]
@@ -354,7 +375,7 @@ class PowerFold:
         if not gains:
             return None
         return cls(gains, powers, art.get("min_gain_db"), art.get("max_gain_db"),
-                   gain_step_db=step, actives=actives)
+                   gain_step_db=step, actives=actives, extrapolate=extrapolate)
 
 
 def clamp_warning(artifact: Optional[dict], freq_hz: Optional[float],

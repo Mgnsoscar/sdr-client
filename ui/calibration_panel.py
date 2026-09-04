@@ -120,6 +120,17 @@ _LIMIT_THROUGH_READING_NEEDS_NEWER = (
     "under-applying the limit and transmitting over the ceiling. Update the agent, or set every "
     "signal's limiting to “Same as measured” before saving.")
 
+CAL_EXTRAPOLATE_CAPABILITY = "calibration-extrapolate"  # agent >= 1.14.0
+_EXTRAPOLATE_NEEDS_NEWER = (
+    "this unit's agent is too old to extrapolate a measured curve past its endpoints (needs "
+    "1.14.0+). It would clamp instead, so the unit would deliver a different power than the "
+    "range shown here for commands in the extrapolated region. Update the agent, or set every "
+    "signal's measured-curve extrapolation back to “None” before saving.")
+
+# The measured-curve extrapolation modes, and their operator-facing labels for the picker.
+_EXTRAPOLATE_LABELS = [("none", "None (clamp at measured)"), ("down", "Extend down"),
+                       ("up", "Extend up"), ("both", "Extend both ways")]
+
 # The baseband amplitude every broadcaster script transmits at is a FIXED constant (the
 # scripts' baked AMPLITUDE), not an operator control — so calibration is always measured at
 # this amplitude and the editor does not expose it as an editable field. It is recorded on
@@ -3366,6 +3377,28 @@ class CalibrationPanel(QWidget):
         rmp.clicked.connect(tbl.remove_selected)
         pts.addWidget(addp); pts.addWidget(rmp); pts.addStretch(1)
         v.addLayout(pts)
+        # Extrapolation past the measured endpoints. Default None clamps flat (safe, unchanged);
+        # Down/Up/Both continue the end-segment slope so --power can reach a gain that wasn't
+        # measured (e.g. below a noise-floor-limited low-gain point). Needs agent 1.14.0+.
+        ex = QHBoxLayout()
+        exlbl = QLabel("Extrapolate:")
+        exlbl.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_MUTED};")
+        excombo = QComboBox()
+        for val, label in _EXTRAPOLATE_LABELS:
+            excombo.addItem(label, val)
+        cur_mode = str(getattr(tbl, "_extrapolate", "none") or "none").strip().lower()
+        idx = excombo.findData(cur_mode)
+        excombo.setCurrentIndex(idx if idx >= 0 else 0)
+        excombo.setToolTip("How --power behaves past the measured gain range. None clamps at the "
+                           "measured endpoints (the safe default). Down/Up/Both continue the end "
+                           "slope so you can command power at a gain you didn't measure — the "
+                           "commanded gain is still capped by the safety ceiling. Needs agent 1.14.0+.")
+
+        def _set_extrap(_i, t=tbl, c=excombo):
+            t._extrapolate = c.currentData()
+        excombo.currentIndexChanged.connect(_set_extrap)
+        ex.addWidget(exlbl); ex.addWidget(excombo); ex.addStretch(1)
+        v.addLayout(ex)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         bb.rejected.connect(dlg.reject); bb.accepted.connect(dlg.accept)
         v.addWidget(bb)
@@ -3722,7 +3755,11 @@ class CalibrationPanel(QWidget):
         for plane in measured:
             spark = _Sparkline()
             tbl = _CurveTable(on_changed=lambda t=None, s=spark: self._on_curve_changed(s))
-            tbl.set_points(((sig.get("curves") or {}).get(plane) or {}).get("points"))
+            _cur = (sig.get("curves") or {}).get(plane) or {}
+            tbl.set_points(_cur.get("points"))
+            # Per-curve extrapolation mode (persists on the table widget across rebuilds, edited
+            # in the measured-points dialog, serialized by _read_form). Default "none".
+            tbl._extrapolate = str(_cur.get("extrapolate") or "none").strip().lower()
             spark.set_points(tbl.numeric_points())
             self._spark_src[spark] = tbl
             curves[plane] = tbl; sparks[plane] = spark
@@ -3827,6 +3864,11 @@ class CalibrationPanel(QWidget):
                 prev = ((prev_sigs.get(sid) or {}).get("curves") or {}).get(plane) or {}
                 entry = dict(prev)           # preserve unmodeled curve fields too
                 entry["points"] = pts
+                mode = str(getattr(tbl, "_extrapolate", "none") or "none").strip().lower()
+                if mode and mode != "none":  # keep the doc clean when unused (default)
+                    entry["extrapolate"] = mode
+                else:
+                    entry.pop("extrapolate", None)
                 curves[plane] = entry
             sig["curves"] = curves
             # Per-signal MEASUREMENT (quantity/unit) and LIMITING reading, from the source
@@ -3951,7 +3993,8 @@ class CalibrationPanel(QWidget):
                 or self._blocks_on_source_bias() or self._blocks_on_stage_bypass()
                 or self._blocks_on_power_bridges() or self._blocks_on_deembed()
                 or self._blocks_on_measurement_quantity()
-                or self._blocks_on_limit_through_reading()):
+                or self._blocks_on_limit_through_reading()
+                or self._blocks_on_extrapolate()):
             return False
         self._send(json.dumps(self._doc).encode("utf-8"))
         return True
@@ -4091,6 +4134,30 @@ class CalibrationPanel(QWidget):
         if (self._doc_uses_limit_through_reading(self._doc)
                 and not self._supports(CAL_LIMIT_THROUGH_READING_CAPABILITY)):
             self._set_status(_LIMIT_THROUGH_READING_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
+    @staticmethod
+    def _doc_uses_extrapolate(doc) -> bool:
+        """True when any signal's measured curve sets extrapolate to a non-``none`` mode — a
+        ≤1.13.1 agent ignores it and CLAMPS, so the range the unit delivers would be narrower
+        than the client shows (a command in the extrapolated region maps to a different power)."""
+        for s in ((doc or {}).get("signals") or {}).values():
+            if not isinstance(s, dict):
+                continue
+            for c in (s.get("curves") or {}).values():
+                v = c.get("extrapolate") if isinstance(c, dict) else None
+                if v and str(v).strip().lower() not in ("", "none"):
+                    return True
+        return False
+
+    def _blocks_on_extrapolate(self) -> bool:
+        """Guard (safety): don't push an extrapolating curve to an agent that predates it — it
+        would clamp instead, so a --power the operator authored in the extrapolated region would
+        be delivered at a different (clamped) power than the client showed."""
+        if (self._doc_uses_extrapolate(self._doc)
+                and not self._supports(CAL_EXTRAPOLATE_CAPABILITY)):
+            self._set_status(_EXTRAPOLATE_NEEDS_NEWER, kind="error")
             return True
         return False
 
