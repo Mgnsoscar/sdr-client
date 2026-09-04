@@ -277,8 +277,11 @@ class _TimelineCanvas(QWidget):
     def _run_label(self, item) -> str:
         act = getattr(item, "action", "run")
         if act == "tune":
-            # A tune point shows its parameter changes inline (no caret panel).
-            summary = ", ".join(f"{k}={v}" for k, v in (item.params or {}).items())
+            # A tune point shows its parameter changes inline (no caret panel). A calibrated --power
+            # controlled in a view (a chirp's live density) shows THAT quantity, not the raw base.
+            overrides = self._editor._pill_power_display(item)
+            summary = ", ".join(f"{k}={overrides.get(k, v)}"
+                                for k, v in (item.params or {}).items())
             base = f"◈ {item.task_name or '(no task)'}"
             return f"{base}  {summary}".strip() if summary else base
         if act == "ramp":
@@ -1827,6 +1830,43 @@ class TimelineEditor(QWidget):
             if isinstance(spec, dict) and spec.get("restates_measurement"):
                 return spec
         return None
+
+    def _pill_power_display(self, item) -> Dict[str, str]:
+        """Override text for a tune step's canvas pill: when the step controls --power in a bw-keyed
+        view (a chirp's live density), the pill shows the density the operator SET (base +
+        view_delta at the carried bw) with its unit — not the raw base it is sent in. Returns
+        ``{power_dest: 'value unit'}`` to replace that param's pill value, or ``{}`` to show the raw
+        params. Best-effort — any gap (no view, params not cached, unresolvable carried bw) falls
+        back to the raw base, so the label helper never breaks the canvas."""
+        pv = getattr(item, "power_view", None)
+        params = getattr(item, "params", None) or {}
+        task = getattr(item, "task_name", None)
+        if not pv or not task or not params:
+            return {}
+        try:
+            resolve = self._achievability_resolver()
+            info = resolve(task) if resolve else None
+            if not info:
+                return {}
+            power_dest = info.get("power_dest")
+            base = params.get(power_dest)
+            if not isinstance(base, (int, float)) or isinstance(base, bool):
+                return {}
+            spec = (info.get("view_laws") or {}).get(pv)
+            law = tlm._view_law_of(spec)
+            if law is None or not law.params():
+                return {}
+            specs = info.get("specs") or []
+            carried = tlm.sequence_effective_values(
+                self._canvas.items(), task, info.get("base_args") or [], specs,
+                getattr(item, "uid", None), target_key=tlm._carry_order_key(item))
+            from state.power_fold import resolve_keyed_values
+            keyed = resolve_keyed_values(specs, carried, law.params())
+            delta = law.delta_db(keyed) if keyed else law.rep_delta_db()
+            unit = str(spec.get("unit") or "").strip()
+            return {power_dest: f"{base + delta:.2f}{(' ' + unit) if unit else ''}"}
+        except Exception:                          # noqa: BLE001 — a label helper must never break
+            return {}
 
     def _update_achievability(self) -> None:
         """Refresh the sequence-level power-achievability warning. Best-effort: a task whose params

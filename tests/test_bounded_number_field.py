@@ -56,6 +56,21 @@ def test_power_snap_uses_the_achievable_grid():
     assert -30.0 <= f.value() <= 4.0
 
 
+def test_value_at_a_sub_display_precision_max_is_not_flagged_over():
+    # A calibrated --power view shifted by a log10 view_offset (a chirp's live density) gives a bound
+    # FINER than the display: a -10.2503 dBm/MHz max shows at 2 decimals as -10.25. The spinbox rounds
+    # its OWN maximum up to -10.25 (> the true -10.2503), so a value AT the max must NOT be flagged
+    # "clamped" — a difference below half a display step is treated as ON the bound, else the operator
+    # can't select the max (owner report: "range is (x to -10.2503), setting -10.25 doesn't work").
+    spec = {"dest": "power", "flags": ["--power"], "type": "float", "unit": "dBm/MHz",
+            "min": -30.2503, "max": -10.2503, "step": 0.01}
+    f = BoundedNumberField(spec)
+    assert f._spin.decimals() == 2
+    assert f._spin.maximum() == pytest.approx(-10.25)     # the spinbox rounds its max up
+    f.setValue(f._spin.maximum())                         # drag/type to the displayed max
+    assert f._warn is not None and not f._warn.isVisible()  # NOT falsely flagged over
+
+
 def test_unbounded_numeric_has_no_rail_but_still_reads_writes():
     f = BoundedNumberField({"dest": "x", "type": "float", "step": 0.1})
     assert f._rail is None and f._chip is None            # no min/max ⇒ no rail/limit chip

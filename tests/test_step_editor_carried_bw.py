@@ -155,6 +155,24 @@ def test_the_carried_bandwidth_limit_updates_when_the_step_moves():
     assert dlg._form._widgets["power"][0].maximum() == pytest.approx(_psd_max(20), abs=0.06)
 
 
+def test_tune_pill_shows_the_controlled_density_not_the_base():
+    # Owner report: a density tune step's canvas pill showed the raw base --power (−7.something)
+    # instead of the density the operator set. With a control view it now shows the live density at
+    # the carried bandwidth; without one it still shows the raw param.
+    ed = _editor([])
+    pstep = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=10.0,
+                        params={"power": -7.49}, power_view="psd_live")
+    ed._canvas.set_items([_bar(10), _set_bw(20, 5.0), pstep])
+    _app.processEvents()
+    lbl = ed._canvas._run_label(pstep).replace("−", "-")
+    assert "dBm/MHz" in lbl
+    assert "-10.5" in lbl                    # density -10.5 at bw 20 (base -7.49 + view_delta(20))
+    assert "-7.49" not in lbl
+    raw = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=12.0,
+                      params={"power": -7.49})
+    assert "-7.49" in ed._canvas._run_label(raw)   # no control view → raw base
+
+
 def test_the_base_quantity_stays_bandwidth_invariant():
     # Guard the premise: this artifact's fold is NOT param-dependent — the base density range is the
     # same at every --bw (the bandwidth dependence lives only in the psd_live VIEW). So the temporal

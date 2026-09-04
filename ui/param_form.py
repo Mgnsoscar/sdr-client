@@ -690,8 +690,12 @@ class BoundedNumberField(QWidget):
     def _on_change(self, *_) -> None:
         v = float(self._spin.value())
         self._rail.set_value(v)
-        over = v > self._hi + 1e-9
-        under = v < self._lo - 1e-9
+        # Tolerate the spinbox's display rounding (half its display step) so a value AT a bound with
+        # finer precision than the display — a --power view shifted by a log10 view_offset — isn't
+        # flagged over/under (see ParamForm._wire_rail). 0.5·10^-decimals is below device resolution.
+        tol = 0.5 * 10.0 ** (-self._spin.decimals()) if hasattr(self._spin, "decimals") else 1e-9
+        over = v > self._hi + tol
+        under = v < self._lo - tol
         self._chip.set_state(over=over, under=under)
         u = f" {self._spec['unit']}" if self._spec.get("unit") else ""
         if over:
@@ -1445,11 +1449,18 @@ class ParamForm(QWidget):
                 else:
                     widget.setText(f"{value:g}")
 
+        # Tolerate the field's own display rounding: a spinbox reads its value back rounded to its
+        # decimals, so a bound with finer precision than the display (a --power view shifted by a
+        # log10 view_delta, e.g. a −10.2503 dBm/MHz max shown as −10.25) would flag a value AT the
+        # max as "over" and stop the operator selecting it. Half the display step is below the
+        # device resolution, so a value within it of a bound is treated as ON the bound.
+        tol = 0.5 * 10.0 ** (-widget.decimals()) if isinstance(widget, QDoubleSpinBox) else 1e-9
+
         def update(*_):
             v = read()
             rail.set_value(v)
-            over = v is not None and v > hi + 1e-9
-            under = v is not None and v < lo - 1e-9
+            over = v is not None and v > hi + tol
+            under = v is not None and v < lo - tol
             if chip is not None:
                 chip.set_state(over=over, under=under)
             if warn is not None:

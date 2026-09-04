@@ -148,7 +148,14 @@ upstream edits propagate (idempotent). (5) **Ramp editor** authors `--power` in 
 (`BoundedNumberField(view_offset)`, `_control_view`/`_view_offset`; stores base, records `power_view`).
 No agent/scripts/capability change; drift-guarded files untouched. Tests: `test_achievability_view_fold`,
 `test_step_power_view_persistence`, `test_hold_control_quantity`, `test_ramp_view_fold`. Docs: §10.
-**Owner testing: Stage 2 "mostly works, a few minor things to fix" — TBD (list pending from owner).**
+**Owner testing fixes (round 1):** (A) **Rounding blocked the max density.** A --power view shifted by
+a log10 view_offset gives a bound finer than the display (a −7.24 base max → −10.2503 at bw 20, shown
+as −10.25); the spinbox reads its value back rounded to −10.25 which then read as ABOVE −10.2503 and
+falsely warned "clamped", so the operator couldn't select the max. Fixed by tolerating half a display
+step in the over/under checks (`ParamForm._wire_rail`, `BoundedNumberField._on_change`); tests
+`test_bounded_number_field.py`. (B) **The tune pill showed the raw base** (−7.something) not the
+controlled density. `TimelineEditor._pill_power_display` now shows a bw-keyed --power in its view (base
++ view_delta at the carried bw) with its unit; `_run_label` uses it; test `test_step_editor_carried_bw.py`.
 
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY
