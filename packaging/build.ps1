@@ -126,12 +126,26 @@ if ($SkipInstaller) {
 }
 
 function Resolve-ISCC {
+    # 1. On PATH?
     $c = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
     if ($c) { return $c.Source }
-    foreach ($base in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, $env:LOCALAPPDATA)) {
-        if (-not $base) { continue }
-        $p = Join-Path $base "Inno Setup 6\ISCC.exe"
+    # 2. Known install dirs. A per-user Inno Setup install lands under
+    #    %LOCALAPPDATA%\Programs\Inno Setup 6 (note the 'Programs' subfolder);
+    #    a machine-wide one under Program Files (x86).
+    $bases = @("$env:LOCALAPPDATA\Programs", ${env:ProgramFiles(x86)}, $env:ProgramFiles, $env:LOCALAPPDATA) |
+             Where-Object { $_ }
+    foreach ($b in $bases) {
+        $p = Join-Path $b "Inno Setup 6\ISCC.exe"
         if (Test-Path $p) { return $p }
+    }
+    # 3. Registry fallback: Inno records InstallLocation, so this finds it wherever
+    #    it was installed, whatever the version.
+    foreach ($k in @(
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1",
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1")) {
+        $loc = (Get-ItemProperty -Path $k -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation
+        if ($loc -and (Test-Path (Join-Path $loc "ISCC.exe"))) { return (Join-Path $loc "ISCC.exe") }
     }
     return $null
 }
