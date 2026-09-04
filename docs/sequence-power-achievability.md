@@ -509,6 +509,16 @@ Three bugs from testing the hold-live-density feature (screenshots in the owner'
    genuinely-over value still warns and still fails validation. Tests: `tests/test_range_rail.py`
    (`…_max_in_a_log10_view_is_selectable_not_flagged_out_of_range`).
 
+4. **The tune pill showed the raw base when controlled in FULL-BANDWIDTH (total) power.** A tune
+   step authored in total power displayed `power=<base>` on the canvas pill instead of the total
+   power the operator set. Round-1's `_pill_power_display` (`ui/timeline_editor.py`) only handled a
+   bw-KEYED view (density) — it bailed on `not law.params()`, and the total-power law (`fbw_power`)
+   is a CONSTANT-offset law with no bridge param. Fix: a param-less view now uses the law's own
+   (representative) delta, so the pill shows `base + delta` with the view unit (total power ≈
+   base + 10 dB, bandwidth-invariant); the bw-keyed density/`dBm/Hz` paths are unchanged and a step
+   with no `power_view` still shows the raw base. Tests: `tests/test_step_editor_carried_bw.py`
+   (`…_shows_total_power_when_controlled_in_full_bandwidth_power`).
+
 Client-only; no agent/scripts/capability/version change; drift-guarded files untouched.
 
 Note (verified): the client-precompute hold delivers exactly what the current runtime already does on

@@ -1832,12 +1832,13 @@ class TimelineEditor(QWidget):
         return None
 
     def _pill_power_display(self, item) -> Dict[str, str]:
-        """Override text for a tune step's canvas pill: when the step controls --power in a bw-keyed
-        view (a chirp's live density), the pill shows the density the operator SET (base +
-        view_delta at the carried bw) with its unit — not the raw base it is sent in. Returns
-        ``{power_dest: 'value unit'}`` to replace that param's pill value, or ``{}`` to show the raw
-        params. Best-effort — any gap (no view, params not cached, unresolvable carried bw) falls
-        back to the raw base, so the label helper never breaks the canvas."""
+        """Override text for a tune step's canvas pill: when the step controls --power in a non-base
+        view, the pill shows the quantity the operator SET (base + view_delta) with its unit — not the
+        raw base it is sent in. Covers a bw-KEYED view (a chirp's live density → base + view_delta at
+        the carried bw) AND a CONSTANT-offset view (full-bandwidth total power → base + a fixed delta,
+        no bridge param). Returns ``{power_dest: 'value unit'}`` to replace that param's pill value, or
+        ``{}`` to show the raw params. Best-effort — any gap (no view, params not cached, unresolvable
+        carried bw) falls back to the raw base, so the label helper never breaks the canvas."""
         pv = getattr(item, "power_view", None)
         params = getattr(item, "params", None) or {}
         task = getattr(item, "task_name", None)
@@ -1854,15 +1855,21 @@ class TimelineEditor(QWidget):
                 return {}
             spec = (info.get("view_laws") or {}).get(pv)
             law = tlm._view_law_of(spec)
-            if law is None or not law.params():
+            if law is None:
                 return {}
-            specs = info.get("specs") or []
-            carried = tlm.sequence_effective_values(
-                self._canvas.items(), task, info.get("base_args") or [], specs,
-                getattr(item, "uid", None), target_key=tlm._carry_order_key(item))
-            from state.power_fold import resolve_keyed_values
-            keyed = resolve_keyed_values(specs, carried, law.params())
-            delta = law.delta_db(keyed) if keyed else law.rep_delta_db()
+            # A bw-keyed view (density) folds its delta through the carried bridge params; a
+            # constant-offset view (total power) has none and uses the law's own (representative)
+            # delta — either way the pill shows what the operator set, not the base.
+            if law.params():
+                specs = info.get("specs") or []
+                carried = tlm.sequence_effective_values(
+                    self._canvas.items(), task, info.get("base_args") or [], specs,
+                    getattr(item, "uid", None), target_key=tlm._carry_order_key(item))
+                from state.power_fold import resolve_keyed_values
+                keyed = resolve_keyed_values(specs, carried, law.params())
+                delta = law.delta_db(keyed) if keyed else law.rep_delta_db()
+            else:
+                delta = law.rep_delta_db()
             unit = str(spec.get("unit") or "").strip()
             return {power_dest: f"{base + delta:.2f}{(' ' + unit) if unit else ''}"}
         except Exception:                          # noqa: BLE001 — a label helper must never break

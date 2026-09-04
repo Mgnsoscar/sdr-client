@@ -173,6 +173,26 @@ def test_tune_pill_shows_the_controlled_density_not_the_base():
     assert "-7.49" in ed._canvas._run_label(raw)   # no control view → raw base
 
 
+def test_tune_pill_shows_total_power_when_controlled_in_full_bandwidth_power():
+    # Owner report: a tune step authored in FULL-BANDWIDTH (total) power showed the raw base
+    # --power in the pill, not the total power. The total-power view (fbw_power) is a CONSTANT-offset
+    # law (no bridge param), which the density-only pill path skipped. It now shows base + the law's
+    # delta with its unit — total power ≈ base + 10 dB, bandwidth-invariant.
+    ed = _editor([])
+    pstep = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=10.0,
+                        params={"power": -12.74}, power_view="fbw_power")
+    ed._canvas.set_items([_bar(10), pstep])
+    _app.processEvents()
+    lbl = ed._canvas._run_label(pstep).replace("−", "-")
+    assert "dBm" in lbl and "dBm/" not in lbl      # total power in plain dBm, not a density unit
+    assert "-2.74" in lbl                          # base -12.74 + fbw delta (+10) = -2.74 dBm
+    assert "-12.74" not in lbl
+    # bandwidth-invariant: the same total power reads the same after a later widen.
+    ed._canvas.set_items([_bar(10), _set_bw(20, 5.0), pstep])
+    _app.processEvents()
+    assert "-2.74" in ed._canvas._run_label(pstep).replace("−", "-")
+
+
 def test_the_base_quantity_stays_bandwidth_invariant():
     # Guard the premise: this artifact's fold is NOT param-dependent — the base density range is the
     # same at every --bw (the bandwidth dependence lives only in the psd_live VIEW). So the temporal

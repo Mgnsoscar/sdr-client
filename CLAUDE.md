@@ -176,6 +176,12 @@ AND failed `validate()` ("out of range"), blocking the save. `_wire_rail` now ap
 `0.5·10^-_power_decimals()` tolerance to a QLineEdit power field, and `ParamForm.validate()` tolerates it
 when range-checking a `snap_role="power"` field. A genuine overage still warns/blocks. Tests:
 `test_range_rail.py`. No agent/scripts/capability/version change; drift-guarded files untouched.
+(4) **The tune pill showed the raw base for a FULL-BANDWIDTH-power step.** `_pill_power_display`
+(`ui/timeline_editor.py`) only rendered a bw-KEYED view (density) and bailed on `not law.params()`,
+so a total-power step (`fbw_power`, a constant-offset law) showed `power=<base>` on the canvas pill.
+A param-less view now uses the law's representative delta → the pill shows total power (base + ~10 dB,
+bw-invariant) with its unit; density/`dBm/Hz` unchanged, no-view still raw. Test:
+`test_step_editor_carried_bw.py`.
 
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY
