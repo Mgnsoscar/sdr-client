@@ -27,9 +27,11 @@ import time
 from pathlib import Path
 from typing import Dict, Optional
 
+from paths import data_file
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_CACHE_FILE = Path(__file__).resolve().parent.parent / "address_cache.json"
+DEFAULT_CACHE_FILE = data_file("address_cache.json")
 
 # Ignore entries older than this — a unit not seen in a month has very likely moved.
 MAX_AGE_S = 30 * 24 * 3600

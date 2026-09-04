@@ -13,8 +13,10 @@ from __future__ import annotations
 import logging
 import sys
 
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
+import paths
 from api import AgentClient, Fleet
 from config import ClientConfig
 from state import LibraryStore, LibraryClient
@@ -58,10 +60,17 @@ def migrate_plan_refs(cfg: ClientConfig) -> None:
 
 
 def main() -> int:
+    # Seed a starter units.yaml into the per-user data dir on first run of a
+    # frozen build (a no-op running from source). Best-effort — see paths.py.
+    paths.seed_defaults()
+
     cfg = ClientConfig.load()
 
     app = QApplication(sys.argv)
     app.setApplicationName("SDR Broadcaster Control")
+    _icon = paths.resource_dir() / "ui" / "assets" / "app.ico"
+    if _icon.exists():
+        app.setWindowIcon(QIcon(str(_icon)))   # window + taskbar (frozen and source)
     apply_theme(app)
     # Commit any focused input when the user clicks outside it (app-wide).
     app.installEventFilter(ClickFocusFilter(app))

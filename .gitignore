@@ -226,3 +226,11 @@ calibration_cache.json
 
 # Local ComponentCatalog store (per-machine, not project state)
 components.json
+
+# Agent OTA bundles staged for a packaging build (binary; not committed)
+bundles/*.tar.gz
+bundles/*.tgz
+
+# Packaging build outputs
+.venv-build/
+packaging/Output/

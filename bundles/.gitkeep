@@ -1,0 +1,5 @@
+# Drop the agent OTA bundle here before a packaging build, for the
+# "Provision unit…" feature:  sdr-agent-<version>.tar.gz
+# (produced by sdr-agent/deploy/build_bundle.sh). The PyInstaller spec collects
+# bundles/sdr-agent-*.tar.gz into the frozen app. The tarballs themselves are
+# gitignored (binary, versioned out-of-band); this file just keeps the dir.

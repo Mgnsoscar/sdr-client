@@ -21,10 +21,11 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from api import models as m
+from paths import data_file
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LIBRARY_FILE = Path(__file__).resolve().parent.parent / "library.json"
+DEFAULT_LIBRARY_FILE = data_file("library.json")
 
 
 def _script_of_command(command: List[str]) -> str:
