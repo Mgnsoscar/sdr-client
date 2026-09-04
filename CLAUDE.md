@@ -182,6 +182,12 @@ so a total-power step (`fbw_power`, a constant-offset law) showed `power=<base>`
 A param-less view now uses the law's representative delta → the pill shows total power (base + ~10 dB,
 bw-invariant) with its unit; density/`dBm/Hz` unchanged, no-view still raw. Test:
 `test_step_editor_carried_bw.py`.
+(5) **The ramp editor's per-step listing was a cramped box with its own scrollbar** (one line at a
+time). The whole ramp dialog body is now wrapped in ONE `QScrollArea` (buttons pinned below), and the
+listing is a `QLabel` (`ui/ramp_editor.py` `_build`, `_refresh_steps_view`) that expands to its full
+height inside that shared scroll — so a long ramp shows every step and the dialog scrolls as a whole.
+The dialog is capped to ~90% of screen height so the scroll engages when the body is tall. Test:
+`test_ramp_view_fold.py` (`…_step_listing_shares_the_form_scroll_and_expands`).
 
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY

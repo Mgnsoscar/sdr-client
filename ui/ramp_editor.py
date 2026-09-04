@@ -22,10 +22,11 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from api import ramp as _ramp
@@ -194,7 +195,15 @@ class RampEditorDialog(QDialog):
         from .dialog_style import editor_qss
         from .param_widgets import Dropdown
         self.setStyleSheet(editor_qss())
-        outer = QVBoxLayout(self)
+        # One scroll environment for the whole form: the fields, the run-mode params, the preview
+        # AND the per-step listing all live in a single scrollable body, so a long step list scrolls
+        # with everything else instead of being trapped in its own tiny box. The button row is pinned
+        # beneath the scroll (assembled after the body is populated).
+        dlg_lay = QVBoxLayout(self)
+        dlg_lay.setContentsMargins(0, 0, 0, 0)
+        dlg_lay.setSpacing(0)
+        body = QWidget()
+        outer = QVBoxLayout(body)
         outer.setContentsMargins(16, 16, 16, 12)
         outer.setSpacing(10)
         form = QFormLayout()
@@ -339,12 +348,25 @@ class RampEditorDialog(QDialog):
             f"QPushButton {{ text-align: left; color: {Palette.ACCENT}; border: none; }}")
         self._steps_btn.toggled.connect(self._toggle_steps)
         outer.addWidget(self._steps_btn)
-        self._steps_view = QPlainTextEdit()
-        self._steps_view.setReadOnly(True)
+        # A QLabel (not a fixed-height text box with its OWN scrollbar) so the listing expands to its
+        # full height inside the shared scroll — the operator sees every step, not one line at a time.
+        self._steps_view = QLabel("")
         self._steps_view.setFont(QFont("monospace"))
-        self._steps_view.setFixedHeight(140)
+        self._steps_view.setTextFormat(Qt.TextFormat.PlainText)      # \n are line breaks, content literal
+        self._steps_view.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._steps_view.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._steps_view.setStyleSheet(
+            f"QLabel {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER}; "
+            f"border-radius: 8px; padding: 8px; font-size: 11px; }}")
         self._steps_view.setVisible(False)
         outer.addWidget(self._steps_view)
+
+        # The scrollable body holds everything above; assemble it, then pin the button row beneath.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(body)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        dlg_lay.addWidget(scroll, 1)
 
         buttons = QDialogButtonBox()
         if not self._new:
@@ -356,7 +378,11 @@ class RampEditorDialog(QDialog):
         ok_btn.setDefault(True)                  # accent primary
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
-        outer.addWidget(buttons)
+        btn_row = QWidget()
+        btn_lay = QHBoxLayout(btn_row)
+        btn_lay.setContentsMargins(16, 8, 16, 12)
+        btn_lay.addWidget(buttons)
+        dlg_lay.addWidget(btn_row)
 
         # Now everything exists — wire the change signals.
         self._run_chk.toggled.connect(self._sync_target_mode)
@@ -379,6 +405,12 @@ class RampEditorDialog(QDialog):
         self._rebuild_value_fields()   # From/To fields (fallback until params load)
         self._apply_mode_visibility()
         self._sync_anchor()   # populate modes + show/hide rows + preview
+        # Cap the dialog to the available screen so the shared scroll engages when the body (a long
+        # step list, run-mode params) is taller than the screen — otherwise the dialog would grow off
+        # the bottom, hiding the buttons with no way to scroll to them.
+        scr = QApplication.primaryScreen()
+        if scr is not None and scr.availableGeometry().height() > 240:
+            self.setMaximumHeight(int(scr.availableGeometry().height() * 0.9))
 
     # ── Target (tune vs run) wiring ──────────────────────────────────────────
 
@@ -930,7 +962,7 @@ class RampEditorDialog(QDialog):
         except (ValueError, TypeError) as exc:
             lines.append("⚠ " + str(exc))
             self._set_preview("\n".join(lines), error=True)
-            self._steps_view.setPlainText("")
+            self._steps_view.setText("")
             return
         step = abs(res.values[1] - res.values[0]) if len(res.values) > 1 else 0
         dropped = [w for w, on in (("first", self._inc_first.isChecked()),
@@ -964,7 +996,7 @@ class RampEditorDialog(QDialog):
         if not self._steps_view.isVisible():
             return
         if spec.get("start") is None or spec.get("stop") is None:
-            self._steps_view.setPlainText("")
+            self._steps_view.setText("")
             return
         unit = self._param_unit()
         u = f" {unit}" if unit else ""
@@ -973,7 +1005,7 @@ class RampEditorDialog(QDialog):
                 # steps or step fix the value sequence regardless of the window; a
                 # hold-only ramp's point count depends on the (scheduled) window.
                 if spec.get("steps") is None and spec.get("step") is None:
-                    self._steps_view.setPlainText(
+                    self._steps_view.setText(
                         "Hold-time ramp: the number of points depends on the on-air\n"
                         "window, resolved when the sequence is scheduled.")
                     return
@@ -982,7 +1014,7 @@ class RampEditorDialog(QDialog):
                 lines = ["   #   value      (times set by the schedule window)"]
                 for i, v in enumerate(res.values):
                     lines.append(f"  {i:>3}   {fmt_value(_clean(v))}{u}")
-                self._steps_view.setPlainText("\n".join(lines))
+                self._steps_view.setText("\n".join(lines))
                 return
             res = _ramp.resolve_ramp(spec["start"], spec["stop"], steps=spec.get("steps"),
                                      step=spec.get("step"), hold_s=spec.get("hold_s"),
@@ -990,7 +1022,7 @@ class RampEditorDialog(QDialog):
                                      include_first=spec.get("include_first", True),
                                      include_last=spec.get("include_last", True))
         except (ValueError, TypeError) as exc:
-            self._steps_view.setPlainText(str(exc))
+            self._steps_view.setText(str(exc))
             return
         anchor = self._anchor.currentData()
         fires = _ramp.place_ramp(anchor, float(self._offset.value()), res)
@@ -998,7 +1030,7 @@ class RampEditorDialog(QDialog):
         for i, (fa, foff, v) in enumerate(fires):
             tag = "T0" if fa == "start" else "off"
             lines.append(f"{i:>3}  {tag + _off(foff):>9}   {fmt_value(_clean(v))}{u}")
-        self._steps_view.setPlainText("\n".join(lines))
+        self._steps_view.setText("\n".join(lines))
 
     # ── Accept ───────────────────────────────────────────────────────────────
 

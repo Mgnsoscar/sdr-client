@@ -195,6 +195,21 @@ def test_saving_in_a_switched_view_stores_base_and_records_that_view():
     assert dlg.result_item.ramp["stop"] == pytest.approx(-18.0 - off, abs=0.06)
 
 
+def test_step_listing_shares_the_form_scroll_and_expands():
+    # The per-step listing must live in the SAME scroll as the rest of the form — not its own tiny
+    # fixed-height box with an inner scrollbar (where you see ~one line at a time). It is a QLabel
+    # (expands to its full content, no own scrollbar) sitting inside the outer QScrollArea whose body
+    # also holds the From/To fields, so a long ramp shows every step and the whole dialog scrolls.
+    from PyQt6.QtWidgets import QLabel, QScrollArea, QWidget
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    assert isinstance(dlg._steps_view, QLabel)                     # not a fixed-height text box
+    body = next((s.widget() for s in dlg.findChildren(QScrollArea)
+                 if s.widget() is not None
+                 and dlg._steps_view in s.widget().findChildren(QLabel)), None)
+    assert body is not None                                        # the listing is inside a scroll…
+    assert dlg._start_box in body.findChildren(QWidget)            # …the SAME one as the From/To fields
+
+
 def test_reopening_a_total_power_ramp_selects_that_view():
     # A ramp saved in the total-power view reopens with the picker on total power, showing dBm.
     ed = _chirp_editor([_bar(10), _set_bw(20, 5.0)])
