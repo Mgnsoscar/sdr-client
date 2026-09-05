@@ -2224,13 +2224,33 @@ class ParamForm(QWidget):
     @staticmethod
     def _formula_sources(spec: dict) -> List[str]:
         """The field names a derived spec's formula reads from (numeric literals in the
-        args — e.g. a scale/offset or a lookup table — are not fields, so they are skipped)."""
+        args — e.g. a scale/offset or a lookup table — are not fields, so they are skipped).
+        A ``labels`` entry is a display-only per-value annotation, not a compute op, so its
+        strings are not treated as source fields."""
         out: List[str] = []
-        for args in (spec.get("formula") or {}).values():
+        for key, args in (spec.get("formula") or {}).items():
+            if key == "labels":       # display annotations (see _derived_label), not sources
+                continue
             if isinstance(args, (list, tuple)):
                 out.extend(str(a) for a in args
                            if not (isinstance(a, (int, float)) and not isinstance(a, bool)))
         return out
+
+    def _derived_label(self, spec: dict) -> str:
+        """An optional per-value descriptive annotation for a derived readout. The derived
+        field's ``formula`` may carry a ``labels`` list — ``[source_field, l0, l1, …]``, a
+        nearest-integer lookup on the source (the shape of a ``table`` formula, but of
+        strings) — so the readout reads e.g. ``14.32 MHz  (full TMBOC)`` as the source count
+        changes. Returns "" when unset, the source is unavailable, or the entry is blank."""
+        labels = (spec.get("formula") or {}).get("labels")
+        if not isinstance(labels, (list, tuple)) or len(labels) < 2:
+            return ""
+        sv = self._source_num(str(labels[0]))
+        if sv is None:
+            return ""
+        idx = max(0, min(len(labels) - 2, int(round(sv))))
+        lab = labels[1 + idx]
+        return str(lab) if lab else ""
 
     def _source_num(self, dest: str) -> Optional[float]:
         """The current numeric value of a field a derived formula reads, or None."""
@@ -2313,7 +2333,8 @@ class ParamForm(QWidget):
                     info["chip"].set_state(over=False, under=False)
                 warn.setVisible(False)
                 continue
-            info["value_lbl"].setText(f"{val:g}{unit}")
+            lab = self._derived_label(spec)
+            info["value_lbl"].setText(f"{val:g}{unit}" + (f"   ({lab})" if lab else ""))
             over = hi is not None and val > hi + 1e-9
             under = lo is not None and val < lo - 1e-9
             if info["chip"] is not None:

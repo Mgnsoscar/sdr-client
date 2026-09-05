@@ -54,6 +54,20 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — derived readout per-value labels: COMPLETE (branch `claude/gps-calibration`)
+A derived (computed, read-only) field's readout can now carry a per-value descriptive
+annotation. `ui/param_form.py` `_recompute_derived` appends `  (label)` to the numeric value
+via a new `_derived_label(spec)`: the field's `formula` may carry an optional `labels` list
+`[source_field, l0, l1, …]` — a nearest-int lookup on the source (the shape of a `table`
+formula, but of strings) whose last entry covers any higher count. So the BOC scripts' passband
+bandwidth reads e.g. `14.32 MHz  (full TMBOC)` at L1C `--sidelobes` 5, `30.69 MHz  (both main
+lobes)` at M-code 0. The label rides through the `formula` dict verbatim on both param paths
+(paramkit `--describe-params` and the drift-guarded static `argspec`), so it is scripts + client
+only — no argspec/paramkit change, no agent version bump; the numeric fold ignores it (the compute
+op stays first in the dict), and `_formula_sources` skips the `labels` key so its strings are not
+mistaken for source fields. Backward compatible (no `labels` → the bare numeric readout). Scripts:
+`sdr-scripts` `MCode.py`, `gps_l1c_tx.py`. Tests: `test_param_form_derived_labels.py`.
+
 ## Sequence power achievability + step/ramp power control: COMPLETE (multi-session)
 Branch `claude/sequence-power-achievability` (all three repos; client-only). Full design + code
 map live in **`docs/sequence-power-achievability.md`**. In one line: sequence power achievability
