@@ -131,3 +131,23 @@ def test_no_per_signal_deembed_not_gated():
     p._set_doc(_doc_ps(signal_deembed=None))
     assert p._doc_uses_deembed_per_signal(p._doc) is False
     assert p._blocks_on_deembed_per_signal() is False
+
+
+def test_deleting_a_deembed_cable_keeps_it_on_the_unit_that_uses_it():
+    # The owner's requirement: delete a measurement cable from the shared library and it must still
+    # persist on a unit whose signal was measured through it. _push_components pushes the catalog but
+    # KEEPS a referenced part the catalog no longer has, taken from the unit's own components.yaml.
+    from state import ComponentCatalog, dump_components
+
+    class _Unit(FakeClient):
+        def get_components(self):                    # the unit already stores the cable
+            return dump_components({"sig_cable": {"kind": "cable", "delta_db_by_freq": [[0, -0.5]]}})
+
+    c = _Unit()
+    p = CalibrationPanel("u", FakeHub(c))
+    p._catalog.put("other", "pad", [[0, -1.0]])      # the client library has NO sig_cable anymore
+    p._push_components(c, _doc_ps(signal_deembed="sig_cable"))
+    assert c.components_uploaded, "components should have been pushed"
+    uploaded = ComponentCatalog.parse_wire(c.components_uploaded[-1])
+    assert "sig_cable" in uploaded                   # kept from the unit despite the library delete
+    assert "other" in uploaded                       # the current catalog is still pushed

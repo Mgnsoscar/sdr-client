@@ -4353,23 +4353,39 @@ class CalibrationPanel(QWidget):
             return
         self._set_status("validating (dry run — not saving)…")
         doc = self._doc
-        wire = self._catalog.to_wire()
         host = self.hostname
 
         def _do():
             client = self.hub.fleet.get(host)
-            client.upload_components(wire)       # so component refs resolve in the dry-run
+            self._push_components(client, doc)   # push the catalog (keep referenced) so refs resolve
             return client.validate_calibration(doc)
         self.hub.run_async(f"cal_validate:{host}", _do)
 
+    def _push_components(self, client, doc) -> None:
+        """Upload this unit's ``components.yaml``: the shared catalog PLUS any component the
+        calibration still references that the catalog no longer has, KEPT from the unit's own copy
+        — so deleting a measurement cable (or a chain part) from the shared library never strips it
+        off a unit that still uses it (docs/calibration-v2 §14.1: a de-embed cable is a bench
+        artifact, but the resolver still evaluates it at resolve time, so it must stay on the unit).
+        Prunes only parts the library dropped that nothing references. Runs on the worker thread."""
+        from state import (ComponentCatalog, dump_components, plan_unit_deploy,
+                           referenced_components)
+        referenced = referenced_components(doc)
+        try:
+            on_unit = ComponentCatalog.parse_wire(client.get_components() or "")
+        except Exception:                                # noqa: BLE001 — a broken/absent unit file
+            on_unit = {}
+        upload, _info = plan_unit_deploy(self._catalog.components(), on_unit, referenced, prune=True)
+        client.upload_components(dump_components(upload))
+
     def _send(self, content: bytes) -> None:
         self._set_status("validating + saving…")
-        wire = self._catalog.to_wire()
         host = self.hostname
+        doc = self._doc
 
         def _do():
             client = self.hub.fleet.get(host)
-            client.upload_components(wire)       # push the catalog first so refs resolve
+            self._push_components(client, doc)   # push the catalog (keep referenced) so refs resolve
             return client.upload_file(CAL_NAME, content)
         self.hub.run_async(f"cal_save:{host}", _do)
 
@@ -4697,11 +4713,10 @@ class CalibrationPanel(QWidget):
         self._saved_doc = renamed                      # our view of what's now persisted
         host = self.hostname
         content = json.dumps(renamed).encode("utf-8")
-        wire = self._catalog.to_wire()
 
         def _do():
             client = self.hub.fleet.get(host)
-            client.upload_components(wire)             # keep component refs resolvable
+            self._push_components(client, renamed)     # keep component refs resolvable on the unit
             return client.upload_file(CAL_NAME, content)
         self.hub.run_async(f"cal_rename_save:{host}", _do)
 
@@ -4752,7 +4767,6 @@ class CalibrationPanel(QWidget):
         hosts = self._other_unit_hosts()
         if not hosts:
             return
-        wire = self._catalog.to_wire()
 
         def _do():
             fleet = self.hub.fleet
@@ -4760,7 +4774,7 @@ class CalibrationPanel(QWidget):
             for h in hosts:
                 try:
                     client = fleet.get(h)
-                    touched = self._rename_signal_on_client(client, old, new, wire)
+                    touched = self._rename_signal_on_client(client, old, new)
                 except Exception:  # noqa: BLE001 — offline / transport error → report it
                     unreachable.append(h)
                     continue
@@ -4769,7 +4783,7 @@ class CalibrationPanel(QWidget):
         self._set_status(f"renaming “{old}” → “{new}” across the fleet…")
         self.hub.run_async(f"cal_fleetrename:{self.hostname}", _do)
 
-    def _rename_signal_on_client(self, client, old: str, new: str, wire: str) -> bool:
+    def _rename_signal_on_client(self, client, old: str, new: str) -> bool:
         """Rename the signal on ONE unit: the key in its calibration.json (if present) and
         any task env that references it. Runs on the worker thread (agent I/O). Returns
         True if anything was changed. A 404 calibration (unit not calibrated) is not an
@@ -4782,7 +4796,7 @@ class CalibrationPanel(QWidget):
                 doc = copy.deepcopy(doc)
                 doc["signals"] = {(new if k == old else k): v
                                   for k, v in doc["signals"].items()}
-                client.upload_components(wire)
+                self._push_components(client, doc)     # keep that unit's referenced parts
                 client.upload_file(CAL_NAME, json.dumps(doc).encode("utf-8"))
                 touched = True
         except AgentHTTPError as exc:

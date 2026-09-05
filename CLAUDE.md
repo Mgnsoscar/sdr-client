@@ -356,6 +356,16 @@ frequency-dependent cable reshapes the flatness). Saving either placement is gat
 `_blocks_on_deembed_per_signal` (a safety gate). The pre-existing plane-level de-embed
 (`_blocks_on_deembed`) is untouched and stays as a backward-compatible fallback (per-signal wins).
 Client-only UI + gate; the agent does the math. Tests: `tests/test_calibration_deembed_client.py`.
+**Persistence — a deleted de-embed cable is KEPT on units that use it.** `referenced_components`
+(`state/component_catalog.py`) now counts every measurement-de-embed component id (plane, per-signal
+curve, source bias) — not just chain-stage `component` refs — so deleting a measurement cable from
+the shared library never strips it off a unit whose calibration still de-embeds it (the unit holds
+its own `components.yaml`). The calibration panel's own saves route through a new
+`CalibrationPanel._push_components(client, doc)` (fetches the unit's components + `plan_unit_deploy`
+prune=True) instead of a blind `upload_components(to_wire())`, so a re-save keeps referenced parts
+the catalog dropped, matching the fleet-deploy path (`api/fleet.py::_deploy_components_to`). Tests:
+`test_component_catalog.py` (referenced counts de-embed; a deleted cable is kept),
+`test_calibration_deembed_client.py` (`_push_components` keeps a unit-only cable).
 
 ## Prior state — stage limits gauged through the limiting reading: COMPLETE
 The client mirror of the agent 1.13.0 fix: `state/power_fold.py` `_ceiling()` folds a stage

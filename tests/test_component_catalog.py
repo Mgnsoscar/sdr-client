@@ -165,6 +165,38 @@ def test_referenced_components_reads_chain():
     assert referenced_components({}) == set()
 
 
+def test_referenced_components_counts_measurement_deembed():
+    # A measurement de-embed cable (plane-level, per-signal curve, or source-bias) is a bench
+    # artifact but the resolver still evaluates it, so deleting it from the library must KEEP it on
+    # any unit that measured through it — hence it counts as referenced. Inline tables reference no
+    # catalog id and are ignored.
+    doc = {
+        "chain": {"planes": {
+            "sdr_output": {"type": "measured", "measurement_deembed": "plane_cable"},
+            "amp": {"type": "derived", "from": "sdr_output", "component": "amp_a"}}},
+        "signals": {
+            "gps": {"curves": {"sdr_output": {"measurement_deembed": "sig_cable"}}},
+            "gal": {"curves": {"sdr_output": {"measurement_deembed": [[0, -1.0]]}}}},  # inline → ignored
+        "source_bias": {"power_by_freq": [[1e9, 0.0]], "measurement_deembed": "bias_cable"},
+    }
+    assert referenced_components(doc) == {"amp_a", "plane_cable", "sig_cable", "bias_cable"}
+
+
+def test_deleted_deembed_cable_is_kept_on_a_unit_that_uses_it():
+    # The owner's case: a measurement cable deleted from the shared library must survive on a unit
+    # whose calibration still de-embeds it. plan_unit_deploy keeps a referenced part the library
+    # dropped (from the unit's own copy) even when pruning.
+    library = {"amp_a": {"kind": "amp", "delta_db_by_freq": [[0, 20.0]]}}   # cable deleted from lib
+    on_unit = {"amp_a": {"kind": "amp", "delta_db_by_freq": [[0, 20.0]]},
+               "sig_cable": {"kind": "cable", "delta_db_by_freq": [[0, -0.5]]}}
+    doc = {"signals": {"gps": {"curves": {"sdr_output": {"measurement_deembed": "sig_cable"}}}}}
+    upload, info = plan_unit_deploy(library, on_unit, referenced_components(doc), prune=True)
+    assert "sig_cable" in upload                                # kept on the unit despite the delete
+    assert upload["sig_cable"] == on_unit["sig_cable"]          # …from the unit's own copy
+    assert "sig_cable" in info["kept_referenced"]
+    assert not info["dangling"]
+
+
 def test_plan_prune_keeps_referenced_and_prunes_unused():
     # ant_a was deleted from the shared library, but the unit's calibration still uses it
     # → it must persist on the unit; an unrelated old_pad the unit doesn't use is pruned.

@@ -211,12 +211,35 @@ def dump_components(comps: Dict[str, dict]) -> str:
 
 
 def referenced_components(calibration_doc: Optional[dict]) -> set:
-    """The component ids a unit's calibration chain references (its derived planes'
-    ``component`` fields). These must never be stripped from a unit — the calibration
-    wouldn't resolve, and the unit would refuse to transmit."""
-    planes = ((calibration_doc or {}).get("chain") or {}).get("planes") or {}
-    return {p["component"] for p in planes.values()
-            if isinstance(p, dict) and p.get("component")}
+    """The component ids a unit's calibration references. These must never be stripped from a
+    unit — the calibration wouldn't resolve, and the unit would refuse to transmit. Counts:
+      * the transmit chain's derived-plane ``component`` fields;
+      * every measurement DE-EMBED that names a catalog component (a string id, not an inline
+        table) — on a measured plane, on a signal's OWN measured curve, or on the source bias.
+        A de-embed cable is a bench artifact, but the resolver still evaluates it at resolve time,
+        so deleting it from the shared library must KEEP it on any unit that measured through it."""
+    doc = calibration_doc or {}
+    out: set = set()
+
+    def _add(v):
+        if isinstance(v, str) and v:
+            out.add(v)
+
+    planes = ((doc.get("chain") or {}).get("planes") or {})
+    for p in planes.values():
+        if isinstance(p, dict):
+            _add(p.get("component"))
+            _add(p.get("measurement_deembed"))            # plane-level de-embed
+    for sig in (doc.get("signals") or {}).values():
+        if not isinstance(sig, dict):
+            continue
+        for curve in (sig.get("curves") or {}).values():
+            if isinstance(curve, dict):
+                _add(curve.get("measurement_deembed"))    # per-signal curve de-embed
+    sb = doc.get("source_bias")
+    if isinstance(sb, dict):
+        _add(sb.get("measurement_deembed"))               # source-bias de-embed
+    return out
 
 
 def plan_unit_deploy(library: Dict[str, dict], on_unit: Dict[str, dict],
