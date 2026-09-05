@@ -351,14 +351,19 @@ into the signal editor state (`w["deembed"]`) at entry construction, written bac
 so its de-embed is a constant at the signal's measured-at freq — each signal keeps its own cable, and
 a signal added later through a different cable is corrected independently. (2) **The Source-bias ("SDR
 flatness") editor** sets `source_bias.measurement_deembed`, removed frequency-by-frequency (only a
-frequency-dependent cable reshapes the flatness). Saving either placement is gated on
+frequency-dependent cable reshapes the flatness). (3) **A signal's LIMITING "Separate measurement
+(dBm)" reading** (`_limiting_section` own branch) sets `signals.<id>.limiting.measurement_deembed`
+(round-tripped via `_reading_block`) — its own bench cable, de-embedded INDEPENDENTLY of the signal's
+primary curve (the agent shifts the own curve by `primary − own`; same cable == inheriting, different
+cable overrides; only the ceiling moves, not the `--power` axis). Saving any placement is gated on
 `CAL_DEEMBED_PER_SIGNAL_CAPABILITY` (`calibration-deembed-per-signal`) via
-`_blocks_on_deembed_per_signal` (a safety gate). The pre-existing plane-level de-embed
+`_blocks_on_deembed_per_signal` (a safety gate; `_doc_uses_deembed_per_signal` scans curves, the
+own limiting/reported readings, and the source bias). The pre-existing plane-level de-embed
 (`_blocks_on_deembed`) is untouched and stays as a backward-compatible fallback (per-signal wins).
 Client-only UI + gate; the agent does the math. Tests: `tests/test_calibration_deembed_client.py`.
 **Persistence — a deleted de-embed cable is KEPT on units that use it.** `referenced_components`
 (`state/component_catalog.py`) now counts every measurement-de-embed component id (plane, per-signal
-curve, source bias) — not just chain-stage `component` refs — so deleting a measurement cable from
+curve, own limiting/reported reading, source bias) — not just chain-stage `component` refs — so deleting a measurement cable from
 the shared library never strips it off a unit whose calibration still de-embeds it (the unit holds
 its own `components.yaml`). The calibration panel's own saves route through a new
 `CalibrationPanel._push_components(client, doc)` (fetches the unit's components + `plan_unit_deploy`

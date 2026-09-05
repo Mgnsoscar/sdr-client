@@ -175,11 +175,13 @@ def test_referenced_components_counts_measurement_deembed():
             "sdr_output": {"type": "measured", "measurement_deembed": "plane_cable"},
             "amp": {"type": "derived", "from": "sdr_output", "component": "amp_a"}}},
         "signals": {
-            "gps": {"curves": {"sdr_output": {"measurement_deembed": "sig_cable"}}},
+            "gps": {"curves": {"sdr_output": {"measurement_deembed": "sig_cable"}},
+                    "limiting": {"kind": "own", "curve": {"points": [[40, -20]]},
+                                 "measurement_deembed": "own_cable"}},   # separate-measurement cable
             "gal": {"curves": {"sdr_output": {"measurement_deembed": [[0, -1.0]]}}}},  # inline → ignored
         "source_bias": {"power_by_freq": [[1e9, 0.0]], "measurement_deembed": "bias_cable"},
     }
-    assert referenced_components(doc) == {"amp_a", "plane_cable", "sig_cable", "bias_cable"}
+    assert referenced_components(doc) == {"amp_a", "plane_cable", "sig_cable", "own_cable", "bias_cable"}
 
 
 def test_deleted_deembed_cable_is_kept_on_a_unit_that_uses_it():

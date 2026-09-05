@@ -236,6 +236,10 @@ def referenced_components(calibration_doc: Optional[dict]) -> set:
         for curve in (sig.get("curves") or {}).values():
             if isinstance(curve, dict):
                 _add(curve.get("measurement_deembed"))    # per-signal curve de-embed
+        for rd in ("limiting", "reported"):               # an own reading's separate curve
+            blk = sig.get(rd)
+            if isinstance(blk, dict):
+                _add(blk.get("measurement_deembed"))
     sb = doc.get("source_bias")
     if isinstance(sb, dict):
         _add(sb.get("measurement_deembed"))               # source-bias de-embed

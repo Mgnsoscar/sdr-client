@@ -133,6 +133,43 @@ def test_no_per_signal_deembed_not_gated():
     assert p._blocks_on_deembed_per_signal() is False
 
 
+def _doc_own(own_deembed="sa_cable"):
+    """A signal whose LIMITING reading is a separate (own) dBm measurement, optionally through its
+    own measurement cable."""
+    doc = _doc_ps(signal_deembed=None)
+    doc["signals"]["sig"]["measurement"] = {"quantity": "main-lobe power", "unit": "dBm"}
+    lim = {"kind": "own", "curve": {"interp": "linear",
+           "points": [{"gain_db": 40, "power_dbm": -20}, {"gain_db": 74, "power_dbm": 10}]}}
+    if own_deembed is not None:
+        lim["measurement_deembed"] = own_deembed
+    doc["signals"]["sig"]["limiting"] = lim
+    return doc
+
+
+def test_own_limiting_deembed_round_trips():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc_own("sa_cable"))
+    out = p._read_form(strict=False)
+    assert out["signals"]["sig"]["limiting"]["kind"] == "own"
+    assert out["signals"]["sig"]["limiting"]["measurement_deembed"] == "sa_cable"
+
+
+def test_own_limiting_deembed_gated_on_the_new_capability():
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=())))
+    p._set_doc(_doc_own("sa_cable"))
+    assert p._doc_uses_deembed_per_signal(p._doc) is True
+    assert p._blocks_on_deembed_per_signal() is True
+    ok = CalibrationPanel("u", FakeHub(FakeClient(caps=["calibration-deembed-per-signal"])))
+    ok._set_doc(_doc_own("sa_cable"))
+    assert ok._blocks_on_deembed_per_signal() is False
+
+
+def test_own_limiting_without_a_cable_is_not_gated():
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=())))
+    p._set_doc(_doc_own(None))
+    assert p._doc_uses_deembed_per_signal(p._doc) is False
+
+
 def test_deleting_a_deembed_cable_keeps_it_on_the_unit_that_uses_it():
     # The owner's requirement: delete a measurement cable from the shared library and it must still
     # persist on a unit whose signal was measured through it. _push_components pushes the catalog but

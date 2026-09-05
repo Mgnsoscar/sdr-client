@@ -293,6 +293,11 @@ def _reading_block(sub) -> Optional[dict]:
             out["curve"] = curve
         else:
             return None
+        # Measurement de-embed for the separate curve (docs/calibration-v2 §14.1): its own bench
+        # cable, removed at resolve time. A component id or an inline table; "" / None ⇒ none.
+        dm = sub.get("measurement_deembed")
+        if dm not in (None, ""):
+            out["measurement_deembed"] = dm
     if kind == "same" and set(out) == {"kind"}:
         return None                     # nothing to say — a plain "same" is the default
     return out
@@ -3371,6 +3376,21 @@ class CalibrationPanel(QWidget):
             hint.setStyleSheet(f"font-size:10.5px;color:{Palette.TEXT_FAINT};")
             orow.addWidget(ol); orow.addWidget(ob); orow.addWidget(hint); orow.addStretch(1)
             v.addLayout(orow)
+            # This is its OWN bench measurement, so it names its OWN measurement cable — de-embedded
+            # independently of the signal's primary curve (docs/calibration-v2 §14.1). A constant at
+            # the signal's frequency (it shares the signal frequency).
+            odm = sub.get("measurement_deembed", "")
+            odcb = self._deembed_combo(odm)
+            odcb.currentIndexChanged.connect(
+                lambda _=0, c=odcb, s=sub: (s.__setitem__("measurement_deembed", c.currentData()),
+                                            self._refresh_form_from_widgets()))
+            odl = QLabel("its cable"); odl.setFixedWidth(80)
+            odl.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_MUTED};")
+            odh = QLabel("its loss is removed (de-embedded)")
+            odh.setStyleSheet(f"font-size:10.5px;color:{Palette.TEXT_FAINT};")
+            odrow = QHBoxLayout(); odrow.setContentsMargins(0, 0, 0, 0)
+            odrow.addWidget(odl); odrow.addWidget(odcb, 1); odrow.addWidget(odh)
+            v.addLayout(odrow)
             read_q = sub.get("quantity", "").strip() or "Separate dBm measurement"
         reads = QLabel(f"limit reading: <b>{read_q}</b> "
                        f"<span style='color:{Palette.TEXT_MUTED};font-family:monospace;"
@@ -4114,10 +4134,17 @@ class CalibrationPanel(QWidget):
 
     @staticmethod
     def _doc_uses_deembed_per_signal(doc) -> bool:
-        """A per-signal curve de-embed or a source-bias de-embed (needs agent 1.14.0+)."""
+        """A per-signal measured-curve de-embed, an own (separate-measurement) reading's de-embed,
+        or a source-bias de-embed (all need agent 1.14.0+)."""
         for sig in ((doc or {}).get("signals") or {}).values():
-            for curve in (isinstance(sig, dict) and (sig.get("curves") or {}) or {}).values():
+            if not isinstance(sig, dict):
+                continue
+            for curve in (sig.get("curves") or {}).values():
                 if isinstance(curve, dict) and curve.get("measurement_deembed"):
+                    return True
+            for rd in ("limiting", "reported"):        # an own reading's separate curve
+                blk = sig.get(rd)
+                if isinstance(blk, dict) and blk.get("measurement_deembed"):
                     return True
         sb = (doc or {}).get("source_bias")
         return bool(isinstance(sb, dict) and sb.get("measurement_deembed"))
