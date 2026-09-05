@@ -23,12 +23,12 @@ def _doc(deembed="sa_cable"):
     return {
         "schema_version": 1, "unit_type": "broadcaster",
         "chain": {
-            "operating_plane": "sdr_output",
+            "operating_plane": "Source",
             "gain_limits": {"min_gain_db": 0.0, "max_gain_db": 74.0},
-            "limits": [{"plane": "sdr_output", "max_dbm": 4.0, "reason": "amp"}],
-            "planes": {"sdr_output": plane},
+            "limits": [{"plane": "Source", "max_dbm": 4.0, "reason": "amp"}],
+            "planes": {"Source": plane},
         },
-        "signals": {"sig": {"curves": {"sdr_output": {"interp": "linear", "points": [
+        "signals": {"sig": {"curves": {"Source": {"interp": "linear", "points": [
             {"gain_db": 40, "power_dbm": -31}, {"gain_db": 74, "power_dbm": 3}]}}}},
     }
 
@@ -37,7 +37,7 @@ def test_deembed_round_trips():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(_doc("sa_cable"))
     out = p._read_form(strict=False)
-    assert out["chain"]["planes"]["sdr_output"]["measurement_deembed"] == "sa_cable"
+    assert out["chain"]["planes"]["Source"]["measurement_deembed"] == "sa_cable"
 
 
 def test_save_gated_without_capability():
@@ -69,13 +69,13 @@ def _doc_ps(signal_deembed="sa_cable", source_bias_deembed=None):
     doc = {
         "schema_version": 1, "unit_type": "broadcaster",
         "chain": {
-            "operating_plane": "sdr_output",
+            "operating_plane": "Source",
             "gain_limits": {"min_gain_db": 0.0, "max_gain_db": 74.0},
-            "limits": [{"plane": "sdr_output", "max_dbm": 4.0, "reason": "amp"}],
-            "planes": {"sdr_output": {"type": "measured", "quantity": "power"}},
+            "limits": [{"plane": "Source", "max_dbm": 4.0, "reason": "amp"}],
+            "planes": {"Source": {"type": "measured", "quantity": "power"}},
         },
         "signals": {"sig": {"center_freq_hz": 1.5e9,
-                            "curves": {"sdr_output": curve}}},
+                            "curves": {"Source": curve}}},
     }
     if source_bias_deembed is not None:
         doc["source_bias"] = {"power_by_freq": [[1e9, 0.0], [2e9, -1.0]],
@@ -87,20 +87,20 @@ def test_per_signal_curve_deembed_round_trips():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(_doc_ps(signal_deembed="sa_cable"))
     out = p._read_form(strict=False)
-    assert out["signals"]["sig"]["curves"]["sdr_output"]["measurement_deembed"] == "sa_cable"
+    assert out["signals"]["sig"]["curves"]["Source"]["measurement_deembed"] == "sa_cable"
     # and it is NOT written onto the plane (per-signal placement, not plane-level)
-    assert "measurement_deembed" not in out["chain"]["planes"]["sdr_output"]
+    assert "measurement_deembed" not in out["chain"]["planes"]["Source"]
 
 
 def test_per_signal_picker_sets_and_clears():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(_doc_ps(signal_deembed=None))                 # no cable to start
-    p._f["signals"]["sig"]["deembed"]["sdr_output"] = "sa_cable"   # picker chooses one
-    assert p._read_form(strict=False)["signals"]["sig"]["curves"]["sdr_output"][
+    p._f["signals"]["sig"]["deembed"]["Source"] = "sa_cable"   # picker chooses one
+    assert p._read_form(strict=False)["signals"]["sig"]["curves"]["Source"][
         "measurement_deembed"] == "sa_cable"
-    p._f["signals"]["sig"]["deembed"]["sdr_output"] = ""      # picker → "(none)"
+    p._f["signals"]["sig"]["deembed"]["Source"] = ""      # picker → "(none)"
     assert "measurement_deembed" not in \
-        p._read_form(strict=False)["signals"]["sig"]["curves"]["sdr_output"]
+        p._read_form(strict=False)["signals"]["sig"]["curves"]["Source"]
 
 
 def test_source_bias_deembed_round_trips():

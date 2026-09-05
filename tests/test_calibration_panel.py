@@ -85,13 +85,13 @@ def _doc():
         "schema_version": 1, "unit_id": "u1", "unit_type": "broadcaster",
         "chain": {
             "gain_limits": {"min_gain_db": 0.0, "max_gain_db": 89.75},
-            "operating_plane": "sdr_output",
-            "limits": [{"plane": "sdr_output", "max_dbm": -2.5, "reason": "amp P1dB"}],
-            "planes": {"sdr_output": {"type": "measured", "quantity": "total in-band power"}},
+            "operating_plane": "Source",
+            "limits": [{"plane": "Source", "max_dbm": -2.5, "reason": "amp P1dB"}],
+            "planes": {"Source": {"type": "measured", "quantity": "total in-band power"}},
         },
         "defaults": {"amplitude": 0.5},
         "signals": {"mock": {"curves": {
-            "sdr_output": {"points": [{"gain_db": 40, "power_dbm": -36},
+            "Source": {"points": [{"gain_db": 40, "power_dbm": -36},
                                       {"gain_db": 74, "power_dbm": -2.5}]}}}},
     }
 
@@ -105,7 +105,7 @@ def test_fmt_range():
 
 def test_renders_calibrated_summary():
     cal = {"unit_type": "broadcaster", "valid": True, "document": _doc(),
-           "signals": {"mock": {"operating_plane": "sdr_output", "quantity": "total in-band power",
+           "signals": {"mock": {"operating_plane": "Source", "quantity": "total in-band power",
                                  "min_gain_db": 0.0, "max_gain_db": 74.0,
                                  "min_power_dbm": -36.0, "max_power_dbm": -2.5}}}
     p = CalibrationPanel("u", FakeHub(FakeClient(cal=cal)))
@@ -158,7 +158,7 @@ def test_resolved_power_ranges_survive_navigation():
     # The resolved --power column must not revert to "validate to resolve" on an unrelated
     # interaction (navigation re-reads the form) — only after a value is actually edited.
     cal = {"unit_type": "broadcaster", "valid": True, "document": _doc(),
-           "signals": {"mock": {"operating_plane": "sdr_output",
+           "signals": {"mock": {"operating_plane": "Source",
                                  "quantity": "total in-band power",
                                  "min_gain_db": 0.0, "max_gain_db": 74.0,
                                  "min_power_dbm": -36.0, "max_power_dbm": -2.5}}}
@@ -167,11 +167,11 @@ def test_resolved_power_ranges_survive_navigation():
     resolved = p._table.item(0, 2).text()
     assert resolved not in ("validate to resolve", "", "—")
 
-    p._select_plane("sdr_output")                    # navigation: re-reads the form
+    p._select_plane("Source")                    # navigation: re-reads the form
     assert p._table.item(0, 2).text() == resolved    # ranges preserved
 
     p._f["max_gain"].setText("50")                   # an actual edit
-    p._select_plane("sdr_output")
+    p._select_plane("Source")
     assert p._table.item(0, 2).text() == "validate to resolve"
 
 
@@ -211,8 +211,8 @@ def test_save_from_form_serializes_document():
     import json
     name, content = client.uploaded[0]
     sent = json.loads(content)
-    assert sent["chain"]["operating_plane"] == "sdr_output"
-    assert sent["signals"]["mock"]["curves"]["sdr_output"]["points"][0]["gain_db"] == 40
+    assert sent["chain"]["operating_plane"] == "Source"
+    assert sent["signals"]["mock"]["curves"]["Source"]["points"][0]["gain_db"] == 40
 
 
 # ── form model ───────────────────────────────────────────────────────────────────
@@ -222,26 +222,26 @@ def test_form_round_trips_through_widgets():
     p._set_doc(_doc())
     out = p._read_form(strict=True)
     assert out["chain"]["gain_limits"] == {"min_gain_db": 0.0, "max_gain_db": 89.75}
-    assert out["chain"]["operating_plane"] == "sdr_output"
-    assert out["chain"]["limits"] == [{"plane": "sdr_output", "max_dbm": -2.5, "reason": "amp P1dB"}]
+    assert out["chain"]["operating_plane"] == "Source"
+    assert out["chain"]["limits"] == [{"plane": "Source", "max_dbm": -2.5, "reason": "amp P1dB"}]
     # amplitude is fixed fleet-wide: recorded on the chain default, not per signal
     assert out["defaults"]["amplitude"] == 0.5
     assert "amplitude" not in out["signals"]["mock"]
-    pts = out["signals"]["mock"]["curves"]["sdr_output"]["points"]
+    pts = out["signals"]["mock"]["curves"]["Source"]["points"]
     assert [(pt["gain_db"], pt["power_dbm"]) for pt in pts] == [(40.0, -36.0), (74.0, -2.5)]
     # plane topology is preserved from the model even though the form doesn't edit it
-    assert out["chain"]["planes"]["sdr_output"]["type"] == "measured"
+    assert out["chain"]["planes"]["Source"]["type"] == "measured"
 
 
 def test_curve_grid_edit_is_read_back():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(_doc())
-    tbl = p._f["signals"]["mock"]["curves"]["sdr_output"]
+    tbl = p._f["signals"]["mock"]["curves"]["Source"]
     tbl.add_blank_row()
     r = tbl.rowCount() - 1
     tbl.item(r, 0).setText("60")
     tbl.item(r, 1).setText("-16")
-    pts = p._read_form(strict=True)["signals"]["mock"]["curves"]["sdr_output"]["points"]
+    pts = p._read_form(strict=True)["signals"]["mock"]["curves"]["Source"]["points"]
     assert {"gain_db": 60.0, "power_dbm": -16.0} in pts
 
 
@@ -250,7 +250,7 @@ def test_curve_grid_remove_without_selection_drops_last_row():
     # case right after typing into cells), rather than silently doing nothing.
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(_doc())
-    tbl = p._f["signals"]["mock"]["curves"]["sdr_output"]
+    tbl = p._f["signals"]["mock"]["curves"]["Source"]
     tbl.clearSelection()
     tbl.setCurrentCell(-1, -1)
     before = tbl.rowCount()
@@ -263,18 +263,18 @@ def test_read_form_preserves_unmodeled_signal_fields():
     # truth for those). Editing in the Editor tab and reading back must not drop them.
     d = _doc()
     d["signals"]["mock"]["note"] = "keep me"                      # signal-level extra
-    d["signals"]["mock"]["curves"]["sdr_output"]["interp"] = "pchip"  # curve-level extra
+    d["signals"]["mock"]["curves"]["Source"]["interp"] = "pchip"  # curve-level extra
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(d)
     out = p._read_form(strict=True)["signals"]["mock"]
     assert out["note"] == "keep me"
-    assert out["curves"]["sdr_output"]["interp"] == "pchip"
+    assert out["curves"]["Source"]["interp"] == "pchip"
 
 
 def test_bad_curve_cell_blocks_save_strictly():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(_doc())
-    tbl = p._f["signals"]["mock"]["curves"]["sdr_output"]
+    tbl = p._f["signals"]["mock"]["curves"]["Source"]
     tbl.add_blank_row()
     tbl.item(tbl.rowCount() - 1, 0).setText("not-a-number")
     with pytest.raises(ValueError):
@@ -295,7 +295,7 @@ def _full_doc():
     d = _doc()
     d["chain"]["operating_plane"] = "antenna_eirp"
     d["chain"]["planes"] = {
-        "sdr_output": {"type": "measured", "quantity": "total in-band power"},
+        "Source": {"type": "measured", "quantity": "total in-band power"},
         "amplifier_output": {"type": "measured", "quantity": "main-lobe power"},
         "cable_output": {"type": "derived", "from": "amplifier_output", "delta_db": -1.8},
         "antenna_eirp": {"type": "derived", "from": "cable_output", "delta_db": 6.0, "quantity": "EIRP"},
@@ -309,34 +309,34 @@ def test_plane_topology_round_trips_through_form():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(_full_doc())
     out = p._read_form(strict=True)["chain"]["planes"]
-    assert out["sdr_output"] == {"type": "measured", "quantity": "total in-band power"}
+    assert out["Source"] == {"type": "measured", "quantity": "total in-band power"}
     assert out["cable_output"] == {"type": "derived", "from": "amplifier_output", "delta_db": -1.8}
     assert out["antenna_eirp"]["type"] == "derived"
     assert out["antenna_eirp"]["from"] == "cable_output"
     assert out["antenna_eirp"]["quantity"] == "EIRP"
     # measured planes drive which curve grids exist per signal
-    assert set(p._f["signals"]["mock"]["curves"]) == {"sdr_output", "amplifier_output"}
+    assert set(p._f["signals"]["mock"]["curves"]) == {"Source", "amplifier_output"}
 
 
 def test_add_and_remove_plane(monkeypatch):
     monkeypatch.setattr(QMessageBox, "question",
                         staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
     p = CalibrationPanel("u", FakeHub(FakeClient()))
-    p._set_doc(_doc())                                   # one plane: sdr_output
+    p._set_doc(_doc())                                   # one plane: Source
     p._on_add_plane()
     planes = p._read_form(strict=False)["chain"]["planes"]
     assert len(planes) == 2 and "plane" in planes
     # remove the added one via its row
     row = next(r for r in p._f["planes"] if r["name"].text() == "plane")
     p._remove_plane(row)
-    assert list(p._read_form(strict=False)["chain"]["planes"]) == ["sdr_output"]
+    assert list(p._read_form(strict=False)["chain"]["planes"]) == ["Source"]
 
 
 def test_derived_plane_without_delta_blocks_save():
     # A constant Δ dB stage with no value entered can't be saved strictly.
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     doc = _doc()
-    doc["chain"]["planes"]["pad"] = {"type": "derived", "from": "sdr_output"}
+    doc["chain"]["planes"]["pad"] = {"type": "derived", "from": "Source"}
     p._set_doc(doc)
     row = next(r for r in p._f["planes"] if r["name"].text() == "pad")
     assert row["role"] == "constant"
@@ -386,26 +386,28 @@ def test_rename_plane_updates_all_references():
 
 def test_rename_operating_and_limit_plane_follow():
     from ui.calibration_panel import _rename_plane_in_doc
-    d = _doc()                                       # operating + limit both on sdr_output
-    out = _rename_plane_in_doc(d, "sdr_output", "sdr_port")
+    d = _doc()                                       # operating + limit both on Source
+    out = _rename_plane_in_doc(d, "Source", "sdr_port")
     assert out["chain"]["operating_plane"] == "sdr_port"
     assert out["chain"]["limits"][0]["plane"] == "sdr_port"
     assert "sdr_port" in out["signals"]["mock"]["curves"]
 
 
 def test_rename_in_form_keeps_document_valid_shape():
-    # End-to-end through the widget handler: rename the single plane and confirm the
-    # operating plane + curve key follow, so the read-back doc has no dangling refs.
+    # End-to-end through the widget handler: rename a (non-source) plane and confirm the
+    # references that point at it follow, so the read-back doc has no dangling refs. (The
+    # SOURCE stage can't be renamed — see test_source_stage_name_is_locked.)
     p = CalibrationPanel("u", FakeHub(FakeClient()))
-    p._set_doc(_doc())
-    row = p._f["planes"][0]
-    assert row["orig"] == "sdr_output"
-    row["name"].setText("sdr_port")
+    p._set_doc(_full_doc())
+    row = next(r for r in p._f["planes"] if r["name"].text() == "amplifier_output")
+    assert row["orig"] == "amplifier_output"
+    row["name"].setText("amp_out")
     p._on_plane_name_changed(row)
     out = p._read_form(strict=False)
-    assert list(out["chain"]["planes"]) == ["sdr_port"]
-    assert out["chain"]["operating_plane"] == "sdr_port"
-    assert "sdr_port" in out["signals"]["mock"]["curves"]
+    assert "amp_out" in out["chain"]["planes"]
+    assert "amplifier_output" not in out["chain"]["planes"]
+    assert out["chain"]["planes"]["cable_output"]["from"] == "amp_out"    # parent pointer follows
+    assert "amp_out" in out["signals"]["mock"]["curves"]                  # curve key follows
 
 
 def test_removing_plane_purges_its_references(monkeypatch):
@@ -432,9 +434,83 @@ def test_source_stage_cannot_be_removed(monkeypatch):
                         staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(_full_doc())
-    row = next(r for r in p._f["planes"] if r["name"].text() == "sdr_output")
+    row = next(r for r in p._f["planes"] if r["name"].text() == "Source")
     p._remove_plane(row)
-    assert "sdr_output" in p._read_form(strict=False)["chain"]["planes"]
+    assert "Source" in p._read_form(strict=False)["chain"]["planes"]
+
+
+# ── the source stage's name is fixed ("Source") and no stage can be named "" ───────
+
+def test_source_stage_name_is_locked_readonly():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc())
+    src = p._f["planes"][0]["name"]
+    assert src.text() == "Source"
+    assert src.isReadOnly()                          # can't be edited in the form
+
+
+def test_source_stage_cannot_be_renamed():
+    # Even a programmatic edit is refused — the source snaps back to "Source".
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc())
+    row = p._f["planes"][0]
+    row["name"].setText("whatever")
+    p._on_plane_name_changed(row)
+    assert row["name"].text() == "Source"
+    assert list(p._read_form(strict=False)["chain"]["planes"]) == ["Source"]
+
+
+def test_legacy_source_name_is_migrated_to_source_on_load():
+    # Opening a unit whose source stage had another id renames it to "Source", carrying every
+    # reference (curve key, limit plane, operating plane, downstream 'from') so nothing dangles.
+    d = {
+        "schema_version": 1, "unit_id": "u1", "unit_type": "broadcaster",
+        "chain": {
+            "gain_limits": {"min_gain_db": 0.0, "max_gain_db": 89.75},
+            "operating_plane": "amp_out",
+            "limits": [{"plane": "sdr_output", "max_dbm": -2.5, "reason": "amp"}],
+            "planes": {
+                "sdr_output": {"type": "measured", "quantity": "power"},
+                "amp_out": {"type": "derived", "from": "sdr_output", "delta_db": 6.0},
+            },
+        },
+        "defaults": {"amplitude": 0.5},
+        "signals": {"mock": {"curves": {"sdr_output": {"points": [
+            {"gain_db": 40, "power_dbm": -36}, {"gain_db": 74, "power_dbm": -2.5}]}}}},
+    }
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(d)
+    out = p._read_form(strict=False)
+    planes = out["chain"]["planes"]
+    assert list(planes)[0] == "Source" and "sdr_output" not in planes
+    assert planes["amp_out"]["from"] == "Source"            # downstream 'from' follows
+    assert out["chain"]["limits"][0]["plane"] == "Source"   # limit follows
+    assert "Source" in out["signals"]["mock"]["curves"]     # curve key follows
+
+
+def test_clearing_a_stage_name_reverts_instead_of_deleting_it():
+    # The reported bug: renaming a stage to "" used to drop it (it's skipped on read). Now the
+    # empty edit is reverted to the stage's last valid name and the stage survives.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_full_doc())
+    row = next(r for r in p._f["planes"] if r["name"].text() == "amplifier_output")
+    row["name"].setText("")
+    p._on_plane_name_changed(row)
+    assert row["name"].text() == "amplifier_output"         # snapped back, not dropped
+    assert "amplifier_output" in p._read_form(strict=False)["chain"]["planes"]
+
+
+def test_a_stage_cannot_take_the_reserved_source_name():
+    # Renaming another stage to the reserved source id "Source" would collide — it's reverted.
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_full_doc())
+    row = next(r for r in p._f["planes"] if r["name"].text() == "amplifier_output")
+    row["name"].setText("Source")
+    p._on_plane_name_changed(row)
+    assert row["name"].text() == "amplifier_output"
+    planes = list(p._read_form(strict=False)["chain"]["planes"])
+    assert planes.count("Source") == 1                      # only the real source stage
+    assert "amplifier_output" in planes
 
 
 # ── the JSON escape hatch applies valid documents and rejects bad ones ─────────────
@@ -468,7 +544,7 @@ def test_local_issues_empty_signals_is_clean():
 def test_local_issues_flags_non_invertible_curve():
     from ui.calibration_panel import local_calibration_issues
     d = _doc()
-    d["signals"]["mock"]["curves"]["sdr_output"]["points"] = [
+    d["signals"]["mock"]["curves"]["Source"]["points"] = [
         {"gain_db": 40, "power_dbm": -20}, {"gain_db": 50, "power_dbm": -20}]  # flat power
     issues = local_calibration_issues(d)
     assert any("not invertible" in i for i in issues)
@@ -488,7 +564,7 @@ def test_local_issues_flags_missing_ceiling_and_unset_operating():
 def test_issues_panel_shows_after_bad_edit():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(_doc())
-    tbl = p._f["signals"]["mock"]["curves"]["sdr_output"]
+    tbl = p._f["signals"]["mock"]["curves"]["Source"]
     tbl.item(1, 1).setText("-36")                    # make power flat (40→-36, 74→-36)
     # (isVisible() is unreliable on a never-shown offscreen widget; the label text is
     # cleared when there are no issues, so a non-empty text means the panel is showing.)
@@ -553,7 +629,7 @@ def test_validate_button_gated_on_capability():
 
 def test_validate_valid_populates_summary_without_saving():
     client = FakeClient(caps=("cal-validate",), validate={
-        "valid": True, "signals": {"mock": {"operating_plane": "sdr_output",
+        "valid": True, "signals": {"mock": {"operating_plane": "Source",
         "quantity": "q", "min_gain_db": 0.0, "max_gain_db": 74.0,
         "min_power_dbm": -36.0, "max_power_dbm": -2.5}}})
     p = CalibrationPanel("u", FakeHub(client))
@@ -589,7 +665,7 @@ def test_validate_rejects_non_numeric_curve_cell():
                         validate={"valid": True, "signals": {}})
     p = CalibrationPanel("u", FakeHub(client))
     p._set_doc(_doc())
-    tbl = p._f["signals"]["mock"]["curves"]["sdr_output"]
+    tbl = p._f["signals"]["mock"]["curves"]["Source"]
     tbl.add_blank_row()
     r = tbl.rowCount() - 1
     tbl.item(r, 0).setText("oops")                       # non-numeric gain
@@ -613,7 +689,7 @@ def test_apply_bad_json_leaves_document_and_reports():
 def test_validate_still_passes_a_clean_doc():
     # Regression: the stricter parse must not reject a genuinely valid document.
     client = FakeClient(caps=("cal-validate",), validate={
-        "valid": True, "signals": {"mock": {"operating_plane": "sdr_output",
+        "valid": True, "signals": {"mock": {"operating_plane": "Source",
         "quantity": "q", "min_gain_db": 0.0, "max_gain_db": 74.0,
         "min_power_dbm": -36.0, "max_power_dbm": -2.5}}})
     p = CalibrationPanel("u", FakeHub(client))
@@ -652,7 +728,7 @@ def _v2_doc():
     d = _doc()
     d["chain"]["operating_plane"] = "antenna_eirp"
     d["chain"]["planes"] = {
-        "sdr_output": {"type": "measured", "quantity": "total in-band power"},
+        "Source": {"type": "measured", "quantity": "total in-band power"},
         "amplifier_output": {"type": "measured", "quantity": "main-lobe"},
         "cable_output": {"type": "derived", "from": "amplifier_output",
                          "component": "cable_lmr240_3m_a"},
@@ -804,7 +880,7 @@ def test_clicking_a_signal_opens_its_measured_curve():
     p._set_doc(_v2_doc())
     p._select_plane("cable_output")                      # start on a passive stage
     p._on_signal_row_clicked(0, 0)                       # click the "mock" signal row
-    assert p._selected_plane == "sdr_output"             # jumped to a measured stage
+    assert p._selected_plane == "Source"             # jumped to a measured stage
     assert p._expanded_signals == {"mock"}
 
 
@@ -825,7 +901,7 @@ def test_signals_are_collapsible_in_measured_detail():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     _seed_catalog(p)
     p._set_doc(_v2_doc())
-    p._select_plane("sdr_output")                        # measured stage
+    p._select_plane("Source")                        # measured stage
     assert "mock" not in p._expanded_signals             # collapsed by default
     p._toggle_signal("mock")
     assert p._expanded_signals == {"mock"}
@@ -1131,10 +1207,10 @@ def test_signal_without_points_inherits_previous_stage():
     d = _doc()
     d["chain"]["operating_plane"] = "amplifier_output"
     d["chain"]["planes"] = {
-        "sdr_output": {"type": "measured", "quantity": "tp"},
+        "Source": {"type": "measured", "quantity": "tp"},
         "amplifier_output": {"type": "measured", "quantity": "mlp"},
     }
-    # mock has a curve only on sdr_output (from _doc); none on amplifier_output.
+    # mock has a curve only on Source (from _doc); none on amplifier_output.
     p._set_doc(d)
     out = p._read_form(strict=False)
     assert "amplifier_output" not in out["signals"]["mock"]["curves"]
@@ -1156,7 +1232,7 @@ def test_non_source_stage_shows_only_measured_signals():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     _seed_catalog(p)
     p._set_doc(_v2_doc())
-    assert p._signal_shown_on("mock", "sdr_output") is True
+    assert p._signal_shown_on("mock", "Source") is True
     assert p._signal_shown_on("mock", "amplifier_output") is False
     # once it's measured there, it shows
     p._set_doc(_v2_doc_measured_both())
@@ -1183,7 +1259,7 @@ def test_clicking_signal_falls_back_to_source_when_not_on_stage():
     p._set_doc(_v2_doc())                                # mock only on source
     p._select_plane("amplifier_output")
     p._on_signal_row_clicked(0, 0)
-    assert p._selected_plane == "sdr_output"
+    assert p._selected_plane == "Source"
 
 
 def test_add_signal_to_downstream_stage(monkeypatch):
@@ -1210,21 +1286,21 @@ def test_remove_signal_from_stage_keeps_signal(monkeypatch):
     assert "mock" in out["signals"]                      # the signal itself stays
     curves = out["signals"]["mock"]["curves"]
     assert "amplifier_output" not in curves              # only its data on this stage went
-    assert "sdr_output" in curves                        # upstream measurement is intact
+    assert "Source" in curves                        # upstream measurement is intact
 
 
 def _three_measured_doc():
     d = _doc()
     d["chain"]["operating_plane"] = "amp2"
     d["chain"]["planes"] = {
-        "sdr_output": {"type": "measured", "quantity": "tp"},
+        "Source": {"type": "measured", "quantity": "tp"},
         "amp1": {"type": "measured", "quantity": "m1"},
         "amp2": {"type": "measured", "quantity": "m2"},
     }
     pts = lambda a, b: {"points": [{"gain_db": 40, "power_dbm": a},
                                    {"gain_db": 74, "power_dbm": b}]}
     d["signals"]["mock"]["curves"] = {
-        "sdr_output": pts(-36, -2.5), "amp1": pts(-6, 24), "amp2": pts(-4, 26)}
+        "Source": pts(-36, -2.5), "amp1": pts(-6, 24), "amp2": pts(-4, 26)}
     return d
 
 
@@ -1235,7 +1311,7 @@ def test_remove_signal_from_stage_cascades_downstream(monkeypatch):
     p._set_doc(_three_measured_doc())
     p._on_remove_signal_from_stage("mock", "amp1")       # remove at a middle stage
     curves = p._read_form(strict=False)["signals"]["mock"]["curves"]
-    assert set(curves) == {"sdr_output"}                 # amp1 AND downstream amp2 removed
+    assert set(curves) == {"Source"}                 # amp1 AND downstream amp2 removed
 
 
 def test_calibration_panel_binds_fleet_shared_catalog():
@@ -1295,7 +1371,7 @@ def _two_measured_doc(measure_second: bool):
     d = _doc()
     d["chain"]["operating_plane"] = "amplifier_output"
     d["chain"]["planes"] = {
-        "sdr_output": {"type": "measured", "quantity": "tp"},
+        "Source": {"type": "measured", "quantity": "tp"},
         "amplifier_output": {"type": "measured", "quantity": "mlp"},
     }
     if measure_second:
@@ -1380,9 +1456,9 @@ def test_limit_side_output_is_omitted_from_document():
 def test_local_issues_input_side_on_first_plane_flagged():
     from ui.calibration_panel import local_calibration_issues
     d = _two_measured_doc(measure_second=True)
-    d["chain"]["limits"] = [{"plane": "sdr_output", "side": "input", "max_dbm": -2.5}]
+    d["chain"]["limits"] = [{"plane": "Source", "side": "input", "max_dbm": -2.5}]
     assert any("nothing upstream" in i for i in local_calibration_issues(d))
-    # the same limit input-side on the 2nd stage is fine (sdr_output is upstream)
+    # the same limit input-side on the 2nd stage is fine (Source is upstream)
     d["chain"]["limits"] = [{"plane": "amplifier_output", "side": "input", "max_dbm": -2.5}]
     assert local_calibration_issues(d) == []
 
@@ -1418,7 +1494,7 @@ def _roles_doc():
     d = _two_measured_doc(measure_second=True)
     d["chain"]["planes"]["amplifier_output"] = {
         "type": "measured", "quantity": "main-lobe power",
-        "role": "reported", "of": "sdr_output"}
+        "role": "reported", "of": "Source"}
     return d
 
 
@@ -1427,9 +1503,9 @@ def test_reported_role_round_trips_through_form():
     p._set_doc(_roles_doc())
     planes = p._read_form(strict=True)["chain"]["planes"]
     assert planes["amplifier_output"]["role"] == "reported"
-    assert planes["amplifier_output"]["of"] == "sdr_output"
+    assert planes["amplifier_output"]["of"] == "Source"
     # the source stays limiting (no role key emitted — limiting is the default)
-    assert "role" not in planes["sdr_output"]
+    assert "role" not in planes["Source"]
 
 
 def test_limiting_role_is_omitted_from_document():
@@ -1447,13 +1523,13 @@ def test_plane_roles_detection():
 
 def test_reported_of_is_derived_automatically_not_from_the_document():
     # The input doc marks the stage reported but names a bogus `of`; the panel ignores it
-    # and derives `of` from chain position (nearest limiting stage upstream = sdr_output).
+    # and derives `of` from chain position (nearest limiting stage upstream = Source).
     d = _two_measured_doc(measure_second=True)
     d["chain"]["planes"]["amplifier_output"] = {
         "type": "measured", "role": "reported", "of": "bogus", "quantity": "mlp"}
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(d)
-    assert p._read_form(strict=True)["chain"]["planes"]["amplifier_output"]["of"] == "sdr_output"
+    assert p._read_form(strict=True)["chain"]["planes"]["amplifier_output"]["of"] == "Source"
 
 
 def test_reported_stack_shares_the_limiting_basis():
@@ -1462,15 +1538,15 @@ def test_reported_stack_shares_the_limiting_basis():
     d = _doc()
     d["chain"]["operating_plane"] = "view_b"
     d["chain"]["planes"] = {
-        "source": {"type": "measured", "quantity": "full-band"},
+        "Source": {"type": "measured", "quantity": "full-band"},
         "view_a": {"type": "measured", "role": "reported", "quantity": "main-lobe"},
         "view_b": {"type": "measured", "role": "reported", "quantity": "narrower"},
     }
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(d)
     planes = p._read_form(strict=True)["chain"]["planes"]
-    assert planes["view_a"]["of"] == "source"
-    assert planes["view_b"]["of"] == "source"
+    assert planes["view_a"]["of"] == "Source"
+    assert planes["view_b"]["of"] == "Source"
 
 
 def test_reported_after_a_passive_stage_is_not_honoured():
@@ -1699,17 +1775,17 @@ def test_reorder_stage_moves_a_stage_and_pins_the_source():
     _seed_catalog(p)
     p._set_doc(_v2_doc())
     order = lambda: list(p._read_form(strict=False)["chain"]["planes"])
-    assert order() == ["sdr_output", "amplifier_output", "cable_output", "antenna_eirp"]
+    assert order() == ["Source", "amplifier_output", "cable_output", "antenna_eirp"]
     # drag antenna_eirp onto amplifier_output → it lands just before it
     p._reorder_stage("antenna_eirp", "amplifier_output")
-    assert order() == ["sdr_output", "antenna_eirp", "amplifier_output", "cable_output"]
+    assert order() == ["Source", "antenna_eirp", "amplifier_output", "cable_output"]
     # the operating plane always follows the last stage
     assert p._read_form(strict=False)["chain"]["operating_plane"] == "cable_output"
     # the source is pinned: it can't move and nothing can take slot 0
-    p._reorder_stage("sdr_output", "cable_output")
-    assert order()[0] == "sdr_output"
-    p._reorder_stage("cable_output", "sdr_output")
-    assert order()[0] == "sdr_output"
+    p._reorder_stage("Source", "cable_output")
+    assert order()[0] == "Source"
+    p._reorder_stage("cable_output", "Source")
+    assert order()[0] == "Source"
 
 
 def test_reorder_planes_to_lands_and_pins_source():
@@ -1718,9 +1794,9 @@ def test_reorder_planes_to_lands_and_pins_source():
     p._set_doc(_v2_doc())
     order = lambda: list(p._read_form(strict=False)["chain"]["planes"])
     p._reorder_planes_to("antenna_eirp", 1)              # move the last stage up to slot 1
-    assert order() == ["sdr_output", "antenna_eirp", "amplifier_output", "cable_output"]
+    assert order() == ["Source", "antenna_eirp", "amplifier_output", "cable_output"]
     p._reorder_planes_to("cable_output", 0)              # clamped: never before the source
-    assert order()[0] == "sdr_output"
+    assert order()[0] == "Source"
     src = order()[0]
     p._reorder_planes_to(src, 3)                         # the source itself never moves
     assert order()[0] == src
@@ -1738,7 +1814,7 @@ def test_chain_drag_lifecycle_commits_order():
     p._chain_drag_end()
     assert p._drag is None                               # drag state cleared
     order = list(p._read_form(strict=False)["chain"]["planes"])
-    assert order == ["sdr_output", "antenna_eirp", "amplifier_output", "cable_output"]
+    assert order == ["Source", "antenna_eirp", "amplifier_output", "cable_output"]
 
 
 def test_freq_interp_endpoint_clamped():
@@ -1757,7 +1833,7 @@ def test_freq_interp_endpoint_clamped():
 def _doc2():
     """The base doc plus a derived 'pad' stage after the source (operating = pad)."""
     d = _doc()
-    d["chain"]["planes"]["pad"] = {"type": "derived", "from": "sdr_output", "delta_db": -10.0}
+    d["chain"]["planes"]["pad"] = {"type": "derived", "from": "Source", "delta_db": -10.0}
     d["chain"]["operating_plane"] = "pad"
     return d
 
@@ -1783,17 +1859,17 @@ def test_source_stage_bypass_is_never_serialized():
     p._set_doc(_doc2())
     p._f["planes"][0]["bypass"] = True             # the source can't be bypassed
     out = p._read_form(strict=False)
-    assert "bypass" not in out["chain"]["planes"]["sdr_output"]
+    assert "bypass" not in out["chain"]["planes"]["Source"]
 
 
 def test_bypassed_stage_skips_local_validation():
     from ui.calibration_panel import local_calibration_issues
     d = _doc2()
     # a bypassed derived stage with NO Δ/component is transparent → must NOT be flagged
-    d["chain"]["planes"]["pad"] = {"type": "derived", "from": "sdr_output", "bypass": True}
+    d["chain"]["planes"]["pad"] = {"type": "derived", "from": "Source", "bypass": True}
     assert not any("pad" in i for i in local_calibration_issues(d))
     # the same stage un-bypassed IS flagged (missing Δ dB)
-    d["chain"]["planes"]["pad"] = {"type": "derived", "from": "sdr_output"}
+    d["chain"]["planes"]["pad"] = {"type": "derived", "from": "Source"}
     assert any("pad" in i and "Δ" in i for i in local_calibration_issues(d))
 
 

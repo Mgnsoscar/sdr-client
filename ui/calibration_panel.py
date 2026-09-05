@@ -823,22 +823,50 @@ def _rename_plane_in_doc(doc: dict, old: str, new: str) -> dict:
     return doc
 
 
+# The SOURCE (first) stage is the chain's measured origin; it has a fixed, reserved id the
+# editor never lets the operator rename or empty (renaming it to "" used to delete the stage).
+SOURCE_PLANE_NAME = "Source"
+
+
+def _normalize_source_plane(doc: dict) -> dict:
+    """Guarantee the SOURCE (first) stage is named ``SOURCE_PLANE_NAME``. A legacy/other source
+    id is renamed consistently (curves, limits, operating_plane, downstream 'from'/'of' — via
+    `_rename_plane_in_doc`) so nothing dangles. No-op when the source is already "Source"; if
+    some OTHER stage already holds the reserved name (degenerate), it is moved aside first so the
+    source can take it. Mutates and returns `doc`."""
+    if not isinstance(doc, dict):
+        return doc
+    planes = (doc.get("chain") or {}).get("planes")
+    if not isinstance(planes, dict) or not planes:
+        return doc
+    first = next(iter(planes))
+    if first == SOURCE_PLANE_NAME:
+        return doc
+    if SOURCE_PLANE_NAME in planes:                       # free the reserved name for the source
+        alt, i = f"{SOURCE_PLANE_NAME}_1", 1
+        while alt in planes:
+            i += 1
+            alt = f"{SOURCE_PLANE_NAME}_{i}"
+        _rename_plane_in_doc(doc, SOURCE_PLANE_NAME, alt)
+    return _rename_plane_in_doc(doc, first, SOURCE_PLANE_NAME)
+
+
 def _template() -> dict:
     """A minimal, valid starting document (broadcaster, one measured plane)."""
     return {
         "schema_version": 1, "unit_id": "", "unit_type": "broadcaster",
         "chain": {
             "gain_limits": {"min_gain_db": 0.0, "max_gain_db": 89.75},
-            "operating_plane": "sdr_output",
-            "limits": [{"plane": "sdr_output", "max_dbm": -2.5, "reason": "amp P1dB input"}],
+            "operating_plane": SOURCE_PLANE_NAME,
+            "limits": [{"plane": SOURCE_PLANE_NAME, "max_dbm": -2.5, "reason": "amp P1dB input"}],
             "planes": {
-                "sdr_output": {"type": "measured", "quantity": "total in-band power"},
+                SOURCE_PLANE_NAME: {"type": "measured", "quantity": "total in-band power"},
             },
         },
         "defaults": {"amplitude": FIXED_BASEBAND_AMPLITUDE},
         "signals": {
             "mock": {"curves": {
-                "sdr_output": {"points": [
+                SOURCE_PLANE_NAME: {"points": [
                     {"gain_db": 40, "power_dbm": -36}, {"gain_db": 74, "power_dbm": -2.5}]}}},
         },
     }
@@ -1530,14 +1558,14 @@ class CalibrationPanel(QWidget):
             doc = json.loads(text)
         except ValueError as exc:
             return f"not valid JSON: {exc}"
-        self._doc = doc
+        self._doc = _normalize_source_plane(doc)
         self._download_btn.setEnabled(doc is not None)
         self._doc_to_form()
         return None
 
     # ── model → views ────────────────────────────────────────────────────────────
     def _set_doc(self, doc: Optional[dict]) -> None:
-        self._doc = doc
+        self._doc = _normalize_source_plane(doc) if doc else doc
         self._stage_extra = {}                  # a fresh document → forget transient adds
         self._download_btn.setEnabled(doc is not None)
         self._doc_to_form()
@@ -1608,6 +1636,14 @@ class CalibrationPanel(QWidget):
         # render decides where the selected ones are shown).
         self._f["planes"] = [self._make_plane_row(n, s or {})
                              for n, s in (chain.get("planes") or {}).items()]
+        # The SOURCE (first) stage is the chain's measured origin: its name is the fixed,
+        # reserved id "Source" and can't be renamed (renaming it — to "" especially — used to
+        # strand the stage). Lock its name field read-only; every other stage stays editable.
+        if self._f["planes"]:
+            src_name = self._f["planes"][0]["name"]
+            src_name.setReadOnly(True)
+            src_name.setToolTip("The source stage is always named 'Source' — the chain's "
+                                "measured origin — and can't be renamed.")
         self._f["signals"] = {}
         self._spark_src = {}                # sparkline → its source curve table
         measured = self._measured_planes()
@@ -3671,7 +3707,9 @@ class CalibrationPanel(QWidget):
         planes: dict = {}
         prev_name: Optional[str] = None
         for idx, row in enumerate(self._f.get("planes", [])):
-            name = row["name"].text().strip()
+            # Never drop a stage because its name field is momentarily blank — fall back to its
+            # last committed name (empty edits are also reverted in _on_plane_name_changed).
+            name = row["name"].text().strip() or (row.get("orig") or "").strip()
             if not name:
                 continue
             role = row.get("role", "measured")
@@ -3790,12 +3828,25 @@ class CalibrationPanel(QWidget):
         curves/operating/limits stay consistent), then rename the plane everywhere it's
         referenced, so nothing dangles. Falls back to a plain rebuild when there's no
         real rename or the new name would collide with another plane."""
+        rows = self._f.get("planes", [])
+        if rows and rows[0] is row:
+            # The source stage is always named "Source" and can't be renamed (its field is
+            # read-only; guarded here too against a programmatic edit). Snap it back and stop.
+            if row["name"].text().strip() != SOURCE_PLANE_NAME:
+                row["name"].setText(SOURCE_PLANE_NAME)
+            return
         new = row["name"].text().strip()
         old = row.get("orig", "")
         planes_now = {r["name"].text().strip() for r in self._f.get("planes", []) if r is not row}
-        if not new or new == old or new in planes_now:
-            # nothing to propagate (or a name clash — let the generic rebuild/agent
-            # surface it); just resync so the rest of the form stays current.
+        if not new or new in planes_now:
+            # An empty name would delete the stage (it's dropped on read); a duplicate would
+            # collide with another stage (incl. the reserved source id "Source"). Neither is
+            # allowed — snap the field back to its last valid name, then resync.
+            row["name"].setText(old)
+            self._refresh_form_from_widgets()
+            return
+        if new == old:
+            # nothing to propagate; just resync so the rest of the form stays current.
             self._refresh_form_from_widgets()
             return
         row["name"].setText(old)                      # read the form under the old name…
