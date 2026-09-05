@@ -106,6 +106,12 @@ _DEEMBED_NEEDS_NEWER = (
     "this unit's agent is too old to de-embed a measurement cable (needs 1.11.0+). It would "
     "leave the cable loss baked into the measurement — wrong absolute power and a mis-placed "
     "ceiling. Update the agent, or clear the measurement cable before saving.")
+CAL_DEEMBED_PER_SIGNAL_CAPABILITY = "calibration-deembed-per-signal"  # agent >= 1.14.0
+_DEEMBED_PER_SIGNAL_NEEDS_NEWER = (
+    "this unit's agent is too old to de-embed a PER-SIGNAL or SOURCE-BIAS measurement cable "
+    "(needs 1.14.0+). It would leave the cable loss baked into that measurement — wrong absolute "
+    "power and a mis-placed ceiling. Update the agent, or clear the measurement cable on the "
+    "signal(s) / SDR flatness before saving.")
 
 CAL_MEASUREMENT_QUANTITY_CAPABILITY = "calibration-measurement-quantity"  # agent >= 1.12.0
 _MEASUREMENT_QUANTITY_NEEDS_NEWER = (
@@ -1696,6 +1702,35 @@ class CalibrationPanel(QWidget):
         spec = self._catalog.get(comp_id) if comp_id else None
         return (spec or {}).get("delta_db_by_freq") or []
 
+    def _deembed_combo(self, current):
+        """A picker for a measurement de-embed component (docs/calibration-v2 §14): "(none)" plus
+        every catalog component, its ``currentData()`` the chosen id ("" = none). A component the
+        catalog no longer has, or a non-string INLINE table (advanced, JSON-authored), is preserved
+        as a locked entry so opening the editor never silently drops it. ``current`` is the stored
+        value (an id string, an inline table, or ""/None)."""
+        cb = QComboBox()
+        cb.addItem("(no measurement cable)", "")
+        for cid in self._catalog.ids():
+            spec = self._catalog.get(cid) or {}
+            kind = (spec.get("kind") or "").strip()
+            cb.addItem(f"{cid}  ·  {kind}" if kind else cid, cid)
+        if isinstance(current, str) and current:
+            j = cb.findData(current)
+            if j < 0:                                   # references a component not in the catalog
+                cb.addItem(f"{current}  ·  (missing)", current)
+                j = cb.count() - 1
+            cb.setCurrentIndex(j)
+        elif current not in (None, "") and not isinstance(current, str):
+            cb.addItem("(inline table — edit in JSON)", current)   # preserve an advanced inline table
+            cb.setCurrentIndex(cb.count() - 1)
+        else:
+            cb.setCurrentIndex(0)
+        cb.setToolTip("The cable/pad between the measured point and the analyzer during THIS "
+                      "measurement. Its loss is REMOVED (de-embedded) so the calibration stores the "
+                      "true power — the cable is a bench artifact, not part of the transmit path. "
+                      "Characterize it in the Component library.")
+        return cb
+
     def _update_issues(self) -> None:
         """Recompute the instant local structural check from the current widgets and
         show the top few problems (or hide the panel when the document is clean)."""
@@ -2096,6 +2131,13 @@ class CalibrationPanel(QWidget):
         grow.addWidget(QLabel("measured at gain (dB), optional:"))
         gain_e = QLineEdit(_numstr(sb.get("gain_db"))); gain_e.setPlaceholderText("e.g. 60")
         grow.addWidget(gain_e); lay.addLayout(grow)
+        # Measurement DE-EMBED: the cable used for the flatness sweep. Its loss is removed
+        # FREQUENCY-BY-FREQUENCY (only a frequency-dependent cable reshapes the flatness — a
+        # constant loss cancels in the per-signal normalization). Needs agent 1.14.0+.
+        drow = QHBoxLayout()
+        drow.addWidget(QLabel("measurement cable (de-embed):"))
+        deembed_cb = self._deembed_combo(sb.get("measurement_deembed"))
+        drow.addWidget(deembed_cb, 1); lay.addLayout(drow)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                               | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
@@ -2116,6 +2158,11 @@ class CalibrationPanel(QWidget):
                 pass
         else:
             new_sb.pop("gain_db", None)
+        dm = deembed_cb.currentData()
+        if dm not in (None, ""):
+            new_sb["measurement_deembed"] = dm
+        else:
+            new_sb.pop("measurement_deembed", None)
         if new_sb.get("power_by_freq"):
             self._doc["source_bias"] = new_sb
         else:
@@ -3202,11 +3249,26 @@ class CalibrationPanel(QWidget):
         pts_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         pts_btn.setToolTip("The measured SDR gain → measured value points, in a dialog.")
         pts_btn.clicked.connect(lambda _=False, s=sid, p=plane: self._open_points_dialog(s, p))
+        # Measurement DE-EMBED for THIS signal's curve (docs/calibration-v2 §14.1): the cable
+        # between the measured point and the analyzer during this measurement. Removed as a constant
+        # at the signal's measured-at frequency, so the stored curve becomes true power (each signal
+        # keeps its own cable). Needs agent 1.14.0+ (gated on save).
+        dm = (entry.get("deembed") or {}).get(plane, "")
+        dcb = self._deembed_combo(dm)
+        dcb.currentIndexChanged.connect(
+            lambda _=0, cb=dcb, e=entry, p=plane: (
+                e.setdefault("deembed", {}).__setitem__(p, cb.currentData()),
+                self._refresh_form_from_widgets()))
+        dw = QWidget(); dr = QHBoxLayout(dw); dr.setContentsMargins(0, 0, 0, 0)
+        dhint = QLabel("its loss is removed (de-embedded)")
+        dhint.setStyleSheet(f"font-size:10.5px;color:{Palette.TEXT_FAINT};")
+        dr.addWidget(dcb, 1); dr.addWidget(dhint)
         form.addRow("quantity", q)
         form.addRow("unit", uw)
         form.addRow("shows as", preview)
         form.addRow("frequency (Hz)", fw)
         form.addRow("curve", pts_btn)
+        form.addRow("measurement cable", dw)
         v.addLayout(form)
         return sec
 
@@ -3734,8 +3796,13 @@ class CalibrationPanel(QWidget):
         measurement = {"quantity": str(meas.get("quantity") or "").strip(),
                        "unit": str(meas.get("unit") or "dBm").strip() or "dBm"}
         reading = {"limiting": dict(sig.get("limiting") or {})}
+        # Per-signal measurement DE-EMBED (docs/calibration-v2 §14.1): the cable this signal's curve
+        # was measured through, per measured plane. Seeded from the stored curve; the Measurement
+        # card's picker mutates it, and _read_form writes it back onto the curve.
+        deembed = {plane: ((sig.get("curves") or {}).get(plane) or {}).get("measurement_deembed") or ""
+                   for plane in measured}
         self._f["signals"][sid] = {"bw": bw, "cfreq": cfreq, "plabel": plabel,
-                                   "curves": curves, "sparks": sparks,
+                                   "curves": curves, "sparks": sparks, "deembed": deembed,
                                    "measurement": measurement, "reading": reading}
 
     def _on_curve_changed(self, spark: "_Sparkline") -> None:
@@ -3827,6 +3894,13 @@ class CalibrationPanel(QWidget):
                 prev = ((prev_sigs.get(sid) or {}).get("curves") or {}).get(plane) or {}
                 entry = dict(prev)           # preserve unmodeled curve fields too
                 entry["points"] = pts
+                # Per-signal measurement de-embed (docs/calibration-v2 §14.1): the picker's choice
+                # overrides any stored value ("" = clear it).
+                dm = (w.get("deembed") or {}).get(plane)
+                if dm not in (None, ""):
+                    entry["measurement_deembed"] = dm
+                else:
+                    entry.pop("measurement_deembed", None)
                 curves[plane] = entry
             sig["curves"] = curves
             # Per-signal MEASUREMENT (quantity/unit) and LIMITING reading, from the source
@@ -3950,6 +4024,7 @@ class CalibrationPanel(QWidget):
                 or self._blocks_on_freq_optional_center() or self._blocks_on_active_components()
                 or self._blocks_on_source_bias() or self._blocks_on_stage_bypass()
                 or self._blocks_on_power_bridges() or self._blocks_on_deembed()
+                or self._blocks_on_deembed_per_signal()
                 or self._blocks_on_measurement_quantity()
                 or self._blocks_on_limit_through_reading()):
             return False
@@ -4034,6 +4109,25 @@ class CalibrationPanel(QWidget):
         if (self._doc_uses_deembed(self._doc)
                 and not self._supports(CAL_MEASUREMENT_DEEMBED_CAPABILITY)):
             self._set_status(_DEEMBED_NEEDS_NEWER, kind="error")
+            return True
+        return False
+
+    @staticmethod
+    def _doc_uses_deembed_per_signal(doc) -> bool:
+        """A per-signal curve de-embed or a source-bias de-embed (needs agent 1.14.0+)."""
+        for sig in ((doc or {}).get("signals") or {}).values():
+            for curve in (isinstance(sig, dict) and (sig.get("curves") or {}) or {}).values():
+                if isinstance(curve, dict) and curve.get("measurement_deembed"):
+                    return True
+        sb = (doc or {}).get("source_bias")
+        return bool(isinstance(sb, dict) and sb.get("measurement_deembed"))
+
+    def _blocks_on_deembed_per_signal(self) -> bool:
+        """Guard (safety): a per-signal or source-bias measurement de-embed on a pre-1.14.0 agent
+        would leave that cable's loss baked in (wrong power + a mis-placed ceiling)."""
+        if (self._doc_uses_deembed_per_signal(self._doc)
+                and not self._supports(CAL_DEEMBED_PER_SIGNAL_CAPABILITY)):
+            self._set_status(_DEEMBED_PER_SIGNAL_NEEDS_NEWER, kind="error")
             return True
         return False
 

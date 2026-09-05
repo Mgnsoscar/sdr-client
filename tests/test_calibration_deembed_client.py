@@ -55,3 +55,79 @@ def test_no_deembed_not_gated():
     p._set_doc(_doc(None))
     assert p._doc_uses_deembed(p._doc) is False
     assert p._blocks_on_deembed() is False
+
+
+# ── §14.1: per-signal + source-bias de-embed (agent 1.14.0) ──────────────────────────────────────
+
+def _doc_ps(signal_deembed="sa_cable", source_bias_deembed=None):
+    """A doc whose de-embed lives on the SIGNAL's own curve (not the plane), optionally with a
+    source-bias de-embed too."""
+    curve = {"interp": "linear", "points": [{"gain_db": 40, "power_dbm": -31},
+                                            {"gain_db": 74, "power_dbm": 3}]}
+    if signal_deembed is not None:
+        curve["measurement_deembed"] = signal_deembed
+    doc = {
+        "schema_version": 1, "unit_type": "broadcaster",
+        "chain": {
+            "operating_plane": "sdr_output",
+            "gain_limits": {"min_gain_db": 0.0, "max_gain_db": 74.0},
+            "limits": [{"plane": "sdr_output", "max_dbm": 4.0, "reason": "amp"}],
+            "planes": {"sdr_output": {"type": "measured", "quantity": "power"}},
+        },
+        "signals": {"sig": {"center_freq_hz": 1.5e9,
+                            "curves": {"sdr_output": curve}}},
+    }
+    if source_bias_deembed is not None:
+        doc["source_bias"] = {"power_by_freq": [[1e9, 0.0], [2e9, -1.0]],
+                              "measurement_deembed": source_bias_deembed}
+    return doc
+
+
+def test_per_signal_curve_deembed_round_trips():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc_ps(signal_deembed="sa_cable"))
+    out = p._read_form(strict=False)
+    assert out["signals"]["sig"]["curves"]["sdr_output"]["measurement_deembed"] == "sa_cable"
+    # and it is NOT written onto the plane (per-signal placement, not plane-level)
+    assert "measurement_deembed" not in out["chain"]["planes"]["sdr_output"]
+
+
+def test_per_signal_picker_sets_and_clears():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc_ps(signal_deembed=None))                 # no cable to start
+    p._f["signals"]["sig"]["deembed"]["sdr_output"] = "sa_cable"   # picker chooses one
+    assert p._read_form(strict=False)["signals"]["sig"]["curves"]["sdr_output"][
+        "measurement_deembed"] == "sa_cable"
+    p._f["signals"]["sig"]["deembed"]["sdr_output"] = ""      # picker → "(none)"
+    assert "measurement_deembed" not in \
+        p._read_form(strict=False)["signals"]["sig"]["curves"]["sdr_output"]
+
+
+def test_source_bias_deembed_round_trips():
+    p = CalibrationPanel("u", FakeHub(FakeClient()))
+    p._set_doc(_doc_ps(signal_deembed=None, source_bias_deembed="sa_cable"))
+    out = p._read_form(strict=False)
+    assert out["source_bias"]["measurement_deembed"] == "sa_cable"
+
+
+def test_per_signal_and_source_bias_gate_on_the_new_capability():
+    # per-signal curve de-embed
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=())))
+    p._set_doc(_doc_ps(signal_deembed="sa_cable"))
+    assert p._doc_uses_deembed_per_signal(p._doc) is True
+    assert p._blocks_on_deembed_per_signal() is True
+    ok = CalibrationPanel("u", FakeHub(FakeClient(caps=["calibration-deembed-per-signal"])))
+    ok._set_doc(_doc_ps(signal_deembed="sa_cable"))
+    assert ok._blocks_on_deembed_per_signal() is False
+    # source-bias de-embed gates the same way
+    sb = CalibrationPanel("u", FakeHub(FakeClient(caps=())))
+    sb._set_doc(_doc_ps(signal_deembed=None, source_bias_deembed="sa_cable"))
+    assert sb._doc_uses_deembed_per_signal(sb._doc) is True
+    assert sb._blocks_on_deembed_per_signal() is True
+
+
+def test_no_per_signal_deembed_not_gated():
+    p = CalibrationPanel("u", FakeHub(FakeClient(caps=())))
+    p._set_doc(_doc_ps(signal_deembed=None))
+    assert p._doc_uses_deembed_per_signal(p._doc) is False
+    assert p._blocks_on_deembed_per_signal() is False

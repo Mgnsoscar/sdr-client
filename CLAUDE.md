@@ -340,6 +340,23 @@ beside its live twin. Explicit flag, never inferred from unit/family, so a same-
 reading (main-lobe vs total-in-band, both dBm) keeps the measured view. Tests:
 `test_param_form_power_units.py`. Script side: `sdr-scripts` `fm_chirp_tx.py`.
 
+## Current state — measurement de-embed pickers (per-signal + source bias): COMPLETE
+`ui/calibration_panel.py` gained a **"measurement cable" component picker** (`_deembed_combo`:
+"(no measurement cable)" + every catalog component, preserving a missing id or a JSON-authored inline
+table as a locked entry) in TWO places, so each measurement records the bench cable it was taken
+through and the agent removes its loss (docs/calibration-v2 §14.1; agent ≥ 1.14.0). (1) **Each
+signal's Measurement card** sets `signals.<id>.curves.<plane>.measurement_deembed` — seeded per plane
+into the signal editor state (`w["deembed"]`) at entry construction, written back in `_read_form`
+(overrides any stored value; "" clears it). A per-signal power curve is a gain sweep at ONE frequency,
+so its de-embed is a constant at the signal's measured-at freq — each signal keeps its own cable, and
+a signal added later through a different cable is corrected independently. (2) **The Source-bias ("SDR
+flatness") editor** sets `source_bias.measurement_deembed`, removed frequency-by-frequency (only a
+frequency-dependent cable reshapes the flatness). Saving either placement is gated on
+`CAL_DEEMBED_PER_SIGNAL_CAPABILITY` (`calibration-deembed-per-signal`) via
+`_blocks_on_deembed_per_signal` (a safety gate). The pre-existing plane-level de-embed
+(`_blocks_on_deembed`) is untouched and stays as a backward-compatible fallback (per-signal wins).
+Client-only UI + gate; the agent does the math. Tests: `tests/test_calibration_deembed_client.py`.
+
 ## Prior state — stage limits gauged through the limiting reading: COMPLETE
 The client mirror of the agent 1.13.0 fix: `state/power_fold.py` `_ceiling()` folds a stage
 limit's `via_limiting` entry (or its own dBm `anchor_curve`) through the signal's limiting reading
