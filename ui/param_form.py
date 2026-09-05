@@ -1676,6 +1676,30 @@ class ParamForm(QWidget):
                 sp[k] = round(float(v) + off, 4)
         return sp
 
+    def _power_field_bounds(self):
+        """The base --power ``(min, max)`` the SCRIPT's argparse enforces: the resolved
+        calibration bounds rounded to 2 dp. ``calkit.power_field_kwargs`` and
+        ``apply_power_bounds`` round identically, so these are exactly the bounds the transmit
+        script accepts. Either end is None when unknown. The achievable-level grid can land a
+        hair above the rounded max (a true level like −49.1772 rounds to a field max of −49.18),
+        so both the snap grid and the emitted base clamp to these — otherwise the form would
+        offer, and send, a base the script refuses (the task then crashes on launch)."""
+        b = self._cal_bounds or {}
+        def _r(v):
+            return (round(float(v), 2)
+                    if isinstance(v, (int, float)) and not isinstance(v, bool) else None)
+        return _r(b.get("min_power_dbm")), _r(b.get("max_power_dbm"))
+
+    def _clamp_power_base(self, base: float) -> float:
+        """Clamp a base --power to the script's field bounds, so an emitted value is never
+        outside what the script accepts (see _power_field_bounds)."""
+        lo, hi = self._power_field_bounds()
+        if hi is not None:
+            base = min(base, hi)
+        if lo is not None:
+            base = max(base, lo)
+        return base
+
     def _power_snappers(self):
         """``(snap, quantize_up, quantize_down)`` for the calibrated --power field, bound to
         the resolved artifact and the frequency + bridge parameters this render folds at, so
@@ -1690,9 +1714,13 @@ class ParamForm(QWidget):
         # shifted by a constant (the display offset at this bandwidth): snap in the base unit,
         # then re-apply the offset. `off` is 0 for the base quantity, so the base path is exact.
         off = self._power_offset
-        return (lambda p: fold.snap_power(p - off, f, pr) + off,
-                lambda p: fold.quantize_up(p - off, f, pr) + off,
-                lambda p: fold.quantize_down(p - off, f, pr) + off)
+        # Clamp the snapped base to the field bounds so the top selectable level is the field
+        # max (not a true achievable level a hair above the rounded max, which would read as
+        # over-range and — once sent — be refused by the script).
+        cl = self._clamp_power_base
+        return (lambda p: cl(fold.snap_power(p - off, f, pr)) + off,
+                lambda p: cl(fold.quantize_up(p - off, f, pr)) + off,
+                lambda p: cl(fold.quantize_down(p - off, f, pr)) + off)
 
     @staticmethod
     def _connect_commit(w, cb) -> None:
@@ -2448,12 +2476,15 @@ class ParamForm(QWidget):
                     val = choice_token(w)         # the value the script receives
                 else:
                     val = w.text().strip()
-                # --power controlled in a non-base unit: the widget holds the DISPLAYED unit;
-                # the script always receives the base (reported) quantity, so remove the offset.
-                if dest == self._power_dest and self._power_offset:
+                # --power: the widget holds the DISPLAYED unit; the script always receives the
+                # base (reported) quantity, so remove any view offset AND clamp to the field
+                # bounds. The achievable snap can land a hair over the rounded max (a plain
+                # QLineEdit --power field doesn't clamp it), so without this the emitted base
+                # would exceed what the script accepts and the task would refuse to start.
+                if dest == self._power_dest and spec.get("snap_role") == "power":
                     n = num_or_none(val)
                     if n is not None:
-                        val = fmt_value(round(n - self._power_offset, 4))
+                        val = fmt_value(self._clamp_power_base(round(n - self._power_offset, 4)))
                 if val == "":
                     continue
                 if flag:
@@ -2487,11 +2518,15 @@ class ParamForm(QWidget):
                 txt = w.text().strip()
                 if txt != "":
                     out[dest] = _typed(txt, spec)
-        # --power in a non-base display unit → send the base (reported) quantity (live tuning).
-        if (self._power_offset and self._power_dest in out
+        # --power → send the base (reported) quantity (live tuning): remove any view offset and
+        # clamp to the field bounds, so the value never exceeds what the script accepts.
+        psp = (self._widgets.get(self._power_dest, (None, None))[1]
+               if self._power_dest else None)
+        if (psp is not None and psp.get("snap_role") == "power" and self._power_dest in out
                 and isinstance(out[self._power_dest], (int, float))
                 and not isinstance(out[self._power_dest], bool)):
-            out[self._power_dest] = round(out[self._power_dest] - self._power_offset, 4)
+            out[self._power_dest] = self._clamp_power_base(
+                round(out[self._power_dest] - self._power_offset, 4))
         return out
 
     def validate(self) -> Optional[str]:

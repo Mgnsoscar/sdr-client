@@ -353,6 +353,22 @@ Client-only; no agent/scripts/capability change; drift-guarded files untouched. 
 `test_timeline_calibration.py` (`..._folds_through_live_bridge_params`, `test_eval_formula_reads_from_
 a_dict_source`, `test_fold_params_from_values_resolves_derived_enbw`).
 
+## Current state — --power never emits/snaps a base above the field max: COMPLETE (branch `claude/power-clamp-field-max`)
+Bug (Run form, GPS C/A in the full-signal-power view): drag to max, change `--sidelobes`, drag to
+the new max → the slider turned orange with NO warning, and Start crashed the script with "power
+−49.1772 dBm is above the maximum −49.18 dBm". Root cause: the calibrated `--power` field renders
+as a plain **QLineEdit** (no clamp) when the script gives no `step`; the achievable-level snap
+returns a TRUE folded level (−49.1772) that rounds UP past the field max (`round(base,2)` =
+−49.18, the SAME rounding `calkit.power_field_kwargs` uses, so it's exactly what the script's
+argparse rejects); the round-2 display tolerance let `validate()` pass; and `build_args`/`values`
+emitted the unclamped base. Fix (`ui/param_form.py`, client-only): `_power_field_bounds()` =
+`round(cal bounds, 2)` (the script's field bounds); `_clamp_power_base()` clamps to them.
+`_power_snappers()` clamps each snapped base to those bounds (so the top selectable level is the
+field max — no phantom orange), and `build_args`/`values` clamp the emitted base (bulletproof, and
+covers the QLineEdit-no-clamp path + the base quantity, not just views). Tests:
+`test_param_form_power_units.py` (`..._drag_to_max_never_emits_a_base_over_the_field_max`,
+`..._power_snapper_top_is_clamped_to_the_field_max`). No agent/scripts/capability change.
+
 ## Current state — start/stop sweep folds at the real span (`provides`): COMPLETE
 `ui/param_form.py` resolves a law-keyed parameter through a visible derived stand-in when the
 parameter's own field is hidden by a mode: `_provider_spec`/`_keyed_param_value` back a rewritten
