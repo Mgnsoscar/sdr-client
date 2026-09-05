@@ -203,6 +203,23 @@ height inside that shared scroll — so a long ramp shows every step and the dia
 The dialog is capped to ~90% of screen height so the scroll engages when the body is tall. Test:
 `test_ramp_view_fold.py` (`…_step_listing_shares_the_form_scroll_and_expands`).
 
+## Current state — opt-in measured-curve extrapolation: COMPLETE (branch `claude/calibration-extrapolate`)
+Cross-repo (agent + client). A signal's measured curve may set `extrapolate: down|up|both` (default
+`none`) on its curve entry to continue the end-segment slope past the measured gain endpoints instead
+of clamping flat — so `--power` reaches a gain that wasn't measured (motivating case: extrapolate DOWN
+because the low-gain measurement sits in the analyzer's noise floor). Gain is still clamped to the
+ceiling, so it extends the *curve*, not the limits. Client pieces: (1) **`state/power_fold.py`** mirrors
+the fold via a new `_interp_ex` on the operating anchor (reads the artifact's top-level `extrapolate`),
+so the form's `--power` range matches what the unit's `calkit` delivers. (2) **`ui/calibration_panel.py`**
+adds a per-signal picker (None/Down/Up/Both) on the measured-points dialog (`_open_points_dialog`),
+stored on the persistent `_CurveTable` widget (`tbl._extrapolate`, seeded in `_render_signal_form`,
+serialized in `_read_form`) so every edit surface preserves it and the doc stays clean when `none`.
+(3) A save-time capability gate `_blocks_on_extrapolate` / `_doc_uses_extrapolate` on
+`CAL_EXTRAPOLATE_CAPABILITY` ("calibration-extrapolate", agent ≥ 1.15.0) — a safety gate: an older
+agent would clamp, delivering a different power than the range shown. Drift-guarded files untouched.
+Tests: `test_power_fold_extrapolate.py`, `test_calibration_extrapolate.py`. Agent side: resolver +
+`calkit` + `docs/calibration.md` §7.5 (see sdr-agent CLAUDE.md).
+
 ## Packaging as a standalone no-admin Windows app: COMPLETE (branch `claude/packaging-standalone`)
 Owner decisions: **Windows 10/11 x64 only · no code-signing cert · Provision-unit IN scope · build on
 the owner's own Windows PC** (I write the config; they run it). Full build/install/distribute guide is
