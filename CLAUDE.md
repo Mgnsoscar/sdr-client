@@ -258,8 +258,11 @@ fields live in ONE full-width `_power_area` that `_render_power_area()` rebuilds
 card matches the mockup: a **RAMP POWER** header (+ LIVE), a **RAMPING IN** primary block with a
 vertical accent-soft→surface **gradient**, the swept quantity's name + family-coloured unit chip, the
 two `BoundedNumberField` From/To fields (kept verbatim — all calibrated folding/snapping/clamping/
-view-offset preserved — but built with `show_rail=False` so they drop their own rails and are styled as
-the mockup's `.p-input`: big right-aligned mono value + unit suffix), **ONE shared dual-handle rail**
+view-offset preserved — but built with `pinput=True` so they render as the mockup's **`.p-input`**: a
+bordered box with a big right-aligned mono value, a unit segment, and stacked ▲/▼ steppers that route
+through the spinbox's achievable-level stepping), their sub-labels showing the **actual fire times**
+(`_ft_sublabels`: anchor start → `on-air +Xs` / `ramp end`; stop → `ramp start` / `off-air −Xs`; both →
+insets), **ONE shared dual-handle rail**
 (new `param_widgets.DualRangeRail` — two handles over MIN..MAX with the swept span filled; a drag snaps
 to an achievable level via `BoundedNumberField.snap()`/`bounds()` and writes the field, which re-syncs
 the handle), MIN/MAX labels, a rising/falling **span** read-out, and a **DEPENDS ON** chip row of the

@@ -268,6 +268,8 @@ class RampEditorDialog(QDialog):
         self._pwr_rail = None          # the shared dual-handle From/To rail (card mode)
         self._pwr_min = None
         self._pwr_max = None
+        self._ft_from_lbl = None       # FROM/TO sub-labels (fire times) — refreshed live
+        self._ft_to_lbl = None
         self._power_area = QWidget()
         self._power_area_lay = QVBoxLayout(self._power_area)
         self._power_area_lay.setContentsMargins(0, 0, 0, 0)
@@ -886,16 +888,17 @@ class RampEditorDialog(QDialog):
         return fold, freq, params, note, view_off
 
     def _make_value_field(self, spec: Optional[dict], value, placeholder: str,
-                          show_rail: bool = True):
+                          card: bool = False):
         """A From/To widget for the swept parameter: a bounded numeric field (spinbox + rail
         + limit chip) when the parameter has a numeric min/max, else a plain line edit.
-        ``show_rail=False`` builds just the input (the power card supplies one shared dual rail)."""
+        ``card=True`` builds the mockup's .p-input (no own rail/chip — the power card supplies one
+        shared dual rail)."""
         if spec and spec.get("type") in ("int", "float") \
                 and spec.get("min") is not None and spec.get("max") is not None:
             fold, freq, params, note, view_off = self._power_fold_ctx(spec)
             field = BoundedNumberField(spec, fold=fold, fold_freq=freq, note=note,
                                        fold_params=params, view_offset=view_off,
-                                       show_rail=show_rail)
+                                       show_rail=not card, pinput=card)
             if isinstance(value, (int, float)):
                 field.setValue(value)
             field.valueChanged.connect(self._update_preview)
@@ -905,11 +908,12 @@ class RampEditorDialog(QDialog):
         le.textChanged.connect(self._update_preview)
         return le
 
-    def _rebuild_value_fields(self, show_rail: bool = True) -> None:
+    def _rebuild_value_fields(self, card: bool = False) -> None:
         """Rebuild the From/To fields for the currently-swept parameter, carrying the values
         over. Called when the parameter, task or its params change so the fields always show
         the right range/unit and (for --power) the calibrated, frequency-folded bound.
-        ``show_rail=False`` (card mode) omits each field's own rail — the card adds a shared one."""
+        ``card=True`` builds each field as the mockup's .p-input (no own rail — the card adds a
+        shared dual-handle one)."""
         spec = self._ramped_spec()
         # The saved ramp's start/stop are BASE; show them in the controlled view (+off). The FIRST
         # build runs before params load (offset unknown), so re-seed from the saved base — converted
@@ -926,8 +930,8 @@ class RampEditorDialog(QDialog):
             cur_start, cur_stop = seed_start, seed_stop
             if self._all_params:                     # params are in → this seed is the real one
                 self._seeded_view = True
-        self._start_field = self._make_value_field(spec, cur_start, "start value", show_rail)
-        self._stop_field = self._make_value_field(spec, cur_stop, "stop value", show_rail)
+        self._start_field = self._make_value_field(spec, cur_start, "start value", card)
+        self._stop_field = self._make_value_field(spec, cur_stop, "stop value", card)
         _swap_only(self._start_lay, self._start_field)
         _swap_only(self._stop_lay, self._stop_field)
 
@@ -945,9 +949,9 @@ class RampEditorDialog(QDialog):
         is_power = spec is not None and find_power_index([spec]) is not None
         views = self._power_views() if is_power else []
         card = is_power and len(views) >= 2
-        # In card mode the two fields share ONE dual-handle rail, so build them WITHOUT their own
-        # rail/chip; plain mode keeps each field's own rail. (Build after the card decision.)
-        self._rebuild_value_fields(show_rail=not card)
+        # In card mode the two fields share ONE dual-handle rail and render as the mockup's .p-input
+        # (no own rail/chip); plain mode keeps each field's own rail. (Build after the card decision.)
+        self._rebuild_value_fields(card=card)
         self._clear_power_area()
         if card:
             root = self._build_power_card(spec, views)
@@ -975,6 +979,8 @@ class RampEditorDialog(QDialog):
         self._pwr_rail = None
         self._pwr_min = None
         self._pwr_max = None
+        self._ft_from_lbl = None
+        self._ft_to_lbl = None
         self._card_active = False
 
     def _build_plain_fromto(self) -> QWidget:
@@ -1036,14 +1042,16 @@ class RampEditorDialog(QDialog):
         topline.addStretch(1)
         pv.addLayout(topline)
 
-        # From / To — the persistent bounded fields (styled like the mockup's .p-input: big
-        # right-aligned mono value + unit suffix + steppers), side by side under FROM/TO labels.
-        self._style_power_input(self._start_field)
-        self._style_power_input(self._stop_field)
+        # From / To — the persistent bounded fields, now rendered as the mockup's .p-input (built
+        # by BoundedNumberField in pinput mode). Their sub-labels reflect the ACTUAL fire times
+        # for the current anchor + offset (not a hardcoded on-air/off-air).
+        from_sub, to_sub = self._ft_sublabels()
+        self._ft_from_lbl = self._ft_label("FROM", from_sub)
+        self._ft_to_lbl = self._ft_label("TO", to_sub)
         grid = QGridLayout(); grid.setContentsMargins(0, 6, 0, 2)
         grid.setHorizontalSpacing(14); grid.setVerticalSpacing(4)
-        grid.addWidget(self._ft_label("FROM", "on-air, T0"), 0, 0)
-        grid.addWidget(self._ft_label("TO", "off-air"), 0, 1)
+        grid.addWidget(self._ft_from_lbl, 0, 0)
+        grid.addWidget(self._ft_to_lbl, 0, 1)
         grid.addWidget(self._start_box, 1, 0)
         grid.addWidget(self._stop_box, 1, 1)
         grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
@@ -1178,24 +1186,29 @@ class RampEditorDialog(QDialog):
         if idx >= 0:
             self._power_unit.setCurrentIndex(idx)
 
-    def _style_power_input(self, field) -> None:
-        """Style a From/To field's spinbox as the mockup's .p-input — a bordered box with a big
-        right-aligned mono value + unit suffix + steppers. No-op for a non-spinbox field."""
-        spin = getattr(field, "_spin", None)
-        if spin is None:
-            return
-        spin.setObjectName("rampPwrInput")
-        try:
-            spin.setAlignment(Qt.AlignmentFlag.AlignRight)
-        except (AttributeError, TypeError):
-            pass
-        spin.setMinimumHeight(44)
-        spin.setStyleSheet(
-            f"QAbstractSpinBox#rampPwrInput {{ background: {Palette.SURFACE}; "
-            f"border: 1px solid {Palette.BORDER_STRONG}; border-radius: 9px; padding: 6px 8px; "
-            f"font-family: 'IBM Plex Mono','DejaVu Sans Mono',monospace; font-size: 20px; "
-            f"color: {Palette.TEXT}; }} "
-            f"QAbstractSpinBox#rampPwrInput:focus {{ border: 1px solid {Palette.ACCENT}; }}")
+    def _ft_sublabels(self) -> tuple:
+        """The FROM/TO sub-labels describing WHEN each endpoint fires, from the current anchor +
+        offset (see api.ramp): anchor 'start' pins the FROM point to on-air T0 + offset and runs
+        forward to the ramp end; anchor 'stop' holds the TO level up to off-air + offset (offset ≤
+        0); anchor 'both' fills on-air + start-inset .. off-air − end-inset. Replaces the old
+        hardcoded 'on-air, T0' / 'off-air'."""
+        anchor = self._anchor.currentData() or "start"
+        off = float(self._offset.value())
+        if anchor == "both":
+            end = float(self._offset_end.value())
+            return (self._time_sub("on-air", off), self._time_sub("off-air", -abs(end)))
+        if anchor == "stop":
+            return ("ramp start", self._time_sub("off-air", off))
+        return (self._time_sub("on-air", off), "ramp end")
+
+    @staticmethod
+    def _time_sub(edge: str, secs: float) -> str:
+        """A fire-time sub-label relative to an edge: 'at on-air (T0)' at 0, else e.g.
+        'on-air +10 s' / 'off-air −5 s'."""
+        if abs(secs) < 1e-9:
+            return f"at {edge}" + (" (T0)" if edge == "on-air" else "")
+        sign = "+" if secs > 0 else "−"
+        return f"{edge} {sign}{fmt_duration(abs(secs))}"
 
     def _on_rail_drag(self, which: str, v: float) -> None:
         """A drag on the shared dual rail: snap the value to a real achievable level and write it
@@ -1216,15 +1229,17 @@ class RampEditorDialog(QDialog):
         h.addWidget(_uc_label("DEPENDS ON", 9, Palette.TEXT_FAINT, 0.8))
         for c in chips:
             chip = QFrame(); chip.setObjectName("rampDepChip")
+            # A fully-rounded pill (radius ≈ half height), matching the mockup's .dep.
             chip.setStyleSheet(
                 f"#rampDepChip {{ background: {Palette.INSET}; border: 1px solid {Palette.BORDER}; "
-                f"border-radius: 11px; }}")
-            ch = QHBoxLayout(chip); ch.setContentsMargins(10, 3, 10, 3); ch.setSpacing(6)
-            k = QLabel(c["name"]); kf = QFont("IBM Plex Sans"); kf.setPixelSize(10)
-            kf.setWeight(QFont.Weight.DemiBold); k.setFont(kf)
-            k.setStyleSheet(f"color: {Palette.ACCENT_INK};")
+                f"border-radius: 13px; }}")
+            ch = QHBoxLayout(chip); ch.setContentsMargins(11, 4, 11, 4); ch.setSpacing(6)
+            k = QLabel(c["name"])                          # bold, accent-coloured parameter name
+            kf = QFont("IBM Plex Sans"); kf.setPixelSize(11); kf.setWeight(QFont.Weight.DemiBold)
+            k.setFont(kf); k.setStyleSheet(f"color: {Palette.ACCENT_INK};")
             dv = QLabel(fmt_value(c["value"]) if c["value"] is not None else "—")
-            dv.setFont(mono_font(11, 500)); dv.setStyleSheet(f"color: {Palette.TEXT};")
+            dv.setFont(mono_font(12))                      # sleeker (regular-weight) value text
+            dv.setStyleSheet(f"color: {Palette.TEXT};")
             ch.addWidget(k); ch.addWidget(dv)
             if c.get("unit"):
                 du = QLabel(c["unit"]); du.setFont(mono_font(10))
@@ -1327,6 +1342,11 @@ class RampEditorDialog(QDialog):
             u = f" {unit}" if unit else ""
             self._span_lbl.setText(f"sweeps  {sign}{abs(d):.{self._power_disp_decimals()}f}{u}  "
                                    f"({direction})")
+        # FROM/TO sub-labels reflect the live anchor + offset (fire times)
+        if self._ft_from_lbl is not None:
+            fs, ts = self._ft_sublabels()
+            self._ft_from_lbl.setText(f"FROM  ({fs})")
+            self._ft_to_lbl.setText(f"TO  ({ts})")
         # the shared dual rail + MIN/MAX labels track the live From/To and the field bounds
         if isinstance(self._start_field, BoundedNumberField):
             lo, hi = self._start_field.bounds()

@@ -326,3 +326,26 @@ def test_min_max_labels_reflect_the_field_bounds():
     # the numbers shown are the achievable bounds (density at the carried bw)
     assert _num(dlg._pwr_min.text().replace("MIN", "")) == pytest.approx(lo, abs=0.06)
     assert _num(dlg._pwr_max.text().replace("MAX", "")) == pytest.approx(hi, abs=0.06)
+
+
+# ── From/To render as the mockup's .p-input, and their sub-labels follow the fire times ──────────
+
+def test_from_to_fields_render_as_pinput_in_the_card():
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    assert dlg._start_field._pinput and dlg._stop_field._pinput      # the mockup's .p-input
+    # the ▲/▼ steppers route through the spinbox's achievable-level stepping
+    dlg._start_field.setValue(-30.0); _app.processEvents()
+    before = dlg._start_field.value()
+    dlg._start_field._spin.stepUp(); _app.processEvents()
+    assert dlg._start_field.value() > before                         # stepped to the next level
+
+
+def test_from_to_sublabels_follow_the_anchor_and_offset():
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)], offset=10.0)       # anchor start, +10 s
+    _app.processEvents()
+    assert "on-air +10" in dlg._ft_from_lbl.text() and "ramp end" in dlg._ft_to_lbl.text()
+    # switch to the off-air anchor: FROM is the ramp start, TO is held to off-air − offset
+    dlg._anchor.setCurrentIndex(dlg._anchor.findData("stop"))
+    dlg._offset.setValue(-5.0)
+    _app.processEvents()
+    assert "ramp start" in dlg._ft_from_lbl.text() and "off-air −5" in dlg._ft_to_lbl.text()

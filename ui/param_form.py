@@ -626,12 +626,15 @@ class BoundedNumberField(QWidget):
     def __init__(self, spec: dict, fold: Optional["PowerFold"] = None,
                  fold_freq: Optional[float] = None, note: str = "", parent=None,
                  fold_params: Optional[dict] = None, view_offset: float = 0.0,
-                 show_rail: bool = True):
+                 show_rail: bool = True, pinput: bool = False):
         super().__init__(parent)
         # show_rail=False builds JUST the input (no own rail/limit-chip/warning) — for the ramp
         # power card, where one shared dual-handle rail serves both the From and To fields. The
         # value model, range and achievable-level snapping (snap()/the arrows) are unchanged.
-        self._show_rail = show_rail
+        # pinput=True renders that bare input as the mockup's .p-input — a bordered box with a big
+        # right-aligned mono value, a unit segment and stacked ▲/▼ steppers (implies show_rail off).
+        self._pinput = pinput
+        self._show_rail = show_rail and not pinput
         self._spec = dict(spec)
         self._is_int = self._spec.get("type") == "int"
         lo, hi = self._spec.get("min"), self._spec.get("max")
@@ -659,11 +662,15 @@ class BoundedNumberField(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(4)
-        crow = QHBoxLayout(); crow.setContentsMargins(0, 0, 0, 0); crow.setSpacing(8)
-        crow.addWidget(self._spin, 1)
         self._bounded = (self._spec.get("type") in ("int", "float")
                          and self._lo is not None and self._hi is not None)
         self._chip = self._rail = self._warn = None
+        if self._pinput:
+            outer.addWidget(self._build_pinput())
+            self._spin.valueChanged.connect(lambda *_: self.valueChanged.emit())
+            return
+        crow = QHBoxLayout(); crow.setContentsMargins(0, 0, 0, 0); crow.setSpacing(8)
+        crow.addWidget(self._spin, 1)
         if self._bounded and self._show_rail:
             self._chip = LimitChip()
             self._chip.set_range(_fmt_bound(self._lo), _fmt_bound(self._hi))
@@ -685,6 +692,58 @@ class BoundedNumberField(QWidget):
             self._on_change()
         else:
             self._spin.valueChanged.connect(lambda *_: self.valueChanged.emit())
+
+    def _build_pinput(self) -> QWidget:
+        """Render the input as the mockup's .p-input: a bordered box with a big right-aligned mono
+        value, a unit segment, and stacked ▲/▼ steppers that route through the spinbox's
+        achievable-level stepping. No own rail/chip — the ramp card supplies one shared rail."""
+        self._spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self._spin.setSuffix("")                          # the unit is shown as its own segment
+        try:
+            self._spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+        except (AttributeError, TypeError):
+            pass
+        self._spin.setObjectName("pInputSpin")
+        self._spin.setStyleSheet(
+            "QAbstractSpinBox#pInputSpin { border: none; background: transparent; "
+            "padding: 6px 6px 6px 14px; font-family: 'IBM Plex Mono','DejaVu Sans Mono',monospace; "
+            f"font-size: 21px; font-weight: 500; color: {Palette.TEXT}; }}")
+
+        frame = QFrame(); frame.setObjectName("pInput")
+        frame.setStyleSheet(
+            f"#pInput {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER_STRONG}; "
+            f"border-radius: 9px; }}")
+        h = QHBoxLayout(frame); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(0)
+        h.addWidget(self._spin, 1)
+
+        unit = (self._spec.get("unit") or "").strip()
+        if unit:
+            u = QLabel(unit); u.setObjectName("pInputUnit")
+            u.setFont(mono_font(12))
+            u.setStyleSheet(f"color: {Palette.TEXT_MUTED}; padding: 0 9px 0 4px;")
+            h.addWidget(u)
+
+        col = QWidget(); col.setObjectName("pInputSteps")
+        col.setStyleSheet(f"#pInputSteps {{ border-left: 1px solid {Palette.BORDER}; }}")
+        cv = QVBoxLayout(col); cv.setContentsMargins(0, 0, 0, 0); cv.setSpacing(0)
+        up = self._step_button("▲", first=True); down = self._step_button("▼", first=False)
+        up.clicked.connect(self._spin.stepUp)
+        down.clicked.connect(self._spin.stepDown)
+        cv.addWidget(up); cv.addWidget(down)
+        h.addWidget(col)
+        return frame
+
+    def _step_button(self, glyph: str, first: bool) -> QPushButton:
+        b = QPushButton(glyph); b.setObjectName("pInputStep")
+        b.setFixedWidth(30); b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        border = f"border-bottom: 1px solid {Palette.BORDER};" if first else ""
+        b.setStyleSheet(
+            f"QPushButton#pInputStep {{ border: none; {border} background: {Palette.SURFACE}; "
+            f"color: {Palette.TEXT_MUTED}; font-size: 10px; padding: 0; }}"
+            f"QPushButton#pInputStep:hover {{ background: {Palette.ACCENT_SOFT}; "
+            f"color: {Palette.ACCENT_INK}; }}")
+        return b
 
     def _on_rail(self, value: float) -> None:
         value = min(max(value, self._lo), self._hi)          # a drag can't leave the range
