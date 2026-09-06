@@ -25,8 +25,9 @@ from typing import List, Optional
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
+    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QSizePolicy,
+    QVBoxLayout, QWidget,
 )
 
 from api import ramp as _ramp
@@ -37,10 +38,10 @@ from state.power_law import parse_law
 from . import timeline_model as tlm
 from .duration_spin import DurationSpinBox
 from .param_form import (
-    BoundedNumberField, ParamForm, apply_power_bounds, find_power_index,
+    BoundedNumberField, ParamForm, _family_chip, apply_power_bounds, find_power_index,
     fmt_duration, fmt_value, hz_per_unit, range_hint,
 )
-from .theme import Palette
+from .theme import Palette, mono_font
 
 
 def _is_numeric(spec: dict) -> bool:
@@ -232,13 +233,13 @@ class RampEditorDialog(QDialog):
         form.addRow("Parameter", self._param)
 
         # Which quantity to author a calibrated --power ramp in (spectral density / total power /
-        # dBm-per-Hz …) — the ramp analogue of the Run/Tune power card's "Control in this →". Shown
-        # only when the swept parameter is the calibrated --power field AND the signal offers more
-        # than one view; the From/To range re-folds + relabels into the chosen quantity.
+        # dBm-per-Hz …) — the ramp analogue of the Run/Tune power card's "Control in this →". It is
+        # now driven by the per-quantity "Ramp in this →" buttons on the power card's companion
+        # tiles, so the combo itself is a hidden state/logic holder (kept for its view-conversion
+        # wiring — _on_power_view_changed), never shown; the visible switch is the card.
         self._power_unit = Dropdown()
-        self._power_unit_lbl = _row(form, "Set power in", self._power_unit)
-        self._power_unit_lbl.setVisible(False)
-        self._power_unit.setVisible(False)
+        self._power_unit.setParent(self)
+        self._power_unit.hide()
 
         # From/To render as bounded numeric fields (spinbox + range rail + limit chip) —
         # the same widget the parameter form uses — rebuilt for the swept parameter so its
@@ -254,8 +255,20 @@ class RampEditorDialog(QDialog):
         self._start_lay.setContentsMargins(0, 0, 0, 0); self._start_lay.setSpacing(0)
         self._stop_box = QWidget(); self._stop_lay = QVBoxLayout(self._stop_box)
         self._stop_lay.setContentsMargins(0, 0, 0, 0); self._stop_lay.setSpacing(0)
-        form.addRow("From", self._start_box)
-        form.addRow("To", self._stop_box)
+        # The From/To fields live in ONE full-width area that renders EITHER the styled
+        # multi-quantity power card (calibrated --power with ≥2 views — the ramp analogue of the
+        # Run/Tune power card: a RAMPING IN primary + From/To, an ALSO READS AS companion grid, a
+        # DEPENDS ON row) OR plain From/To rows (any other parameter). Rebuilt by
+        # _render_power_area when the swept parameter, task or its params change; the persistent
+        # From/To boxes are re-parented across renders, never deleted with the old card.
+        self._card_active = False
+        self._span_lbl = None
+        self._companion_labels: List[tuple] = []
+        self._power_area = QWidget()
+        self._power_area_lay = QVBoxLayout(self._power_area)
+        self._power_area_lay.setContentsMargins(0, 0, 0, 0)
+        self._power_area_lay.setSpacing(0)
+        form.addRow(self._power_area)
 
         self._anchor = Dropdown()
         self._anchor.addItem("On-air (T0)", "start")
@@ -402,7 +415,7 @@ class RampEditorDialog(QDialog):
         # the first mode, hiding the fields the saved ramp actually uses).
         self._init_mode = _mode_for_ramp(r, self._is_both())
         self._ready = True
-        self._rebuild_value_fields()   # From/To fields (fallback until params load)
+        self._render_power_area()      # From/To fields + power card (fallback until params load)
         self._apply_mode_visibility()
         self._sync_anchor()   # populate modes + show/hide rows + preview
         # Cap the dialog to the available screen so the shared scroll engages when the body (a long
@@ -610,15 +623,13 @@ class RampEditorDialog(QDialog):
         return self._selected_view()
 
     def _populate_power_views(self) -> None:
-        """(Re)fill the "Set power in" picker for the currently-swept parameter and show it only
-        when that parameter is the calibrated --power field and the signal offers ≥2 views. Keeps
-        the current selection valid (falls back to the default view). Signals are blocked so
-        repopulating never spuriously re-folds; the caller rebuilds the From/To fields afterwards."""
+        """(Re)fill the hidden --power quantity picker for the currently-swept parameter, keeping
+        the current selection valid (falls back to the default view). The card's companion
+        "Ramp in this →" buttons drive this combo; the card itself is shown/hidden by
+        _render_power_area. Signals are blocked so repopulating never spuriously re-folds; the
+        caller rebuilds the From/To fields afterwards."""
         spec = self._ramped_spec()
         views = self._power_views() if (spec and find_power_index([spec]) is not None) else []
-        show = len(views) >= 2
-        self._power_unit_lbl.setVisible(show)
-        self._power_unit.setVisible(show)
         self._power_unit.blockSignals(True)
         self._power_unit.clear()
         for v in views:
@@ -642,7 +653,7 @@ class RampEditorDialog(QDialog):
         cur_start, cur_stop = self._val(self._start_field), self._val(self._stop_field)
         self._power_view = self._power_unit.currentData()
         delta = self._ramp_view_offset() - old_off   # base is unchanged; the display shifts by Δoffset
-        self._rebuild_value_fields()                 # new view's shifted range + unit
+        self._render_power_area()                     # new view's card (primary/companions) + fields
         if isinstance(cur_start, (int, float)) and isinstance(self._start_field, BoundedNumberField):
             self._start_field.setValue(cur_start + delta)
         if isinstance(cur_stop, (int, float)) and isinstance(self._stop_field, BoundedNumberField):
@@ -685,8 +696,7 @@ class RampEditorDialog(QDialog):
 
     def _on_param_changed(self) -> None:
         self._rebuild_run_form()      # the ramped param leaves the fixed-value form
-        self._populate_power_views()  # the picker only applies to the calibrated --power field
-        self._rebuild_value_fields()  # From/To take the new parameter's range/unit
+        self._render_power_area()     # From/To + the power card (or plain rows) for the new param
         self._update_preview()
 
     def _update_warning(self) -> None:
@@ -790,8 +800,7 @@ class RampEditorDialog(QDialog):
             self._param.setCurrentText(want)
         self._param.blockSignals(False)
         self._rebuild_run_form()
-        self._populate_power_views()   # the swept param's --power views (before the fold reads them)
-        self._rebuild_value_fields()   # now the swept param's real range/unit is known
+        self._render_power_area()      # the swept param's From/To + power card (or plain rows)
         self._update_preview()
 
     # ── Preview ──────────────────────────────────────────────────────────────
@@ -914,9 +923,360 @@ class RampEditorDialog(QDialog):
         _swap_only(self._start_lay, self._start_field)
         _swap_only(self._stop_lay, self._stop_field)
 
+    # ── Power card (the multi-quantity presentation of From/To) ─────────────────
+    def _render_power_area(self) -> None:
+        """Rebuild the From/To area for the currently-swept parameter: the styled multi-quantity
+        power card (the ramp analogue of the Run/Tune power card) when the parameter is the
+        calibrated --power field and the signal offers ≥2 quantities, else plain From/To rows.
+        Rebuilds the From/To bounded fields and the hidden quantity picker first, then lays them
+        into the chosen presentation. The persistent From/To boxes are re-parented, never deleted."""
+        if not self._ready:
+            return
+        self._rebuild_value_fields()     # fresh From/To bounded fields inside the persistent boxes
+        self._populate_power_views()     # hidden picker reflects the swept param's views
+        spec = self._ramped_spec()
+        is_power = spec is not None and find_power_index([spec]) is not None
+        views = self._power_views() if is_power else []
+        self._clear_power_area()
+        if is_power and len(views) >= 2:
+            root = self._build_power_card(spec, views)
+            self._card_active = True
+        else:
+            root = self._build_plain_fromto()
+        self._power_area_lay.addWidget(root)
+        self._update_power_readouts()
+
+    def _clear_power_area(self) -> None:
+        """Empty the power area, detaching the persistent From/To boxes FIRST so deleting the
+        previous card (a child of the area) doesn't take them with it, and dropping the per-render
+        read-out references so a stale card's labels are never touched."""
+        for box in (self._start_box, self._stop_box):
+            if box is not None:
+                box.setParent(None)
+        while self._power_area_lay.count():
+            item = self._power_area_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        self._span_lbl = None
+        self._companion_labels = []
+        self._card_active = False
+
+    def _build_plain_fromto(self) -> QWidget:
+        """Plain 'From' / 'To' rows — the presentation for any parameter that is not a calibrated
+        --power field with ≥2 quantities (an ordinary numeric knob, or --power with a single view)."""
+        w = QWidget()
+        fl = QFormLayout(w)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.setSpacing(8)
+        fl.addRow("From", self._start_box)
+        fl.addRow("To", self._stop_box)
+        return w
+
+    def _build_power_card(self, spec: dict, views: List[dict]) -> QWidget:
+        """The multi-quantity --power card: a RAMPING IN primary (the swept quantity's name +
+        family chip, the From/To bounded fields, a span read-out and a DEPENDS ON row) and an
+        ALSO READS AS grid of read-only companion tiles (each other quantity's live From → To with
+        a 'Ramp in this →' switch). Matches docs/ramp-power-mockup.html and the Run/Tune power card
+        (ui/param_form._add_power_unit_ui) — the values-carrying widgets are the same BoundedNumber
+        fields the plain rows use, so all calibrated folding/snapping/clamping is preserved."""
+        selected = self._selected_view() or {}
+        p_unit = (selected.get("unit") or spec.get("unit") or "dBm").strip()
+
+        card = QFrame(); card.setObjectName("rampPwrCard")
+        card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        card.setStyleSheet(
+            f"#rampPwrCard {{ background: {Palette.SURFACE}; border: 1px solid {Palette.ACCENT_SOFT}; "
+            f"border-radius: 10px; }}")
+        v = QVBoxLayout(card); v.setContentsMargins(14, 12, 14, 14); v.setSpacing(10)
+
+        # header: eyebrow + one-line lead + LIVE badge
+        head = QHBoxLayout(); head.setContentsMargins(0, 0, 0, 0); head.setSpacing(9)
+        head.addWidget(_uc_label("RAMP POWER", 11, Palette.ACCENT, 1.3))
+        lead = QLabel("sweep From → To in any one quantity — the rest track it live")
+        lead.setStyleSheet(f"color: {Palette.TEXT_FAINT}; font-size: 11px;")
+        head.addWidget(lead); head.addStretch(1)
+        head.addWidget(self._live_badge())
+        v.addLayout(head)
+
+        # primary block — the quantity you sweep
+        prim = QFrame(); prim.setObjectName("rampPwrPrimary")
+        prim.setStyleSheet(
+            f"#rampPwrPrimary {{ background: {Palette.ACCENT_SOFT}; "
+            f"border: 1px solid {Palette.BORDER_STRONG}; border-radius: 10px; }}")
+        pv = QVBoxLayout(prim); pv.setContentsMargins(13, 12, 13, 12); pv.setSpacing(8)
+
+        topline = QHBoxLayout(); topline.setContentsMargins(0, 0, 0, 0); topline.setSpacing(9)
+        tag = _uc_label("RAMPING IN", 9, Palette.ACCENT, 0.8)
+        tag.setStyleSheet(tag.styleSheet() + f" background: {Palette.SURFACE}; "
+                          f"border: 1px solid {Palette.ACCENT_SOFT}; border-radius: 5px; padding: 2px 7px;")
+        topline.addWidget(tag)
+        pname = QLabel(selected.get("name") or "power")
+        nf = QFont("IBM Plex Sans"); nf.setPixelSize(14); nf.setWeight(QFont.Weight.DemiBold)
+        pname.setFont(nf); pname.setStyleSheet(f"color: {Palette.TEXT};")
+        topline.addWidget(pname)
+        topline.addWidget(_family_chip(p_unit, p_unit))
+        topline.addStretch(1)
+        pv.addLayout(topline)
+
+        # From / To — the persistent bounded fields, side by side under uppercase labels
+        grid = QGridLayout(); grid.setContentsMargins(0, 4, 0, 0)
+        grid.setHorizontalSpacing(14); grid.setVerticalSpacing(4)
+        grid.addWidget(self._ft_label("FROM", "start value"), 0, 0)
+        grid.addWidget(self._ft_label("TO", "stop value"), 0, 1)
+        grid.addWidget(self._start_box, 1, 0)
+        grid.addWidget(self._stop_box, 1, 1)
+        grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
+        pv.addLayout(grid)
+
+        # span read-out (rising / falling / flat), in the primary quantity
+        self._span_lbl = QLabel("—")
+        self._span_lbl.setFont(mono_font(11, 500))
+        self._span_lbl.setStyleSheet(f"color: {Palette.TEXT_MUTED};")
+        pv.addWidget(self._span_lbl)
+
+        # DEPENDS ON — the fold inputs (frequency + carried bridge knobs) the range moves with
+        fold, freq, _params, _note, _off = self._power_fold_ctx(spec)
+        dep_row = self._build_deps_row(spec, fold, freq)
+        if dep_row is not None:
+            pv.addWidget(dep_row)
+        v.addWidget(prim)
+
+        # ALSO READS AS — one read-only companion per OTHER quantity, each promotable to primary
+        others = [x for x in views if x.get("id") != selected.get("id")]
+        if others:
+            v.addWidget(self._reads_divider())
+            cg = QGridLayout(); cg.setContentsMargins(0, 0, 0, 0)
+            cg.setHorizontalSpacing(10); cg.setVerticalSpacing(10)
+            for i, view in enumerate(others):
+                cg.addWidget(self._companion_card(view), i // 2, i % 2)
+            if len(others) == 1:
+                cg.setColumnStretch(1, 1)
+            v.addLayout(cg)
+        return card
+
+    def _live_badge(self) -> QLabel:
+        b = QLabel("● LIVE")
+        f = QFont("IBM Plex Sans"); f.setPixelSize(10); f.setWeight(QFont.Weight.DemiBold)
+        b.setFont(f)
+        b.setStyleSheet(
+            f"color: {Palette.ONLINE}; background: {Palette.ONLINE_SOFT}; border: 1px solid #BFE6D7; "
+            f"border-radius: 10px; padding: 2px 9px;")
+        return b
+
+    def _ft_label(self, main: str, sub: str) -> QLabel:
+        lbl = QLabel(f"{main}  ({sub})")
+        f = QFont("IBM Plex Sans"); f.setPixelSize(9); f.setWeight(QFont.Weight.Bold)
+        lbl.setFont(f)
+        lbl.setStyleSheet(f"color: {Palette.TEXT_FAINT}; letter-spacing: 0.8px;")
+        return lbl
+
+    def _reads_divider(self) -> QWidget:
+        row = QWidget()
+        h = QHBoxLayout(row); h.setContentsMargins(0, 4, 0, 0); h.setSpacing(10)
+        h.addWidget(_uc_label("ALSO READS AS", 10, Palette.TEXT_FAINT, 0.9))
+        rule = QFrame(); rule.setFrameShape(QFrame.Shape.HLine); rule.setFixedHeight(1)
+        rule.setStyleSheet(f"background: {Palette.BORDER}; border: none;")
+        h.addWidget(rule, 1)
+        return row
+
+    def _companion_card(self, view: dict) -> QWidget:
+        """A read-only companion tile: the quantity name + family chip, its live From → To value,
+        a live marker, and a 'Ramp in this →' button that promotes it to the primary (drives the
+        hidden picker, so all the view-conversion wiring runs). Its value labels are registered for
+        live refresh in _update_power_readouts."""
+        card = QFrame(); card.setObjectName("rampCompCard")
+        card.setStyleSheet(
+            f"#rampCompCard {{ background: {Palette.SURFACE_ALT}; border: 1px solid {Palette.BORDER}; "
+            f"border-radius: 7px; }}")
+        cv = QVBoxLayout(card); cv.setContentsMargins(13, 11, 13, 11); cv.setSpacing(8)
+        unit = (view.get("unit") or "dBm").strip()
+
+        top = QHBoxLayout(); top.setContentsMargins(0, 0, 0, 0); top.setSpacing(8)
+        name = QLabel(view.get("name") or "power"); name.setWordWrap(True)
+        nf = QFont("IBM Plex Sans"); nf.setPixelSize(12); nf.setWeight(QFont.Weight.DemiBold)
+        name.setFont(nf); name.setStyleSheet(f"color: {Palette.TEXT};")
+        top.addWidget(name, 1)
+        top.addWidget(_family_chip(unit, unit))
+        cv.addLayout(top)
+
+        valrow = QHBoxLayout(); valrow.setContentsMargins(0, 0, 0, 0); valrow.setSpacing(7)
+        from_lbl = QLabel("—"); from_lbl.setFont(mono_font(16, 500))
+        from_lbl.setStyleSheet(f"color: {Palette.TEXT};")
+        arrow = QLabel("→"); arrow.setStyleSheet(f"color: {Palette.TEXT_FAINT};")
+        to_lbl = QLabel("—"); to_lbl.setFont(mono_font(16, 600))
+        to_lbl.setStyleSheet(f"color: {Palette.TEXT};")
+        u = QLabel(unit); u.setFont(mono_font(11)); u.setStyleSheet(f"color: {Palette.TEXT_MUTED};")
+        valrow.addWidget(from_lbl); valrow.addWidget(arrow); valrow.addWidget(to_lbl)
+        valrow.addWidget(u); valrow.addStretch(1)
+        cv.addLayout(valrow)
+
+        foot = QHBoxLayout(); foot.setContentsMargins(0, 0, 0, 0); foot.setSpacing(8)
+        live = QLabel("● live"); lf = QFont("IBM Plex Sans"); lf.setPixelSize(10); live.setFont(lf)
+        live.setStyleSheet(f"color: {Palette.ONLINE};")
+        foot.addWidget(live); foot.addStretch(1)
+        btn = QPushButton("Ramp in this →"); btn.setObjectName("rampInThis")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(
+            f"QPushButton#rampInThis {{ color: {Palette.ACCENT}; background: transparent; "
+            f"border: none; padding: 3px 4px; font-size: 11px; font-weight: 500; }}"
+            f"QPushButton#rampInThis:hover {{ background: {Palette.ACCENT_SOFT}; "
+            f"border-radius: 5px; text-decoration: underline; }}")
+        btn.clicked.connect(lambda _=False, vid=view.get("id"): self._set_ramp_power_view(vid))
+        foot.addWidget(btn)
+        cv.addLayout(foot)
+
+        self._companion_labels.append((view, from_lbl, to_lbl))
+        return card
+
+    def _set_ramp_power_view(self, vid) -> None:
+        """Promote a companion quantity to the primary — the card's 'Ramp in this →'. Drives the
+        hidden picker (setCurrentIndex fires _on_power_view_changed), so the From/To values are
+        re-expressed in the new quantity and the base ramp the unit is commanded in is unchanged."""
+        if vid == self._power_view:
+            return
+        idx = self._power_unit.findData(vid)
+        if idx >= 0:
+            self._power_unit.setCurrentIndex(idx)
+
+    def _build_deps_row(self, spec: dict, fold, freq):
+        """The 'DEPENDS ON' chip row — the fold frequency (when the range is freq-dependent) and
+        each carried bridge knob the range folds through (a chirp's --bw, GPS C/A's --sidelobes),
+        resolved to the real knob behind an internal derived quantity. None when nothing re-folds."""
+        chips = self._ramp_dep_chips(spec, fold, freq)
+        if not chips:
+            return None
+        row = QWidget()
+        h = QHBoxLayout(row); h.setContentsMargins(0, 3, 0, 0); h.setSpacing(8)
+        h.addWidget(_uc_label("DEPENDS ON", 9, Palette.TEXT_FAINT, 0.8))
+        for c in chips:
+            chip = QFrame(); chip.setObjectName("rampDepChip")
+            chip.setStyleSheet(
+                f"#rampDepChip {{ background: {Palette.INSET}; border: 1px solid {Palette.BORDER}; "
+                f"border-radius: 11px; }}")
+            ch = QHBoxLayout(chip); ch.setContentsMargins(10, 3, 10, 3); ch.setSpacing(6)
+            k = QLabel(c["name"]); kf = QFont("IBM Plex Sans"); kf.setPixelSize(10)
+            kf.setWeight(QFont.Weight.DemiBold); k.setFont(kf)
+            k.setStyleSheet(f"color: {Palette.ACCENT_INK};")
+            dv = QLabel(fmt_value(c["value"]) if c["value"] is not None else "—")
+            dv.setFont(mono_font(11, 500)); dv.setStyleSheet(f"color: {Palette.TEXT};")
+            ch.addWidget(k); ch.addWidget(dv)
+            if c.get("unit"):
+                du = QLabel(c["unit"]); du.setFont(mono_font(10))
+                du.setStyleSheet(f"color: {Palette.TEXT_FAINT};")
+                ch.addWidget(du)
+            h.addWidget(chip)
+        h.addStretch(1)
+        return row
+
+    def _ramp_dep_chips(self, spec: dict, fold, freq) -> List[dict]:
+        """``[{name, value, unit}]`` for the DEPENDS ON row: the fold frequency in MHz (when the
+        range moves with it) plus each carried bridge knob the range folds through, read at the
+        ramp's operating point (``_op_state``). An internal derived key a law uses (e.g. an
+        equivalent-noise bandwidth from --sidelobes) is resolved to its source knob."""
+        chips: List[dict] = []
+        task = self._task.currentText().strip()
+        if fold is not None and getattr(fold, "freq_dependent", False) \
+                and isinstance(freq, (int, float)):
+            fname = "Frequency"
+            fparam = (getattr(self._editor, "_script_cal_freq_params", None) or {}).get(
+                self._current_script)
+            s = next((x for x in self._all_params if x.get("dest") == fparam), None)
+            if s is not None:
+                fname = _pretty(s.get("name") or "Frequency")
+            chips.append({"name": fname, "value": round(freq / 1e6, 4), "unit": "MHz"})
+        keyed = set(fold.keyed_params()) if fold is not None else set()
+        view = self._control_view()
+        if view is not None and view.get("law") is not None:
+            try:
+                keyed.update(view["law"].params())
+            except (ValueError, TypeError):
+                pass
+        state = self._op_state(task)
+        seen: set = set()
+        for pdest in sorted(keyed):
+            for src in self._resolve_dep_source(pdest):
+                if src in seen:
+                    continue
+                seen.add(src)
+                s = next((x for x in self._all_params if x.get("dest") == src), None)
+                if s is None:
+                    continue
+                chips.append({"name": _pretty(s.get("name") or src),
+                              "value": state.get(src), "unit": (s.get("unit") or "").strip()})
+        return chips
+
+    def _resolve_dep_source(self, pdest: str) -> List[str]:
+        """The real input knob(s) behind a law-keyed dest: the dest itself when it is a visible
+        input param, else the source fields of the derived quantity under it (e.g. --sidelobes
+        behind an ``enbw_mhz`` table lookup). Falls back to the dest so the row is never empty."""
+        own = next((x for x in self._all_params if x.get("dest") == pdest), None)
+        if own is not None and own.get("kind") != "derived" and not own.get("hidden"):
+            return [pdest]
+        srcs: List[str] = []
+        if own is not None and own.get("kind") == "derived":
+            for key, args in (own.get("formula") or {}).items():
+                if key == "labels":
+                    continue
+                if isinstance(args, (list, tuple)):
+                    srcs.extend(str(a) for a in args
+                                if not (isinstance(a, (int, float)) and not isinstance(a, bool)))
+        real = [s for s in srcs
+                if any(x.get("dest") == s and x.get("kind") != "derived" for x in self._all_params)]
+        return real or [pdest]
+
+    def _power_disp_decimals(self) -> int:
+        """Display decimals for the companion read-outs — the primary field's own device-step
+        decimals (a QDoubleSpinBox setDecimals), so companions round like the field. 2 by default."""
+        f = self._start_field
+        spin = getattr(f, "_spin", None)
+        if isinstance(f, BoundedNumberField) and spin is not None and hasattr(spin, "decimals"):
+            try:
+                return int(spin.decimals())
+            except (TypeError, ValueError):
+                return 2
+        return 2
+
+    def _fmt_pw(self, v) -> str:
+        try:
+            return f"{float(v):.{self._power_disp_decimals()}f}".replace("-", "−")
+        except (TypeError, ValueError):
+            return "—"
+
+    def _update_power_readouts(self) -> None:
+        """Refresh the span read-out and each companion's From → To from the live From/To values.
+        A companion value is the primary value plus the gap between the two views' offsets at the
+        carried operating point (base is shared, so displayed = primary + (off_companion − off_sel));
+        no-op when the plain rows are showing (no card labels)."""
+        if self._span_lbl is None:
+            return
+        a = self._selected_view() or {}
+        unit = (a.get("unit") or self._param_unit() or "").strip()
+        sfrom, sto = self._val(self._start_field), self._val(self._stop_field)
+        if sfrom is None or sto is None:
+            self._span_lbl.setText("enter From / To")
+        else:
+            d = sto - sfrom
+            direction = "rising" if d > 1e-9 else "falling" if d < -1e-9 else "flat"
+            sign = "+" if d >= 0 else "−"
+            u = f" {unit}" if unit else ""
+            self._span_lbl.setText(f"sweeps  {sign}{abs(d):.{self._power_disp_decimals()}f}{u}  "
+                                   f"({direction})")
+        sel_off = self._ramp_view_offset()
+        task = self._task.currentText().strip()
+        for view, from_lbl, to_lbl in self._companion_labels:
+            gap = self._view_offset(task, view) - sel_off
+            if sfrom is None or sto is None:
+                from_lbl.setText("—"); to_lbl.setText("—")
+            else:
+                from_lbl.setText(self._fmt_pw(sfrom + gap))
+                to_lbl.setText(self._fmt_pw(sto + gap))
+
     def _update_preview(self, *_) -> None:
         if not self._ready:
             return
+        self._update_power_readouts()   # span + companion From→To track the live From/To values
         spec = self._spec_from_form()
         self._update_warning()
         if not self._active_params():
@@ -1119,3 +1479,20 @@ def _row(form: QFormLayout, label: str, widget: QWidget) -> QLabel:
     form.addRow(lbl, widget)
     widget._row_label = lbl
     return lbl
+
+
+def _uc_label(text: str, px: int, color: str, spacing: float) -> QLabel:
+    """A small uppercase eyebrow/label — bold IBM Plex Sans at ``px`` with letter-spacing,
+    matching the power card's section headers (RAMP POWER / RAMPING IN / ALSO READS AS / DEPENDS ON)."""
+    lbl = QLabel(text)
+    f = QFont("IBM Plex Sans"); f.setPixelSize(px); f.setWeight(QFont.Weight.Bold)
+    lbl.setFont(f)
+    lbl.setStyleSheet(f"color: {color}; letter-spacing: {spacing}px;")
+    return lbl
+
+
+def _pretty(name: str) -> str:
+    """A parameter's display name for a chip: strip a leading '--', underscores → spaces, first
+    letter capitalised (e.g. ``sidelobes`` → ``Sidelobes``, ``--bw`` → ``Bw``)."""
+    s = str(name or "").lstrip("-").replace("_", " ").strip()
+    return (s[:1].upper() + s[1:]) if s else s

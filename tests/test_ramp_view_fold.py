@@ -125,33 +125,39 @@ def test_save_then_load_round_trips_the_density():
     assert dlg2._val(dlg2._stop_field) == pytest.approx(-18.0, abs=0.06)
 
 
-# ── Issue 2: the "Set power in" picker offers the OTHER quantities (dBm, dBm/Hz), not just density ─
+# ── Issue 2: the power card offers the OTHER quantities (dBm, dBm/Hz), not just density ──────────
 # The ramp editor previously locked --power to the leading restates_measurement view (live density);
-# the operator could not author the ramp in total power or dBm/Hz. It now surfaces a picker (the ramp
-# analogue of the Run/Tune card's "Control in this →") that lists every declared view and re-folds.
+# the operator could not author the ramp in total power or dBm/Hz. It now renders the multi-quantity
+# power card (the ramp analogue of the Run/Tune card): a RAMPING IN primary + an ALSO READS AS grid
+# of companion tiles, each with a "Ramp in this →" switch. The card is backed by a hidden picker
+# (_power_unit) that carries the view id list + the view-conversion wiring.
 
 def _total(base):     # full-bandwidth total power = base + view_delta(fbw) = base + 10 dB (bw-invariant)
     return base + 10.0
 
 
-def test_power_view_picker_lists_every_view_and_defaults_to_density():
+def test_power_card_lists_every_view_and_defaults_to_density():
     dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
-    assert dlg._power_unit.isVisibleTo(dlg)                       # shown for calibrated --power
+    assert dlg._card_active                                       # the card renders for calibrated --power
     ids = [dlg._power_unit.itemData(i) for i in range(dlg._power_unit.count())]
     assert ids == ["psd_live", "fbw_power", "psd_hz"]            # the chirp's CAL_POWER_LAWS, base dropped
     assert dlg._power_view == "psd_live"                         # the leading restatement is the default
     labels = [dlg._power_unit.itemText(i) for i in range(dlg._power_unit.count())]
     assert "dBm/MHz" in labels[0] and "dBm" == labels[1].split("[")[-1].rstrip("] ") and "dBm/Hz" in labels[2]
+    # the OTHER two quantities each get a companion tile with a "Ramp in this →" button
+    comp_ids = [v["id"] for v, _f, _t in dlg._companion_labels]
+    assert comp_ids == ["fbw_power", "psd_hz"]
 
 
-def test_power_view_picker_hidden_for_a_non_power_param():
+def test_power_card_hidden_for_a_non_power_param():
     dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
     dlg._param.setCurrentText("bw")
     _app.processEvents()
-    assert not dlg._power_unit.isVisibleTo(dlg)                  # a non-power ramp has no quantity choice
+    assert not dlg._card_active                                  # a non-power ramp has no quantity card
+    assert not dlg._companion_labels                             # …and no companion tiles
     dlg._param.setCurrentText("power")
     _app.processEvents()
-    assert dlg._power_unit.isVisibleTo(dlg)                      # ...and it returns when --power is swept
+    assert dlg._card_active                                      # ...and it returns when --power is swept
 
 
 def test_switching_to_total_power_relabels_the_range_and_converts_the_values():
@@ -224,3 +230,63 @@ def test_reopening_a_total_power_ramp_selects_that_view():
     assert dlg._ramped_spec().get("unit") == "dBm"
     # base stop −14.99 → total power −4.99 dBm.
     assert dlg._val(dlg._stop_field) == pytest.approx(_total(-14.99), abs=0.06)
+
+
+# ── The multi-quantity power card: companion From → To read-outs + "Ramp in this →" ──────────────
+
+def _num(lbl_text):
+    """A companion/span label reads back a formatted number with a unicode minus — parse it."""
+    return float(str(lbl_text).replace("−", "-").split()[0])
+
+
+def test_companion_tiles_show_each_quantity_from_to_live():
+    # With --power swept in live density (default), the total-power companion shows the SAME sweep
+    # re-expressed: density −25 → −18 at bw 20 is total power −11.99 → −4.99 dBm.
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    dlg._start_field.setValue(-25.0)
+    dlg._stop_field.setValue(-18.0)
+    _app.processEvents()
+    tiles = {v["id"]: (f, t) for v, f, t in dlg._companion_labels}
+    assert set(tiles) == {"fbw_power", "psd_hz"}                 # the two quantities not being swept
+    off = -10 * math.log10(2)                                    # psd_live view_delta(20) ≈ −3.01
+    ffrom, fto = tiles["fbw_power"]
+    assert _num(ffrom.text()) == pytest.approx(_total(-25.0 - off), abs=0.06)   # ≈ −11.99
+    assert _num(fto.text()) == pytest.approx(_total(-18.0 - off), abs=0.06)     # ≈ −4.99
+
+
+def test_ramp_in_this_button_promotes_a_companion_to_primary():
+    # "Ramp in this →" on the total-power tile makes it the swept quantity, re-expressing the same
+    # physical sweep (density −25/−18 → total −11.99/−4.99 dBm) and demoting density to a companion.
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    dlg._start_field.setValue(-25.0)
+    dlg._stop_field.setValue(-18.0)
+    _app.processEvents()
+    dlg._set_ramp_power_view("fbw_power")                        # the companion button's action
+    _app.processEvents()
+    assert dlg._power_view == "fbw_power"
+    assert dlg._ramped_spec().get("unit") == "dBm"
+    off = -10 * math.log10(2)
+    assert dlg._val(dlg._start_field) == pytest.approx(_total(-25.0 - off), abs=0.06)   # ≈ −11.99
+    # density is now one of the companions, not the primary
+    assert "psd_live" in [v["id"] for v, _f, _t in dlg._companion_labels]
+
+
+def test_span_readout_reports_the_sweep_direction():
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    dlg._start_field.setValue(-30.0); dlg._stop_field.setValue(-18.0)
+    _app.processEvents()
+    assert "rising" in dlg._span_lbl.text()                      # From < To
+    dlg._start_field.setValue(-18.0); dlg._stop_field.setValue(-30.0)
+    _app.processEvents()
+    assert "falling" in dlg._span_lbl.text()                     # From > To
+
+
+def test_plain_from_to_rows_for_a_non_power_param():
+    # A non-power ramp keeps the plain From/To rows — no card, no companion tiles, no span read-out.
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    dlg._param.setCurrentText("bw")
+    _app.processEvents()
+    assert not dlg._card_active
+    assert dlg._span_lbl is None
+    assert dlg._companion_labels == []
+    assert dlg._start_field is not None and dlg._stop_field is not None   # still editable

@@ -249,6 +249,27 @@ guard intact):
   exe, "Run anyway"; self-signed doesn't help. **Open:** must still be smoke-tested on a clean Windows
   10/11 VM (no-admin install, icon, real-unit discovery, Provision) — the Linux build can't cover that.
 
+## Current state — ramp step editor power card: COMPLETE (branch `claude/ramp-power-quantities`)
+The ramp step editor's calibrated `--power` control now renders the **multi-quantity power card** —
+the ramp analogue of the Run/Tune card — instead of a plain "Set power in" dropdown + From/To boxes.
+Design record: `docs/ramp-power-mockup.html` (interactive mockup). In `ui/ramp_editor.py`, the From/To
+fields live in ONE full-width `_power_area` that `_render_power_area()` rebuilds into EITHER the card
+(calibrated `--power` with ≥2 views) OR plain From/To rows (any other parameter / a single view). The
+card: a **RAMP POWER** header (+ LIVE), a **RAMPING IN** primary (the swept quantity's name +
+family-coloured unit chip, the two `BoundedNumberField` From/To fields kept verbatim — so all
+calibrated folding/snapping/clamping/view-offset is preserved — a rising/falling **span** read-out, and
+a **DEPENDS ON** chip row of the fold frequency + carried bridge knobs via `_ramp_dep_chips`/
+`_resolve_dep_source`), then an **ALSO READS AS** grid of read-only companion tiles (`_companion_card`),
+each showing that quantity's live From → To (`_update_power_readouts`) with a **Ramp in this →** button
+(`_set_ramp_power_view` → drives the now-HIDDEN `_power_unit` combo, so `_on_power_view_changed`'s
+value-conversion wiring runs unchanged). The combo is kept as the state/logic holder (tests still read
+its item ids/data); the visible switch is the card. `_card_active`/`_companion_labels`/`_span_lbl` expose
+the card for tests. Everything else in the dialog (Run-a-task toggle, Task/Parameter, Anchor/Offset,
+Define by + steps/step/hold/duration, Include first/last, run-mode fixed-param form, preview + Show
+steps) is untouched and fully functional. Client-only; no agent/scripts/capability change; drift-guarded
+files untouched. Tests: `tests/test_ramp_view_fold.py` (card lists/defaults, hidden for non-power,
+companion From→To live, "Ramp in this →" promotes, span direction, plain rows for a non-power param).
+
 ## Current state — Run/tune power control redesign: COMPLETE
 The calibrated `--power` control (Run/tune form) is now the mockup's power card: one PRIMARY
 quantity you set (large step-rounded value + range rail with labelled MIN/MAX + a family-coloured
