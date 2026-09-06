@@ -439,6 +439,83 @@ def test_depends_on_shows_the_source_knob_not_an_internal_derived_quantity():
     assert "Sidelobes 0" in _dep_chips(f)
 
 
+# ── the emitted / snapped base --power never exceeds the script's field max ─────────
+# Regression: controlling --power in the full-signal-power view and dragging to the max — then
+# re-folding at another --sidelobes — used to emit a base a hair above the script's field max
+# (a true achievable level like −49.1772 rounds to a field max of −49.18), so the task crashed
+# on launch ("power -49.1772 dBm is above the maximum -49.18 dBm"). The snap grid and the
+# emitted base now both clamp to the field bounds (round(cal bounds, 2)).
+
+def _ca_view_form(max_sidelobes=13):
+    ENBW = ["sidelobes", 0.923588, 0.971788, 0.988638, 0.997168, 1.002311, 1.005749,
+            1.008208, 1.010054, 1.011490, 1.012640, 1.013581, 1.014365, 1.015029, 1.015598]
+    FULL = {"id": "full_power", "name": "Full signal power", "unit": "dBm", "in": "density",
+            "out": "abs", "k": 60.0, "param": "enbw_mhz", "coeff": 10.0, "ref": 1.0, "rep": 0.988638}
+    base_max = -49.1772                       # a true achievable top that rounds to -49.18
+    art = {"operating_unit": "dBm/Hz", "quantity": "Peak spectral density",
+           "min_gain_db": 40.0, "max_gain_db": 74.0, "min_power_dbm": -136.61,
+           "max_power_dbm": base_max, "anchor_curve": [[40.0, -136.61], [74.0, base_max]],
+           "passive_hops": [], "readings": {"limiting": {"kind": "same"}}}
+    bounds = {"min_power_dbm": -136.61, "max_power_dbm": base_max,
+              "quantity": "Peak spectral density", "operating_plane": "sdr_output",
+              "amplitude": 0.5, "artifact": art}
+    specs = [
+        {"dest": "freq", "flags": ["--freq"], "type": "float", "step": 0.01, "unit": "MHz",
+         "default": 1575.42, "is_freq": True},
+        {"dest": "power", "flags": ["--power"], "type": "float", "unit": "dBm/Hz",
+         "snap_role": "power"},
+        {"dest": "sidelobes", "flags": ["-Sidelobes", "--sidelobes"], "type": "int", "min": 0,
+         "max": max_sidelobes, "step": 1, "default": 5},
+        {"dest": "enbw_mhz", "flags": ["-Full-power-bandwidth"], "kind": "derived",
+         "hidden": True, "unit": "MHz", "formula": {"table": ENBW}},
+    ]
+    f = ParamForm()
+    f.set_params(specs, cal_bounds=bounds, absolute_allowed=True, default_power_mode="absolute",
+                 cal_freq_param="freq", power_laws=[FULL])
+    f.set_values(["--freq", "1575.42", "--sidelobes", "5", "--power", "-120"])
+    _app.processEvents()
+    return f, round(base_max, 2)              # the field max the script enforces
+
+
+def _emit_base(f):
+    args = f.build_args()
+    return float(args[args.index("--power") + 1])
+
+
+def test_full_power_view_drag_to_max_never_emits_a_base_over_the_field_max():
+    f, field_max = _ca_view_form()
+    f._set_power_view("full_power")
+    _app.processEvents()
+
+    def drag_to_max(nsl):
+        sw = f._widgets["sidelobes"][0]
+        sw.setValue(nsl)
+        sw.editingFinished.emit()            # commit → re-fold the view offset at the new count
+        _app.processEvents()
+        w = f._widgets["power"][0]
+        top = f._power_snappers()[0](1e9)    # the top achievable level, in the view's unit
+        if hasattr(w, "setValue"):
+            w.setValue(top)
+        else:
+            w.setText(f"{top}")
+            w.editingFinished.emit()
+        _app.processEvents()
+        return _emit_base(f)
+
+    assert drag_to_max(5) <= field_max + 1e-9
+    assert drag_to_max(13) <= field_max + 1e-9       # the reported crash case
+    assert f.values()["power"] <= field_max + 1e-9   # the live-tune path clamps too
+
+
+def test_power_snapper_top_is_clamped_to_the_field_max():
+    # The achievable-snap grid never offers a level above the field max, so the top selectable
+    # value equals the display max (no phantom over-range orange) — in the base quantity too.
+    f, field_max = _ca_view_form()
+    snap = f._power_snappers()
+    assert snap[0](1e9) <= field_max + 1e-9          # snap
+    assert snap[1](1e9) <= field_max + 1e-9          # quantize_up
+
+
 def test_power_chip_when_operating_unit_absent_falls_back_to_dbm():
     # A bridge-less calibration (no operating_unit) keeps the quantity and shows [dBm].
     art = _artifact(_density_reported()); art.pop("operating_unit"); art["quantity"] = "Total in-band power"
