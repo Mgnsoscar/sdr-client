@@ -249,6 +249,26 @@ guard intact):
   exe, "Run anyway"; self-signed doesn't help. **Open:** must still be smoke-tested on a clean Windows
   10/11 VM (no-admin install, icon, real-unit discovery, Provision) — the Linux build can't cover that.
 
+## Current state — offline calibration fallback in plans/sequences: COMPLETE (branch `claude/ramp-power-quantities`)
+Authoring a plan/sequence for a calibrated unit that is OFFLINE now folds absolute power from the
+unit's **last-known cached calibration** (`state/calibration_cache.py`, keyed by hostname; already
+populated whenever a unit's `/calibration` is seen — the Calibration tab and the timeline both `put`
+it), instead of dropping to no calibration. The machinery existed (`TimelineEditor._on_cal_result`
+falls back to `cache.get(host)` and flags `_cal_stale`), but only for `AgentConnectionError`; a unit
+never seen THIS session isn't in the fleet so `Fleet.get` raises **`KeyError`**, which fell through to
+the "reachable but uncalibrated" branch → no bounds. Fixed by reclassifying `_on_cal_result`: a
+`dict` (valid → use+cache; invalid → none) and an **`AgentHTTPError`** (a real 404 "uncalibrated" →
+none, never stale) are the only "don't use cache" cases; **every other failure** (connection error,
+`KeyError`/undiscovered, timeout) falls back to the cached calibration, marked stale. It refreshes to
+live the next time the unit is reachable (`set_calibration` re-fetches). **Clear to the user** in
+three places: a timeline-level accent banner (`TimelineEditor._cal_stale_banner`/
+`_update_cal_stale_banner`: "<unit> is offline — absolute power uses its last-known calibration, last
+seen <ts>…"), the step editor's existing stale status line, and a new ramp-editor notice
+(`RampEditorDialog._cal_note`/`_update_cal_note`). Client-only; no agent/scripts/capability change;
+drift-guarded files untouched. Tests: `test_calibration_cache.py` (undiscovered `KeyError` → cache +
+stale; offline-no-cache → none; banner shows offline / hides online), `test_ramp_cal_bounds.py`
+(ramp offline note shows when stale, hides when fresh).
+
 ## Current state — ramp step editor power card: COMPLETE (branch `claude/ramp-power-quantities`)
 The ramp step editor's calibrated `--power` control now renders the **multi-quantity power card** —
 the ramp analogue of the Run/Tune card — instead of a plain "Set power in" dropdown + From/To boxes.

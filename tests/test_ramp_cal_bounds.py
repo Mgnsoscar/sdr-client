@@ -97,3 +97,26 @@ def test_without_calibration_uses_the_script_range():
     assert (field._spin.minimum(), field._spin.maximum()) == (-140.0, 60.0)
     field.setValue(999)
     assert field.value() == 60.0                       # clamped to the script max
+
+
+def test_offline_calibration_note_shows_when_bounds_are_stale():
+    # When the target unit is offline and the --power range comes from the cached (last-known)
+    # calibration, the ramp editor says so — and hides the note once a fresh fetch lands.
+    ed = _FakeEditor([_POWER_SPEC], _CAL_BOUNDS)
+    ed.cal_is_stale = lambda: True                     # bounds served from the offline cache
+    ed._cal_hostname = "rpi-gnss-07"
+    dlg = RampEditorDialog(_Src(), ed, new=True)
+    dlg._run_chk.setChecked(True)
+    dlg._param.setCurrentText("power")
+    _app.processEvents()
+    assert dlg._cal_note.isVisibleTo(dlg)
+    assert "rpi-gnss-07" in dlg._cal_note.text()
+    ed.cal_is_stale = lambda: False                    # unit reconnected → fresh calibration
+    dlg._update_preview()
+    assert not dlg._cal_note.isVisibleTo(dlg)
+
+
+def test_no_offline_note_when_calibration_is_fresh():
+    dlg = _dialog(_CAL_BOUNDS)                          # online, valid (FakeEditor isn't stale)
+    _app.processEvents()
+    assert not dlg._cal_note.isVisibleTo(dlg)

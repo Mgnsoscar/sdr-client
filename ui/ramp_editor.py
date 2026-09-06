@@ -371,6 +371,16 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
             f"border-radius: 8px; }}")
         outer.addWidget(self._form_scroll)
 
+        # Offline-calibration notice: when the ramped --power range is folded from the last-known
+        # (cached) calibration because the target unit is offline, say so — it refreshes on reconnect.
+        self._cal_note = QLabel("")
+        self._cal_note.setWordWrap(True)
+        self._cal_note.setStyleSheet(
+            f"font-size: 11px; color: {Palette.ARMED}; background: {Palette.ARMED_SOFT}; "
+            f"border: 1px solid #ecd3a3; border-radius: 8px; padding: 6px 9px;")
+        self._cal_note.setVisible(False)
+        outer.addWidget(self._cal_note)
+
         self._warn = QLabel("")
         self._warn.setWordWrap(True)
         self._warn.setStyleSheet(f"font-size: 11px; color: {Palette.ARMED};")
@@ -1383,10 +1393,31 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
                 from_lbl.setText(self._fmt_pw(sfrom + gap))
                 to_lbl.setText(self._fmt_pw(sto + gap))
 
+    def _update_cal_note(self) -> None:
+        """Show the offline-calibration notice when the ramped --power range is folded from the
+        last-known (cached) calibration because the target unit is offline. Hidden otherwise."""
+        if getattr(self, "_cal_note", None) is None:
+            return
+        stale_getter = getattr(self._editor, "cal_is_stale", None)
+        stale = bool(stale_getter()) if callable(stale_getter) else False
+        spec = self._ramped_spec()
+        is_power = spec is not None and find_power_index([spec]) is not None
+        bounds = self._editor.cal_bounds_for_task(self._task.currentText().strip()) \
+            if getattr(self._editor, "cal_bounds_for_task", None) else None
+        if stale and is_power and bounds:
+            host = getattr(self._editor, "_cal_hostname", "") or "the target unit"
+            self._cal_note.setText(
+                f"⚠ Using the last-known calibration for {host} (offline) — the power range "
+                f"refreshes when the unit reconnects.")
+            self._cal_note.setVisible(True)
+        else:
+            self._cal_note.setVisible(False)
+
     def _update_preview(self, *_) -> None:
         if not self._ready:
             return
         self._update_power_readouts()   # span + companion From→To track the live From/To values
+        self._update_cal_note()         # offline "last-known calibration" notice
         spec = self._spec_from_form()
         self._update_warning()
         if not self._active_params():
