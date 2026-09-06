@@ -881,11 +881,13 @@ class _CurveTable(QTableWidget):
         self.setHorizontalHeaderLabels(list(headers))
         self.verticalHeader().setVisible(False)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        # No persistent selection fill: clicking a cell (or arrow-keying to it) makes
-        # it the CURRENT cell, and that outline is the only in-focus visual — it shows
-        # only while the grid has focus, so nothing stays highlighted after you click
-        # away. (NoSelection still supports a current cell + arrow-key navigation.)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        # Cell-level range selection: click-drag to select a block of cells, Ctrl+A to
+        # select the whole grid, Ctrl+C to copy the selection (tab/newline separated, so it
+        # pastes straight into a spreadsheet) and Del/Backspace to clear every selected cell.
+        # The selection is dropped when the grid loses focus (_on_focus_changed), so nothing
+        # stays highlighted after you click away.
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         # Edit on a double-click or F2, or just by typing on the current cell.
         self.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked
@@ -895,7 +897,9 @@ class _CurveTable(QTableWidget):
         # visual, and it disappears on its own when the grid loses focus.
         self.setStyleSheet(
             f"QTableWidget::item:focus {{ background: {Palette.SURFACE}; "
-            f"border: 1px solid {Palette.ACCENT}; }}")
+            f"border: 1px solid {Palette.ACCENT}; }}"
+            f"QTableWidget::item:selected {{ background: {Palette.ACCENT_SOFT}; "
+            f"color: {Palette.TEXT}; }}")
         # Grow with the rows (up to a cap) so added points are always visible, rather
         # than hiding them behind an inner scrollbar in a fixed-height box.
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -904,9 +908,10 @@ class _CurveTable(QTableWidget):
         self.setToolTip("Each row is one measured point: the SDR gain you set and the "
                         "power you measured on this plane. Enter at least two points, "
                         "with gain AND power both strictly increasing.\n\n"
-                        "Double-click a cell (or just type) to edit · Del clears the "
-                        "current cell · Ctrl+Z / Ctrl+Y undo/redo · Esc or click away "
-                        "to deselect · paste (Ctrl+V) a \"gain, power\" block from a "
+                        "Double-click a cell (or just type) to edit · click-drag to select "
+                        "a block, Ctrl+A selects all · Ctrl+C copies the selection, "
+                        "Del/Backspace clears it · Ctrl+Z / Ctrl+Y undo/redo · Esc or click "
+                        "away to deselect · paste (Ctrl+V) a \"gain, power\" block from a "
                         "spreadsheet — it lands at the selected cell (or appends), and a "
                         "single column fills just that column · right-click to paste or "
                         "clear the whole table.")
@@ -948,6 +953,11 @@ class _CurveTable(QTableWidget):
         # table straight in instead of retyping it cell by cell.
         if event.matches(QKeySequence.StandardKey.Paste) and self._paste_csv():
             return
+        if event.matches(QKeySequence.StandardKey.Copy) and self._copy_selection():
+            return
+        if event.matches(QKeySequence.StandardKey.SelectAll):
+            self.selectAll()               # Ctrl+A marks every cell (for copy / clear)
+            return
         if event.matches(QKeySequence.StandardKey.Undo):
             self.undo()
             return
@@ -964,17 +974,18 @@ class _CurveTable(QTableWidget):
             self._deselect()               # Esc drops the current cell
             return
         if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) \
-                and self._clear_current_contents():
-            return                         # Del/Backspace empties the current cell
+                and self._clear_selection_contents():
+            return                         # Del/Backspace empties every selected cell
         super().keyPressEvent(event)
 
     # ── Focus / current-cell ergonomics ──────────────────────────────────────
 
     def _on_focus_changed(self, _old, new) -> None:
-        # When focus leaves the grid entirely (including its own cell editor), drop
-        # the current cell so no highlight lingers after clicking away.
+        # When focus leaves the grid entirely (including its own cell editor), drop the
+        # current cell AND the selection so no highlight lingers after clicking away.
         if new is self or (new is not None and self.isAncestorOf(new)):
             return
+        self.clearSelection()
         self.setCurrentCell(-1, -1)
 
     def _deselect(self) -> None:
@@ -997,6 +1008,49 @@ class _CurveTable(QTableWidget):
         if it is None or it.text() == "":
             return False
         it.setText("")                     # fires cellChanged → history + sparkline
+        return True
+
+    def _copy_selection(self) -> bool:
+        """Copy the selected cells to the clipboard as a tab/newline block (spreadsheet
+        paste format), spanning the bounding rectangle of the selection so the layout is
+        preserved (unselected cells inside it come through blank). With no selection, copy
+        the current cell. Returns False when there is nothing to copy."""
+        items = self.selectedItems()
+        if not items:
+            it = self.currentItem()
+            if it is None or it.text() == "":
+                return False
+            QApplication.clipboard().setText(it.text())
+            return True
+        rows = [i.row() for i in items]
+        cols = [i.column() for i in items]
+        r0, r1, c0, c1 = min(rows), max(rows), min(cols), max(cols)
+        lines = []
+        for r in range(r0, r1 + 1):
+            cells = []
+            for c in range(c0, c1 + 1):
+                it = self.item(r, c)
+                cells.append(it.text() if (it is not None and it.isSelected()) else "")
+            lines.append("\t".join(cells))
+        QApplication.clipboard().setText("\n".join(lines))
+        return True
+
+    def _clear_selection_contents(self) -> bool:
+        """Empty every selected (editable) cell in one undoable step; with no selection,
+        fall back to clearing the current cell."""
+        items = [i for i in self.selectedItems()
+                 if i.flags() & Qt.ItemFlag.ItemIsEditable]
+        if not items:
+            return self._clear_current_contents()
+        changed = False
+        self.blockSignals(True)
+        for it in items:
+            if it.text() != "":
+                it.setText("")
+                changed = True
+        self.blockSignals(False)
+        if changed:
+            self._changed()                # one history entry + sparkline refresh
         return True
 
     # ── Undo / redo ──────────────────────────────────────────────────────────

@@ -1,7 +1,8 @@
-"""Usability of the calibration curve grid (_CurveTable): the current-cell is the
-only in-focus visual (no lingering selection fill), double-click / type to edit,
-Esc / click-away clears focus, Del clears the current cell, and Ctrl+Z / Ctrl+Y
-undo & redo. Offscreen widget tests driving the overridden handlers."""
+"""Usability of the calibration curve grid (_CurveTable): cell-range selection
+(click-drag / Ctrl+A) with copy (Ctrl+C) and clear (Del) of the selection, no
+lingering selection after click-away, double-click / type to edit, Esc clears focus,
+and Ctrl+Z / Ctrl+Y undo & redo. Offscreen widget tests driving the overridden
+handlers."""
 import os
 
 import pytest
@@ -30,9 +31,11 @@ def _key(table, key, mods=Qt.KeyboardModifier.NoModifier):
 
 # ── configuration: no selection fill, double-click to edit ───────────────────────
 
-def test_no_selection_mode_and_double_click_editing():
+def test_cell_range_selection_mode_and_double_click_editing():
     t = _CurveTable()
-    assert t.selectionMode() == QAbstractItemView.SelectionMode.NoSelection
+    # cell-level range selection (click-drag a block, Ctrl+A select all)
+    assert t.selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection
+    assert t.selectionBehavior() == QAbstractItemView.SelectionBehavior.SelectItems
     trig = t.editTriggers()
     assert trig & QAbstractItemView.EditTrigger.DoubleClicked
     # single-click-to-edit was reverted — SelectedClicked must NOT be enabled
@@ -58,12 +61,14 @@ def test_escape_clears_current_cell():
     assert t.currentRow() == -1
 
 
-def test_focus_leaving_grid_clears_current_cell():
+def test_focus_leaving_grid_clears_current_cell_and_selection():
     t = _table()
     t.setCurrentCell(1, 1)
+    t.selectAll()
     outside = QWidget()
     t._on_focus_changed(None, outside)   # focus moved to a widget outside the grid
     assert t.currentRow() == -1
+    assert len(t.selectedItems()) == 0   # nothing lingers highlighted after click-away
 
 
 def test_focus_staying_in_grid_keeps_current_cell():
@@ -86,8 +91,62 @@ def test_delete_clears_current_cell_only():
 def test_delete_with_no_current_cell_is_ignored():
     t = _table()
     t.setCurrentCell(-1, -1)
-    _key(t, Qt.Key.Key_Delete)           # no current cell → no-op, no crash
+    t.clearSelection()
+    _key(t, Qt.Key.Key_Delete)           # no current cell, no selection → no-op, no crash
     assert t.item(0, 0).text() != ""
+
+
+# ── cell-range selection: Ctrl+A, copy (Ctrl+C), clear (Del) ─────────────────────
+
+def test_ctrl_a_selects_every_cell():
+    t = _table([(40, -36), (74, -2.5)])
+    _key(t, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+    assert len(t.selectedItems()) == 4   # 2 rows × 2 cols
+
+
+def test_ctrl_c_copies_selection_as_tab_newline_block():
+    t = _table([(40, -36), (74, -2.5)])
+    t.selectAll()
+    QApplication.clipboard().setText("")
+    _key(t, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+    assert QApplication.clipboard().text() == "40\t-36\n74\t-2.5"
+
+
+def test_ctrl_c_copies_a_single_column_block():
+    t = _table([(40, -36), (74, -2.5)])
+    t.clearSelection()
+    t.item(0, 0).setSelected(True)
+    t.item(1, 0).setSelected(True)       # just the gain column
+    _key(t, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+    assert QApplication.clipboard().text() == "40\n74"
+
+
+def test_ctrl_c_with_no_selection_copies_the_current_cell():
+    t = _table([(40, -36)])
+    t.clearSelection()
+    t.setCurrentCell(0, 1)
+    _key(t, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+    assert QApplication.clipboard().text() == "-36"
+
+
+def test_delete_clears_the_whole_selection():
+    t = _table([(40, -36), (74, -2.5)])
+    t.selectAll()
+    _key(t, Qt.Key.Key_Delete)
+    assert t.points(strict=False) == []  # every cell emptied
+    # …and it is ONE undo step
+    t.undo()
+    assert t.numeric_points() == [(40.0, -36.0), (74.0, -2.5)]
+
+
+def test_delete_selection_leaves_unselected_cells_untouched():
+    t = _table([(40, -36), (74, -2.5)])
+    t.clearSelection()
+    t.item(0, 1).setSelected(True)       # only the first power cell
+    t.item(1, 1).setSelected(True)       # and the second power cell
+    _key(t, Qt.Key.Key_Delete)
+    assert t.item(0, 0).text() == "40" and t.item(1, 0).text() == "74"   # gains kept
+    assert t.item(0, 1).text() == "" and t.item(1, 1).text() == ""       # powers cleared
 
 
 # ── add / remove rows (unchanged fallbacks) ──────────────────────────────────────

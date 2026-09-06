@@ -264,6 +264,21 @@ guard intact):
   exe, "Run anyway"; self-signed doesn't help. **Open:** must still be smoke-tested on a clean Windows
   10/11 VM (no-admin install, icon, real-unit discovery, Provision) — the Linux build can't cover that.
 
+## Current state — calibration grid cell selection (copy / clear a block): COMPLETE (branch `claude/table-and-ramp-fixes`)
+The calibration curve grids (`_CurveTable` in `ui/calibration_panel.py` — measured points, gain/power
+curves, the source-bias grid) now support spreadsheet-style **cell-range selection**: click-drag a
+block, **Ctrl+A** selects all, **Ctrl+C** copies the selection as a tab/newline block (pastes into a
+spreadsheet), **Del/Backspace** clears every selected editable cell in one undo step. Was
+`NoSelection` (only a focus outline); now `ExtendedSelection` + `SelectItems`, with the selection
+dropped on focus-out (`_on_focus_changed` also `clearSelection()`) so nothing lingers after
+click-away. `keyPressEvent` gained Copy/SelectAll handling; `_copy_selection` builds the bounding-rect
+TSV (unselected cells inside the block come through blank; no selection → the current cell) and
+`_clear_selection_contents` empties the selected cells (falls back to the current cell), both keeping
+the existing Ctrl+V paste / Ctrl+Z-Y undo / right-click menu. The Signals table (a click-to-open
+navigation control with a hand-painted highlight) is intentionally left `NoSelection`. Client-only.
+Tests: `tests/test_curve_table_ux.py` (Ctrl+A/Ctrl+C block + single-column + current-cell copy,
+Del clears the selection in one undo step and spares unselected cells, focus-out clears selection).
+
 ## Current state — offline calibration fallback in plans/sequences: COMPLETE (branch `claude/ramp-power-quantities`)
 Authoring a plan/sequence for a calibrated unit that is OFFLINE now folds absolute power from the
 unit's **last-known cached calibration** (`state/calibration_cache.py`, keyed by hostname; already
