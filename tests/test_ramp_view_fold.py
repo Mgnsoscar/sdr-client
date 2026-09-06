@@ -349,3 +349,21 @@ def test_from_to_sublabels_follow_the_anchor_and_offset():
     dlg._offset.setValue(-5.0)
     _app.processEvents()
     assert "ramp start" in dlg._ft_from_lbl.text() and "off-air −5" in dlg._ft_to_lbl.text()
+
+
+# ── The sibling fields are contained .ofield rows that flow with the card ────────────────────────
+
+def test_sibling_fields_are_contained_ofield_rows():
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    # the Anchor control sits inside a bordered ".ofield" container (not a bare form row)
+    row = dlg._anchor.parent()
+    assert row is not None and row.objectName() == "ofield"
+    # Define-by mode toggles the whole numeric rows in/out (containers, not label+widget separately)
+    dlg._mode.setCurrentIndex(dlg._mode.findData("steps_hold")); _app.processEvents()
+    assert dlg._row_steps.isVisibleTo(dlg) and not dlg._row_step.isVisibleTo(dlg)
+    dlg._mode.setCurrentIndex(dlg._mode.findData("step_duration")); _app.processEvents()
+    assert dlg._row_step.isVisibleTo(dlg) and dlg._row_duration.isVisibleTo(dlg)
+    assert not dlg._row_steps.isVisibleTo(dlg)
+    # a window-filling ramp reveals the end-offset row and hides the include row
+    dlg._anchor.setCurrentIndex(dlg._anchor.findData("both")); _app.processEvents()
+    assert dlg._offend_row.isVisibleTo(dlg) and not dlg._inc_row.isVisibleTo(dlg)

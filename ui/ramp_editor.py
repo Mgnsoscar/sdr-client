@@ -25,7 +25,7 @@ from typing import List, Optional
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFrame,
     QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QSizePolicy,
     QVBoxLayout, QWidget,
 )
@@ -196,7 +196,20 @@ class RampEditorDialog(QDialog):
     def _build(self) -> None:
         from .dialog_style import editor_qss
         from .param_widgets import Dropdown
-        self.setStyleSheet(editor_qss())
+        # The sibling fields are contained ".ofield" rows (a bordered surface-alt box with an
+        # accent-ink label + the control), matching the mockup. The controls are FLATTENED inside
+        # the box (no own border/inset) so the box provides the boundary — the DurationSpinBox and
+        # Dropdown keep their painted chevron (padding reserves its room).
+        self.setStyleSheet(editor_qss() + f"""
+QFrame#ofield {{ background: {Palette.SURFACE_ALT}; border: 1px solid {Palette.BORDER};
+    border-radius: 8px; }}
+QFrame#ofield QComboBox, QFrame#ofield QLineEdit, QFrame#ofield QAbstractSpinBox {{
+    background: transparent; border: none; border-radius: 0; min-height: 24px; padding: 2px 0; }}
+QFrame#ofield DurationSpinBox {{ padding: 2px 30px 2px 0; }}
+QFrame#ofield QComboBox:focus, QFrame#ofield QLineEdit:focus,
+QFrame#ofield QAbstractSpinBox:focus {{ background: transparent; border: none; }}
+QFrame#ofield QCheckBox {{ background: transparent; }}
+""")
         # One scroll environment for the whole form: the fields, the run-mode params, the preview
         # AND the per-step listing all live in a single scrollable body, so a long step list scrolls
         # with everything else instead of being trapped in its own tiny box. The button row is pinned
@@ -208,7 +221,10 @@ class RampEditorDialog(QDialog):
         outer = QVBoxLayout(body)
         outer.setContentsMargins(16, 16, 16, 12)
         outer.setSpacing(10)
-        form = QFormLayout()
+        # The sibling fields stack as full-width ".ofield" rows (not a QFormLayout), so they flow
+        # edge-to-edge with the power card exactly like the mockup.
+        form = QVBoxLayout()
+        form.setContentsMargins(0, 0, 0, 0)
         form.setSpacing(8)
         r = dict(getattr(self._src, "ramp", None) or {})
 
@@ -224,14 +240,14 @@ class RampEditorDialog(QDialog):
         if not self._has_dur:
             self._run_chk.setToolTip("No duration task in this sequence to tune, so a ramp "
                                      "must run a task each step.")
-        form.addRow("", self._run_chk)
+        form.addWidget(self._run_chk)
 
         self._task = Dropdown()
         self._populate_tasks()
-        form.addRow("Task", self._task)
+        form.addWidget(_ofield("Task", self._task))
 
         self._param = Dropdown()
-        form.addRow("Parameter", self._param)
+        form.addWidget(_ofield("Parameter", self._param))
 
         # Which quantity to author a calibrated --power ramp in (spectral density / total power /
         # dBm-per-Hz …) — the ramp analogue of the Run/Tune power card's "Control in this →". It is
@@ -274,7 +290,7 @@ class RampEditorDialog(QDialog):
         self._power_area_lay = QVBoxLayout(self._power_area)
         self._power_area_lay.setContentsMargins(0, 0, 0, 0)
         self._power_area_lay.setSpacing(0)
-        form.addRow(self._power_area)
+        form.addWidget(self._power_area)
 
         self._anchor = Dropdown()
         self._anchor.addItem("On-air (T0)", "start")
@@ -285,21 +301,26 @@ class RampEditorDialog(QDialog):
 
         self._offset = _spin(float(getattr(self._src, "offset", 0.0)))
         self._offset_end = _spin(float(getattr(self._src, "offset_end", 0.0)))
-        form.addRow("Anchor", self._anchor)
-        self._off_lbl = _row(form, "Offset from anchor", self._offset)
-        self._offend_lbl = _row(form, "End offset from off-air", self._offset_end)
+        form.addWidget(_ofield("Anchor", self._anchor))
+        self._off_row = _ofield("Offset from anchor", self._offset)
+        self._off_lbl = self._off_row._klabel
+        self._offend_row = _ofield("End offset from off-air", self._offset_end)
+        form.addWidget(self._off_row)
+        form.addWidget(self._offend_row)
 
         self._mode = Dropdown()
-        form.addRow("Define by", self._mode)
+        form.addWidget(_ofield("Define by", self._mode))
 
         self._steps = QLineEdit();    self._steps.setPlaceholderText("count (equal increments)")
         self._step = QLineEdit();     self._step.setPlaceholderText("increment per step")
         self._hold = QLineEdit();     self._hold.setPlaceholderText("seconds per step")
         self._duration = QLineEdit(); self._duration.setPlaceholderText("seconds")
-        self._row_steps = _row(form, "Number of steps", self._steps)
-        self._row_step = _row(form, "Step size", self._step)
-        self._row_hold = _row(form, "Hold time", self._hold)
-        self._row_duration = _row(form, "Duration", self._duration)
+        self._row_steps = _ofield("Number of steps", self._steps, "levels")
+        self._row_step = _ofield("Step size", self._step)
+        self._row_hold = _ofield("Hold time", self._hold, "s / step")
+        self._row_duration = _ofield("Duration", self._duration, "s")
+        for _rw in (self._row_steps, self._row_step, self._row_hold, self._row_duration):
+            form.addWidget(_rw)
         if r.get("steps") is not None:
             self._steps.setText(str(int(r.get("steps"))))
         if r.get("step") is not None:
@@ -328,7 +349,8 @@ class RampEditorDialog(QDialog):
         inc_row.addStretch(1)
         self._inc_container = QWidget()
         self._inc_container.setLayout(inc_row)
-        self._inc_row_lbl = _row(form, "Include", self._inc_container)
+        self._inc_row = _ofield("Include", self._inc_container)
+        form.addWidget(self._inc_row)
 
         outer.addLayout(form)
 
@@ -725,12 +747,10 @@ class RampEditorDialog(QDialog):
         # A window-filling ramp is inset from BOTH edges; a single-anchor ramp has
         # one offset from its anchor.
         self._off_lbl.setText("Start offset from on-air" if both else "Offset from anchor")
-        self._offend_lbl.setVisible(both)
-        self._offset_end.setVisible(both)
+        self._offend_row.setVisible(both)
         # Include first/last applies to single-anchor ramps; a window-filling ramp
-        # always spans both edges, so hide the checkboxes there.
-        self._inc_row_lbl.setVisible(not both)
-        self._inc_container.setVisible(not both)
+        # always spans both edges, so hide the whole row there.
+        self._inc_row.setVisible(not both)
         # First populate uses the saved ramp's authored mode; later anchor switches
         # keep whatever the user had selected.
         want = self._mode.currentData() or getattr(self, "_init_mode", None)
@@ -745,13 +765,9 @@ class RampEditorDialog(QDialog):
 
     def _sync_mode(self) -> None:
         fields = _FIELDS.get(self._mode.currentData(), ())
-        for name, widget, label in (("steps", self._steps, self._row_steps),
-                                     ("step", self._step, self._row_step),
-                                     ("hold", self._hold, self._row_hold),
-                                     ("duration", self._duration, self._row_duration)):
-            on = name in fields
-            widget.setVisible(on)
-            label.setVisible(on)
+        for name, row in (("steps", self._row_steps), ("step", self._row_step),
+                          ("hold", self._row_hold), ("duration", self._row_duration)):
+            row.setVisible(name in fields)
         self._update_preview()
 
     # ── Task → live params ───────────────────────────────────────────────────
@@ -987,11 +1003,11 @@ class RampEditorDialog(QDialog):
         """Plain 'From' / 'To' rows — the presentation for any parameter that is not a calibrated
         --power field with ≥2 quantities (an ordinary numeric knob, or --power with a single view)."""
         w = QWidget()
-        fl = QFormLayout(w)
+        fl = QVBoxLayout(w)
         fl.setContentsMargins(0, 0, 0, 0)
         fl.setSpacing(8)
-        fl.addRow("From", self._start_box)
-        fl.addRow("To", self._stop_box)
+        fl.addWidget(_ofield("From", self._start_box))
+        fl.addWidget(_ofield("To", self._stop_box))
         return w
 
     def _build_power_card(self, spec: dict, views: List[dict]) -> QWidget:
@@ -1568,11 +1584,25 @@ def _spin(value: float) -> DurationSpinBox:
     return w
 
 
-def _row(form: QFormLayout, label: str, widget: QWidget) -> QLabel:
-    lbl = QLabel(label)
-    form.addRow(lbl, widget)
-    widget._row_label = lbl
-    return lbl
+def _ofield(label: str, widget: QWidget, unit: str = "") -> QFrame:
+    """A contained form row matching the mockup's .ofield: an accent-ink label in a fixed left
+    column + the control filling the rest (+ an optional faint unit on the right), inside a bordered
+    surface-alt box. The control keeps its own identity (only re-parented) and is flattened by the
+    dialog's #ofield QSS. The label is exposed as ``._klabel`` (some rows relabel it live)."""
+    frame = QFrame(); frame.setObjectName("ofield")
+    h = QHBoxLayout(frame); h.setContentsMargins(12, 5, 11, 5); h.setSpacing(10)
+    lbl = QLabel(label); lbl.setObjectName("ofieldKey")
+    lf = QFont("IBM Plex Sans"); lf.setPixelSize(11); lf.setWeight(QFont.Weight.DemiBold)
+    lbl.setFont(lf); lbl.setFixedWidth(140)
+    lbl.setStyleSheet(f"color: {Palette.ACCENT_INK};")
+    h.addWidget(lbl)
+    h.addWidget(widget, 1)
+    if unit:
+        u = QLabel(unit); u.setFont(mono_font(11))
+        u.setStyleSheet(f"color: {Palette.TEXT_FAINT};")
+        h.addWidget(u)
+    frame._klabel = lbl
+    return frame
 
 
 def _uc_label(text: str, px: int, color: str, spacing: float) -> QLabel:

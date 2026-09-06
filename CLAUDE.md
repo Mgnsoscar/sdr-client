@@ -272,9 +272,14 @@ From → To (`_update_power_readouts`) with a **Ramp in this →** button (`_set
 the now-HIDDEN `_power_unit` combo, so `_on_power_view_changed`'s value-conversion wiring runs
 unchanged). The combo is kept as the state/logic holder (tests still read its item ids/data); the visible
 switch is the card. `_card_active`/`_companion_labels`/`_span_lbl`/`_pwr_rail`/`_pwr_min`/`_pwr_max`
-expose the card for tests. Everything else in the dialog (Run-a-task toggle, Task/Parameter,
-Anchor/Offset, Define by + steps/step/hold/duration, Include first/last, run-mode fixed-param form,
-preview + Show steps) is untouched and fully functional. Client-only; no agent/scripts/capability change;
+expose the card for tests. The sibling fields (Task, Parameter, Anchor, Offset, Define by,
+steps/step/hold/duration, Include) render as contained **`.ofield` rows** (module `_ofield`: a
+bordered surface-alt box with a fixed-width accent-ink label + the flattened control + an optional
+faint unit hint), stacked in a `QVBoxLayout` — replacing the old `QFormLayout` — so they flow
+edge-to-edge with the power card like the mockup; the controls keep their identity (`_task`,
+`_anchor`, `_mode`, … unchanged) and are flattened by the dialog's `#ofield` QSS, and mode/anchor
+toggles now show/hide whole rows (`_row_steps`/`_off_row`/`_offend_row`/`_inc_row`). Everything is
+untouched and fully functional. Client-only; no agent/scripts/capability change;
 drift-guarded files untouched. Tests: `tests/test_ramp_view_fold.py` (card lists/defaults, hidden for
 non-power, companion From→To live, "Ramp in this →" promotes, span direction, plain rows for a non-power
 param, one shared dual rail not per-field, dual-rail drag snaps + clamps, MIN/MAX reflect bounds).
