@@ -68,11 +68,11 @@ def _doc(extrapolate=None):
     return {
         "schema_version": 1, "unit_id": "u1", "unit_type": "broadcaster",
         "chain": {"gain_limits": {"min_gain_db": 0.0, "max_gain_db": 89.75},
-                  "operating_plane": "sdr_output",
-                  "limits": [{"plane": "sdr_output", "max_dbm": -2.5, "reason": "amp"}],
-                  "planes": {"sdr_output": {"type": "measured", "quantity": "dBm"}}},
+                  "operating_plane": "Source",
+                  "limits": [{"plane": "Source", "max_dbm": -2.5, "reason": "amp"}],
+                  "planes": {"Source": {"type": "measured", "quantity": "dBm"}}},
         "defaults": {"amplitude": 0.5},
-        "signals": {"mock": {"curves": {"sdr_output": curve}}},
+        "signals": {"mock": {"curves": {"Source": curve}}},
     }
 
 
@@ -90,22 +90,22 @@ def test_doc_uses_extrapolate_detects_a_non_none_mode():
 def test_form_seeds_and_serializes_extrapolate():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(_doc("down"))
-    tbl = p._f["signals"]["mock"]["curves"]["sdr_output"]
+    tbl = p._f["signals"]["mock"]["curves"]["Source"]
     assert tbl._extrapolate == "down"                       # seeded from the stored curve
     out = p._read_form(strict=True)
-    assert out["signals"]["mock"]["curves"]["sdr_output"]["extrapolate"] == "down"
+    assert out["signals"]["mock"]["curves"]["Source"]["extrapolate"] == "down"
 
     # Changing the picker to None drops the key (keeps the doc clean); "up" is written.
     tbl._extrapolate = "none"
-    assert "extrapolate" not in p._read_form(strict=True)["signals"]["mock"]["curves"]["sdr_output"]
+    assert "extrapolate" not in p._read_form(strict=True)["signals"]["mock"]["curves"]["Source"]
     tbl._extrapolate = "up"
-    assert p._read_form(strict=True)["signals"]["mock"]["curves"]["sdr_output"]["extrapolate"] == "up"
+    assert p._read_form(strict=True)["signals"]["mock"]["curves"]["Source"]["extrapolate"] == "up"
 
 
 def test_none_document_never_writes_the_key():
     p = CalibrationPanel("u", FakeHub(FakeClient()))
     p._set_doc(_doc(None))
-    assert "extrapolate" not in p._read_form(strict=True)["signals"]["mock"]["curves"]["sdr_output"]
+    assert "extrapolate" not in p._read_form(strict=True)["signals"]["mock"]["curves"]["Source"]
 
 
 # ── the save-time capability gate ─────────────────────────────────────────────
@@ -126,4 +126,4 @@ def test_save_allowed_when_agent_supports_it():
     assert p._on_save() is True
     assert len(client.uploaded) == 1
     sent = json.loads(client.uploaded[0][1])
-    assert sent["signals"]["mock"]["curves"]["sdr_output"]["extrapolate"] == "down"
+    assert sent["signals"]["mock"]["curves"]["Source"]["extrapolate"] == "down"

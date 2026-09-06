@@ -54,6 +54,21 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — source stage name fixed to "Source"; no empty stage names: COMPLETE (branch `claude/source-stage-name`)
+Bug: renaming a chain stage to `""` deleted it — `_read_planes` skips a nameless row (`if not
+name: continue`). Fix (all in `ui/calibration_panel.py`): (1) the SOURCE (first) stage has a
+fixed, reserved id `SOURCE_PLANE_NAME = "Source"` — its name field is read-only
+(`_doc_to_form`), and `_on_plane_name_changed` refuses a rename of row 0 (snaps back). (2)
+`_normalize_source_plane(doc)` renames a legacy/other source id to "Source" consistently (via
+`_rename_plane_in_doc` — curves, limits, operating_plane, downstream `from`/`of`) when a doc is
+loaded (`_set_doc`, `_apply_json_text`); the `_template()` seeds "Source" directly. (3) Any
+stage cleared to `""` or renamed to a duplicate (incl. the reserved "Source") reverts to its
+last valid name in `_on_plane_name_changed`; `_read_planes` also falls back to the row's `orig`
+name defensively so a momentarily-blank field never drops the stage. Tests:
+`test_calibration_panel.py` (name locked/read-only, source can't be renamed, legacy source
+migrated on load, clearing a name reverts instead of deleting, a stage can't take the reserved
+name). Client-only; no agent/scripts/capability change.
+
 ## Current state — derived readout per-value labels: COMPLETE (branch `claude/gps-calibration`)
 A derived (computed, read-only) field's readout can now carry a per-value descriptive
 annotation. `ui/param_form.py` `_recompute_derived` appends `  (label)` to the numeric value
