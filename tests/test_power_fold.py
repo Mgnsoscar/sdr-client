@@ -127,6 +127,27 @@ def test_refold_bounds_is_a_noop_without_frequency_or_artifact():
     assert refold_bounds({"min_power_dbm": 1.0}, 2.0e9) == {"min_power_dbm": 1.0}  # no artifact
 
 
+def test_refold_pins_a_between_steps_ceiling_to_the_realisable_max():
+    # A stage limit (e.g. an amp input limit) caps the ceiling gain at 73.30 dB — BETWEEN the
+    # 0.25 dB grid steps — so the agent reports the continuous ceiling power (3.30 dBm), which the
+    # SDR can't set. On a constant chain refold_bounds pins the max to the top level the chain can
+    # actually deliver (gain 73.25 → 3.25 dBm), matching what the slider snaps to.
+    art = {"anchor_curve": [[40.0, -30.0], [74.0, 4.0]], "min_gain_db": 40.0,
+           "gain_ceiling_db": 73.30, "gain_step_db": 0.25}
+    bounds = {"min_power_dbm": -30.0, "max_power_dbm": 3.30, "artifact": art}
+    out = refold_bounds(bounds, None)
+    assert out["max_power_dbm"] == pytest.approx(3.25)     # realisable step, not the 3.30 phantom
+    assert out["min_power_dbm"] == -30.0                    # floor (a settable min gain) unchanged
+
+
+def test_refold_leaves_an_on_grid_ceiling_untouched():
+    # When the ceiling already sits on a grid step, the resolved range is unchanged (same object).
+    art = {"anchor_curve": [[40.0, -30.0], [74.0, 4.0]], "min_gain_db": 40.0,
+           "gain_ceiling_db": 74.0, "gain_step_db": 0.25}
+    bounds = {"min_power_dbm": -30.0, "max_power_dbm": 4.0, "artifact": art}
+    assert refold_bounds(bounds, None) is bounds
+
+
 # ── active components: the fold mirrors the agent's achievable-level resolver ──────
 
 # SDR: 1 dB gain ⇒ 1 dB power over 0..40 dB (−40..0 dBm), then a 0..95 dB / 0.25 dB step

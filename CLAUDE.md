@@ -269,13 +269,19 @@ Three owner-reported ramp editor fixes (client-only):
 - **Opens too small.** `RampEditorDialog._build` now `resize()`s to a size that fits the power card
   horizontally and shows a large part of the form vertically (700×820, clamped to 0.95×/0.9× the
   screen; `setMinimumWidth(560)`), instead of collapsing to the scroll area's tiny min-size hint.
-- **Slider couldn't reach the max.** When a stage limit (e.g. an amplifier INPUT limit) caps the
-  ceiling gain BETWEEN grid steps, the top achievable grid level sits below the shown max (40.08 vs
-  40.33), so a full-right drag never reached it. `BoundedNumberField.snap()` (used by the ramp
-  card's dual rail and each field's own rail) and `ParamForm._wire_rail`'s `set_widget` now treat
-  the exact `min`/`max` as reachable snap-stops: they snap to the nearest of {grid level, lo, hi} to
-  the drag target, so the extremes win at the very ends and the grid wins in the middle. `min`/`max`
-  are script-accepted values (build_args already clamps the emitted base to the field bounds).
+- **Slider couldn't reach the max — root cause: a phantom max.** When a stage limit (e.g. an
+  amplifier INPUT limit) caps the ceiling gain BETWEEN the SDR's grid steps, the agent reports the
+  CONTINUOUS ceiling power (40.33) as `max_power_dbm`, but the SDR can only set grid steps, so the
+  top the chain can actually deliver is one step below (40.08). The shown max was thus a phantom
+  the slider could never reach. **Fix (`state/power_fold.refold_bounds`):** on a constant chain
+  (freq/param-dependent chains already fold through `bounds_at`, which snaps the ceiling gain via
+  `_snap`), pin `max_power_dbm` to `snap_power(max)` — the top REALISABLE level — so the displayed
+  max is a real, reachable step, not a between-steps value. A no-op when the ceiling is already
+  on-grid or the chain has no gain grid. Secondary: `BoundedNumberField.snap()` and
+  `ParamForm._wire_rail` treat the exact `min`/`max` as reachable snap-stops (nearest of {grid
+  level, lo, hi}) so a full-right drag lands on the max despite its 2-decimal display rounding
+  sitting a hair below the true folded level. Tests: `tests/test_power_fold.py`
+  (refold pins a between-steps ceiling to the realisable max; leaves an on-grid ceiling untouched).
 - **Relative-power (gain) step + overshoot.** The ramp editor's `_with_cal_bounds` only applied
   `apply_power_bounds` (→ `--gain` kept the script's 0..90 / step 1 and the slider overshot to 90 >
   the 89.75 ceiling, still startable). It now ALSO applies `apply_gain_bounds`, narrowing `--gain`

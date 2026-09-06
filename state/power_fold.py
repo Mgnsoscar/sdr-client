@@ -429,6 +429,23 @@ def refold_bounds(bounds: dict, freq_hz: Optional[float],
         out = dict(bounds)
         out.update(fold.bounds_at(freq_hz, params))
         return out
+    # A constant chain keeps its resolved range, but a stage limit (e.g. an amplifier INPUT
+    # limit) can cap the ceiling gain BETWEEN the SDR's gain steps — the agent then reports that
+    # continuous ceiling as max_power_dbm, which isn't a power the hardware can actually set. Pin
+    # the max to the highest level the chain can truly deliver (what the slider snaps to), so the
+    # shown maximum is a real, reachable step rather than a phantom between-steps value. A no-op
+    # when the ceiling already sits on a step, or the chain has no gain grid (bounds_at already
+    # does this for the folded paths above). The floor is a settable min gain, so it's left as-is.
+    hi = bounds.get("max_power_dbm")
+    if isinstance(hi, (int, float)) and not isinstance(hi, bool):
+        try:
+            top = fold.snap_power(float(hi), freq_hz, params)
+        except Exception:                          # noqa: BLE001 — never break the range on a fold error
+            top = float(hi)
+        if top < float(hi) - 1e-9:
+            out = dict(bounds)
+            out["max_power_dbm"] = top
+            return out
     return bounds
 
 

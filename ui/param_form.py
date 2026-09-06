@@ -806,11 +806,11 @@ class BoundedNumberField(QWidget):
             snapped = target
         if bounded:
             snapped = min(max(snapped, self._lo), self._hi)
-            # The exact bounds are reachable stops too: a ceiling capped BETWEEN grid steps (e.g.
-            # an amplifier input limit that lowers the max gain to a non-grid value) leaves the top
-            # achievable grid level below the shown max, so a full-right drag would never reach it.
-            # Pick whichever of {grid level, min, max} is nearest the target — the extremes win at
-            # the very ends, the grid wins in the middle. (min/max are valid, script-accepted values.)
+            # The exact bounds are reachable stops too. The max is the top REALISABLE level (see
+            # power_fold.refold_bounds), but its 2-decimal DISPLAY value can sit a hair below the
+            # true folded level, so snapping the display max floors to the step below and a
+            # full-right drag would miss it. Pick whichever of {grid level, min, max} is nearest
+            # the target — the extremes win at the very ends, the grid wins in the middle.
             snapped = min((snapped, self._lo, self._hi), key=lambda c: abs(c - target))
         return int(round(snapped)) if self._is_int else snapped
 
