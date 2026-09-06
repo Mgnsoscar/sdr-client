@@ -125,33 +125,39 @@ def test_save_then_load_round_trips_the_density():
     assert dlg2._val(dlg2._stop_field) == pytest.approx(-18.0, abs=0.06)
 
 
-# ── Issue 2: the "Set power in" picker offers the OTHER quantities (dBm, dBm/Hz), not just density ─
+# ── Issue 2: the power card offers the OTHER quantities (dBm, dBm/Hz), not just density ──────────
 # The ramp editor previously locked --power to the leading restates_measurement view (live density);
-# the operator could not author the ramp in total power or dBm/Hz. It now surfaces a picker (the ramp
-# analogue of the Run/Tune card's "Control in this →") that lists every declared view and re-folds.
+# the operator could not author the ramp in total power or dBm/Hz. It now renders the multi-quantity
+# power card (the ramp analogue of the Run/Tune card): a RAMPING IN primary + an ALSO READS AS grid
+# of companion tiles, each with a "Ramp in this →" switch. The card is backed by a hidden picker
+# (_power_unit) that carries the view id list + the view-conversion wiring.
 
 def _total(base):     # full-bandwidth total power = base + view_delta(fbw) = base + 10 dB (bw-invariant)
     return base + 10.0
 
 
-def test_power_view_picker_lists_every_view_and_defaults_to_density():
+def test_power_card_lists_every_view_and_defaults_to_density():
     dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
-    assert dlg._power_unit.isVisibleTo(dlg)                       # shown for calibrated --power
+    assert dlg._card_active                                       # the card renders for calibrated --power
     ids = [dlg._power_unit.itemData(i) for i in range(dlg._power_unit.count())]
     assert ids == ["psd_live", "fbw_power", "psd_hz"]            # the chirp's CAL_POWER_LAWS, base dropped
     assert dlg._power_view == "psd_live"                         # the leading restatement is the default
     labels = [dlg._power_unit.itemText(i) for i in range(dlg._power_unit.count())]
     assert "dBm/MHz" in labels[0] and "dBm" == labels[1].split("[")[-1].rstrip("] ") and "dBm/Hz" in labels[2]
+    # the OTHER two quantities each get a companion tile with a "Ramp in this →" button
+    comp_ids = [v["id"] for v, _f, _t in dlg._companion_labels]
+    assert comp_ids == ["fbw_power", "psd_hz"]
 
 
-def test_power_view_picker_hidden_for_a_non_power_param():
+def test_power_card_hidden_for_a_non_power_param():
     dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
     dlg._param.setCurrentText("bw")
     _app.processEvents()
-    assert not dlg._power_unit.isVisibleTo(dlg)                  # a non-power ramp has no quantity choice
+    assert not dlg._card_active                                  # a non-power ramp has no quantity card
+    assert not dlg._companion_labels                             # …and no companion tiles
     dlg._param.setCurrentText("power")
     _app.processEvents()
-    assert dlg._power_unit.isVisibleTo(dlg)                      # ...and it returns when --power is swept
+    assert dlg._card_active                                      # ...and it returns when --power is swept
 
 
 def test_switching_to_total_power_relabels_the_range_and_converts_the_values():
@@ -224,3 +230,140 @@ def test_reopening_a_total_power_ramp_selects_that_view():
     assert dlg._ramped_spec().get("unit") == "dBm"
     # base stop −14.99 → total power −4.99 dBm.
     assert dlg._val(dlg._stop_field) == pytest.approx(_total(-14.99), abs=0.06)
+
+
+# ── The multi-quantity power card: companion From → To read-outs + "Ramp in this →" ──────────────
+
+def _num(lbl_text):
+    """A companion/span label reads back a formatted number with a unicode minus — parse it."""
+    return float(str(lbl_text).replace("−", "-").split()[0])
+
+
+def test_companion_tiles_show_each_quantity_from_to_live():
+    # With --power swept in live density (default), the total-power companion shows the SAME sweep
+    # re-expressed: density −25 → −18 at bw 20 is total power −11.99 → −4.99 dBm.
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    dlg._start_field.setValue(-25.0)
+    dlg._stop_field.setValue(-18.0)
+    _app.processEvents()
+    tiles = {v["id"]: (f, t) for v, f, t in dlg._companion_labels}
+    assert set(tiles) == {"fbw_power", "psd_hz"}                 # the two quantities not being swept
+    off = -10 * math.log10(2)                                    # psd_live view_delta(20) ≈ −3.01
+    ffrom, fto = tiles["fbw_power"]
+    assert _num(ffrom.text()) == pytest.approx(_total(-25.0 - off), abs=0.06)   # ≈ −11.99
+    assert _num(fto.text()) == pytest.approx(_total(-18.0 - off), abs=0.06)     # ≈ −4.99
+
+
+def test_ramp_in_this_button_promotes_a_companion_to_primary():
+    # "Ramp in this →" on the total-power tile makes it the swept quantity, re-expressing the same
+    # physical sweep (density −25/−18 → total −11.99/−4.99 dBm) and demoting density to a companion.
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    dlg._start_field.setValue(-25.0)
+    dlg._stop_field.setValue(-18.0)
+    _app.processEvents()
+    dlg._set_ramp_power_view("fbw_power")                        # the companion button's action
+    _app.processEvents()
+    assert dlg._power_view == "fbw_power"
+    assert dlg._ramped_spec().get("unit") == "dBm"
+    off = -10 * math.log10(2)
+    assert dlg._val(dlg._start_field) == pytest.approx(_total(-25.0 - off), abs=0.06)   # ≈ −11.99
+    # density is now one of the companions, not the primary
+    assert "psd_live" in [v["id"] for v, _f, _t in dlg._companion_labels]
+
+
+def test_span_readout_reports_the_sweep_direction():
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    dlg._start_field.setValue(-30.0); dlg._stop_field.setValue(-18.0)
+    _app.processEvents()
+    assert "rising" in dlg._span_lbl.text()                      # From < To
+    dlg._start_field.setValue(-18.0); dlg._stop_field.setValue(-30.0)
+    _app.processEvents()
+    assert "falling" in dlg._span_lbl.text()                     # From > To
+
+
+def test_plain_from_to_rows_for_a_non_power_param():
+    # A non-power ramp keeps the plain From/To rows — no card, no companion tiles, no span read-out.
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    dlg._param.setCurrentText("bw")
+    _app.processEvents()
+    assert not dlg._card_active
+    assert dlg._span_lbl is None
+    assert dlg._companion_labels == []
+    assert dlg._start_field is not None and dlg._stop_field is not None   # still editable
+
+
+# ── One shared dual-handle rail (the mockup's single power slider with two handles) ──────────────
+
+def test_card_uses_one_shared_dual_rail_not_per_field_rails():
+    from ui.param_widgets import DualRangeRail
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    assert isinstance(dlg._pwr_rail, DualRangeRail)         # one dual-handle rail for both endpoints
+    assert dlg._start_field._rail is None                   # the fields drop their own single rails
+    assert dlg._stop_field._rail is None
+    # a non-power param falls back to per-field rails (no shared dual rail)
+    dlg._param.setCurrentText("bw")
+    _app.processEvents()
+    assert dlg._pwr_rail is None
+    assert dlg._start_field._rail is not None
+
+
+def test_dual_rail_drag_snaps_into_the_field_and_clamps():
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    lo, hi = dlg._start_field.bounds()
+    dlg._on_rail_drag("to", -20.0)                          # a drag on the To handle
+    _app.processEvents()
+    assert dlg._val(dlg._stop_field) == pytest.approx(-20.0, abs=0.06)   # snapped to the level
+    assert dlg._pwr_rail._to == pytest.approx(dlg._val(dlg._stop_field), abs=1e-6)  # handle re-synced
+    dlg._on_rail_drag("from", 999.0)                        # a drag past MAX clamps to it
+    _app.processEvents()
+    assert dlg._val(dlg._start_field) == pytest.approx(hi, abs=0.06)
+
+
+def test_min_max_labels_reflect_the_field_bounds():
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    lo, hi = dlg._start_field.bounds()
+    assert "MIN" in dlg._pwr_min.text() and "MAX" in dlg._pwr_max.text()
+    # the numbers shown are the achievable bounds (density at the carried bw)
+    assert _num(dlg._pwr_min.text().replace("MIN", "")) == pytest.approx(lo, abs=0.06)
+    assert _num(dlg._pwr_max.text().replace("MAX", "")) == pytest.approx(hi, abs=0.06)
+
+
+# ── From/To render as the mockup's .p-input, and their sub-labels follow the fire times ──────────
+
+def test_from_to_fields_render_as_pinput_in_the_card():
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    assert dlg._start_field._pinput and dlg._stop_field._pinput      # the mockup's .p-input
+    # the ▲/▼ steppers route through the spinbox's achievable-level stepping
+    dlg._start_field.setValue(-30.0); _app.processEvents()
+    before = dlg._start_field.value()
+    dlg._start_field._spin.stepUp(); _app.processEvents()
+    assert dlg._start_field.value() > before                         # stepped to the next level
+
+
+def test_from_to_sublabels_follow_the_anchor_and_offset():
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)], offset=10.0)       # anchor start, +10 s
+    _app.processEvents()
+    assert "on-air +10" in dlg._ft_from_lbl.text() and "ramp end" in dlg._ft_to_lbl.text()
+    # switch to the off-air anchor: FROM is the ramp start, TO is held to off-air − offset
+    dlg._anchor.setCurrentIndex(dlg._anchor.findData("stop"))
+    dlg._offset.setValue(-5.0)
+    _app.processEvents()
+    assert "ramp start" in dlg._ft_from_lbl.text() and "off-air −5" in dlg._ft_to_lbl.text()
+
+
+# ── The sibling fields are contained .ofield rows that flow with the card ────────────────────────
+
+def test_sibling_fields_are_contained_ofield_rows():
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    # the Anchor control sits inside a bordered ".ofield" container (not a bare form row)
+    row = dlg._anchor.parent()
+    assert row is not None and row.objectName() == "ofield"
+    # Define-by mode toggles the whole numeric rows in/out (containers, not label+widget separately)
+    dlg._mode.setCurrentIndex(dlg._mode.findData("steps_hold")); _app.processEvents()
+    assert dlg._row_steps.isVisibleTo(dlg) and not dlg._row_step.isVisibleTo(dlg)
+    dlg._mode.setCurrentIndex(dlg._mode.findData("step_duration")); _app.processEvents()
+    assert dlg._row_step.isVisibleTo(dlg) and dlg._row_duration.isVisibleTo(dlg)
+    assert not dlg._row_steps.isVisibleTo(dlg)
+    # a window-filling ramp reveals the end-offset row and hides the include row
+    dlg._anchor.setCurrentIndex(dlg._anchor.findData("both")); _app.processEvents()
+    assert dlg._offend_row.isVisibleTo(dlg) and not dlg._inc_row.isVisibleTo(dlg)

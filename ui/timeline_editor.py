@@ -1607,6 +1607,17 @@ class TimelineEditor(QWidget):
             f"border-radius: 8px; padding: 7px 10px;")
         outer.addWidget(self._achv_warn)
 
+        # Offline-calibration banner: the target unit is offline, so absolute power is folded from
+        # its last-known (cached) calibration. Informational (accent, not alarming) — distinct from
+        # the amber achievability clamp warning above. Refreshed whenever calibration resolves.
+        self._cal_stale_banner = QLabel("")
+        self._cal_stale_banner.setWordWrap(True)
+        self._cal_stale_banner.setVisible(False)
+        self._cal_stale_banner.setStyleSheet(
+            f"font-size: 11px; color: {Palette.ACCENT_INK}; background: {Palette.ACCENT_SOFT}; "
+            f"border: 1px solid #cfe0ee; border-radius: 8px; padding: 7px 10px;")
+        outer.addWidget(self._cal_stale_banner)
+
         self._canvas = _TimelineCanvas(self)
         self._canvas.changed.connect(self.changed.emit)
         self._canvas.changed.connect(self._update_mindur)
@@ -1650,6 +1661,8 @@ class TimelineEditor(QWidget):
             hostname = ""                            # the library isn't a real unit
         self._cal_hostname = hostname or ""
         self._calibration = None
+        self._cal_stale = False
+        self._update_cal_stale_banner()              # clear any prior unit's stale banner
         if not hostname or hub is None:
             return
         if not self._cal_connected:
@@ -1659,7 +1672,7 @@ class TimelineEditor(QWidget):
                       lambda h=hostname: hub.fleet.get(h).get_calibration())
 
     def _on_cal_result(self, label: str, result) -> None:
-        from api.client import AgentConnectionError
+        from api.client import AgentHTTPError
         from state.calibration_cache import get_calibration_cache
         if not isinstance(label, str) or not label.startswith("tl_cal:"):
             return
@@ -1667,19 +1680,51 @@ class TimelineEditor(QWidget):
         if host != self._cal_hostname:
             return
         cache = get_calibration_cache()
-        if isinstance(result, dict) and result.get("valid"):
-            self._calibration = result
-            self._cal_stale = False
-            cache.put(host, result)                      # remember for offline authoring
-        elif isinstance(result, AgentConnectionError):
-            # Unit offline — fall back to the last-known calibration we cached.
-            self._calibration = cache.get(host)
-            self._cal_stale = self._calibration is not None
-        else:
-            # Reachable but uncalibrated (404) or invalid — no absolute, don't use cache.
+        if isinstance(result, dict):
+            if result.get("valid"):
+                self._calibration = result
+                self._cal_stale = False
+                cache.put(host, result)                  # remember for offline authoring
+            else:
+                # Reachable but uncalibrated / invalid — no absolute; don't use the cache.
+                self._calibration = None
+                self._cal_stale = False
+        elif isinstance(result, AgentHTTPError):
+            # Reachable, but the agent returned an error (404 = no calibration document) —
+            # a real "uncalibrated" verdict, so do NOT serve stale cached bounds.
             self._calibration = None
             self._cal_stale = False
+        else:
+            # Every other failure means we couldn't reach the unit to ask: it's offline
+            # (AgentConnectionError), it was never discovered this session so it isn't in the
+            # fleet (KeyError from Fleet.get), a timeout, etc. Fall back to the last-known
+            # calibration we cached for THIS unit, marked stale, so a plan/sequence can still
+            # author absolute power for it. Refreshed the moment the unit is reachable again.
+            self._calibration = cache.get(host)
+            self._cal_stale = self._calibration is not None
+        self._update_cal_stale_banner()   # show/hide the "using cached calibration" notice
         self._update_achievability()      # bounds just arrived — surface any ramp clamps now
+
+    def _update_cal_stale_banner(self) -> None:
+        """Show the offline-calibration banner when absolute power is folded from the last-known
+        (cached) calibration because the target unit is offline; hide it once a live fetch lands."""
+        banner = getattr(self, "_cal_stale_banner", None)
+        if banner is None:
+            return
+        stale = bool(self._cal_stale and self._calibration and self._cal_hostname)
+        if stale:
+            host = self._cal_hostname or "the target unit"
+            when = ""
+            try:
+                from state.calibration_cache import get_calibration_cache
+                ts = get_calibration_cache().fetched_at(host)
+                when = f", last seen {ts.replace('T', ' ').rstrip('Z')}" if ts else ""
+            except Exception:                          # noqa: BLE001
+                when = ""
+            banner.setText(
+                f"⚠ {host} is offline — absolute power uses its last-known calibration{when}. "
+                f"It refreshes automatically when the unit reconnects.")
+        banner.setVisible(stale)
 
     def absolute_allowed(self) -> bool:
         """Absolute (calibrated dBm) power is offered only when a unit is targeted."""

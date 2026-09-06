@@ -98,3 +98,36 @@ def test_online_404_ignores_cache(cal_cache):
     # …but the unit is reachable and now uncalibrated → no absolute, no stale bounds
     assert t.cal_bounds_for_task("mocktask") is None
     assert t.cal_is_stale() is False
+
+
+def test_undiscovered_unit_uses_cache_and_marks_stale(cal_cache):
+    # A unit never seen THIS session isn't in the fleet, so Fleet.get raises KeyError (not an
+    # AgentConnectionError). Authoring a plan for it must still fall back to the cached
+    # calibration — the case the user hit ("make a sequence on a calibrated unit that's offline").
+    cal_cache.put("unit-1", CAL)                    # cached from a previous session
+    t = _editor()
+    t.set_calibration(FakeHub(KeyError("Unknown unit: 'unit-1'")), "unit-1")
+    assert t.cal_bounds_for_task("mocktask") == CAL["signals"]["mock"]
+    assert t.cal_is_stale() is True                 # served from cache, flagged stale
+
+
+def test_offline_with_no_cache_has_no_bounds(cal_cache):
+    # Offline AND nothing cached for this unit → no absolute bounds (and not "stale").
+    t = _editor()
+    t.set_calibration(FakeHub(AgentConnectionError("unit-2", "offline")), "unit-2")
+    assert t.cal_bounds_for_task("mocktask") is None
+    assert t.cal_is_stale() is False
+
+
+def test_offline_shows_the_stale_calibration_banner(cal_cache):
+    cal_cache.put("unit-1", CAL)
+    t = _editor()
+    t.set_calibration(FakeHub(AgentConnectionError("unit-1", "offline")), "unit-1")
+    assert t._cal_stale_banner.isVisibleTo(t)
+    assert "unit-1" in t._cal_stale_banner.text() and "offline" in t._cal_stale_banner.text()
+
+
+def test_online_hides_the_stale_calibration_banner(cal_cache):
+    t = _editor()
+    t.set_calibration(FakeHub(CAL), "unit-1")          # fresh, live
+    assert not t._cal_stale_banner.isVisibleTo(t)
