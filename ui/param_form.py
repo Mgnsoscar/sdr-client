@@ -625,8 +625,13 @@ class BoundedNumberField(QWidget):
 
     def __init__(self, spec: dict, fold: Optional["PowerFold"] = None,
                  fold_freq: Optional[float] = None, note: str = "", parent=None,
-                 fold_params: Optional[dict] = None, view_offset: float = 0.0):
+                 fold_params: Optional[dict] = None, view_offset: float = 0.0,
+                 show_rail: bool = True):
         super().__init__(parent)
+        # show_rail=False builds JUST the input (no own rail/limit-chip/warning) — for the ramp
+        # power card, where one shared dual-handle rail serves both the From and To fields. The
+        # value model, range and achievable-level snapping (snap()/the arrows) are unchanged.
+        self._show_rail = show_rail
         self._spec = dict(spec)
         self._is_int = self._spec.get("type") == "int"
         lo, hi = self._spec.get("min"), self._spec.get("max")
@@ -659,12 +664,12 @@ class BoundedNumberField(QWidget):
         self._bounded = (self._spec.get("type") in ("int", "float")
                          and self._lo is not None and self._hi is not None)
         self._chip = self._rail = self._warn = None
-        if self._bounded:
+        if self._bounded and self._show_rail:
             self._chip = LimitChip()
             self._chip.set_range(_fmt_bound(self._lo), _fmt_bound(self._hi))
             crow.addWidget(self._chip)
         outer.addLayout(crow)
-        if self._bounded:
+        if self._bounded and self._show_rail:
             self._rail = RangeRail()
             self._rail.set_bounds(self._lo, self._hi, _fmt_bound)
             if note:
@@ -717,6 +722,27 @@ class BoundedNumberField(QWidget):
             self._spin.setValue(int(round(float(v))) if self._is_int else float(v))
         except (TypeError, ValueError):
             pass
+
+    def bounds(self):
+        """The field's display ``(min, max)`` (view-shifted for a controlled --power view), or
+        ``(None, None)`` when unbounded — for an external rail to size itself to this field."""
+        return self._lo, self._hi
+
+    def snap(self, v: float) -> float:
+        """Clamp ``v`` to the field's range and snap it to a real achievable level (the same grid
+        the arrows / a typed commit use), in DISPLAY units. Used by the ramp card's shared dual
+        rail so a drag lands where the field itself would. A no-op beyond clamping without a fold."""
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return v
+        if self._lo is not None and self._hi is not None:
+            v = min(max(v, self._lo), self._hi)
+        if self._psnap is not None:
+            v = self._psnap(v)
+            if self._lo is not None and self._hi is not None:
+                v = min(max(v, self._lo), self._hi)
+        return int(round(v)) if self._is_int else v
 
 
 # ── The form widget ───────────────────────────────────────────────────────────

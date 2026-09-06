@@ -423,6 +423,110 @@ class RangeRail(QWidget):
         self._note.setVisible(True)
 
 
+# ── Dual-handle range rail (a ramp's From/To over one track) ─────────────────────
+
+class DualRangeRail(QWidget):
+    """A single range track with TWO draggable handles — the ramp analogue of RangeRail.
+    The swept span is filled between the From handle (outline) and the To handle (accent);
+    drag the nearer one and it emits ``fromMoved`` / ``toMoved`` with the value under that
+    handle (the caller snaps it to an achievable level and writes it back via ``set_from`` /
+    ``set_to``). The handles may cross — a ramp can rise or fall — so the fill always spans
+    ``[min, max]`` of the two. Matches docs/ramp-power-mockup.html's ``.rail2``."""
+
+    fromMoved = pyqtSignal(float)
+    toMoved = pyqtSignal(float)
+
+    _M = 9.0                                   # side margin so a handle never clips at either end
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._lo, self._hi = 0.0, 1.0
+        self._from, self._to = 0.0, 1.0
+        self._active: Optional[str] = None     # 'from' | 'to' while dragging
+        self.setMinimumHeight(26)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_bounds(self, lo: float, hi: float) -> None:
+        self._lo, self._hi = float(lo), float(hi)
+        self.update()
+
+    def set_from(self, v: Optional[float]) -> None:
+        if v is not None:
+            self._from = float(v); self.update()
+
+    def set_to(self, v: Optional[float]) -> None:
+        if v is not None:
+            self._to = float(v); self.update()
+
+    def _frac(self, v: float) -> float:
+        if self._hi <= self._lo:
+            return 0.0
+        return max(0.0, min(1.0, (v - self._lo) / (self._hi - self._lo)))
+
+    def _x_of(self, v: float) -> float:
+        usable = max(0.0, self.width() - 2 * self._M)
+        return self._M + usable * self._frac(v)
+
+    def _val_at(self, x: float) -> float:
+        usable = self.width() - 2 * self._M
+        if usable <= 0:
+            return self._lo
+        f = max(0.0, min(1.0, (x - self._M) / usable))
+        return self._lo + f * (self._hi - self._lo)
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() != Qt.MouseButton.LeftButton:
+            return
+        x = ev.position().x()
+        self._active = "from" if abs(x - self._x_of(self._from)) <= abs(x - self._x_of(self._to)) \
+            else "to"
+        self._drag(x)
+
+    def mouseMoveEvent(self, ev) -> None:
+        if self._active and (ev.buttons() & Qt.MouseButton.LeftButton):
+            self._drag(ev.position().x())
+
+    def mouseReleaseEvent(self, _ev) -> None:
+        self._active = None
+
+    def _drag(self, x: float) -> None:
+        v = self._val_at(x)
+        if self._active == "from":
+            self._from = v; self.update(); self.fromMoved.emit(v)
+        else:
+            self._to = v; self.update(); self.toMoved.emit(v)
+
+    def paintEvent(self, _ev) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        m = self._M
+        h = 6.0
+        y = (self.height() - h) / 2.0
+        usable = max(0.0, self.width() - 2 * m)
+        track = QRectF(m, y, usable, h)
+        tp = QPainterPath(); tp.addRoundedRect(track, h / 2, h / 2)
+        p.fillPath(tp, _c(Palette.INSET))
+        p.setPen(QPen(_c(Palette.BORDER), 1)); p.drawPath(tp)
+
+        # filled span between the two handles (accent, translucent)
+        xa, xb = self._x_of(self._from), self._x_of(self._to)
+        lo_x, hi_x = min(xa, xb), max(xa, xb)
+        if hi_x - lo_x > 0.5:
+            span = _c(Palette.ACCENT); span.setAlpha(78)
+            fp = QPainterPath(); fp.addRoundedRect(QRectF(lo_x, y, hi_x - lo_x, h), h / 2, h / 2)
+            p.fillPath(fp, span)
+
+        cy = self.height() / 2.0
+        accent = _c(Palette.ACCENT)
+        # From handle: outline (surface fill); To handle: solid accent — matching the mockup.
+        p.setPen(QPen(accent, 2.0)); p.setBrush(_c(Palette.SURFACE))
+        p.drawEllipse(QRectF(xa - 8, cy - 8, 16, 16))
+        p.setPen(QPen(accent, 2.0)); p.setBrush(accent)
+        p.drawEllipse(QRectF(xb - 8, cy - 8, 16, 16))
+        p.end()
+
+
 # ── Limit chip (always-visible min → max beside a bounded input) ─────────────────
 
 class LimitChip(QFrame):

@@ -290,3 +290,39 @@ def test_plain_from_to_rows_for_a_non_power_param():
     assert dlg._span_lbl is None
     assert dlg._companion_labels == []
     assert dlg._start_field is not None and dlg._stop_field is not None   # still editable
+
+
+# ── One shared dual-handle rail (the mockup's single power slider with two handles) ──────────────
+
+def test_card_uses_one_shared_dual_rail_not_per_field_rails():
+    from ui.param_widgets import DualRangeRail
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    assert isinstance(dlg._pwr_rail, DualRangeRail)         # one dual-handle rail for both endpoints
+    assert dlg._start_field._rail is None                   # the fields drop their own single rails
+    assert dlg._stop_field._rail is None
+    # a non-power param falls back to per-field rails (no shared dual rail)
+    dlg._param.setCurrentText("bw")
+    _app.processEvents()
+    assert dlg._pwr_rail is None
+    assert dlg._start_field._rail is not None
+
+
+def test_dual_rail_drag_snaps_into_the_field_and_clamps():
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    lo, hi = dlg._start_field.bounds()
+    dlg._on_rail_drag("to", -20.0)                          # a drag on the To handle
+    _app.processEvents()
+    assert dlg._val(dlg._stop_field) == pytest.approx(-20.0, abs=0.06)   # snapped to the level
+    assert dlg._pwr_rail._to == pytest.approx(dlg._val(dlg._stop_field), abs=1e-6)  # handle re-synced
+    dlg._on_rail_drag("from", 999.0)                        # a drag past MAX clamps to it
+    _app.processEvents()
+    assert dlg._val(dlg._start_field) == pytest.approx(hi, abs=0.06)
+
+
+def test_min_max_labels_reflect_the_field_bounds():
+    dlg = _ramp_dlg([_bar(10), _set_bw(20, 5.0)])
+    lo, hi = dlg._start_field.bounds()
+    assert "MIN" in dlg._pwr_min.text() and "MAX" in dlg._pwr_max.text()
+    # the numbers shown are the achievable bounds (density at the carried bw)
+    assert _num(dlg._pwr_min.text().replace("MIN", "")) == pytest.approx(lo, abs=0.06)
+    assert _num(dlg._pwr_max.text().replace("MAX", "")) == pytest.approx(hi, abs=0.06)
