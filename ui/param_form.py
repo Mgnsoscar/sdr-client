@@ -640,6 +640,9 @@ class BoundedNumberField(QWidget):
         lo, hi = self._spec.get("min"), self._spec.get("max")
         self._lo = float(lo) if lo is not None else None
         self._hi = float(hi) if hi is not None else None
+        st = self._spec.get("step")
+        self._step = float(st) if isinstance(st, (int, float)) and not isinstance(st, bool) \
+            and st > 0 else None
         self._spin = _make_spinbox(self._spec)
         self._psnap = None
         # For a calibrated --power spec the achievable-level snapping folds at ``fold_freq`` AND
@@ -746,10 +749,7 @@ class BoundedNumberField(QWidget):
         return b
 
     def _on_rail(self, value: float) -> None:
-        value = min(max(value, self._lo), self._hi)          # a drag can't leave the range
-        if self._psnap is not None:                          # snap to a real achievable level
-            value = min(max(self._psnap(value), self._lo), self._hi)
-        self._spin.setValue(int(round(value)) if self._is_int else value)
+        self._spin.setValue(self.snap(value))                # snap + let the ends reach lo/hi
 
     def _on_change(self, *_) -> None:
         v = float(self._spin.value())
@@ -795,13 +795,24 @@ class BoundedNumberField(QWidget):
             v = float(v)
         except (TypeError, ValueError):
             return v
-        if self._lo is not None and self._hi is not None:
-            v = min(max(v, self._lo), self._hi)
-        if self._psnap is not None:
-            v = self._psnap(v)
-            if self._lo is not None and self._hi is not None:
-                v = min(max(v, self._lo), self._hi)
-        return int(round(v)) if self._is_int else v
+        bounded = self._lo is not None and self._hi is not None
+        target = min(max(v, self._lo), self._hi) if bounded else v
+        if self._psnap is not None:                          # real achievable level (--power)
+            snapped = self._psnap(target)
+        elif self._step:                                     # uniform step grid (e.g. --gain 0.25)
+            base = self._lo if self._lo is not None else 0.0
+            snapped = base + round((target - base) / self._step) * self._step
+        else:
+            snapped = target
+        if bounded:
+            snapped = min(max(snapped, self._lo), self._hi)
+            # The exact bounds are reachable stops too: a ceiling capped BETWEEN grid steps (e.g.
+            # an amplifier input limit that lowers the max gain to a non-grid value) leaves the top
+            # achievable grid level below the shown max, so a full-right drag would never reach it.
+            # Pick whichever of {grid level, min, max} is nearest the target — the extremes win at
+            # the very ends, the grid wins in the middle. (min/max are valid, script-accepted values.)
+            snapped = min((snapped, self._lo, self._hi), key=lambda c: abs(c - target))
+        return int(round(snapped)) if self._is_int else snapped
 
 
 # ── The form widget ───────────────────────────────────────────────────────────
@@ -1516,11 +1527,17 @@ class ParamForm(QWidget):
             return None
 
         def set_widget(value):
-            value = min(max(value, lo), hi)                  # a drag can't leave the range
+            target = min(max(value, lo), hi)                 # a drag can't leave the range
             if psnap is not None:                            # snap to a real achievable level
-                value = min(max(psnap(value), lo), hi)
+                value = min(max(psnap(target), lo), hi)
             elif step:                                       # snap to the script's step grid
-                value = min(max(lo + round((value - lo) / step) * step, lo), hi)
+                value = min(max(lo + round((target - lo) / step) * step, lo), hi)
+            else:
+                value = target
+            # The exact bounds are reachable stops: a ceiling capped between grid steps (an amp
+            # input limit lowering the max to a non-grid value) leaves the top level below the shown
+            # max, so a full-right drag would never reach it. Snap to the nearest of {level, lo, hi}.
+            value = min((value, lo, hi), key=lambda c: abs(c - target))
             if isinstance(widget, QSpinBox):
                 widget.setValue(int(round(value)))
             elif isinstance(widget, QDoubleSpinBox):

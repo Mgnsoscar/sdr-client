@@ -23,6 +23,13 @@ _POWER_SPEC = {"dest": "power", "name": "power", "flags": ["-Power", "--power"],
 _CAL_BOUNDS = {"min_power_dbm": -1.8, "max_power_dbm": 28.2,
                "quantity": "EIRP", "operating_plane": "antenna_eirp"}
 
+# A --gain param whose SCRIPT range/step is wide (0..90 step 1); calibration narrows it to the
+# usable gain range on the SDR's real 0.25 dB grid.
+_GAIN_SPEC = {"dest": "gain", "name": "gain", "flags": ["-Gain", "--gain"],
+              "type": "float", "min": 0.0, "max": 90.0, "step": 1.0, "default": 40.0}
+_GAIN_BOUNDS = {"min_gain_db": 0.0, "max_gain_db": 89.75,
+                "artifact": {"gain_step_db": 0.25}}
+
 
 class _Src:
     ramp = None
@@ -120,3 +127,17 @@ def test_no_offline_note_when_calibration_is_fresh():
     dlg = _dialog(_CAL_BOUNDS)                          # online, valid (FakeEditor isn't stale)
     _app.processEvents()
     assert not dlg._cal_note.isVisibleTo(dlg)
+
+
+def test_gain_ramp_narrows_to_the_calibrated_gain_range_and_step():
+    # Sweeping --gain (relative power) narrows to the usable gain range on the SDR's 0.25 dB grid,
+    # so the slider can't overshoot the ceiling and steps by 0.25 (not the script's 1).
+    dlg = RampEditorDialog(_Src(), _FakeEditor([_GAIN_SPEC], _GAIN_BOUNDS), new=True)
+    dlg._run_chk.setChecked(True)
+    dlg._param.setCurrentText("gain")
+    _app.processEvents()
+    spec = dlg._ramped_spec()
+    assert (spec["min"], spec["max"]) == (0.0, 89.75)  # calibrated range, not 0..90
+    assert spec["step"] == 0.25                         # SDR gain grid, not the script's 1
+    dlg._start_field.setValue(90.0)                     # a value above the calibrated ceiling
+    assert dlg._start_field.value() == 89.75           # clamped — can't start above max

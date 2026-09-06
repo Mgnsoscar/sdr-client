@@ -264,6 +264,28 @@ guard intact):
   exe, "Run anyway"; self-signed doesn't help. **Open:** must still be smoke-tested on a clean Windows
   10/11 VM (no-admin install, icon, real-unit discovery, Provision) — the Linux build can't cover that.
 
+## Current state — ramp editor fixes (size, slider max, gain): COMPLETE (branch `claude/table-and-ramp-fixes`)
+Three owner-reported ramp editor fixes (client-only):
+- **Opens too small.** `RampEditorDialog._build` now `resize()`s to a size that fits the power card
+  horizontally and shows a large part of the form vertically (700×820, clamped to 0.95×/0.9× the
+  screen; `setMinimumWidth(560)`), instead of collapsing to the scroll area's tiny min-size hint.
+- **Slider couldn't reach the max.** When a stage limit (e.g. an amplifier INPUT limit) caps the
+  ceiling gain BETWEEN grid steps, the top achievable grid level sits below the shown max (40.08 vs
+  40.33), so a full-right drag never reached it. `BoundedNumberField.snap()` (used by the ramp
+  card's dual rail and each field's own rail) and `ParamForm._wire_rail`'s `set_widget` now treat
+  the exact `min`/`max` as reachable snap-stops: they snap to the nearest of {grid level, lo, hi} to
+  the drag target, so the extremes win at the very ends and the grid wins in the middle. `min`/`max`
+  are script-accepted values (build_args already clamps the emitted base to the field bounds).
+- **Relative-power (gain) step + overshoot.** The ramp editor's `_with_cal_bounds` only applied
+  `apply_power_bounds` (→ `--gain` kept the script's 0..90 / step 1 and the slider overshot to 90 >
+  the 89.75 ceiling, still startable). It now ALSO applies `apply_gain_bounds`, narrowing `--gain`
+  to the calibrated `[min_gain_db, max_gain_db]` on the SDR's real `gain_step_db` (0.25) — so the
+  field/slider clamp to 89.75 and step by 0.25. `snap()` gained uniform-step-grid snapping (with the
+  same reach-the-extremes rule) for stepped non-power fields. Tests:
+  `tests/test_bounded_number_field.py` (snap reaches a between-steps ceiling; step-grid snap reaches
+  the max), `tests/test_ramp_cal_bounds.py` (a --gain ramp narrows to the calibrated range + 0.25
+  step and clamps at 89.75). Full headless suite: 738 passed.
+
 ## Current state — calibration grid cell selection (copy / clear a block): COMPLETE (branch `claude/table-and-ramp-fixes`)
 The calibration curve grids (`_CurveTable` in `ui/calibration_panel.py` — measured points, gain/power
 curves, the source-bias grid) now support spreadsheet-style **cell-range selection**: click-drag a

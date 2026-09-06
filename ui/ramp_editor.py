@@ -38,8 +38,8 @@ from state.power_law import parse_law
 from . import timeline_model as tlm
 from .duration_spin import DurationSpinBox
 from .param_form import (
-    BoundedNumberField, ParamForm, _family_chip, apply_power_bounds, find_power_index,
-    fmt_duration, fmt_value, hz_per_unit, range_hint,
+    BoundedNumberField, ParamForm, _family_chip, apply_gain_bounds, apply_power_bounds,
+    find_power_index, fmt_duration, fmt_value, hz_per_unit, range_hint,
 )
 from .param_widgets import DualRangeRail
 from .theme import Palette, mono_font
@@ -456,12 +456,19 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         self._render_power_area()      # From/To fields + power card (fallback until params load)
         self._apply_mode_visibility()
         self._sync_anchor()   # populate modes + show/hide rows + preview
-        # Cap the dialog to the available screen so the shared scroll engages when the body (a long
-        # step list, run-mode params) is taller than the screen — otherwise the dialog would grow off
-        # the bottom, hiding the buttons with no way to scroll to them.
+        # Open at a size that fits the power card horizontally (its two From/To columns + the
+        # ALSO READS AS companions need real width) and shows a large part of the form vertically,
+        # instead of the tiny min-size-hint the scroll area would otherwise collapse to. The body
+        # is scrollable, and the height is capped to the screen so the buttons stay on-screen.
+        self.setMinimumWidth(560)
+        want_w, want_h = 700, 820
         scr = QApplication.primaryScreen()
         if scr is not None and scr.availableGeometry().height() > 240:
-            self.setMaximumHeight(int(scr.availableGeometry().height() * 0.9))
+            avail = scr.availableGeometry()
+            self.setMaximumHeight(int(avail.height() * 0.92))
+            want_w = min(want_w, int(avail.width() * 0.95))
+            want_h = min(want_h, int(avail.height() * 0.9))
+        self.resize(max(self.minimumWidth(), want_w), want_h)
 
     # ── Target (tune vs run) wiring ──────────────────────────────────────────
 
@@ -504,14 +511,15 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         return None
 
     def _with_cal_bounds(self, spec: dict) -> dict:
-        """If the ramped parameter is the calibrated --power field, narrow its min/max
-        to the target unit's resolved dBm range (the task's calibration signal), so
+        """If the ramped parameter is the calibrated --power OR --gain field, narrow its min/max
+        to the target unit's resolved calibration range (the task's calibration signal), so
         the range check, preview and unit conform to calibration rather than the
-        script's wider declared bounds. For a frequency-dependent chain the range is
-        re-folded at the frequency the ramped task runs at (carried from the sequence),
-        the same fold the step editor applies — so the range tracks the operating
-        frequency, not just the calibration's representative one. Non-power params, no
-        unit, or an uncalibrated unit pass through unchanged."""
+        script's wider declared bounds. --power gets the resolved dBm range (achievable-level
+        snapping); relative --gain gets the usable gain range [min_gain_db, max_gain_db] on the
+        SDR's real gain step, so the slider lands on commandable gains and can't overshoot the
+        calibrated ceiling. For a frequency-dependent chain the range is re-folded at the frequency
+        the ramped task runs at (carried from the sequence), the same fold the step editor applies.
+        Other params, no unit, or an uncalibrated unit pass through unchanged."""
         getter = getattr(self._editor, "cal_bounds_for_task", None)
         if getter is None:
             return spec
@@ -524,7 +532,10 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         # against what the unit can actually deliver at the operating point — not the law's
         # representative value. refold_bounds is a no-op when neither applies.
         bounds = refold_bounds(bounds, self._op_freq_hz(task), self._op_params(task))
+        # apply_power_bounds targets --power, apply_gain_bounds targets --gain; each is a no-op for
+        # the other's field, so chaining both narrows whichever one this ramp sweeps.
         out = apply_power_bounds([spec], bounds)[0]
+        out = apply_gain_bounds([out], bounds)[0]
         # Author a density ramp in the CONTROLLED view (a chirp's live spectral density), like the
         # Run/Tune power card: shift the base range into the view at the carried bw and relabel the
         # unit, so the operator ramps the live density and it stays honest at that sweep width.

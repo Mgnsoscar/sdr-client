@@ -43,6 +43,40 @@ def test_rail_note_is_shown():
     assert "2000.00 MHz" in f._rail._note.text()
 
 
+class _DownFold:
+    """A fold whose achievable grid quantizes DOWN to a 0.25 dB step — so a ceiling capped
+    between grid steps (an amplifier input limit) has its top level below the shown max."""
+    def snap_power(self, p, f=None, pr=None):
+        import math
+        return math.floor(round(float(p), 6) / 0.25) * 0.25
+    quantize_down = snap_power
+    def quantize_up(self, p, f=None, pr=None):
+        import math
+        return math.ceil(round(float(p), 6) / 0.25) * 0.25
+
+
+def test_snap_reaches_a_ceiling_between_grid_steps():
+    # max 40.33 sits 0.25-of-a-step above the top achievable grid level (40.25) — the amp-limit
+    # case. Dragging the rail to the far right must reach 40.33, not stop at the grid level below.
+    spec = {"dest": "power", "flags": ["--power"], "type": "float", "unit": "dBm",
+            "min": -10.0, "max": 40.33, "step": 0.25, "snap_role": "power"}
+    f = BoundedNumberField(spec, fold=_DownFold())
+    assert f.snap(40.33) == pytest.approx(40.33)     # the max is a reachable stop
+    assert f.snap(40.31) == pytest.approx(40.33)     # a hair below the max still reaches it
+    assert f.snap(30.10) == pytest.approx(30.0)      # mid-range still snaps to the grid
+    assert f.snap(-10.0) == pytest.approx(-10.0)     # the min is reachable too
+
+
+def test_step_grid_snapping_reaches_the_max():
+    # A plain (non-fold) bounded field with a 0.25 step and a max off the grid (89.75) — the
+    # calibrated --gain case: snapping lands on the 0.25 grid AND reaches the calibrated max.
+    spec = {"dest": "gain", "flags": ["--gain"], "type": "float", "unit": "dB",
+            "min": 0.0, "max": 89.75, "step": 0.25}
+    f = BoundedNumberField(spec)
+    assert f.snap(90.0) == pytest.approx(89.75)      # clamps to the calibrated max, not 90
+    assert f.snap(50.1) == pytest.approx(50.0)       # 0.25 grid
+
+
 def test_power_snap_uses_the_achievable_grid():
     # snap_role 'power' + a fold ⇒ the spinbox steps/commits on the chain's real levels.
     art = {"anchor_curve": [[40.0, -30.0], [74.0, 4.0]], "min_gain_db": 40.0,
