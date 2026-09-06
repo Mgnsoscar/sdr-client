@@ -263,6 +263,22 @@ guard intact):
   mitigations only — IT allow-list / software portal first, portable ZIP + shortcut over the installer
   exe, "Run anyway"; self-signed doesn't help. **Open:** must still be smoke-tested on a clean Windows
   10/11 VM (no-admin install, icon, real-unit discovery, Provision) — the Linux build can't cover that.
+- **`packaging/README.md`** — the one-glance build cheat-sheet: the PowerShell command
+  (`powershell -ExecutionPolicy Bypass -File packaging\build.ps1`), its `-Clean`/`-SkipInstaller`/
+  `-Python` variations, prerequisites, and where the artifacts + version come from. Points at
+  `docs/packaging-standalone.md` for the full guide.
+
+## Current state — source-bias table fills its dialog: COMPLETE (branch `claude/table-and-ramp-fixes`, client-only)
+Bug: the freq→dBm grid in the Source-bias editor (`_edit_source_bias`) only ever showed one row —
+expanding the window grew the space ABOVE the grid, not the grid. Root cause: `_CurveTable._fit_height`
+caps `maximumHeight` to ~content (≈ header + up-to-12 rows), so a one-row grid stayed one row tall.
+Fix (`ui/calibration_panel.py`): `_CurveTable` gained a `fill=False` flag; with `fill=True` it takes an
+Expanding vertical size policy and `_fit_height` drops the max-height cap (keeps a ~3-row floor), so the
+table grows to whatever the layout gives it. `_edit_source_bias` builds the grid `fill=True`, adds it
+with a stretch factor (`lay.addWidget(tbl, 1)`), and opens the dialog at 460×520. The measured-points
+dialog and every other `_CurveTable` are unchanged (default `fill=False` still caps to content). Tests:
+`tests/test_curve_table_ux.py` (a fill table doesn't cap its height + takes an Expanding policy; a
+non-fill table still caps).
 
 ## Current state — attenuator engagement no longer caps the minimum power: COMPLETE (branch `claude/table-and-ramp-fixes`, cross-repo)
 Bug: the minimum achievable power of a signal tracked the programmable attenuator's `engage_pct`

@@ -149,6 +149,25 @@ def test_delete_selection_leaves_unselected_cells_untouched():
     assert t.item(0, 1).text() == "" and t.item(1, 1).text() == ""       # powers cleared
 
 
+# ── fill mode (source-bias editor): grow with the dialog, not just the rows ──────
+
+def test_fill_table_expands_instead_of_capping_to_its_rows():
+    from PyQt6.QtWidgets import QSizePolicy
+    t = _CurveTable(headers=("frequency (MHz)", "power (dBm)"), fill=True)
+    t.set_points([{"gain_db": 100, "power_dbm": -30}])   # a single row
+    # A fill table does NOT cap its max height to a few rows (so the layout can stretch it
+    # to fill the dialog); a normal table would clamp maximumHeight near its content.
+    assert t.maximumHeight() >= 16777215
+    assert t.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Expanding
+
+
+def test_non_fill_table_still_caps_its_height_to_content():
+    t = _CurveTable()                                    # default fill=False
+    t.set_points([{"gain_db": 40, "power_dbm": -36}])    # one row
+    # The old behaviour is preserved: a squat grid is capped, not free to grow unbounded.
+    assert t.maximumHeight() < 16777215
+
+
 # ── add / remove rows (unchanged fallbacks) ──────────────────────────────────────
 
 def test_add_blank_row_lands_on_new_row():

@@ -875,9 +875,13 @@ def _template() -> dict:
 # ── A small editable (gain, power) grid ─────────────────────────────────────────
 
 class _CurveTable(QTableWidget):
-    def __init__(self, on_changed=None, headers=("gain (dB)", "power (dBm)")):
+    def __init__(self, on_changed=None, headers=("gain (dB)", "power (dBm)"), fill=False):
         super().__init__(0, 2)
         self._on_changed = on_changed          # called after any edit (live feedback)
+        # fill=True: the table should EXPAND to fill the space it's given (a stretch child of
+        # its layout) instead of hugging its rows — so a one-row source-bias grid still fills
+        # the dialog and grows when the window does, rather than parking extra space above it.
+        self._fill = fill
         self.setHorizontalHeaderLabels(list(headers))
         self.verticalHeader().setVisible(False)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -928,6 +932,10 @@ class _CurveTable(QTableWidget):
         app = QApplication.instance()
         if app is not None:
             app.focusChanged.connect(self._on_focus_changed)
+        if self._fill:
+            # Expand to fill the layout cell it's given; the vertical scrollbar handles any
+            # overflow past the visible height.
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._fit_height()
 
     def _changed(self) -> None:
@@ -1197,6 +1205,13 @@ class _CurveTable(QTableWidget):
         row_h = self.verticalHeader().defaultSectionSize()
         rows = max(self.rowCount(), 1)
         wanted = header + rows * row_h + 2 * self.frameWidth() + 2
+        if self._fill:
+            # A fill table takes whatever height its layout gives it: keep a ~3-row floor so
+            # it's usable when the dialog is small, but drop the cap so it grows with the
+            # window instead of leaving the extra space above it.
+            self.setMinimumHeight(header + 3 * row_h)
+            self.setMaximumHeight(16777215)                      # Qt's QWIDGETSIZE_MAX
+            return
         self.setMinimumHeight(min(wanted, header + 3 * row_h))   # show ~3 rows before scrolling
         self.setMaximumHeight(min(wanted, header + 12 * row_h))  # cap tall grids
 
@@ -2217,6 +2232,7 @@ class CalibrationPanel(QWidget):
         sb = dict((self._doc.get("source_bias") or {}))
         dlg = QDialog(self)
         dlg.setWindowTitle("Source bias — SDR power vs frequency")
+        dlg.resize(460, 520)                           # open tall enough to show several rows
         lay = QVBoxLayout(dlg)
         info = QLabel(
             "Transmit a fixed-gain CW and read the delivered power at each frequency, then "
@@ -2225,14 +2241,14 @@ class CalibrationPanel(QWidget):
         info.setWordWrap(True)
         info.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_MUTED};")
         lay.addWidget(info)
-        tbl = _CurveTable(headers=("frequency (MHz)", "power (dBm)"))
+        tbl = _CurveTable(headers=("frequency (MHz)", "power (dBm)"), fill=True)
         for f, p in (sb.get("power_by_freq") or []):
             r = tbl.rowCount(); tbl.insertRow(r)
             tbl.setItem(r, 0, QTableWidgetItem(_numstr(float(f) / 1e6)))
             tbl.setItem(r, 1, QTableWidgetItem(_numstr(float(p))))
         if not sb.get("power_by_freq"):
             tbl.add_blank_row()
-        lay.addWidget(tbl)
+        lay.addWidget(tbl, 1)                          # stretch: the table fills the dialog
         grow = QHBoxLayout()
         grow.addWidget(QLabel("measured at gain (dB), optional:"))
         gain_e = QLineEdit(_numstr(sb.get("gain_db"))); gain_e.setPlaceholderText("e.g. 60")
