@@ -264,6 +264,25 @@ guard intact):
   exe, "Run anyway"; self-signed doesn't help. **Open:** must still be smoke-tested on a clean Windows
   10/11 VM (no-admin install, icon, real-unit discovery, Provision) — the Linux build can't cover that.
 
+## Current state — attenuator engagement no longer caps the minimum power: COMPLETE (branch `claude/table-and-ramp-fixes`, cross-repo)
+Bug: the minimum achievable power of a signal tracked the programmable attenuator's `engage_pct`
+(lower engagement → lower min, and vice versa). It shouldn't — the engagement % should decide only
+WHEN the attenuator starts being used, not the absolute floor. Root cause in the shared
+achievable-power resolver (`state/achievable.py`, mirrored verbatim from `sdr-agent/paramkit/
+achievable.py`): `AchievableGrid._gain_points` clamped the SDR gain floor to the engagement
+threshold gain `_g_thr`, and `realize`/bounds clamped the target to `_thr − _span`, so the min was
+`P_base(_g_thr) − max_atten` instead of `P_base(min_gain) − max_atten`. Fix: the achievable SET
+spans the whole SDR grid down to min gain (`_gain_points` floors at `_lo_g`; `realize` clamps the
+target at `_s_lo − _span`); the threshold now only steers `realize`'s (gain, reduction) CHOICE via
+a tiebreak — ABOVE the threshold least-reduction wins (SDR-first, attenuator at rest), and once the
+attenuator is MAXED the SDR drops below the threshold (most-reduction wins there) to extend the low
+end. So the floor is `SDR@min_gain + attenuator@max` for every `engage_pct`, while the engaged
+region still holds the SDR at the threshold. Both copies kept byte-identical (manual mirror, like
+`power_law.py`); the agent resolver + `calkit` transmit fold get the same fix, so the unit actually
+delivers the extended low end. Tests: client `tests/test_power_fold.py` (min independent of
+engage_pct; SDR drops below threshold when the attenuator is maxed); agent
+`tests/test_calibration_active.py`, `tests/test_achievable_grid.py`.
+
 ## Current state — ramp editor fixes (size, slider max, gain): COMPLETE (branch `claude/table-and-ramp-fixes`)
 Three owner-reported ramp editor fixes (client-only):
 - **Opens too small.** `RampEditorDialog._build` now `resize()`s to a size that fits the power card

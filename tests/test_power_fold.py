@@ -192,12 +192,26 @@ def test_active_realize_commands_the_attenuator_sdr_first():
     assert r["settings"][0]["value"] == pytest.approx(60.0)          # 60 dB attenuation
 
 
-def test_engage_threshold_keeps_the_sdr_higher():
+def test_engage_threshold_keeps_the_sdr_higher_but_not_the_floor():
     fold = PowerFold.from_artifact(_active_artifact(engage_pct=50.0))
-    assert fold.bounds_at(None)["min_power_dbm"] == pytest.approx(-115.0)   # −20 − 95
+    # The engagement % steers WHEN the attenuator is used, NOT the range: the floor is still the
+    # SDR at min gain with the attenuator fully engaged (−40 − 95), independent of engage_pct.
+    assert fold.bounds_at(None)["min_power_dbm"] == pytest.approx(-135.0)
+    # In the engaged region the SDR is held at the threshold (20 dB) and the attenuator fills in.
     r = fold.realize(-60.0)
     assert r["sdr_gain_db"] == pytest.approx(20.0)
     assert r["settings"][0]["value"] == pytest.approx(40.0)
+    # Below the engaged region the attenuator is MAXED and the SDR drops below the threshold —
+    # the attenuator extends the low end rather than imposing a floor at the threshold.
+    r = fold.realize(-130.0)
+    assert r["settings"][0]["value"] == pytest.approx(95.0)   # attenuator fully engaged
+    assert r["sdr_gain_db"] == pytest.approx(5.0)             # SDR below the 20 dB threshold
+
+
+def test_min_power_is_independent_of_engage_pct():
+    lows = [PowerFold.from_artifact(_active_artifact(engage_pct=e))
+            .bounds_at(None)["min_power_dbm"] for e in (0.0, 25.0, 50.0, 90.0)]
+    assert all(low == pytest.approx(-135.0) for low in lows)
 
 
 def test_no_active_component_keeps_the_plain_gain_grid():
