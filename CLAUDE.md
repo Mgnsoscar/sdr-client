@@ -110,6 +110,26 @@ proceed` resolves window B (409 if not holding); a holding run has `held_actual`
 `on_air_end=None`/`open_ended=True` until proceed; abort with the existing DELETE; capability
 `sequence-hold`.
 
+## Current state — Hold step Phase 3a (achievability across the hold): COMPLETE (branch `claude/hold-step-phase-0-wwwxf7`, client-only)
+Design §6.5. The temporal power walk now treats the Hold as a **clock-reset boundary**: a window-B
+(`anchor="hold"`) event is placed as if start-anchored at `hold_offset + its offset`, so it fires
+AFTER every window-A step and inherits the operating point held at the hold (the up-ramp's final
+`--power` + bridge params). Ordering — not absolute wall-clock — is all the walk needs; the held level
+then seeds window B automatically (a "directly-set power held across a boundary", already modelled by
+`_held_power_issue`). Both walks in `ui/timeline_model.py` got the same 3-line fix (compute
+`h_off = hold_offset(items)`, route tune/run/ramp placement through `effective_anchor_offset(it, h_off)`):
+`achievability_warnings` (the amber banner — a window-B density command / down-ramp is validated at the
+bandwidth CARRIED across the hold, and a density held from window A is re-checked by a window-B `--bw`
+change) and `hold_control_quantity` (the deploy-time precompute — a window-B `--bw` change re-derives the
+held base in the right order). Byte-identical for a Hold-free timeline (`h_off` is None → the existing
+path). Client-only; no agent/scripts change; drift-guarded files untouched. Tests:
+`tests/test_achievability_hold_boundary.py` (held density clamps on a window-B widen, in-range stays
+silent, the hold orders window B after window A, a window-B down-ramp clamps at its fire-time width, the
+deploy precompute injects a window-B `--bw` change, a lone marker doesn't perturb a normal walk); suite
+780 → 788 offscreen. **NEXT — Phase 3b/3c** (cross-repo, need `sdr-agent`): Fast-Forward-to-Hold
+(`POST /sequence-runs/{id}/hold-now` + a "Hold now" button, design §5.4) and edit-while-holding (the
+agent's `proceed` honours `ProceedRequest.steps` + a client window-B edit flow, §6.4).
+
 ## Current state — Tune form renders live-sourced derived readouts: COMPLETE (branch `claude/l1c-sidelobes-slider`)
 `ui/live_tune_dialog.py` `_prepare_specs` used to route EVERY non-live spec — derived fields
 included — to fold context (never rendered). Now a VISIBLE (non-hidden) derived field whose formula

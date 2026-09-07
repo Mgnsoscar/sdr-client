@@ -838,6 +838,13 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
                 return ("low", lo, freq_hz)
             return None
 
+        # The Hold is a clock-reset boundary (docs/sequence-hold-step.md §6.5): a window-B
+        # (anchor="hold") step is placed as if start-anchored at hold_offset + its offset, so
+        # it fires AFTER every window-A step and inherits the operating point held at the hold
+        # (the up-ramp's final --power + bridge params). Ordering, not absolute wall-clock, is
+        # all the temporal walk needs — the held level then seeds window B automatically.
+        h_off = hold_offset(items)
+
         # Build fire-time-ordered events for this task.
         events: list = []                        # (fire_s, seq_idx, kind, payload)
         for seq_idx, it in enumerate(items):
@@ -851,10 +858,12 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
                                {"replace": getattr(it, "replace_args", True), "args": list(it.args),
                                 "power_view": pv}))
             elif act == "tune":
-                events.append((_fire_time_s(it.anchor, it.offset, window), seq_idx, "tune",
+                fa, fo = effective_anchor_offset(it, h_off)
+                events.append((_fire_time_s(fa, fo, window), seq_idx, "tune",
                                {"params": dict(getattr(it, "params", {}) or {}), "power_view": pv}))
             elif act == "run":
-                events.append((_fire_time_s(it.anchor, it.offset, window), seq_idx, "args",
+                fa, fo = effective_anchor_offset(it, h_off)
+                events.append((_fire_time_s(fa, fo, window), seq_idx, "args",
                                {"replace": getattr(it, "replace_args", True), "args": list(it.args),
                                 "power_view": pv}))
             elif act == "ramp":
@@ -862,9 +871,12 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
                 rdest = name_to_dest.get(r.get("param")) or flag_to_dest.get(r.get("flag"))
                 if rdest != power_dest:
                     continue                     # only a POWER ramp is analysed (see docstring)
+                # A window-B ramp resolves/places from the hold's side (start-anchored at
+                # hold_offset + its offset), so its points order after window A.
+                r_anchor, r_offset = effective_anchor_offset(it, h_off)
                 try:
-                    resolved = _resolve_ramp_points(r, it.anchor, window)
-                    fires = _place_ramp_points(r, it.anchor, float(it.offset), resolved)
+                    resolved = _resolve_ramp_points(r, r_anchor, window)
+                    fires = _place_ramp_points(r, r_anchor, r_offset, resolved)
                 except (ValueError, TypeError):
                     continue
                 run_mode = r.get("mode") == "run"
@@ -1094,6 +1106,11 @@ def hold_control_quantity(items, resolve):
                 return None
             return float(p) + _view_delta(state)
 
+        # The Hold is a clock-reset boundary (docs/sequence-hold-step.md §6.5): a window-B
+        # (anchor="hold") step orders after window A at hold_offset + its offset, so an injection
+        # re-derives the held base at the right moment (mirrors achievability_warnings).
+        h_off = hold_offset(items)
+
         # Fire-time events, keeping the item index so a --bw change can be injected into (mirrors
         # achievability_warnings' event build).
         events: list = []
@@ -1108,10 +1125,12 @@ def hold_control_quantity(items, resolve):
                                {"replace": getattr(it, "replace_args", True), "args": list(it.args),
                                 "power_view": pv}))
             elif act == "tune":
-                events.append((_fire_time_s(it.anchor, it.offset, window), seq_idx, "tune",
+                fa, fo = effective_anchor_offset(it, h_off)
+                events.append((_fire_time_s(fa, fo, window), seq_idx, "tune",
                                {"params": dict(getattr(it, "params", {}) or {}), "power_view": pv}))
             elif act == "run":
-                events.append((_fire_time_s(it.anchor, it.offset, window), seq_idx, "args",
+                fa, fo = effective_anchor_offset(it, h_off)
+                events.append((_fire_time_s(fa, fo, window), seq_idx, "args",
                                {"replace": getattr(it, "replace_args", True), "args": list(it.args),
                                 "power_view": pv}))
             # A ramp is a --power sweep; it updates the standing density (last point) but is not
@@ -1121,9 +1140,10 @@ def hold_control_quantity(items, resolve):
                 rdest = name_to_dest.get(r.get("param")) or flag_to_dest.get(r.get("flag"))
                 if rdest != power_dest or r.get("mode") == "run":
                     continue
+                r_anchor, r_offset = effective_anchor_offset(it, h_off)
                 try:
-                    resolved = _resolve_ramp_points(r, it.anchor, window)
-                    fires = _place_ramp_points(r, it.anchor, float(it.offset), resolved)
+                    resolved = _resolve_ramp_points(r, r_anchor, window)
+                    fires = _place_ramp_points(r, r_anchor, r_offset, resolved)
                 except (ValueError, TypeError):
                     continue
                 if fires:
