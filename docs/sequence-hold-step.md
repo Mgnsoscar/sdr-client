@@ -1,7 +1,7 @@
 # Design: the Hold step — an operator-gated pause in a sequence
 
-Status: **proposal / design.** Not yet implemented. This document is the plan we agree on
-*before* building. Cross-repo (agent runtime + client UI); no `sdr-scripts` change.
+Status: **design agreed — ready to build.** Not yet implemented. Owner decisions are locked (§12);
+this is the plan we build to. Cross-repo (agent runtime + client UI); no `sdr-scripts` change.
 
 ---
 
@@ -124,20 +124,21 @@ run state.
 
 `agent/models.py`:
 
-- **`StepAction.HOLD = "hold"`** — a marker step. `anchor="start"`, `offset_s` = its position after
-  the up-ramp (its *offset* is the natural end of window A). It carries no task work; it is a
-  boundary. `args`/`params` empty. Validation (`_validate_steps`, `sequence_runner.py:189`): at most
-  **one** HOLD per sequence (v1); it must sit after all `start`-anchored work and before any
-  `stop`-anchored step in offset order.
-- **`SequenceState.HOLDING = "holding"`** — a new run state between `RUNNING` and the eventual
-  `RUNNING`-again/`COMPLETED`. Reached when all window-A steps have fired and the run is parked at
-  the hold; left when the operator proceeds (or aborts).
-- **`SequenceStep`**: a step gains an optional **`window: "A" | "B"`** classification (derived at
-  compile from its position relative to the HOLD; stored so the runner needn't re-derive). Post-hold
-  steps are `window="B"` and are `hold`-anchored (their `offset_s` is relative to `T_hold`).
-  - *Alternative considered:* a fourth anchor value `anchor="hold"` for window-B steps instead of a
-    `window` tag. Cleaner conceptually (post-hold steps literally anchor to the hold), and it mirrors
-    the existing `start`/`stop` model. **Leaning toward `anchor="hold"`** (see Open Questions §12).
+- **`StepAction.HOLD = "hold"`** — a marker step that defines the hold anchor. It is itself
+  `anchor="start"`, `offset_s` = the end of window A (its position is known at arm). It carries no
+  task work; it is a boundary (`args`/`params` empty).
+- **A third anchor value, `anchor="hold"`** (DECIDED, was Q1). Window-B steps anchor to the hold:
+  their `offset_s` is relative to `T_hold` (0 = the resume instant, positive = after it). This
+  mirrors the existing `start`/`stop` model, and `_resolve_steps` already switches its base by
+  anchor, so window B "just works" with a third base (`T_resume`) supplied at proceed. No separate
+  `window` tag is needed — a step's window is simply "B iff `anchor=="hold"`".
+- **Validation** (`_validate_steps`, `sequence_runner.py:189`): **exactly one HOLD per sequence**
+  in v1 (DECIDED, Q2) — zero is a normal sequence, two is rejected. A HOLD must sit after all
+  `start`-anchored work and before any `stop`-anchored step in offset order. `anchor="hold"` steps
+  are only valid when a HOLD marker exists.
+- **`SequenceState.HOLDING = "holding"`** — a new run state. Reached when all window-A steps have
+  fired and the run is parked at the hold; left when the operator proceeds (back to `RUNNING`) or
+  aborts. Because there is exactly one HOLD, the state machine stays binary (RUNNING ⇄ HOLDING).
 - **`SequenceRun`**: add
   - `hold_at_offset_s: Optional[float]` — window A's end offset (the hold's position), copied at arm.
   - `held_actual: Optional[str]` — wall-clock when HOLDING was entered.
@@ -214,11 +215,12 @@ waiting out a ramp whose outcome is already known.
 
 ### 5.6 Safety: a bounded max-hold (deadman)
 
-Even attended, an indefinite on-air hold deserves a guard. Add an **optional per-run `max_hold_s`**
-(operator-set at arm, default e.g. 30 min, "0 = unlimited" allowed but discouraged): if a run stays
-HOLDING longer than `max_hold_s`, the runner **auto-aborts** (RF off, tasks stopped) and emits
-`sequence_hold_timeout`. This prevents a walk-away from leaving a live signal on-air forever. It
-costs one field and one comparison in `_tick`; I recommend shipping it in v1.
+Even attended, an indefinite on-air hold deserves a guard. Add a per-run **`max_hold_s`**
+(operator-set at arm, **default 30 minutes**; **`0` = unlimited** is allowed — DECIDED, Q4): if a run
+stays HOLDING longer than `max_hold_s`, the runner **auto-aborts** (RF off, tasks stopped) and emits
+`sequence_hold_timeout`. This prevents a walk-away from leaving a live signal on-air forever. It costs
+one field and one comparison in `_tick`. Ships in v1. The Proceed dialog surfaces the remaining
+allowance ("auto-stops in 04:12") so a long receiver restart doesn't get silently cut off.
 
 ## 6. Client / UI design
 
@@ -295,10 +297,19 @@ this by **compiling the Hold out** on the scheduled/plan path, so the agent is n
   and runs straight through — its scheduled path is **byte-for-byte unchanged**. A HOLDING state is
   unreachable without an interactive `hold_aware` arm.
 
-This is enforced in **one place** (the step-compile for the scheduled path) and is the single rule
-that keeps an operator-gated pause out of automation. Belt-and-suspenders: the agent can also reject
-`hold_aware=True` from any non-interactive arm surface if we want a hard server-side guarantee (Open
-Questions §12).
+Two things make this robust and non-surprising (DECIDED, Q3):
+
+1. **The client tells the operator, at schedule time.** Adding a Hold-bearing sequence/plan to the
+   schedule (or to a plan destined for the schedule) raises a clear, up-front notice — *"This sequence
+   contains a Hold. Scheduled runs are unattended, so the Hold is disabled here: the sequence will run
+   straight through without pausing (the down-ramp starts immediately after the up-ramp). Run it from
+   the Library if you need the operator-gated pause."* No silent collapse — the operator is told what
+   will happen and why, and confirms.
+2. **The agent hard-rejects `hold_aware=True` on a scheduled/non-interactive arm** (cheap insurance):
+   a `hold_aware` arm that isn't the interactive Library surface is refused with an explanatory error
+   ("an operator-gated Hold cannot run in the unattended schedule — arm from the Library, or the Hold
+   is compiled out"). So even a buggy or future client can never sneak an indefinite operator pause
+   into automation, and the reason is always legible.
 
 ## 8. New API surface
 
@@ -350,18 +361,20 @@ v1 doesn't have. Not in v1.
   `_blocks_on_*` pattern). Scheduled/plan compilation strips the Hold regardless, so an older agent
   still runs the collapsed sequence correctly.
 
-## 12. Open questions (decide before building)
+## 12. Design decisions (resolved with the owner)
 
-1. **`anchor="hold"` vs a `window` tag** on window-B steps (§5.1). I lean `anchor="hold"` — it mirrors
-   `start`/`stop`, and `_resolve_steps` already switches base by anchor, so window B "just works" with
-   a third base. Confirm.
-2. **One Hold per sequence** in v1 (recommended) vs. many. One keeps the state machine binary
-   (RUNNING/HOLDING) and the UI legible. Multiple holds = a small counter, but I'd defer.
-3. **Server-side guard:** should the agent *reject* `hold_aware=True` from the scheduled surface, or
-   do we trust the client to compile the Hold out (§7)? A hard server guard is cheap insurance.
-4. **`max_hold_s` default** (§5.6): 30 min? And is "0 = unlimited" allowed at all in attended mode?
-5. **Proceed timing floor:** the up-ramp's last value is live; is there any settle/lead time needed
-   before window B's first TUNE, or is "immediate" truly immediate? (Reuse the arm safety-lead.)
+1. **Anchor model — `anchor="hold"`.** Window-B steps take a third anchor value `hold`, mirroring
+   `start`/`stop`; no separate `window` tag (§5.1).
+2. **One Hold per sequence in v1.** Zero = a normal sequence; two is rejected. Keeps the state
+   machine binary (RUNNING ⇄ HOLDING) and the UI legible (§5.1).
+3. **Both guards for the schedule.** The client informs the operator up-front that a Hold is disabled
+   in the schedule and why (no silent collapse), AND the agent hard-rejects a `hold_aware` arm on a
+   non-interactive surface with an explanatory reason (§7).
+4. **`max_hold_s` default 30 min; `0 = unlimited` allowed.** Auto-abort on timeout; the Proceed dialog
+   shows the remaining allowance (§5.6).
+5. **No settle/lead before window B.** The held value is already live, so "immediate" proceed is truly
+   immediate — no extra settle time inserted before window B's first TUNE (the normal arm safety-lead
+   still applies to a future-dated proceed).
 
 ## 13. Phased implementation plan
 
