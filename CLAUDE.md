@@ -54,6 +54,18 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — Tune form renders live-sourced derived readouts: COMPLETE (branch `claude/l1c-sidelobes-slider`)
+`ui/live_tune_dialog.py` `_prepare_specs` used to route EVERY non-live spec — derived fields
+included — to fold context (never rendered). Now a VISIBLE (non-hidden) derived field whose formula
+reads only LIVE knobs is RENDERED read-only in the tune form (kept out of `_context_dests`), so a
+display readout that just tracks a live knob shows and updates while retuning — e.g. L1C's
+`passband_bw_mhz` tracking the live `--sidelobes` slider. Sources are checked via
+`ParamForm._formula_sources`; every source must be a live (rendered) field, else it stays fold
+context. Hidden derived fields (a power law's `enbw_mhz` key) are unaffected — still context-only.
+Client-only; no agent/scripts change. Tests: `tests/test_live_tune_power.py` (visible derived
+readout renders + tracks the live source; hidden one stays context). The scripts side (L1C
+whole-sidelobe slider + labels + max 13) lives in `sdr-scripts` (see its CLAUDE.md).
+
 ## Current state — source stage name fixed to "Source"; no empty stage names: COMPLETE (branch `claude/source-stage-name`)
 Bug: renaming a chain stage to `""` deleted it — `_read_planes` skips a nameless row (`if not
 name: continue`). Fix (all in `ui/calibration_panel.py`): (1) the SOURCE (first) stage has a

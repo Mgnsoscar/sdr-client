@@ -459,3 +459,67 @@ def test_livetune_clamp_warning_folds_at_the_range_frequency_and_params():
 
     # A partially-typed request stays silent (never raises — the mid-keystroke guard).
     assert caption_at(2, "-") == ""
+
+
+# ── a VISIBLE derived readout whose sources are live is shown in the Tune form ───────────
+# A non-hidden derived field (e.g. L1C's passband bandwidth) that reads only LIVE knobs is
+# RENDERED read-only in the tune form and tracks the live source, instead of being fold-context
+# only. A hidden derived field (a law's key, e.g. enbw) stays context. Regression: the tune form
+# used to route EVERY non-live spec (derived included) to fold context, so a display readout that
+# just tracks a live knob never appeared while retuning.
+
+_DERIVED_YAML = (
+    "tasks:\n"
+    "  - name: l1c\n"
+    "    command: [python3, gps_l1c_tx.py, --power, \"-30\", --sidelobes, \"5\"]\n"
+    "    env: { SDR_CAL_SIGNAL_ID: mock }\n"
+)
+_DERIVED_PARAMS = {"params": [
+    {"dest": "power", "flags": ["--power"], "type": "float", "live": True, "unit": "dBm",
+     "min": -140.0, "max": 60.0, "default": -20.0},
+    {"dest": "sidelobes", "flags": ["--sidelobes"], "type": "int", "min": 0, "max": 13,
+     "step": 1, "default": 5, "live": True},
+    # passband bandwidth = 4.092·n + 4.092 MHz — reads only the live --sidelobes, so it renders.
+    {"dest": "passband_bw_mhz", "kind": "derived", "name": "passband_bw_mhz", "unit": "MHz",
+     "formula": {"linear": ["sidelobes", 4.092, 4.092]}},
+    # a hidden derived field stays fold context (never rendered), like a power law's enbw key.
+    {"dest": "enbw_mhz", "kind": "derived", "name": "enbw_mhz", "unit": "MHz", "hidden": True,
+     "formula": {"table": ["sidelobes", 1.0, 2.0, 3.0]}},
+]}
+
+
+class DerivedClient(FakeClient):
+    def get_tasks_yaml(self):
+        return _DERIVED_YAML
+
+    def get_script_params(self, name):
+        return _DERIVED_PARAMS
+
+    def get_task_params(self, name):
+        return {"current": {"power": -30.0, "sidelobes": 5}, "applied": {}}
+
+
+def _derived_text(f, dest):
+    return f._derived[dest]["value_lbl"].text()
+
+
+def test_livetune_shows_visible_derived_readout_tracking_a_live_source():
+    dlg = LiveTuneDialog(FakeHub(DerivedClient()), "u", "l1c")
+    f = dlg._form
+    # the non-hidden derived readout is RENDERED (not fold context); the hidden one stays context.
+    assert "passband_bw_mhz" in f._derived
+    assert "passband_bw_mhz" not in dlg._context_dests
+    assert "enbw_mhz" in dlg._context_dests and "enbw_mhz" not in f._derived
+    # it is NOT an editable knob (read-only) — only the live params are.
+    assert set(f._widgets) == {"power", "sidelobes"}
+
+
+def test_livetune_visible_derived_readout_tracks_the_live_slider():
+    dlg = LiveTuneDialog(FakeHub(DerivedClient()), "u", "l1c")
+    f = dlg._form
+    f._widgets["sidelobes"][0].setValue(0)
+    _app.processEvents()
+    assert "4.092 MHz" in _derived_text(f, "passband_bw_mhz")        # 4.092·0 + 4.092
+    f._widgets["sidelobes"][0].setValue(13)
+    _app.processEvents()
+    assert "57.288 MHz" in _derived_text(f, "passband_bw_mhz")       # 4.092·13 + 4.092

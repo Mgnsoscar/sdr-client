@@ -268,12 +268,22 @@ class LiveTuneDialog(QDialog):
         the running task: a law's derived key (e.g. GPS C/A's enbw from --sidelobes) resolves
         through the live knob behind it, and a fixed --freq folds at the deployed carrier."""
         deployed = self._deployed_values(specs)
+        live_dests = {s.get("dest") for s in specs if s.get("live")}
         prepared: List[dict] = []
         context: List[str] = []
         for s in specs:
             if s.get("live"):
                 prepared.append(s)
                 continue
+            # A VISIBLE derived readout whose formula reads only LIVE knobs is rendered read-only
+            # (not context-only), so it updates as those knobs move — e.g. L1C's passband bandwidth
+            # tracking the live --sidelobes slider. It computes from the rendered source widgets, so
+            # every source must itself be a live (rendered) field; otherwise it stays fold context.
+            if s.get("kind") == "derived" and not s.get("hidden"):
+                srcs = ParamForm._formula_sources(s)
+                if srcs and all(d in live_dests for d in srcs):
+                    prepared.append(s)
+                    continue
             context.append(s.get("dest"))
             val = deployed.get(s.get("dest"))
             prepared.append({**s, "default": val} if isinstance(val, (int, float))
