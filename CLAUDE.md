@@ -54,19 +54,33 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
-## Planned — Hold step (operator-gated sequence pause): DESIGN AGREED, building in phases
-Design doc: **`docs/sequence-hold-step.md`** (cross-repo; the authoritative spec + owner decisions).
-A new **Hold** sequence step pauses a running sequence at the hold, holding system state exactly,
-until the operator proceeds — for the GNSS loss-of-lock/reacquire test where the receiver-restart
-wait (2–10 min) isn't known in advance. v1 scope: **single unit, Library/operator-present execution
-only, no effect in the schedule** (the hold is compiled out + the agent rejects a `hold_aware` arm on
-the scheduled surface). Core model: the Hold is a **third anchor** (`anchor="hold"`) splitting the
-sequence into window A (pre-hold, fixed at arm) and window B (post-hold, resolved only at **proceed**
-relative to the resume instant). Runtime is the agent's `SequenceRunner`, reusing its existing
-`open_ended` runs + `patch_on_air_end` + per-run step overrides. Enhancements: Proceed dialog (reuses
-`ArmDialog`), edit-while-holding, Fast-Forward-to-Hold, a 30-min `max_hold_s` deadman. **Start with
-Phase 0** — the self-contained build checklist is `docs/sequence-hold-step.md` Appendix A (data-model
-vocabulary + validation + round-trip + `sequence-hold` capability/version bump, zero behavior change).
+## Current state — Hold step Phase 0 (data model): COMPLETE (branch `claude/hold-step-phase-0-wwwxf7`, cross-repo)
+Design doc: **`docs/sequence-hold-step.md`** (cross-repo; the authoritative spec + owner decisions +
+a self-contained Phase 0 checklist in Appendix A). A new **Hold** sequence step pauses a running
+sequence at the hold, holding system state exactly, until the operator proceeds — for the GNSS
+loss-of-lock/reacquire test where the receiver-restart wait (2–10 min) isn't known in advance. v1
+scope: **single unit, Library/operator-present execution only, no effect in the schedule**. Core
+model: the Hold is a **third anchor** (`anchor="hold"`) splitting the sequence into window A (pre-hold,
+fixed at arm) and window B (post-hold, resolved only at **proceed**). Phase 0 is the client mirror +
+round-trip only — **no canvas rendering, no arm/Proceed UI, no gate wiring** (all Phase 2). Shipped:
+- **`api/models.py`** — mirrors the agent 1.16.0 additions: `StepAction.HOLD`, `SequenceState.HOLDING`,
+  the `SequenceRun` Hold fields (`hold_at_offset_s`/`held_actual`/`resumed_actual`/`hold_aware`/
+  `max_hold_s`), `ArmSequenceRequest.hold_aware`/`max_hold_s`, and a `ProceedRequest{proceed_at,
+  steps?}`. All defaulted so an older agent's payloads still parse. (Plain HTTP models — NOT under the
+  argspec/ramp drift guard.)
+- **`ui/timeline_model.py`** — `items_to_steps`/`steps_to_items` round-trip a Hold **losslessly**: a
+  HOLD boundary marker is a minimal `RunItem(action="hold", anchor="start", task_name="")` ⇄ a
+  `{action:"hold", anchor:"start"}` step, and window-B items keep `anchor="hold"`. A Hold-FREE
+  timeline compiles **byte-identically** (the new `hold` branch is inert unless a HOLD is present).
+  `ed.steps()`/`ed.set_steps()` (deploy/load) carry it through `m.SequenceStep(action=HOLD)` too. The
+  canvas does **not** draw the marker yet (Phase 2). New capability constant
+  `SEQUENCE_HOLD_CAPABILITY = "sequence-hold"` (defined here; the `_supports`/`_blocks_on_*` gate is
+  Phase 2).
+Tests: `tests/test_timeline_hold_model.py` (round-trip lossless + stable, Hold-free byte-identical,
+the api-model mirror, the editor round-trip); suite 745 → 755 offscreen.
+**NEXT — Phase 2** (after the agent's Phase 1 runtime): the third-anchor canvas + step-editor "Hold"
+anchor option, the arm-dialog messaging + Proceed button (reusing `ArmDialog`), the scheduled-path
+collapse-the-Hold no-op, and wiring the `sequence-hold` save/arm gate. See the design doc §6–§7.
 
 ## Current state — Tune form renders live-sourced derived readouts: COMPLETE (branch `claude/l1c-sidelobes-slider`)
 `ui/live_tune_dialog.py` `_prepare_specs` used to route EVERY non-live spec — derived fields

@@ -27,6 +27,13 @@ from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
+# ── Capability gate ──────────────────────────────────────────────────────────
+# Agent >= 1.16.0 understands a HOLD step (operator-gated pause). Phase 0 just
+# defines the string here, alongside the calibration *_CAPABILITY cluster in
+# ui/calibration_panel.py; wiring the _supports/_blocks_on_* gate into the arm/
+# authoring UI is Phase 2 (docs/sequence-hold-step.md §11).
+SEQUENCE_HOLD_CAPABILITY = "sequence-hold"
+
 # ── Geometry constants ───────────────────────────────────────────────────────
 SCALE = 3.0            # px per second in the warm-up / cool-down zones
 MIDDLE_GAP = 220       # base px between ON-AIR and OFF-AIR (the on-air band)
@@ -273,6 +280,16 @@ def item_to_steps(it) -> List[dict]:
             {"anchor": "stop", "offset_s": it.stop_offset, "action": "stop",
              "task_name": it.task_name, "args": [], "replace_args": False},
         ]
+    if getattr(it, "action", "run") == "hold":
+        # The Hold boundary marker (docs/sequence-hold-step.md): anchor="start" at the
+        # end of window A. It names no task and carries no work — just a divider between
+        # window A and window B (anchor="hold" steps). Phase 0 round-trips it; the canvas
+        # doesn't render it yet (Phase 2).
+        return [
+            {"anchor": "start", "offset_s": it.offset, "action": "hold",
+             "task_name": getattr(it, "task_name", "") or "",
+             "args": [], "replace_args": False},
+        ]
     if getattr(it, "action", "run") == "tune":
         return [
             {"anchor": it.anchor, "offset_s": it.offset, "action": "tune",
@@ -313,7 +330,13 @@ def steps_to_items(steps: List[dict]) -> List:
 
     for s in steps:
         action = _action_of(s)
-        if action == "run":
+        if action == "hold":
+            # The Hold boundary marker → a minimal RunItem(action="hold"). No task,
+            # no params, no power. Kept out of the start/stop bar pairing below.
+            items.append(RunItem(
+                task_name=s.get("task_name") or "", action="hold",
+                anchor=s.get("anchor", "start"), offset=float(s["offset_s"])))
+        elif action == "run":
             items.append(RunItem(
                 task_name=s["task_name"], args=list(s.get("args") or []),
                 replace_args=bool(s.get("replace_args", True)),

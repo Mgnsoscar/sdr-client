@@ -61,6 +61,7 @@ class EventState(str, Enum):
 class SequenceState(str, Enum):
     ARMED     = "armed"
     RUNNING   = "running"
+    HOLDING   = "holding"      # parked at a Hold, RF live, awaiting operator proceed
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     ABORTED   = "aborted"
@@ -72,6 +73,9 @@ class StepAction(str, Enum):
     RUN   = "run"     # fire-and-exit one-shot: launch, self-terminates, no stop
     TUNE  = "tune"    # retune a running task's live parameters (see SequenceStep.params)
     RAMP  = "ramp"    # sweep one live parameter over time (expands to tunes on the unit)
+    HOLD  = "hold"    # operator-gated pause marker: a boundary step (no task work) that
+                      # splits a sequence into window A (pre-hold) and window B
+                      # (anchor="hold"). See docs/sequence-hold-step.md.
 
 
 class RampSpec(BaseModel):
@@ -301,7 +305,7 @@ class PatchEventRequest(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class SequenceStep(BaseModel):
-    anchor: str = "start"              # "start" | "stop" | "both" (ramp)
+    anchor: str = "start"              # "start" | "stop" | "both" (ramp) | "hold" (post-Hold window B)
     offset_s: float
     # "both"-anchored ramp: off-air-side inset (≤ 0). Fills [on-air+offset_s, off-air+offset_end_s].
     offset_end_s: Optional[float] = None
@@ -380,6 +384,13 @@ class SequenceRun(BaseModel):
     steps: List[StepFire] = []
     plan_id: str = ""
     plan_name: str = ""
+    # ── Hold step (docs/sequence-hold-step.md) — mirrors agent/models.py.
+    # All defaulted so a run from an older agent (no Hold fields) deserializes unchanged.
+    hold_at_offset_s: Optional[float] = None  # window-A end offset (the hold's position from T0)
+    held_actual: Optional[str] = None         # wall-clock (UTC ISO) HOLDING was entered
+    resumed_actual: Optional[str] = None       # wall-clock (UTC ISO) the operator proceeded
+    hold_aware: bool = False                   # interactive (Library) arm only; False = no-op Hold
+    max_hold_s: float = 1800.0                 # auto-abort deadman while HOLDING; 0 = unlimited
 
 
 class StepOverride(BaseModel):
@@ -401,10 +412,23 @@ class ArmSequenceRequest(BaseModel):
     plan_name: str = ""
     step_overrides: List[StepOverride] = []
     steps: Optional[List[SequenceStep]] = None   # inline plan-local step list
+    # ── Hold step (docs/sequence-hold-step.md) — mirrors agent/models.py.
+    # hold_aware=True (interactive Library arm only) makes a Hold real; False (default)
+    # is today's behavior. Phase 0 carries the fields; the arm surfaces are Phase 2.
+    hold_aware: bool = False
+    max_hold_s: float = 1800.0                    # auto-abort deadman while HOLDING; 0 = unlimited
 
 
 class PatchSequenceRunRequest(BaseModel):
     on_air_end: str
+
+
+class ProceedRequest(BaseModel):
+    """Body for the (Phase 1) POST /sequence-runs/{id}/proceed — resume a HOLDING run.
+    proceed_at is the operator's chosen resume instant; steps, if given, is the edited
+    window-B step list from edit-while-holding. Mirrors agent/models.py ProceedRequest."""
+    proceed_at: str
+    steps: Optional[List[SequenceStep]] = None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
