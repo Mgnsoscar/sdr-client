@@ -415,3 +415,121 @@ the time-savings.
 `open_ended` + window-patch + per-run-step-override machinery. The scariest-sounding parts (multi-unit
 sync, generic conditions) are deliberately out of v1; the parts that save real test time
 (fast-forward, edit-while-holding) fall out of the two-window model almost for free.
+
+---
+
+## Appendix A — Phase 0 build checklist (self-contained)
+
+Phase 0 = **data-model vocabulary + validation + round-trip + capability/version bump.** It adds the
+Hold's *shape* to both repos and enforces its structural rules, but implements **no holding behavior**
+(that is Phase 1). Acceptance bar: **all existing tests stay green with zero behavior change when no
+Hold is present**, and a Hold-bearing sequence can be created/stored/round-tripped but **cannot yet be
+armed** (a temporary, explicit guard removed in Phase 1).
+
+Everything below is grounded in code that exists today; file:line anchors are from `main` at the time
+of writing and may drift a little — confirm by symbol name.
+
+### A.1 Environment + green baselines (do this first)
+
+`sdr-agent` and `sdr-client` start without deps. Install, then confirm the baseline is green before
+touching anything:
+
+```bash
+# sdr-agent
+pip3 install numpy pytest PyQt6 httpx pydantic zeroconf websocket-client PyYAML paramiko \
+             fastapi uvicorn "ruamel.yaml" starlette psutil python-multipart inotify-simple
+cd /home/user/sdr-agent && python3 -m pytest -q          # baseline: 398 passed
+
+# sdr-client (needs the offscreen Qt libs)
+apt-get update -q && apt-get install -y -q libegl1 libgl1 libglib2.0-0t64 libdbus-1-3 \
+             libxkbcommon0 libfontconfig1
+QT_QPA_PLATFORM=offscreen python3 -m pytest -q   # baseline: 745 passed
+```
+
+`sdr-scripts` is **not** touched by this feature. The `argspec.py`/`ramp.py` drift guard and the
+`achievable.py`/`power_law.py` manual mirrors are **not** touched either — stay clear of them.
+
+### A.2 Agent changes (`sdr-agent`)
+
+1. **`agent/models.py`**
+   - `StepAction` (`:257`): add `HOLD = "hold"`.
+   - `SequenceState` (`:350`): add `HOLDING = "holding"`.
+   - `SequenceRun` (`:372`): add fields (all defaulted so existing runs deserialize unchanged):
+     - `hold_at_offset_s: Optional[float] = None` — window-A end offset (the hold's position from T0).
+     - `held_actual: Optional[str] = None` — wall-clock HOLDING was entered.
+     - `resumed_actual: Optional[str] = None` — wall-clock the operator proceeded.
+     - `hold_aware: bool = False` — interactive (Library) arm only; False = today's behavior.
+     - `max_hold_s: float = 1800.0` — auto-abort deadman; **0 = unlimited** (default 30 min).
+   - `ArmSequenceRequest` (`:412`): add `hold_aware: bool = False` and `max_hold_s: float = 1800.0`.
+   - New model `ProceedRequest(BaseModel)` — `proceed_at: str` + `steps: Optional[list[SequenceStep]] = None`
+     (defined now for Phase 1; no endpoint yet).
+   - `SequenceStep.anchor` stays a `str` — no field change; it now also accepts `"hold"` (validated in
+     the runner, below).
+
+2. **`agent/sequence_runner.py::_validate_steps`** (`:189`) — structural rules only (no runtime):
+   - Accept `anchor == "hold"` (currently only `start`/`stop`/`both` at `:197`).
+   - **Exactly one** `StepAction.HOLD` allowed (zero = normal sequence; ≥2 → `ValueError`).
+   - A HOLD marker must be `anchor="start"`, sit after every other `start`-anchored step and before any
+     `stop`-anchored step (offset order), and carry no `args`/`params`/`ramp`.
+   - `anchor="hold"` steps are valid **only** when a HOLD marker exists; otherwise `ValueError`.
+
+3. **`agent/sequence_runner.py::arm`** (`:460`) — the **temporary Phase-0 guard**: if the effective
+   steps contain a HOLD, `raise ValueError("Hold steps are not yet executable (Phase 1)")`. This keeps
+   a half-built hold from being armed. **Remove this guard in Phase 1** when real holding lands. (Every
+   other arm path — no HOLD present — is untouched.)
+
+4. **`agent/config.py`** — add `"sequence-hold"` to `AGENT_CAPABILITIES` (`:294`) and bump
+   `AGENT_VERSION` (`:288`, `1.15.1 → 1.16.0` — a new capability, so a minor bump; safety gate so the
+   client won't offer Hold authoring to an agent that can't run it). Update the CLAUDE.md version note.
+
+5. **`agent/tests/`** — add a focused test file (e.g. `test_sequence_hold_model.py`):
+   - `_validate_steps` accepts exactly one HOLD in a legal position + `anchor="hold"` steps after it;
+     rejects two HOLDs, a HOLD with args, a stop-before-hold ordering, and a stray `anchor="hold"`
+     with no HOLD.
+   - Arming a Hold-bearing sequence raises the Phase-0 "not yet executable" guard.
+   - A **non-Hold** sequence arms/rounds-trips **exactly** as before (regression).
+   - `test_meta_endpoint.py` / capability test: `"sequence-hold"` is advertised.
+
+### A.3 Client changes (`sdr-client`)
+
+1. **`api/models.py`** — mirror the agent additions so the client can talk to the agent:
+   `StepAction.HOLD` (`:69`), `SequenceState.HOLDING` (`:61`), the new `SequenceRun` fields (`:366`),
+   `ArmSequenceRequest.hold_aware`/`max_hold_s` (`:393`), and a `ProceedRequest` model. (This mirror is
+   a plain HTTP model, not under the drift guard.)
+
+2. **`ui/timeline_model.py`** — round-trip a Hold through the compile, **no canvas rendering yet**
+   (that is Phase 2):
+   - `items_to_steps` (`:271`) emits a `SequenceStep(action=HOLD, anchor="start", offset_s=…)` for the
+     hold marker, and emits window-B steps with `anchor="hold"`.
+   - `steps_to_items` (`:351`) reads them back into whatever minimal item representation you choose
+     (e.g. a `RunItem(action="hold")` marker + `anchor="hold"` on post-hold items). The only Phase-0
+     requirement is a **lossless round-trip**: `steps_to_items(items_to_steps(x)) == x` for a Hold-
+     bearing timeline. Geometry/drawing is Phase 2 — keep the marker inert on the canvas for now (or
+     omit it from paint) so nothing renders oddly.
+
+3. **Capability constant** — add `SEQUENCE_HOLD_CAPABILITY = "sequence-hold"` alongside the other
+   `*_CAPABILITY` strings (the cluster starts at `ui/calibration_panel.py:51`; put the sequence one
+   wherever the sequence/timeline UI can import it). Wiring the `_supports`/`_blocks_on_*` gate into the
+   UI is **Phase 2** — Phase 0 just defines the string.
+
+4. **`tests/`** — `tests/test_timeline_hold_model.py`: the round-trip test above; and a regression that a
+   Hold-free timeline compiles byte-identically to before.
+
+### A.4 What Phase 0 must NOT do
+
+- No `HOLDING` transition, no `proceed`/`hold-now` endpoints, no window-B deferral, no deadman timer
+  (all Phase 1).
+- No canvas third-anchor rendering, no arm-dialog messaging, no Proceed button, no schedule
+  collapse/guard (Phases 2–3).
+- No change to `sdr-scripts`, to the drift-guarded `argspec.py`/`ramp.py`, or to the manually mirrored
+  `achievable.py`/`power_law.py`.
+
+### A.5 Definition of done (Phase 0)
+
+- `sdr-agent`: **≥398 passed** (baseline + the new model tests); `sdr-client`: **≥745 passed**
+  (offscreen). No existing test edited except to assert the new capability set.
+- A Hold-bearing sequence round-trips through both repos' models and the client compile; arming one is
+  cleanly refused with the Phase-0 guard message.
+- `"sequence-hold"` advertised; `AGENT_VERSION` bumped; both CLAUDE.md "current state" notes updated.
+- Committed to a feature branch (suggest `claude/hold-step` in each repo) and pushed; **not** merged to
+  `main` until the owner says so.

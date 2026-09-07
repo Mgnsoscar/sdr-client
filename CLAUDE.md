@@ -54,6 +54,20 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Planned — Hold step (operator-gated sequence pause): DESIGN AGREED, building in phases
+Design doc: **`docs/sequence-hold-step.md`** (cross-repo; the authoritative spec + owner decisions).
+A new **Hold** sequence step pauses a running sequence at the hold, holding system state exactly,
+until the operator proceeds — for the GNSS loss-of-lock/reacquire test where the receiver-restart
+wait (2–10 min) isn't known in advance. v1 scope: **single unit, Library/operator-present execution
+only, no effect in the schedule** (the hold is compiled out + the agent rejects a `hold_aware` arm on
+the scheduled surface). Core model: the Hold is a **third anchor** (`anchor="hold"`) splitting the
+sequence into window A (pre-hold, fixed at arm) and window B (post-hold, resolved only at **proceed**
+relative to the resume instant). Runtime is the agent's `SequenceRunner`, reusing its existing
+`open_ended` runs + `patch_on_air_end` + per-run step overrides. Enhancements: Proceed dialog (reuses
+`ArmDialog`), edit-while-holding, Fast-Forward-to-Hold, a 30-min `max_hold_s` deadman. **Start with
+Phase 0** — the self-contained build checklist is `docs/sequence-hold-step.md` Appendix A (data-model
+vocabulary + validation + round-trip + `sequence-hold` capability/version bump, zero behavior change).
+
 ## Current state — Tune form renders live-sourced derived readouts: COMPLETE (branch `claude/l1c-sidelobes-slider`)
 `ui/live_tune_dialog.py` `_prepare_specs` used to route EVERY non-live spec — derived fields
 included — to fold context (never rendered). Now a VISIBLE (non-hidden) derived field whose formula
