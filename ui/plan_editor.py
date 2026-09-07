@@ -141,8 +141,11 @@ class PlanItemDialog(QDialog):
         form.addRow("Off-air — before OFF-AIR", self._off_air)
         outer.addLayout(form)
 
-        # The full sequence timeline over the plan-local step copy.
+        # The full sequence timeline over the plan-local step copy. A plan is armed on
+        # the schedule/plan path, where a Hold is compiled out (docs/sequence-hold-step.md
+        # §7), so authoring one here would be misleading — hide the '+ Hold' button.
         self._timeline = TimelineEditor()
+        self._timeline.set_hold_authoring(False)
         self._timeline.changed.connect(self._refresh_status)
         outer.addWidget(self._timeline, stretch=1)
 

@@ -117,21 +117,57 @@ def _ramp_duration(r: dict) -> float:
         return 0.0
 
 
-def ramp_span(it):
+def ramp_span(it, h_off: Optional[float] = None):
     """A ramp's two timeline endpoints as ((left_anchor, left_off), (right_anchor,
     right_off)) — so it can be drawn as a duration bar. A 'both' ramp spans on-air
-    to off-air; a single-anchor ramp runs `duration` seconds from its anchor."""
+    to off-air; a single-anchor ramp runs `duration` seconds from its anchor. A
+    window-B (`anchor="hold"`) ramp is placed as if start-anchored at the hold's
+    position (`h_off + its offset`) — the geometry treats the hold as a start-side
+    dwell; the stored anchor stays "hold" (see effective_anchor_offset)."""
     r = dict(getattr(it, "ramp", None) or {})
     if it.anchor == "both":
         return (("start", float(it.offset)), ("stop", float(getattr(it, "offset_end", 0.0))))
     dur = _ramp_duration(r)
     if it.anchor == "stop":
         return (("stop", float(it.offset) - dur), ("stop", float(it.offset)))
+    if it.anchor == "hold" and h_off is not None:
+        base = h_off + float(it.offset)
+        return (("start", base), ("start", base + dur))
     return (("start", float(it.offset)), ("start", float(it.offset) + dur))
 
 
 def _is_ramp(it) -> bool:
     return getattr(it, "action", "run") == "ramp"
+
+
+def _is_hold(it) -> bool:
+    return getattr(it, "action", "run") == "hold"
+
+
+def hold_offset(items) -> Optional[float]:
+    """The on-air offset of the Hold marker (window A's end / the hold's position),
+    or None if the timeline has no Hold. There is at most one Hold in v1."""
+    for it in items:
+        if _is_hold(it):
+            return float(getattr(it, "offset", 0.0))
+    return None
+
+
+def has_hold(items) -> bool:
+    return any(_is_hold(it) for it in items)
+
+
+def effective_anchor_offset(item, h_off: Optional[float]) -> Tuple[str, float]:
+    """(anchor, offset) used for GEOMETRY/placement only. A window-B item
+    (`anchor="hold"`) is placed as if start-anchored at `hold_offset + its offset`
+    (the hold sits at `hold_offset` on the on-air side, and window B flows on from
+    there); every other item keeps its own anchor/offset. The stored item keeps its
+    real `anchor="hold"` — this mapping is purely for drawing, never for round-trip."""
+    anchor = getattr(item, "anchor", "start")
+    off = float(getattr(item, "offset", 0.0))
+    if anchor == "hold" and h_off is not None:
+        return "start", h_off + off
+    return anchor, off
 
 
 # ── Coordinate mapping ───────────────────────────────────────────────────────
@@ -171,18 +207,18 @@ def compute_anchors(items, zoom: float = 1.0) -> Tuple[float, float, int]:
             elif off < 0:
                 max_off = max(max_off, -off)
 
+    h_off = hold_offset(items)
     for it in items:
         if it.kind == "bar":
             take("start", it.start_offset)
             take("stop", it.stop_offset)
         elif _is_ramp(it):
-            (la, lo), (ra, ro) = ramp_span(it)
+            (la, lo), (ra, ro) = ramp_span(it, h_off)
             take(la, lo)
             take(ra, ro)
-        elif it.anchor == "start":
-            take("start", it.offset)
-        else:  # run/tune, off-air anchored
-            take("stop", it.offset)
+        else:  # run/tune/hold — map a window-B (anchor="hold") item to the hold's side
+            a, o = effective_anchor_offset(it, h_off)
+            take(a, o)
     left_s += HEADROOM_S
     right_s += HEADROOM_S
     band_gap = max(MIDDLE_GAP * zoom, (max_on + max_off) * eff + BAND_PAD * zoom)
@@ -389,13 +425,17 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
     if not items:
         return "add at least one duration or one-shot task"
     steps = items_to_steps(items)
-    if any(not s["task_name"] for s in steps):
+    # The Hold marker is a boundary — it names no task and defines no work, so it is
+    # excluded from the task checks (docs/sequence-hold-step.md §5.1).
+    task_steps = [s for s in steps if _action_of(s) != "hold"]
+    if any(not s["task_name"] for s in task_steps):
         return "every step needs a task"
     if known_tasks:
-        unknown = sorted({s["task_name"] for s in steps if s["task_name"] not in known_tasks})
+        unknown = sorted({s["task_name"] for s in task_steps if s["task_name"] not in known_tasks})
         if unknown:
             return "unknown task(s): " + ", ".join(unknown)
-    if not any(s["anchor"] == "start" for s in steps):
+    # A Hold is anchor="start" but not a real on-air step; require a genuine one.
+    if not any(s["anchor"] == "start" and _action_of(s) != "hold" for s in steps):
         return "needs at least one on-air step"
     if not any(s["anchor"] == "stop" for s in steps):
         return "needs at least one off-air step (a duration task provides both)"

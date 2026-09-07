@@ -115,6 +115,7 @@ _STATUS_MAP = {
     "on air":    (Palette.ONLINE, Palette.ONLINE_SOFT),
     "on_air":    (Palette.ONLINE, Palette.ONLINE_SOFT),
     "armed":     (Palette.ARMED,  Palette.ARMED_SOFT),
+    "holding":   (Palette.ARMED,  Palette.ARMED_SOFT),   # parked at a Hold, RF live
     "starting":  (Palette.ARMED,  Palette.ARMED_SOFT),
     "stopping":  (Palette.ARMED,  Palette.ARMED_SOFT),
     "queued":    (Palette.IDLE,   Palette.IDLE_SOFT),

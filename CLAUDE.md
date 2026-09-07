@@ -54,54 +54,61 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
-## Current state — Hold step Phase 0 (data model): COMPLETE (branch `claude/hold-step-phase-0-wwwxf7`, cross-repo)
-Design doc: **`docs/sequence-hold-step.md`** (cross-repo; the authoritative spec + owner decisions +
-a self-contained Phase 0 checklist in Appendix A). A new **Hold** sequence step pauses a running
-sequence at the hold, holding system state exactly, until the operator proceeds — for the GNSS
-loss-of-lock/reacquire test where the receiver-restart wait (2–10 min) isn't known in advance. v1
-scope: **single unit, Library/operator-present execution only, no effect in the schedule**. Core
-model: the Hold is a **third anchor** (`anchor="hold"`) splitting the sequence into window A (pre-hold,
-fixed at arm) and window B (post-hold, resolved only at **proceed**). Phase 0 is the client mirror +
-round-trip only — **no canvas rendering, no arm/Proceed UI, no gate wiring** (all Phase 2). Shipped:
-- **`api/models.py`** — mirrors the agent 1.16.0 additions: `StepAction.HOLD`, `SequenceState.HOLDING`,
-  the `SequenceRun` Hold fields (`hold_at_offset_s`/`held_actual`/`resumed_actual`/`hold_aware`/
-  `max_hold_s`), `ArmSequenceRequest.hold_aware`/`max_hold_s`, and a `ProceedRequest{proceed_at,
-  steps?}`. All defaulted so an older agent's payloads still parse. (Plain HTTP models — NOT under the
-  argspec/ramp drift guard.)
-- **`ui/timeline_model.py`** — `items_to_steps`/`steps_to_items` round-trip a Hold **losslessly**: a
-  HOLD boundary marker is a minimal `RunItem(action="hold", anchor="start", task_name="")` ⇄ a
-  `{action:"hold", anchor:"start"}` step, and window-B items keep `anchor="hold"`. A Hold-FREE
-  timeline compiles **byte-identically** (the new `hold` branch is inert unless a HOLD is present).
-  `ed.steps()`/`ed.set_steps()` (deploy/load) carry it through `m.SequenceStep(action=HOLD)` too. The
-  canvas does **not** draw the marker yet (Phase 2). New capability constant
-  `SEQUENCE_HOLD_CAPABILITY = "sequence-hold"` (defined here; the `_supports`/`_blocks_on_*` gate is
-  Phase 2).
-Tests: `tests/test_timeline_hold_model.py` (round-trip lossless + stable, Hold-free byte-identical,
-the api-model mirror, the editor round-trip); suite 745 → 755 offscreen.
-**AGENT PHASE 1 IS DONE (runtime ready, agent `1.17.0`).** The agent contract Phase 2 builds on
-(see `sdr-agent/CLAUDE.md` "Hold step Phase 1" + design §5):
-- **Arm (interactive/Library):** `ArmSequenceRequest(hold_aware=True, open_ended=True, max_hold_s=…)`.
-  The agent resolves only window A and parks the run at the hold. A Hold-bearing arm **without**
-  `hold_aware` is **refused** by the agent — so the scheduled/plan path MUST compile the Hold out to
-  a plain two-anchor list before arming (client-side, still to build).
-- **Proceed:** `POST /sequence-runs/{id}/proceed` body `ProceedRequest{proceed_at, steps?}` → resolves
-  window B from `proceed_at`, returns the `SequenceRun` (RUNNING); **409 if the run is not holding**.
-  `steps` (edit-while-holding) is accepted by the model but is **Phase 3** — leave it None for now.
-- **Run state:** the agent adds `SequenceState.HOLDING`; a holding run has `held_actual` set,
-  `on_air_end=None`/`open_ended=True` until proceed (then `on_air_end` + `resumed_actual` are set).
-  Abort a holding run with the existing DELETE (`cancel_or_abort`). SSE event kinds: `sequence_hold`,
-  `sequence_proceed`, `sequence_hold_timeout`. Capability `sequence-hold` (already
-  `SEQUENCE_HOLD_CAPABILITY` in `ui/timeline_model.py`); gate save/arm on it (agent ≥ 1.17.0 to run).
-**NEXT — Phase 2** (client, this is the active work): the third-anchor **canvas rendering** of the Hold
-marker + a way to ADD one (a `RunItem(action="hold")` — round-trip already works, `compute_anchors`/
-geometry in `ui/timeline_model.py` must place it); the **step-editor "Hold" anchor option**
-(`StepEditorDialog`, `ui/timeline_editor.py`) once a Hold exists; the **arm-dialog messaging + Proceed
-button** (reuse `ui/arm_dialog.py::ArmDialog`, relabeled; show elapsed/held/remaining) wired from
-`ui/sequences_panel.py`; **run-state plumbing** (Run→Proceed when HOLDING); an **`api/client.py`
-`proceed()`** wrapper; the **scheduled-path collapse-the-Hold no-op** + up-front notice
-(`ui/timeline_tab.py::_arm_scheduled`, `ui/plans_tab.py::_arm_plan`); and wiring the `sequence-hold`
-save/arm **gate** (`_supports`/`_blocks_on_*`). Achievability across the hold (§6.5) is Phase 3. See
-design §6–§7 + §13.
+## Current state — Hold step Phase 2 (client authoring + Proceed UI): COMPLETE (branch `claude/hold-step-phase-0-wwwxf7`, client-only)
+Design doc: **`docs/sequence-hold-step.md`** (cross-repo; the authoritative spec + owner decisions).
+A new **Hold** sequence step pauses a running sequence at the hold, holding system state exactly, until
+the operator proceeds — for the GNSS loss-of-lock/reacquire test where the receiver-restart wait
+(2–10 min) isn't known in advance. v1 scope: **single unit, Library/operator-present execution only, no
+effect in the schedule**. Core model: the Hold is a **third anchor** (`anchor="hold"`) splitting the
+sequence into window A (pre-hold, fixed at arm) and window B (post-hold, resolved only at **proceed**).
+Phase 0 (data-model mirror + lossless round-trip) and Phase 1 (agent HOLDING runtime, agent `1.17.0`)
+are done; **Phase 2 is the client authoring + arm/Proceed UI** (this note). Shipped, client-only, no
+agent/scripts change, drift-guarded files untouched:
+- **Third-anchor canvas** (`ui/timeline_model.py` + `ui/timeline_editor.py`): geometry helpers
+  `hold_offset`/`has_hold`/`effective_anchor_offset` map a window-B (`anchor="hold"`) item to the
+  hold's on-air side (placed as start-anchored at `hold_offset + its offset`); `compute_anchors`/
+  `ramp_span` honor them, so the band widens to keep window B left of off-air. The canvas paints the
+  Hold as a dashed **⏸ HOLD** divider spanning the band (`_paint_hold`), it owns no lane, and it wins
+  hit-testing over a bar body sharing its x (`_hit` checks holds first) so it's clickable + draggable
+  (`hold_body` in `DRAG_PARTS`). A **`+ Hold`** toolbar button (`add_new("hold")`, one per sequence,
+  disabled once one exists via `_sync_hold_button`) opens the tiny **`HoldEditorDialog`** (offset +
+  Remove only — a Hold carries no task). `set_hold_authoring(False)` hides `+ Hold` in the plan-item
+  editor (a plan's Hold is compiled out — see below). `TimelineEditor.has_hold()`.
+- **Step-editor Hold anchor** (`StepEditorDialog`, `ui/timeline_editor.py`): the anchor picker gains a
+  **"hold (after Hold)"** option when a Hold exists on the timeline (or when editing a step already
+  anchored to it); its window-fit check is skipped for a hold-anchored tune (window B is timed at
+  proceed). `validate()` excludes the taskless HOLD marker from the "every step needs a task" / on-air
+  checks.
+- **Arm/Proceed dialog** (`ui/arm_dialog.py`): `ArmDialog` gained keyword-only knobs so the SAME picker
+  serves arm and Proceed — `accept_label`/`title` (relabel to "Proceed"), `body_note` (arm messaging),
+  `show_stop` (hidden for a hold-aware arm — open-ended — and for Proceed — off-air is agent-derived),
+  `max_hold_default_s` (the arm-time deadman field → `max_hold_s()`, 0 = unlimited), and
+  `status_provider` (a live elapsed/held/remaining line for Proceed).
+- **Run→Proceed plumbing** (`ui/sequences_panel.py`): `_ACTIVE` now includes `HOLDING`; a **holding
+  run's row relabels "Arm" → "Proceed"** (enabled) wired to `_on_proceed`. `_on_start` routes a
+  Hold-bearing sequence to `_arm_hold_aware` — **gated on `_supports(SEQUENCE_HOLD_CAPABILITY)`** (a
+  safety gate: an older agent would refuse the arm) — which arms `hold_aware=True, open_ended=True,
+  max_hold_s`. `_on_proceed` opens the relabeled ArmDialog (live `_hold_status_text`) and posts
+  `_proceed_run` → the new **`api/client.py::proceed_sequence_run`** (`POST …/proceed`,
+  `ProceedRequest{proceed_at}`; `steps` left None — edit-while-holding is Phase 3). "holding" is an
+  amber `StatusPill` (`ui/theme.py`).
+- **Scheduled/plan collapse-the-Hold no-op** (design §7): `api/models.py::collapse_hold(steps)` (+
+  `has_hold`) drops the HOLD marker and re-anchors every window-B step to `start` at
+  `hold_offset + its offset` — a zero-length pass-through. `_arm_scheduled` (`ui/timeline_tab.py`) and
+  `_arm_plan` (`ui/plans_tab.py`) send the COLLAPSED steps and **never set `hold_aware`**, so the agent
+  runs its normal two-anchor path. Up-front notices: at schedule-add (`_ScheduleDialog._accept`), at
+  scheduled arm (`_finish_preflight`), and at direct plan arm (`_finish_arm_preflight`).
+Achievability across the hold (§6.5), edit-while-holding, and Fast-Forward-to-Hold are **Phase 3**.
+Tests: `tests/test_timeline_hold_phase2.py` (geometry, canvas paint/hit/add, `+ Hold` gating, step-editor
+anchor option, `validate` tolerates the marker) + `tests/test_hold_arm_proceed.py` (collapse, arm/proceed
+helpers, `proceed_sequence_run`, ArmDialog variants, the capability gate, the Proceed row) on top of
+Phase 0's `tests/test_timeline_hold_model.py`; suite 755 → 780 offscreen.
+**Agent contract Phase 2 builds on** (agent `1.17.0`; `sdr-agent/CLAUDE.md` "Hold step Phase 1"): arm
+`ArmSequenceRequest(hold_aware=True, open_ended=True, max_hold_s=…)` parks at the hold; a Hold-bearing
+arm WITHOUT `hold_aware` is refused (hence the scheduled/plan collapse); `POST /sequence-runs/{id}/
+proceed` resolves window B (409 if not holding); a holding run has `held_actual` set,
+`on_air_end=None`/`open_ended=True` until proceed; abort with the existing DELETE; capability
+`sequence-hold`.
 
 ## Current state — Tune form renders live-sourced derived readouts: COMPLETE (branch `claude/l1c-sidelobes-slider`)
 `ui/live_tune_dialog.py` `_prepare_specs` used to route EVERY non-live spec — derived fields

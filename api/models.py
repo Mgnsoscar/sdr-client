@@ -431,6 +431,51 @@ class ProceedRequest(BaseModel):
     steps: Optional[List[SequenceStep]] = None
 
 
+# ── Hold step helpers (docs/sequence-hold-step.md §7) ─────────────────────────
+# Detect a Hold in a step list and compile it out for the unattended (scheduled /
+# plan) path, where an operator-gated pause is a footgun. Both duck-type over
+# SequenceStep (an .action / .anchor / .offset_s object) so they work on a stored
+# sequence, a plan-local step copy, or a dict.
+
+def _step_action(step) -> str:
+    a = getattr(step, "action", None)
+    if a is None and isinstance(step, dict):
+        a = step.get("action")
+    return a.value if hasattr(a, "value") else str(a)
+
+
+def has_hold(steps) -> bool:
+    """True if the step list contains a HOLD marker (an operator-gated pause)."""
+    return any(_step_action(s) == StepAction.HOLD.value for s in (steps or []))
+
+
+def collapse_hold(steps: List["SequenceStep"]) -> List["SequenceStep"]:
+    """Compile a Hold OUT of a step list for the unattended (scheduled / plan) path:
+    drop the HOLD marker and re-anchor every window-B (``anchor="hold"``) step to
+    ``start`` at ``hold_offset + its own offset`` — a zero-length pass-through, so the
+    run executes straight through without pausing (the down-ramp starts immediately
+    after the up-ramp). A Hold-free list is returned unchanged (same objects), so the
+    non-hold path is byte-identical. See docs/sequence-hold-step.md §7."""
+    steps = list(steps or [])
+    hold_off = None
+    for s in steps:
+        if _step_action(s) == StepAction.HOLD.value:
+            hold_off = float(s.offset_s)
+            break
+    if hold_off is None:
+        return steps
+    out: List["SequenceStep"] = []
+    for s in steps:
+        if _step_action(s) == StepAction.HOLD.value:
+            continue                                     # the boundary marker is dropped
+        if getattr(s, "anchor", None) == "hold":
+            out.append(s.model_copy(update={
+                "anchor": "start", "offset_s": hold_off + float(s.offset_s)}))
+        else:
+            out.append(s)
+    return out
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Panic
 # ══════════════════════════════════════════════════════════════════════════════

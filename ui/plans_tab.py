@@ -137,6 +137,10 @@ def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
         # does), so a skewed unit still goes on air at the intended wall-clock time.
         on_air_at_iso = (t0 + timedelta(seconds=item.on_air_offset_s + _off(item.hostname))
                          ).isoformat()
+        # A Hold has no effect in a plan (multi-unit, unattended-style): compile it out
+        # to a straight-through two-anchor list before arming, and never send hold_aware
+        # (docs/sequence-hold-step.md §7).
+        armed_steps = m.collapse_hold(item.steps) if item.steps else None
         req = m.ArmSequenceRequest(
             on_air_at=on_air_at_iso,
             open_ended=(duration_s is None),
@@ -145,7 +149,7 @@ def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
             plan_name=plan.name,
             # A plan-local step copy runs as-is; older items fall back to the stored
             # sequence with legacy per-arg overrides.
-            steps=(item.steps or None),
+            steps=(armed_steps or None),
             step_overrides=([] if item.steps else item.overrides),
         )
         try:
@@ -519,6 +523,7 @@ class PlansTab(QWidget):
         max_eff_lead = 0.0
         plan_min_dur = 0.0   # longest sequence's minimum on-air window, across items
         missing_seq = []
+        has_hold = False     # any item carries an operator-gated Hold (collapsed for plans)
         for item in plan.items:
             # A plan-local copy carries its own steps; otherwise the source
             # sequence must still exist on the unit.
@@ -530,6 +535,11 @@ class PlansTab(QWidget):
                     missing_seq.append(item.unit_label or item.hostname)
                     continue
                 steps = seq.steps
+            if m.has_hold(steps):
+                has_hold = True
+            # A plan compiles the Hold out (§7), so timing is derived from the
+            # straight-through sequence, not the paused one.
+            steps = m.collapse_hold(steps)
             eff = _lead_in(steps) + clock_off.get(item.hostname, 0.0) - item.on_air_offset_s
             max_eff_lead = max(max_eff_lead, eff)
             plan_min_dur = max(plan_min_dur, _ramp.min_on_air_duration(steps))
@@ -538,6 +548,18 @@ class PlansTab(QWidget):
                 self, "Cannot arm plan",
                 "These units no longer have the plan's sequence:\n" + ", ".join(missing_seq))
             self._set_status("arm cancelled", error=True)
+            return
+
+        if has_hold and QMessageBox.warning(
+            self, "Plan contains a Hold",
+            "One or more sequences in this plan contain a Hold (an operator-gated pause). "
+            "A plan runs across units without an attendant, so the Hold is disabled here: "
+            "the sequence runs straight through without pausing (the down-ramp starts "
+            "immediately after the up-ramp). Run the sequence from its unit's Library tab "
+            "if you need the operator-gated pause.\n\nArm the plan anyway?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+            self._set_status("arm cancelled")
             return
 
         skew_note = ""

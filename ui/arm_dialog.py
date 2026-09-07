@@ -14,7 +14,7 @@ how to translate that to each unit's clock when arming.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
@@ -46,12 +46,27 @@ class ArmDialog(QDialog):
     GRID_S = 30   # every selectable on-air time sits on a 30-second grid
 
     def __init__(self, heading: str, safety_lead_s: float, default_duration_s: float,
-                 min_floor_s: float, skew_note: str = "", parent=None):
+                 min_floor_s: float, skew_note: str = "", parent=None, *,
+                 accept_label: str = "Arm", title: str = "Arm", body_note: str = "",
+                 show_stop: bool = True, max_hold_default_s: Optional[float] = None,
+                 status_provider: Optional[Callable[[], str]] = None):
+        """The same timing picker serves arming a run and Proceeding a HOLDING one
+        (docs/sequence-hold-step.md §6.3). Extra knobs, all keyword-only and defaulted so
+        existing callers are unchanged:
+          accept_label / title  — button + window text ("Proceed" while holding).
+          body_note             — a muted paragraph under the heading (arm messaging).
+          show_stop             — hide the stop-time section (a hold-aware arm is
+                                  open-ended; a proceed's off-air is derived on the agent).
+          max_hold_default_s    — show the max-hold deadman field (arm a hold-aware run);
+                                  read back via max_hold_s() (0 = unlimited).
+          status_provider       — a callable rendered live each tick (elapsed / held /
+                                  remaining, for the Proceed dialog)."""
         super().__init__(parent)
         self._safety = max(0.0, safety_lead_s)      # now + this = earliest valid T0
         self._min_floor = max(0.0, min_floor_s)     # hard minimum (0 = none derivable)
         self._default_dur = max(self._min_floor, default_duration_s, 1.0)
-        self.setWindowTitle("Arm")
+        self._status_provider = status_provider
+        self.setWindowTitle(title)
         self.setMinimumWidth(440)
         # Accept focus on a background click, so clicking anywhere outside the
         # duration field pulls focus off it and commits what was typed (the spinbox
@@ -67,6 +82,20 @@ class ArmDialog(QDialog):
         head.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {Palette.TEXT};")
         head.setWordWrap(True)
         outer.addWidget(head)
+
+        if body_note:
+            note = QLabel(body_note)
+            note.setWordWrap(True)
+            note.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
+            outer.addWidget(note)
+
+        # Live status line (Proceed: elapsed run time / time held / remaining allowance).
+        self._status_line = QLabel("")
+        self._status_line.setWordWrap(True)
+        self._status_line.setStyleSheet(
+            f"font-size: 12px; font-weight: 600; color: {Palette.ARMED};")
+        self._status_line.setVisible(status_provider is not None)
+        outer.addWidget(self._status_line)
 
         # Live wall clock, so the operator can compare "now" to the on-air time they
         # set without glancing away. Kept visually quiet (small, muted, a ⏱ marker)
@@ -112,14 +141,47 @@ class ArmDialog(QDialog):
         self._floor_note.setWordWrap(True)
         outer.addWidget(self._floor_note)
 
+        # ── Max-hold deadman (arm a hold-aware run) ─────────────────────────
+        # A held run is on-air indefinitely; a deadman auto-aborts if it stays HOLDING
+        # past this. Unchecked = unlimited (0). See docs/sequence-hold-step.md §5.6.
+        self._maxhold_section = QWidget()
+        if max_hold_default_s is not None:
+            mh = QVBoxLayout(self._maxhold_section)
+            mh.setContentsMargins(0, 0, 0, 0)
+            mh_line = QFrame(); mh_line.setFrameShape(QFrame.Shape.HLine)
+            mh_line.setStyleSheet(f"color: {Palette.BORDER};")
+            mh.addWidget(mh_line)
+            self._maxhold_on = QCheckBox("Auto-stop if held longer than")
+            self._maxhold_on.setChecked(float(max_hold_default_s) > 0)
+            self._maxhold_on.toggled.connect(self._sync_maxhold)
+            self._maxhold = DurationSpinBox(bare_unit="m")
+            self._maxhold.setRange(1.0, 100000.0)
+            self._maxhold.setValue(round(max(60.0, float(max_hold_default_s) or 1800.0)))
+            mh_row = QHBoxLayout(); mh_row.setSpacing(8)
+            mh_row.addWidget(self._maxhold_on)
+            mh_row.addWidget(self._maxhold)
+            mh_row.addStretch(1)
+            mh.addLayout(mh_row)
+            self._maxhold_hint = QLabel("Unchecked = no limit (held until you Proceed or Stop).")
+            self._maxhold_hint.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+            mh.addWidget(self._maxhold_hint)
+        else:
+            self._maxhold_on = None
+            self._maxhold = None
+        self._maxhold_section.setVisible(max_hold_default_s is not None)
+        outer.addWidget(self._maxhold_section)
+
         # ── Stop time ───────────────────────────────────────────────────────
+        self._stop_section = QWidget()
+        stop_outer = QVBoxLayout(self._stop_section)
+        stop_outer.setContentsMargins(0, 0, 0, 0)
         line = QFrame(); line.setFrameShape(QFrame.Shape.HLine)
         line.setStyleSheet(f"color: {Palette.BORDER};")
-        outer.addWidget(line)
+        stop_outer.addWidget(line)
 
         self._stop_on = QCheckBox("Set a stop time (otherwise runs until stopped)")
         self._stop_on.toggled.connect(self._sync_stop)
-        outer.addWidget(self._stop_on)
+        stop_outer.addWidget(self._stop_on)
 
         stop_row = QGridLayout(); stop_row.setHorizontalSpacing(8); stop_row.setVerticalSpacing(4)
         self._dur_lbl = QLabel("Run for")
@@ -144,7 +206,9 @@ class ArmDialog(QDialog):
         self._stop_at = QLabel()
         self._stop_at.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
         stop_row.addWidget(self._stop_at, 2, 0, 1, 2)
-        outer.addLayout(stop_row)
+        stop_outer.addLayout(stop_row)
+        self._stop_section.setVisible(show_stop)
+        outer.addWidget(self._stop_section)
 
         if skew_note:
             warn = QLabel(skew_note.strip())
@@ -153,7 +217,7 @@ class ArmDialog(QDialog):
             outer.addWidget(warn)
 
         buttons = QDialogButtonBox()
-        arm = buttons.addButton("Arm", QDialogButtonBox.ButtonRole.AcceptRole)
+        arm = buttons.addButton(accept_label, QDialogButtonBox.ButtonRole.AcceptRole)
         arm.setObjectName("primary")
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
@@ -164,6 +228,7 @@ class ArmDialog(QDialog):
         self._t0 = _ceil_to(self._floor(), 60)
         self._auto_note = False
         self._sync_stop()
+        self._sync_maxhold()
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -206,6 +271,11 @@ class ArmDialog(QDialog):
         self._render()
 
     def _render(self) -> None:
+        if self._status_provider is not None:
+            try:
+                self._status_line.setText(self._status_provider() or "")
+            except Exception:                            # noqa: BLE001 — status is best-effort
+                self._status_line.setText("")
         self._now.setText(f"⏱ now  {datetime.now().astimezone().strftime('%H:%M:%S')}")
         eff = self._effective_t0()
         if self._asap.isChecked():
@@ -244,6 +314,11 @@ class ArmDialog(QDialog):
             w.setEnabled(on)
         self._render()
 
+    def _sync_maxhold(self) -> None:
+        if self._maxhold is None:
+            return
+        self._maxhold.setEnabled(self._maxhold_on.isChecked())
+
     # ── Results ──────────────────────────────────────────────────────────────
 
     def on_air_at(self) -> datetime:
@@ -251,3 +326,10 @@ class ArmDialog(QDialog):
 
     def stop_duration_s(self) -> Optional[float]:
         return round(self._dur.value(), 1) if self._stop_on.isChecked() else None
+
+    def max_hold_s(self) -> float:
+        """The operator-set max-hold deadman (seconds); 0 = unlimited. 0 when no
+        max-hold field was shown (a non-hold arm)."""
+        if self._maxhold is None:
+            return 0.0
+        return round(self._maxhold.value(), 1) if self._maxhold_on.isChecked() else 0.0

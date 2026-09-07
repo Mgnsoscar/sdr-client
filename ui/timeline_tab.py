@@ -113,13 +113,17 @@ def _arm_scheduled(fleet: Fleet, plan: m.Plan, start_utc: datetime,
         skew = _off(item.hostname)
         on_air = (start_utc + timedelta(seconds=item.on_air_offset_s + skew)).isoformat()
         off_air = (stop_utc + timedelta(seconds=item.off_air_offset_s + skew)).isoformat()
+        # Compile any Hold OUT for the unattended schedule (docs/sequence-hold-step.md §7):
+        # the run passes straight through, never pausing, and hold_aware stays False so the
+        # agent runs its normal two-anchor path.
+        sched_steps = m.collapse_hold(item.steps) if item.steps else None
         req = m.ArmSequenceRequest(
             on_air_at=on_air,
             on_air_end=off_air,
             open_ended=False,
             plan_id=plan.id,
             plan_name=plan.name,
-            steps=(item.steps or None),
+            steps=(sched_steps or None),
             step_overrides=([] if item.steps else item.overrides),
         )
         try:
@@ -303,6 +307,20 @@ class _ScheduleDialog(QDialog):
         pid = self._plan.currentData()
         if not pid:
             return
+        # Up-front notice at schedule time (docs/sequence-hold-step.md §7.1): a Hold is
+        # disabled on the unattended schedule — the run passes straight through it.
+        plan = self._plan_override if (self._plan_override and self._plan_override.id == pid) \
+            else next((p for p in self._plans if p.id == pid), None)
+        if plan is not None and any(m.has_hold(i.steps) for i in plan.items if i.steps):
+            if QMessageBox.warning(
+                self, "Plan contains a Hold",
+                "This plan contains a Hold. Scheduled runs are unattended, so the Hold is "
+                "disabled here: the sequence will run straight through without pausing (the "
+                "down-ramp starts immediately after the up-ramp). Run it from the Library if "
+                "you need the operator-gated pause.\n\nAdd it to the schedule anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+                return
         self.result_entry = m.ScheduledPlan(
             id=self._entry.id if self._entry else new_scheduled_id(),
             plan_id=pid,
@@ -1401,12 +1419,20 @@ class TimelineTab(QWidget):
             skew_note = (f"\n\n⚠ Unit clocks differ by {max_skew:.1f}s — a shared on-air time "
                          f"depends on synced clocks; units may differ by that much.")
         n_units = len({i.hostname for i in plan.items})
+        # A Hold has no effect on the schedule (unattended): the run passes straight
+        # through it (docs/sequence-hold-step.md §7). Tell the operator up-front.
+        hold_note = ""
+        if any(m.has_hold(i.steps) for i in plan.items if i.steps):
+            hold_note = ("\n\n⏸ This plan contains a Hold. Scheduled runs are unattended, so "
+                         "the Hold is disabled here: the sequence runs straight through without "
+                         "pausing (the down-ramp starts immediately after the up-ramp). Run it "
+                         "from the Library if you need the operator-gated pause.")
         if QMessageBox.question(
             self, "Arm plan",
             f"Arm “{plan.name}” on {n_units} unit(s)?\n\n"
             f"On air {s.strftime('%H:%M')} → {e.strftime('%H:%M')} "
             f"({s.strftime('%a %d %b')})."
-            f"{skew_note}",
+            f"{skew_note}{hold_note}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Yes,
         ) != QMessageBox.StandardButton.Yes:

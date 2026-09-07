@@ -53,6 +53,7 @@ from .scope_selector import scope_chip, confirm_delete
 from .sequence_editor import SequenceEditorDialog
 from .sequence_log_dialog import SequenceLogDialog
 from .theme import Palette
+from .timeline_model import SEQUENCE_HOLD_CAPABILITY
 from .widgets import StatusPill, natural_key
 
 _SEQ_FILTER_ALL = "__all__"
@@ -61,8 +62,24 @@ _SEQ_FILTER_ALL = "__all__"
 # future even with a little clock skew between the laptop and the unit.
 ARM_MARGIN_S = 5.0
 DEFAULT_STOP_DURATION_S = 60.0   # fallback when a sequence has no derivable minimum
+# Default max-hold deadman offered when arming a Hold-aware run (30 min; 0 = unlimited).
+DEFAULT_MAX_HOLD_S = 1800.0
+# Safety lead for a Proceed: window B's first step fires at (resume + its offset ≥ 0),
+# so a small margin covers clock skew and the immediate-proceed case.
+PROCEED_LEAD_S = 3.0
 
-_ACTIVE = (m.SequenceState.ARMED, m.SequenceState.RUNNING)
+# A run is "active" (blocks re-arm / delete, keeps Stop live) while armed, running, or
+# HOLDING (parked at a Hold with RF live, awaiting Proceed).
+_ACTIVE = (m.SequenceState.ARMED, m.SequenceState.RUNNING, m.SequenceState.HOLDING)
+
+
+def _hold_offset_of(seq: m.Sequence) -> Optional[float]:
+    """The on-air offset of the sequence's Hold marker (window A's length), or None
+    if it has no Hold."""
+    for s in seq.steps:
+        if m._step_action(s) == m.StepAction.HOLD.value:
+            return float(s.offset_s)
+    return None
 
 Result = Tuple[str, Optional[str]]   # (run_id, error-or-None)
 
@@ -96,7 +113,8 @@ def _run_timing(run: m.SequenceRun) -> str:
 
 
 def _arm_at(client, seq: m.Sequence, t0_laptop: datetime,
-            duration_s: Optional[float]) -> m.SequenceRun:
+            duration_s: Optional[float], hold_aware: bool = False,
+            max_hold_s: float = DEFAULT_MAX_HOLD_S) -> m.SequenceRun:
     """
     Arm a sequence to go on air at the operator-chosen wall-clock instant t0 (given
     in laptop UTC), translating it to the AGENT's clock so RF goes live at that same
@@ -106,15 +124,30 @@ def _arm_at(client, seq: m.Sequence, t0_laptop: datetime,
     interprets it, and relative timing (warm-up leads) stays exact. Falls back to no
     adjustment if /system is unavailable. When duration_s is set the run is bounded
     (and stop-anchored steps fire); otherwise it's open-ended. Worker thread.
+
+    hold_aware=True (interactive Library/operator-present arm of a Hold-bearing
+    sequence) parks the run at the Hold; the agent resolves only window A and awaits
+    Proceed. It is always open-ended (window B is scheduled at proceed). See
+    docs/sequence-hold-step.md §6.2.
     """
     on_air_at = t0_laptop + timedelta(seconds=client.clock_offset_s())
     req = m.ArmSequenceRequest(
         on_air_at=on_air_at.isoformat(),
-        open_ended=(duration_s is None),
-        on_air_duration_s=(duration_s if duration_s is not None else None),
+        open_ended=(hold_aware or duration_s is None),
+        on_air_duration_s=(None if hold_aware else duration_s),
         note="manual test",
+        hold_aware=hold_aware,
+        max_hold_s=max_hold_s,
     )
     return client.arm_sequence(seq.id, req)
+
+
+def _proceed_run(client, run_id: str, resume_laptop: datetime) -> m.SequenceRun:
+    """Resume a HOLDING run at the operator-chosen instant, translating it to the
+    agent's clock (like _arm_at). The agent resolves window B relative to it. Worker
+    thread."""
+    resume_at = resume_laptop + timedelta(seconds=client.clock_offset_s())
+    return client.proceed_sequence_run(run_id, m.ProceedRequest(proceed_at=resume_at.isoformat()))
 
 
 def _abort_runs(client, run_ids: List[str]) -> List[Result]:
@@ -173,11 +206,12 @@ class _SequenceRow(QFrame):
     def __init__(self, seq: m.Sequence, active_run: Optional[m.SequenceRun],
                  on_start, on_stop, on_edit, on_delete, on_log,
                  can_edit: bool = True, can_run: bool = True,
-                 show_scope: bool = False):
+                 show_scope: bool = False, on_proceed=None):
         super().__init__()
         self.seq = seq
         self.setObjectName("card")
         active = active_run is not None and active_run.state in _ACTIVE
+        holding = active_run is not None and active_run.state == m.SequenceState.HOLDING
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
@@ -223,23 +257,31 @@ class _SequenceRow(QFrame):
             self._pill = StatusPill(state_word, state_word)
             lay.addWidget(self._pill, alignment=Qt.AlignmentFlag.AlignTop)
 
-        self._start = QPushButton("Arm")
+        # While HOLDING the Arm button becomes Proceed (schedule window B / resume).
+        self._start = QPushButton("Proceed" if holding else "Arm")
         self._stop = QPushButton("Stop")
         self._log = QPushButton("Log")
         self._edit = QPushButton("Edit")
         self._delete = QPushButton("Delete")
         for b in (self._start, self._stop, self._log, self._edit, self._delete):
             b.setFixedWidth(66)
-        self._start.setToolTip("Arm — pick an on-air time (or as-soon-as-possible) and "
-                               "an optional stop, then fire the on-air steps")
+        self._start.setToolTip(
+            "Proceed — schedule the post-hold window (the down-ramp) and resume the run"
+            if holding else
+            "Arm — pick an on-air time (or as-soon-as-possible) and "
+            "an optional stop, then fire the on-air steps")
         self._stop.setToolTip("Stop this run — cancels if armed, aborts if running "
                               "(stops every task it touches)")
         self._log.setToolTip("View this sequence's run log — the whole run's timeline "
                              "and each step's output, live")
-        self._start.setEnabled(not active)
+        # Proceed is enabled while holding; Arm is enabled only when nothing is active.
+        self._start.setEnabled(holding or not active)
         self._stop.setEnabled(active)
         self._delete.setEnabled(not active)   # the agent refuses to delete an active one
-        self._start.clicked.connect(lambda: on_start(seq))
+        if holding and on_proceed is not None:
+            self._start.clicked.connect(lambda: on_proceed(seq))
+        else:
+            self._start.clicked.connect(lambda: on_start(seq))
         self._stop.clicked.connect(lambda: on_stop(seq))
         self._log.clicked.connect(lambda: on_log(seq))
         self._edit.clicked.connect(lambda: on_edit(seq))
@@ -375,6 +417,10 @@ class SequencesPanel(QWidget):
         dlg.show()
 
     def _on_start(self, seq: m.Sequence) -> None:
+        hold_off = _hold_offset_of(seq)
+        if hold_off is not None:
+            self._arm_hold_aware(seq, hold_off)
+            return
         # Pick the on-air time (and optional stop) the same way plans are armed.
         min_dur = _ramp.min_on_air_duration(seq.steps)
         default_dur = min_dur if min_dur > 0 else DEFAULT_STOP_DURATION_S
@@ -392,6 +438,93 @@ class SequencesPanel(QWidget):
             f"seq_arm:{self.hostname}:{seq.id}",
             lambda: _arm_at(client, seq, t0, duration_s),
         )
+
+    def _arm_hold_aware(self, seq: m.Sequence, hold_off: float) -> None:
+        """Arm a Hold-bearing sequence from the Library/operator-present surface: the
+        run pauses at the Hold and awaits Proceed. Gated on the unit's agent advertising
+        `sequence-hold` (a safety gate — an older agent would refuse the arm, or worse,
+        run straight through with RF stuck). See docs/sequence-hold-step.md §6.2/§11."""
+        if not self._supports(SEQUENCE_HOLD_CAPABILITY):
+            QMessageBox.warning(
+                self, "Hold not supported here",
+                f"“{seq.name or seq.id}” contains a Hold (an operator-gated pause), but "
+                f"{self.hostname}'s agent doesn't support it (needs the sequence-hold "
+                f"capability, agent 1.17+). Update the unit's agent, or remove the Hold.")
+            self._set_status("arm blocked — agent lacks sequence-hold", error=True)
+            return
+        wa = fmt_duration(round(max(0.0, hold_off + _lead_in(seq))))
+        dlg = ArmDialog(
+            f"Arm sequence “{seq.name or seq.id}”",
+            _lead_in(seq) + ARM_MARGIN_S, DEFAULT_STOP_DURATION_S, 0.0, parent=self,
+            body_note=(f"This sequence pauses at the Hold and awaits you. It runs to the "
+                       f"Hold in ~{wa}, then holds the signal exactly until you Proceed "
+                       f"(the post-hold window — the down-ramp — is scheduled when you "
+                       f"proceed). Run it from here; the schedule runs straight through a Hold."),
+            show_stop=False, max_hold_default_s=DEFAULT_MAX_HOLD_S)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            self._set_status("arm cancelled")
+            return
+        t0 = dlg.on_air_at()
+        max_hold = dlg.max_hold_s()
+        client = self.hub.fleet.get(self.hostname)
+        self._set_status(f"arming {seq.name or seq.id} (holds at the Hold)…")
+        self.hub.run_async(
+            f"seq_arm:{self.hostname}:{seq.id}",
+            lambda: _arm_at(client, seq, t0, None, hold_aware=True, max_hold_s=max_hold),
+        )
+
+    def _on_proceed(self, seq: m.Sequence) -> None:
+        """Resume a HOLDING run: pick the resume instant (the same timing control as arm)
+        and schedule window B. See docs/sequence-hold-step.md §6.3."""
+        run = next((r for r in self._runs if r.sequence_id == seq.id
+                    and r.state == m.SequenceState.HOLDING), None)
+        if run is None:
+            self._set_status("no holding run to proceed", error=True)
+            self._refresh_runs()
+            return
+        dlg = ArmDialog(
+            f"Proceed “{seq.name or seq.id}”", PROCEED_LEAD_S, DEFAULT_STOP_DURATION_S,
+            0.0, parent=self, accept_label="Proceed", title="Proceed",
+            body_note=("Choose when the post-hold window (the down-ramp) starts. The held "
+                       "signal stays exactly where it is until then."),
+            show_stop=False, status_provider=lambda r=run: self._hold_status_text(r))
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            self._set_status("proceed cancelled")
+            return
+        resume = dlg.on_air_at()
+        client = self.hub.fleet.get(self.hostname)
+        self._set_status(f"proceeding {seq.name or seq.id}…")
+        self.hub.run_async(
+            f"seq_proceed:{self.hostname}:{seq.id}",
+            lambda: _proceed_run(client, run.id, resume),
+        )
+
+    def _hold_status_text(self, run: m.SequenceRun) -> str:
+        """Live one-liner for the Proceed dialog: elapsed run time · time held · the
+        remaining max-hold allowance."""
+        now = datetime.now(timezone.utc)
+        parts: List[str] = []
+        base = run.on_air_actual or run.started_actual or run.on_air_at
+        try:
+            if base:
+                parts.append(f"elapsed {fmt_duration(round(max(0.0, (now - _parse_iso(base)).total_seconds())))}")
+            if run.held_actual:
+                held = (now - _parse_iso(run.held_actual)).total_seconds()
+                parts.append(f"held {fmt_duration(round(max(0.0, held)))}")
+                if run.max_hold_s and run.max_hold_s > 0:
+                    rem = run.max_hold_s - held
+                    parts.append(f"auto-stops in {fmt_duration(round(rem))}" if rem > 0
+                                 else "auto-stop imminent")
+        except (ValueError, TypeError):
+            return ""
+        return "  ·  ".join(parts)
+
+    def _supports(self, capability: str) -> bool:
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(getattr(client, "supports", lambda _c: False)(capability))
 
     def _on_stop(self, seq: m.Sequence) -> None:
         run_ids = [r.id for r in self._runs
@@ -588,6 +721,13 @@ class SequencesPanel(QWidget):
             else:
                 self._set_status("armed")
             self._refresh_runs()
+        elif op == "seq_proceed":
+            if isinstance(result, Exception):
+                self._set_status("proceed failed", error=True)
+                QMessageBox.warning(self, "Could not proceed", str(result))
+            else:
+                self._set_status("proceeding — post-hold window scheduled")
+            self._refresh_runs()
         elif op == "seq_stop":
             if isinstance(result, list):
                 bad = [(rid, e) for rid, e in result if e is not None]
@@ -655,7 +795,7 @@ class SequencesPanel(QWidget):
                 on_start=self._on_start, on_stop=self._on_stop,
                 on_edit=self._on_edit, on_delete=self._on_delete,
                 on_log=self._on_log, can_edit=self.can_edit, can_run=self.can_run,
-                show_scope=self.can_edit,
+                show_scope=self.can_edit, on_proceed=self._on_proceed,
             ))
             shown += 1
         if shown == 0:

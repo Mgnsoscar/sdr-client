@@ -47,7 +47,8 @@ from PyQt6.QtCore import QEvent, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea,
+    QVBoxLayout, QWidget,
 )
 
 from api import models as m
@@ -69,6 +70,7 @@ AXIS_GAP = 14               # min gap between the lowest task and the time axis
 BASELINE_FROM_BOTTOM = 50   # baseline sits this far above the canvas bottom
 HANDLE_W = 12               # drawn width of a bar's grip
 HANDLE_HIT = 11             # px each side of a handle centre that grabs it
+HOLD_HIT = 9                # px each side of the Hold divider that grabs it
 RUN_MIN_W = 120             # minimum run-pill width
 RUN_MAX_W = 260
 RAMP_MIN_W = 44             # minimum ramp-bar width (so a short/zero-span ramp is clickable)
@@ -90,7 +92,7 @@ PANEL_BOT_PAD = 7
 PANEL_H_PAD = 10            # horizontal padding inside the panel
 PANEL_MIN_W = 112
 
-DRAG_PARTS = ("bar_start", "bar_stop", "bar_body", "run_body")
+DRAG_PARTS = ("bar_start", "bar_stop", "bar_body", "run_body", "hold_body")
 
 
 def task_signals_from_yaml(yaml_text) -> Dict[str, str]:
@@ -200,6 +202,7 @@ class _TimelineCanvas(QWidget):
         self._c_on, self._c_off = self._on, self._off
         self._lane_of: Dict[int, int] = {}
         self._lane_y: Dict[int, int] = {}
+        self._hold_off: Optional[float] = None       # the Hold marker's on-air offset (None = none)
         self._baseline = self._content_h - BASELINE_FROM_BOTTOM
         self._zoom = 1.0                 # horizontal (time-axis) zoom factor
         self._scroll = None              # host QScrollArea, for zoom-to-cursor
@@ -312,8 +315,10 @@ class _TimelineCanvas(QWidget):
 
     def _run_cx(self, item) -> float:
         """Centre x of a one-shot — to scale from its anchor (the band widens to
-        keep on-air-anchored points left of off-air-anchored ones)."""
-        return tlm.offset_to_x(item.anchor, item.offset, self._on, self._off, self._zoom)
+        keep on-air-anchored points left of off-air-anchored ones). A window-B
+        (anchor="hold") item is placed to scale from the Hold's position."""
+        a, o = tlm.effective_anchor_offset(item, self._hold_off)
+        return tlm.offset_to_x(a, o, self._on, self._off, self._zoom)
 
     def _item_left(self, item) -> float:
         """Left x the item's name/panel starts at (for panel anchoring/packing)."""
@@ -338,7 +343,7 @@ class _TimelineCanvas(QWidget):
             px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off, self._zoom)
             left, right = sx - HANDLE_W, px + HANDLE_W
         elif tlm._is_ramp(item):
-            (la, lo), (ra, ro) = tlm.ramp_span(item)
+            (la, lo), (ra, ro) = tlm.ramp_span(item, self._hold_off)
             sx = tlm.offset_to_x(la, lo, self._on, self._off, self._zoom)
             px = tlm.offset_to_x(ra, ro, self._on, self._off, self._zoom)
             left, right = min(sx, px) - RAMP_MIN_W / 2, max(sx, px) + RAMP_MIN_W / 2
@@ -353,7 +358,10 @@ class _TimelineCanvas(QWidget):
     def _assign_lanes(self) -> Dict[int, int]:
         placed: List[List[Tuple[float, float]]] = []
         lane_of: Dict[int, int] = {}
-        ordered = sorted(self._items, key=lambda it: self._span(it)[0])
+        # The Hold marker is a full-height divider, not a lane pill — it never
+        # participates in lane packing (see _paint_hold).
+        laid = [it for it in self._items if not tlm._is_hold(it)]
+        ordered = sorted(laid, key=lambda it: self._span(it)[0])
         for it in ordered:
             left, right = self._span(it)
             for idx, spans in enumerate(placed):
@@ -372,6 +380,9 @@ class _TimelineCanvas(QWidget):
         Each lane's height is the tallest footprint of the items in it (an expanded
         task is taller), and lanes stack with cumulative y so an expanded panel or
         an offset caption never overlaps the task below it."""
+        # The Hold marker's position (window A's end) governs where window-B items sit,
+        # so resolve it before geometry (compute_anchors reads it too).
+        self._hold_off = tlm.hold_offset(self._items)
         # Un-centered content anchors + intrinsic content width. Factored into a
         # hook so a subclass (the plan timeline) can supply a window-only geometry.
         self._c_on, self._c_off, self._content_w = self._compute_anchors()
@@ -381,6 +392,8 @@ class _TimelineCanvas(QWidget):
 
         row_h: Dict[int, int] = {}
         for it in self._items:
+            if it.uid not in self._lane_of:
+                continue                           # the Hold divider owns no lane
             lane = self._lane_of[it.uid]
             row_h[lane] = max(row_h.get(lane, LANE_H + CAPTION_H), self._foot_h(it))
         self._lane_y = {}
@@ -421,12 +434,16 @@ class _TimelineCanvas(QWidget):
         for it in self._items:
             y = self._lane_y.get(self._lane_of.get(it.uid, 0), LANES_TOP)
             g = {"kind": it.kind, "y": y}
-            if it.kind == "bar":
+            if tlm._is_hold(it):
+                # The Hold marker is a vertical divider spanning the band, not a pill.
+                g["kind"] = "hold"
+                g["cx"] = self._run_cx(it)     # start-anchored at the hold offset
+            elif it.kind == "bar":
                 g["start_x"] = tlm.offset_to_x("start", it.start_offset, self._on, self._off, self._zoom)
                 g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off, self._zoom)
             elif tlm._is_ramp(it):
                 # A ramp draws as a duration bar between its two anchored ends.
-                (la, lo), (ra, ro) = tlm.ramp_span(it)
+                (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off)
                 g["start_x"] = tlm.offset_to_x(la, lo, self._on, self._off, self._zoom)
                 g["stop_x"] = tlm.offset_to_x(ra, ro, self._on, self._off, self._zoom)
                 g["ends"] = ((la, lo), (ra, ro))
@@ -475,7 +492,9 @@ class _TimelineCanvas(QWidget):
                    int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), "cool-down")
 
         for it in self._items:
-            if it.kind == "bar":
+            if tlm._is_hold(it):
+                self._paint_hold(p, it)
+            elif it.kind == "bar":
                 self._paint_bar(p, it)
             elif tlm._is_ramp(it):
                 self._paint_ramp(p, it)
@@ -684,6 +703,36 @@ class _TimelineCanvas(QWidget):
                            _timing_text(it.offset, it.anchor, with_side=True))
         self._paint_panel(p, it, g, border)
 
+    def _paint_hold(self, p, it):
+        """The Hold marker — a dashed vertical divider across the on-air band at the
+        hold position, with a ⏸ HOLD tab at the top and its offset chip below. It is
+        the third anchor: window-A steps sit to its left, window-B (anchor="hold")
+        steps flow on from it to the right."""
+        g = self._geom[it.uid]
+        cx = int(g["cx"])
+        top = LANES_TOP - 12
+        baseline = int(self._baseline)
+        color = QColor(Palette.ARMED)
+        pen = QPen(color, 2)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        p.drawLine(cx, top, cx, baseline + 6)
+        # A small filled tab so the divider reads as an anchor (like ON-AIR/OFF-AIR).
+        f = QFont(); f.setPointSize(8); f.setBold(True)
+        p.setFont(f)
+        fm = QFontMetrics(f)
+        text = "⏸ HOLD"
+        tw = fm.horizontalAdvance(text) + 12
+        r = QRectF(cx - tw / 2, top - 3, tw, 15)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(color))
+        p.drawRoundedRect(r, 7, 7)
+        p.setPen(QColor(Palette.SURFACE))
+        p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
+        # Offset chip below the band (its position is start-anchored, from on-air).
+        self._paint_timing(p, cx, baseline + 8,
+                           _timing_text(getattr(it, "offset", 0.0), "start", with_side=False))
+
     # ── Hit-testing ───────────────────────────────────────────────────────────
 
     def _caret_center(self, it, g) -> float:
@@ -695,9 +744,17 @@ class _TimelineCanvas(QWidget):
         return g["cx"] + g["w"] / 2 - CARET_W / 2 - 6
 
     def _hit(self, x: float, y: float) -> Optional[Tuple[object, str]]:
+        # The Hold divider spans the whole band, so a wide bar body overlaps its x —
+        # test holds first so a click on the divider grabs it, not the bar underneath.
+        for it in self._items:
+            if not tlm._is_hold(it):
+                continue
+            g = self._geom.get(it.uid)
+            if g and abs(x - g["cx"]) <= HOLD_HIT and (LANES_TOP - 14) <= y <= self._baseline + 20:
+                return it, "hold_body"
         for it in self._items:
             g = self._geom.get(it.uid)
-            if not g:
+            if not g or g.get("kind") == "hold":
                 continue
             top = g["y"]
             # Name row: handles / body / caret (draggable + caret toggle).
@@ -773,10 +830,10 @@ class _TimelineCanvas(QWidget):
         self._drag["moved"] = True
         it, part = self._drag["item"], self._drag["part"]
         x = pos.x()
-        if part == "run_body":
-            # A one-shot keeps its anchor (changed only in the editor); dragging
-            # only moves the offset, measured to scale from that fixed anchor — so
-            # the seconds scale with the distance to the anchor and never jump.
+        if part in ("run_body", "hold_body"):
+            # A one-shot (or the Hold marker) keeps its anchor (changed only in the
+            # editor); dragging only moves the offset, measured to scale from that fixed
+            # anchor — so the seconds scale with the distance to the anchor and never jump.
             anchor_x = self._on if it.anchor == "start" else self._off
             it.offset = self._clamp_tune_offset(it, tlm._snap((x - anchor_x) / self._eff()))
             self._live_relayout(it)
@@ -895,7 +952,10 @@ class _TimelineCanvas(QWidget):
     # ── Editing ───────────────────────────────────────────────────────────────
 
     def _dialog_for(self, item, new: bool):
-        # Ramps have their own editor; everything else uses the step editor.
+        # Ramps and the Hold marker have their own editors; everything else uses the
+        # task-centric step editor.
+        if tlm._is_hold(item):
+            return HoldEditorDialog(item, self._editor, new=new, parent=self)
         if getattr(item, "action", "run") == "ramp":
             return RampEditorDialog(item, self._editor, new=new, parent=self)
         return StepEditorDialog(item, self._editor, new=new, parent=self)
@@ -910,7 +970,17 @@ class _TimelineCanvas(QWidget):
 
     def add_new(self, kind: str) -> None:
         default_task = self._editor.available_tasks()[0] if self._editor.available_tasks() else ""
-        if kind == "bar":
+        if kind == "hold":
+            # One Hold per sequence (docs/sequence-hold-step.md §5.1). Seed its position
+            # after the furthest window-A on-air point so it reads as "pause at the top".
+            if tlm.has_hold(self._items):
+                QMessageBox.information(
+                    self, "Hold", "A sequence can have only one Hold — edit or remove "
+                    "the existing one.")
+                return
+            item = tlm.RunItem(task_name="", action="hold", anchor="start",
+                               offset=self._default_hold_offset())
+        elif kind == "bar":
             item = tlm.BarItem(task_name=default_task, start_offset=0.0, stop_offset=0.0)
         elif kind == "tune":
             item = tlm.RunItem(task_name=default_task, action="tune", anchor="start", offset=0.0)
@@ -923,6 +993,20 @@ class _TimelineCanvas(QWidget):
         r = dlg.exec()
         if r == QDialog.DialogCode.Accepted and dlg.result_item is not None:
             self.add_item(dlg.result_item)
+
+    def _default_hold_offset(self) -> float:
+        """A sensible starting position for a new Hold: just past the furthest on-air
+        (window-A) point, so it sits at the top of the run. 60 s when nothing precedes it."""
+        latest = 0.0
+        for it in self._items:
+            if tlm._is_hold(it):
+                continue
+            if getattr(it, "kind", None) == "bar":
+                latest = max(latest, float(getattr(it, "start_offset", 0.0)))
+            elif getattr(it, "anchor", "start") == "start":
+                _a, o = tlm.effective_anchor_offset(it, self._hold_off)
+                latest = max(latest, o)
+        return round(latest, 1) if latest > 0 else 60.0
 
 
 # ── The step editor (source task + full parameter form + type + offsets) ──────
@@ -1014,10 +1098,14 @@ class StepEditorDialog(QDialog):
         self._row_start = self._add_row(form, "Start — from ON-AIR", self._start_off)
         self._row_stop = self._add_row(form, "Stop — from OFF-AIR", self._stop_off)
 
-        # One-shot anchor + single offset.
+        # One-shot anchor + single offset. "Hold" (window B — steps anchored to the
+        # Hold, resolved at proceed) is offered only once a Hold exists on the timeline,
+        # or when editing a step that already anchors to it.
         self._anchor = Dropdown()
         self._anchor.addItem("on-air (T0)", "start")
         self._anchor.addItem("off-air", "stop")
+        if self._editor.has_hold() or getattr(item, "anchor", "") == "hold":
+            self._anchor.addItem("hold (after Hold)", "hold")
         self._run_off = DurationSpinBox()
         self._row_anchor = self._add_row(form, "Anchor", self._anchor)
         self._row_run = self._add_row(form, "Offset — from anchor", self._run_off)
@@ -1027,7 +1115,8 @@ class StepEditorDialog(QDialog):
             self._start_off.setValue(float(item.start_offset))
             self._stop_off.setValue(float(item.stop_offset))
         else:
-            self._anchor.setCurrentIndex(0 if item.anchor == "start" else 1)
+            ai = self._anchor.findData(getattr(item, "anchor", "start"))
+            self._anchor.setCurrentIndex(ai if ai >= 0 else 0)
             self._run_off.setValue(float(item.offset))
 
         outer.addLayout(form)
@@ -1491,7 +1580,9 @@ class StepEditorDialog(QDialog):
             anchor = self._anchor.currentData()
             offset = round(self._run_off.value(), 1)
             spans_getter = getattr(self._editor, "task_spans", None)
-            if spans_getter is not None:
+            # A window-B (Hold-anchored) tune is timed relative to the resume instant,
+            # which isn't known until proceed — so its window fit can't be checked here.
+            if spans_getter is not None and anchor != "hold":
                 err = tlm.step_within_task_error(spans_getter(task), anchor, offset, kind="tune")
                 if err:
                     self._set_status(err, error=True)
@@ -1518,6 +1609,73 @@ class StepEditorDialog(QDialog):
             self._editor._hub.task_done.disconnect(self._on_params)
         except (TypeError, RuntimeError):
             pass
+
+
+# ── The Hold marker editor (position only — the Hold carries no task work) ────
+
+class HoldEditorDialog(QDialog):
+    """Configure the Hold marker: only its position (window A's end offset, from
+    ON-AIR). The Hold is a boundary — no task, no parameters — so this is a tiny
+    dialog with an offset field and Remove. See docs/sequence-hold-step.md §6.1."""
+
+    REMOVE = 2
+
+    def __init__(self, item, editor: "TimelineEditor", new: bool, parent=None):
+        super().__init__(parent)
+        self._src = item
+        self._editor = editor
+        self._new = new
+        self.result_item: Optional[object] = None
+        self.setWindowTitle("Add Hold" if new else "Edit Hold")
+        self.setMinimumWidth(420)
+        self._build(item)
+
+    def _build(self, item) -> None:
+        from .dialog_style import editor_qss
+        self.setStyleSheet(editor_qss())
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 16, 16, 12)
+        outer.setSpacing(10)
+
+        head = QLabel("Hold — pause here and await the operator")
+        head.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {Palette.TEXT};")
+        outer.addWidget(head)
+        blurb = QLabel(
+            "The run pauses at this point, holding the signal exactly, until you Proceed. "
+            "Steps placed after the Hold (anchored to it) are scheduled only when you "
+            "proceed. In the schedule the Hold is disabled and the run passes straight "
+            "through it.")
+        blurb.setWordWrap(True)
+        blurb.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
+        outer.addWidget(blurb)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        self._off = DurationSpinBox()
+        self._off.setValue(float(getattr(item, "offset", 0.0)))
+        self._off.setToolTip("Where the Hold sits, measured from ON-AIR (T0). Window-A "
+                             "steps run up to here; window B is scheduled at proceed.")
+        form.addRow("Pause at — from ON-AIR", self._off)
+        outer.addLayout(form)
+
+        buttons = QDialogButtonBox()
+        if not self._new:
+            remove = QPushButton("Remove")
+            remove.setStyleSheet(f"color: {Palette.CRASH};")
+            buttons.addButton(remove, QDialogButtonBox.ButtonRole.DestructiveRole)
+            remove.clicked.connect(lambda: self.done(self.REMOVE))
+        ok_btn = buttons.addButton(QDialogButtonBox.StandardButton.Ok)
+        buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        ok_btn.setDefault(True)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        outer.addWidget(buttons)
+
+    def _accept(self) -> None:
+        self.result_item = tlm.RunItem(
+            task_name="", action="hold", anchor="start",
+            offset=round(self._off.value(), 1), uid=self._src.uid)
+        self.accept()
 
 
 # ── Public editor: toolbar + scrollable canvas ────────────────────────────────
@@ -1555,6 +1713,7 @@ class TimelineEditor(QWidget):
         # never cross-route a result.
         self._prefetch_inflight: set = set()
         self._prefetch_connected = False
+        self._hold_authoring = True              # '+ Hold' shown (off in the plan editor)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -1569,14 +1728,20 @@ class TimelineEditor(QWidget):
         self._add_tune.setToolTip("Change a running duration task's live parameters at a set time")
         self._add_ramp = QPushButton("+ Ramp")
         self._add_ramp.setToolTip("Sweep a running duration task's live parameter over time")
+        self._add_hold = QPushButton("+ Hold")
+        self._add_hold.setToolTip("Pause the run here and await the operator (the Hold step); "
+                                  "post-hold steps anchor to it. Library / operator-present runs "
+                                  "only — the schedule runs straight through it.")
         self._add_bar.clicked.connect(lambda: self._canvas.add_new("bar"))
         self._add_run.clicked.connect(lambda: self._canvas.add_new("run"))
         self._add_tune.clicked.connect(lambda: self._canvas.add_new("tune"))
         self._add_ramp.clicked.connect(lambda: self._canvas.add_new("ramp"))
+        self._add_hold.clicked.connect(lambda: self._canvas.add_new("hold"))
         bar.addWidget(self._add_bar)
         bar.addWidget(self._add_run)
         bar.addWidget(self._add_tune)
         bar.addWidget(self._add_ramp)
+        bar.addWidget(self._add_hold)
         bar.addStretch(1)
         # Minimum on-air duration the current steps require (ramps at both ends etc).
         self._mindur = QLabel("")
@@ -1622,6 +1787,8 @@ class TimelineEditor(QWidget):
         self._canvas.changed.connect(self.changed.emit)
         self._canvas.changed.connect(self._update_mindur)
         self._canvas.changed.connect(self._update_achievability)
+        self._canvas.changed.connect(self._sync_hold_button)
+        self._sync_hold_button()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)   # canvas stretches to fill a wider window
         scroll.setWidget(self._canvas)
@@ -1636,6 +1803,27 @@ class TimelineEditor(QWidget):
 
     def _sync_zoom(self) -> None:
         self._zoom_btn.setText(f"{round(self._canvas._zoom * 100)}%")
+
+    def set_hold_authoring(self, enabled: bool) -> None:
+        """Show/hide the '+ Hold' button. Hidden on surfaces where a Hold has no
+        effect (the plan editor: a plan's Hold is compiled out for the schedule)."""
+        self._hold_authoring = bool(enabled)
+        self._sync_hold_button()
+
+    def _sync_hold_button(self) -> None:
+        # One Hold per sequence: once one exists, disable '+ Hold' (edit/remove the
+        # existing marker instead). Hidden entirely where hold authoring is off.
+        btn = getattr(self, "_add_hold", None)
+        if btn is None:
+            return
+        btn.setVisible(getattr(self, "_hold_authoring", True))
+        has = tlm.has_hold(self._canvas.items()) if getattr(self, "_canvas", None) else False
+        btn.setEnabled(not has)
+        btn.setToolTip(
+            "A sequence can have only one Hold — edit or remove the existing one." if has else
+            "Pause the run here and await the operator (the Hold step); post-hold steps "
+            "anchor to it. Library / operator-present runs only — the schedule runs "
+            "straight through it.")
 
     # ── Context injected by the host dialog ──────────────────────────────────
 
@@ -1729,6 +1917,11 @@ class TimelineEditor(QWidget):
     def absolute_allowed(self) -> bool:
         """Absolute (calibrated dBm) power is offered only when a unit is targeted."""
         return bool(self._cal_hostname)
+
+    def has_hold(self) -> bool:
+        """Whether the timeline currently carries a Hold marker — gates the step
+        editor's 'Hold' anchor option (window-B steps anchor to the Hold)."""
+        return tlm.has_hold(self._canvas.items())
 
     def cal_is_stale(self) -> bool:
         """True when the bounds in use came from the offline cache, not a live fetch."""

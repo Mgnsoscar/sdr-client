@@ -775,6 +775,14 @@ class AgentClient:
     def cancel_sequence_run(self, run_id: str) -> m.SequenceRun:
         return m.SequenceRun(**self._request("DELETE", f"/sequence-runs/{run_id}"))
 
+    def proceed_sequence_run(self, run_id: str, request: m.ProceedRequest) -> m.SequenceRun:
+        """Resume a HOLDING run (the Hold step). POST the operator-chosen resume instant;
+        the agent resolves window B (the post-hold steps) relative to it and returns the
+        run as RUNNING. `request.steps` (edit-while-holding) is left None until Phase 3.
+        The agent returns 409 if the run is not HOLDING. See docs/sequence-hold-step.md §5.3."""
+        return m.SequenceRun(**self._request(
+            "POST", f"/sequence-runs/{run_id}/proceed", json=request.model_dump()))
+
     # ══════════════════════════════════════════════════════════════════════════
     # Library (deploy / snapshot the whole definition set)
     # ══════════════════════════════════════════════════════════════════════════
