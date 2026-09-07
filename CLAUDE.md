@@ -78,9 +78,30 @@ round-trip only — **no canvas rendering, no arm/Proceed UI, no gate wiring** (
   Phase 2).
 Tests: `tests/test_timeline_hold_model.py` (round-trip lossless + stable, Hold-free byte-identical,
 the api-model mirror, the editor round-trip); suite 745 → 755 offscreen.
-**NEXT — Phase 2** (after the agent's Phase 1 runtime): the third-anchor canvas + step-editor "Hold"
-anchor option, the arm-dialog messaging + Proceed button (reusing `ArmDialog`), the scheduled-path
-collapse-the-Hold no-op, and wiring the `sequence-hold` save/arm gate. See the design doc §6–§7.
+**AGENT PHASE 1 IS DONE (runtime ready, agent `1.17.0`).** The agent contract Phase 2 builds on
+(see `sdr-agent/CLAUDE.md` "Hold step Phase 1" + design §5):
+- **Arm (interactive/Library):** `ArmSequenceRequest(hold_aware=True, open_ended=True, max_hold_s=…)`.
+  The agent resolves only window A and parks the run at the hold. A Hold-bearing arm **without**
+  `hold_aware` is **refused** by the agent — so the scheduled/plan path MUST compile the Hold out to
+  a plain two-anchor list before arming (client-side, still to build).
+- **Proceed:** `POST /sequence-runs/{id}/proceed` body `ProceedRequest{proceed_at, steps?}` → resolves
+  window B from `proceed_at`, returns the `SequenceRun` (RUNNING); **409 if the run is not holding**.
+  `steps` (edit-while-holding) is accepted by the model but is **Phase 3** — leave it None for now.
+- **Run state:** the agent adds `SequenceState.HOLDING`; a holding run has `held_actual` set,
+  `on_air_end=None`/`open_ended=True` until proceed (then `on_air_end` + `resumed_actual` are set).
+  Abort a holding run with the existing DELETE (`cancel_or_abort`). SSE event kinds: `sequence_hold`,
+  `sequence_proceed`, `sequence_hold_timeout`. Capability `sequence-hold` (already
+  `SEQUENCE_HOLD_CAPABILITY` in `ui/timeline_model.py`); gate save/arm on it (agent ≥ 1.17.0 to run).
+**NEXT — Phase 2** (client, this is the active work): the third-anchor **canvas rendering** of the Hold
+marker + a way to ADD one (a `RunItem(action="hold")` — round-trip already works, `compute_anchors`/
+geometry in `ui/timeline_model.py` must place it); the **step-editor "Hold" anchor option**
+(`StepEditorDialog`, `ui/timeline_editor.py`) once a Hold exists; the **arm-dialog messaging + Proceed
+button** (reuse `ui/arm_dialog.py::ArmDialog`, relabeled; show elapsed/held/remaining) wired from
+`ui/sequences_panel.py`; **run-state plumbing** (Run→Proceed when HOLDING); an **`api/client.py`
+`proceed()`** wrapper; the **scheduled-path collapse-the-Hold no-op** + up-front notice
+(`ui/timeline_tab.py::_arm_scheduled`, `ui/plans_tab.py::_arm_plan`); and wiring the `sequence-hold`
+save/arm **gate** (`_supports`/`_blocks_on_*`). Achievability across the hold (§6.5) is Phase 3. See
+design §6–§7 + §13.
 
 ## Current state — Tune form renders live-sourced derived readouts: COMPLETE (branch `claude/l1c-sidelobes-slider`)
 `ui/live_tune_dialog.py` `_prepare_specs` used to route EVERY non-live spec — derived fields
