@@ -296,8 +296,14 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         self._anchor.addItem("On-air (T0)", "start")
         self._anchor.addItem("Off-air", "stop")
         self._anchor.addItem("Fill on-air window", "both")
-        self._anchor.setCurrentIndex(
-            {"start": 0, "stop": 1, "both": 2}.get(getattr(self._src, "anchor", "start"), 0))
+        # A window-B ramp (the down-ramp) runs forward from the Hold's resume instant —
+        # offered once a Hold exists on the timeline, or when editing a ramp already
+        # anchored to it. The runtime + canvas already resolve anchor="hold" (Phase 1/2).
+        src_anchor = getattr(self._src, "anchor", "start")
+        if getattr(self._editor, "has_hold", lambda: False)() or src_anchor == "hold":
+            self._anchor.addItem("Hold (after Hold)", "hold")
+        _ai = self._anchor.findData(src_anchor)
+        self._anchor.setCurrentIndex(_ai if _ai >= 0 else 0)
 
         self._offset = _spin(float(getattr(self._src, "offset", 0.0)))
         self._offset_end = _spin(float(getattr(self._src, "offset_end", 0.0)))
@@ -768,9 +774,15 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
 
     def _sync_anchor(self) -> None:
         both = self._is_both()
+        anchor = self._anchor.currentData() or "start"
         # A window-filling ramp is inset from BOTH edges; a single-anchor ramp has
-        # one offset from its anchor.
-        self._off_lbl.setText("Start offset from on-air" if both else "Offset from anchor")
+        # one offset from its anchor (from the Hold's resume instant for a window-B ramp).
+        if both:
+            self._off_lbl.setText("Start offset from on-air")
+        elif anchor == "hold":
+            self._off_lbl.setText("Offset from Hold (resume)")
+        else:
+            self._off_lbl.setText("Offset from anchor")
         self._offend_row.setVisible(both)
         # Include first/last applies to single-anchor ramps; a window-filling ramp
         # always spans both edges, so hide the whole row there.
@@ -1239,6 +1251,9 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
             return (self._time_sub("on-air", off), self._time_sub("off-air", -abs(end)))
         if anchor == "stop":
             return ("ramp start", self._time_sub("off-air", off))
+        if anchor == "hold":
+            # Window B: the ramp runs forward from the resume instant to its end.
+            return (self._time_sub("on-resume", off), "ramp end")
         return (self._time_sub("on-air", off), "ramp end")
 
     @staticmethod
@@ -1466,7 +1481,8 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
             self._refresh_steps_view(spec, both=True)
             return
 
-        anchor = "on-air" if self._anchor.currentData() == "start" else "off-air"
+        anchor = {"start": "on-air", "stop": "off-air",
+                  "hold": "Hold (resume)"}.get(self._anchor.currentData(), "on-air")
         lines.append(f"Anchor: {anchor}, offset {_off(self._offset.value())}")
         try:
             res = _ramp.resolve_ramp(spec["start"], spec["stop"], steps=spec.get("steps"),
@@ -1579,7 +1595,11 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
             if ferr:
                 return self._set_preview(ferr, error=True)
             args = self._form.build_args()
-        else:
+        elif anchor != "hold":
+            # A window-B (Hold-anchored) ramp is timed from the resume instant, not against
+            # the on-air window, so the on-air-fit check doesn't apply (its target task still
+            # needs a duration step — enforced by the sequence-level validate()). Mirrors the
+            # step editor skipping the window-fit check for a hold-anchored tune.
             spans_getter = getattr(self._editor, "task_spans", None)
             if spans_getter is not None:
                 span_err = tlm.step_within_task_error(spans_getter(task), anchor, offset,

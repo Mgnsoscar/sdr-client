@@ -141,8 +141,16 @@ def _ramp_summary(spec, anchor: str) -> str:
 
 def _timing_text(offset_s: float, side: str, with_side: bool) -> str:
     """Readable timing label for a chip. Exactly on the anchor reads as the anchor
-    name ('on-air'/'off-air') rather than an ambiguous '0s'; otherwise the signed
-    offset, optionally with the side it's measured from."""
+    name ('on-air'/'off-air'/'on-resume') rather than an ambiguous '0s'; otherwise the
+    signed offset, optionally with the side it's measured from.
+
+    A window-B step (side="hold") is timed from the Hold's resume instant: 0 or after
+    reads 'on-resume', before it reads 'pre-hold' (a step dwelling into the pause)."""
+    if side == "hold":
+        if offset_s == 0:
+            return "on-resume"
+        label = "pre-hold" if offset_s < 0 else "on-resume"
+        return f"{_fmt_offset(offset_s)} · {label}" if with_side else _fmt_offset(offset_s)
     label = "on-air" if side == "start" else "off-air"
     if offset_s == 0:
         return label
@@ -324,7 +332,8 @@ class _TimelineCanvas(QWidget):
     def _item_left(self, item) -> float:
         """Left x the item's name/panel starts at (for panel anchoring/packing)."""
         if item.kind == "bar":
-            sx = tlm.offset_to_x("start", item.start_offset, self._on, self._off, self._zoom)
+            sx = tlm.offset_to_x(*tlm.bar_start_placement(item, self._hold_off),
+                                 self._on, self._off, self._zoom)
             px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off, self._zoom)
             return min(sx, px)
         return self._run_cx(item) - self._run_width(item) / 2
@@ -340,7 +349,8 @@ class _TimelineCanvas(QWidget):
         """Horizontal [left, right] the item occupies (for lane packing) — includes
         the inline argument panel when it's expanded."""
         if item.kind == "bar":
-            sx = tlm.offset_to_x("start", item.start_offset, self._on, self._off, self._zoom)
+            sx = tlm.offset_to_x(*tlm.bar_start_placement(item, self._hold_off),
+                                 self._on, self._off, self._zoom)
             px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off, self._zoom)
             left, right = sx - HANDLE_W, px + HANDLE_W
         elif tlm._is_ramp(item):
@@ -440,7 +450,8 @@ class _TimelineCanvas(QWidget):
                 g["kind"] = "hold"
                 g["cx"] = self._run_cx(it)     # start-anchored at the hold offset
             elif it.kind == "bar":
-                g["start_x"] = tlm.offset_to_x("start", it.start_offset, self._on, self._off, self._zoom)
+                g["start_x"] = tlm.offset_to_x(*tlm.bar_start_placement(it, self._hold_off),
+                                               self._on, self._off, self._zoom)
                 g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off, self._zoom)
             elif tlm._is_ramp(it):
                 # A ramp draws as a duration bar between its two anchored ends.
@@ -628,9 +639,11 @@ class _TimelineCanvas(QWidget):
         if it.args:
             self._paint_caret(p, it, g, border)
 
-        # Timing chips under each handle (side is implied by the handle).
+        # Timing chips under each handle (side is implied by the handle). A window-B bar's
+        # START is timed from the Hold's resume instant, so its chip reads on-resume/pre-hold.
         cap_y = int(y + LANE_H + 1)
-        self._paint_timing(p, sx, cap_y, _timing_text(it.start_offset, "start", with_side=False))
+        start_side = "hold" if getattr(it, "start_anchor", "start") == "hold" else "start"
+        self._paint_timing(p, sx, cap_y, _timing_text(it.start_offset, start_side, with_side=False))
         self._paint_timing(p, px, cap_y, _timing_text(it.stop_offset, "stop", with_side=False))
         self._paint_panel(p, it, g, border)
 
@@ -844,7 +857,13 @@ class _TimelineCanvas(QWidget):
         mid = tlm.midpoint(self._on, self._off)
         eff = self._eff()
         if part == "bar_start":
-            it.start_offset = tlm.resolve_bar_start(x, self._on, self._off, self._zoom)
+            if getattr(it, "start_anchor", "start") == "hold" and self._hold_off is not None:
+                # A window-B bar's start is measured from the Hold divider (resume), never
+                # before it, so it can't be dragged into window A.
+                hold_x = self._on + self._hold_off * eff
+                it.start_offset = max(0.0, tlm._snap((x - hold_x) / eff))
+            else:
+                it.start_offset = tlm.resolve_bar_start(x, self._on, self._off, self._zoom)
         elif part == "bar_stop":
             it.stop_offset = tlm.resolve_bar_stop(x, self._on, self._off, self._zoom)
         elif part == "bar_body":
@@ -884,7 +903,8 @@ class _TimelineCanvas(QWidget):
         if not g:
             return
         if it.kind == "bar":
-            g["start_x"] = tlm.offset_to_x("start", it.start_offset, self._on, self._off, self._zoom)
+            g["start_x"] = tlm.offset_to_x(*tlm.bar_start_placement(it, self._hold_off),
+                                           self._on, self._off, self._zoom)
             g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off, self._zoom)
         else:
             # _run_cx maps a window-B (anchor='hold') item to the Hold's side, so the pill
@@ -1112,6 +1132,16 @@ class StepEditorDialog(QDialog):
         self._type.currentIndexChanged.connect(self._sync_type)
         form.addRow("Type", self._type)
 
+        # Duration START anchor: on-air (the usual case) or the Hold — the latter makes
+        # this a window-B duration task that only starts once the operator proceeds (its
+        # STOP stays off-air). Offered only when a Hold exists (or the bar already uses it).
+        self._start_anchor = Dropdown()
+        self._start_anchor.addItem("on-air (T0)", "start")
+        if self._editor.has_hold() or getattr(item, "start_anchor", "") == "hold":
+            self._start_anchor.addItem("at Hold (resume)", "hold")
+        self._start_anchor.currentIndexChanged.connect(self._sync_start_anchor)
+        self._row_start_anchor = self._add_row(form, "Start anchor", self._start_anchor)
+
         # Duration offsets (two ends).
         self._start_off = DurationSpinBox()
         self._stop_off = DurationSpinBox()
@@ -1132,6 +1162,8 @@ class StepEditorDialog(QDialog):
 
         # Prefill offset widgets from the source item.
         if item.kind == "bar":
+            sai = self._start_anchor.findData(getattr(item, "start_anchor", "start"))
+            self._start_anchor.setCurrentIndex(sai if sai >= 0 else 0)
             self._start_off.setValue(float(item.start_offset))
             self._stop_off.setValue(float(item.stop_offset))
         else:
@@ -1229,6 +1261,14 @@ class StepEditorDialog(QDialog):
         if hasattr(widget, "_row_label"):
             widget._row_label.setVisible(visible)
 
+    def _sync_start_anchor(self) -> None:
+        """Relabel a bar's START-offset row to match its anchor: measured from ON-AIR
+        (T0) normally, or from the Hold's resume instant for a window-B duration task."""
+        hold = self._start_anchor.currentData() == "hold"
+        lbl = getattr(self._start_off, "_row_label", None)
+        if lbl is not None:
+            lbl.setText("Start — from Hold (resume)" if hold else "Start — from ON-AIR")
+
     def _is_tune(self) -> bool:
         return self._type.currentData() == "tune"
 
@@ -1266,8 +1306,14 @@ class StepEditorDialog(QDialog):
         is_tune = mode == "tune"
         self._set_row_visible(self._start_off, is_bar)
         self._set_row_visible(self._stop_off, is_bar)
+        # The START-anchor picker only matters for a bar, and only when a Hold makes the
+        # window-B option meaningful (else the dropdown has a single entry — keep it hidden
+        # so a normal sequence's bar editor is unchanged).
+        self._set_row_visible(self._start_anchor, is_bar and self._start_anchor.count() > 1)
         self._set_row_visible(self._anchor, not is_bar)   # a point (run/tune) has one anchor
         self._set_row_visible(self._run_off, not is_bar)
+        if is_bar:
+            self._sync_start_anchor()
         # Tune sends live-parameter values, not CLI args.
         self._extra_row.setVisible(not is_tune)
         self._hint.setText(
@@ -1615,7 +1661,9 @@ class StepEditorDialog(QDialog):
             self.result_item = tlm.BarItem(
                 task_name=task, args=self._build_args(), replace_args=True,
                 start_offset=round(self._start_off.value(), 1),
-                stop_offset=round(self._stop_off.value(), 1), uid=uid, power_view=pview)
+                stop_offset=round(self._stop_off.value(), 1),
+                start_anchor=self._start_anchor.currentData() or "start",
+                uid=uid, power_view=pview)
         else:
             self.result_item = tlm.RunItem(
                 task_name=task, args=self._build_args(), replace_args=True,

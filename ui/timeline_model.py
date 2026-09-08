@@ -61,8 +61,13 @@ class BarItem:
     task_name: str
     args: List[str] = field(default_factory=list)
     replace_args: bool = True
-    start_offset: float = 0.0   # seconds relative to ON-AIR  (anchor="start")
+    start_offset: float = 0.0   # seconds relative to the START anchor (see start_anchor)
     stop_offset: float = 0.0    # seconds relative to OFF-AIR (anchor="stop")
+    # Which anchor the START end hangs off: "start" = ON-AIR (T0, the usual case), or
+    # "hold" = the Hold's resume instant, making this a window-B duration task that only
+    # starts once the operator proceeds (its STOP stays OFF-AIR). start_offset is measured
+    # from that anchor. Only "hold" when the timeline has a Hold.
+    start_anchor: str = "start"
     # If the run is armed with a resume offset, pass it to this task's start (only a
     # resumable duration task honours it). Carried through edit so it isn't reset.
     inject_resume_offset: bool = False
@@ -178,6 +183,16 @@ def effective_anchor_offset(item, h_off: Optional[float]) -> Tuple[str, float]:
     if anchor == "hold":
         return "start", (h_off or 0.0) + off
     return anchor, off
+
+
+def bar_start_placement(item, h_off: Optional[float]) -> Tuple[str, float]:
+    """(anchor, offset) for drawing a duration bar's START handle. A window-B bar
+    (`start_anchor="hold"`) places its start at the Hold divider (`hold_offset +
+    start_offset`) on the start side; a normal bar places it on-air at its own offset.
+    Drawing only — the stored bar keeps `start_anchor` + `start_offset` for round-trip."""
+    if getattr(item, "start_anchor", "start") == "hold" and h_off is not None:
+        return "start", (h_off or 0.0) + float(getattr(item, "start_offset", 0.0))
+    return "start", float(getattr(item, "start_offset", 0.0))
 
 
 # ── Coordinate mapping ───────────────────────────────────────────────────────
@@ -318,8 +333,11 @@ def item_to_steps(it) -> List[dict]:
     pv = getattr(it, "power_view", None)
     hd = getattr(it, "power_hold_dest", None)
     if it.kind == "bar":
+        # A window-B duration task hangs its START off the Hold (anchor="hold"); its STOP
+        # stays off-air. A normal bar keeps anchor="start" (byte-identical to before).
+        start_anchor = getattr(it, "start_anchor", "start")
         return [
-            {"anchor": "start", "offset_s": it.start_offset, "action": "start",
+            {"anchor": start_anchor, "offset_s": it.start_offset, "action": "start",
              "task_name": it.task_name, "args": list(it.args), "replace_args": it.replace_args,
              "inject_resume_offset": bool(getattr(it, "inject_resume_offset", False)),
              "power_view": pv, "power_hold_dest": hd},
@@ -417,6 +435,7 @@ def steps_to_items(steps: List[dict]) -> List:
             replace_args=bool(st.get("replace_args", True)),
             start_offset=float(st["offset_s"]),
             stop_offset=float(stop["offset_s"]) if stop else 0.0,
+            start_anchor=st.get("anchor", "start"),   # "hold" → a window-B duration task
             inject_resume_offset=bool(st.get("inject_resume_offset", False)),
             power_view=st.get("power_view")))
 
@@ -566,6 +585,10 @@ def _carry_order_key(it, h_off: Optional[float] = None) -> Tuple[int, float]:
     start offset); a run/tune/ramp keys off its anchor + offset (window-B steps ordered past the
     hold when ``h_off`` is given)."""
     if getattr(it, "kind", None) == "bar":
+        # A window-B duration task (start_anchor="hold") starts at the resume instant, so it
+        # orders in phase 1 like other window-B work; a normal bar is phase-0 on-air baseline.
+        if getattr(it, "start_anchor", "start") == "hold" and h_off is not None:
+            return (1, h_off + float(getattr(it, "start_offset", 0.0)))
         return (0, float(getattr(it, "start_offset", 0.0)))
     return carry_order_key(getattr(it, "anchor", "start"),
                            float(getattr(it, "offset", 0.0)), h_off)

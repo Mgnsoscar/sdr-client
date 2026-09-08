@@ -54,6 +54,33 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — Hold-step UI fixes: ramp/duration Hold-anchoring + window-B timing labels: COMPLETE (branch `claude/hold-step-phase-0-wwwxf7`, client-only)
+Two owner-reported gaps in the Hold authoring UI (the runtime + canvas already resolved `anchor="hold"`;
+these were the missing authoring surfaces + a wrong label). Client-only; drift-guarded files untouched.
+- **Window-B timing labels** — `ui/timeline_editor.py::_timing_text` now handles `side="hold"`: a
+  step anchored to the Hold reads **on-resume** (offset 0 or after) or **pre-hold** (before), never the
+  old fallthrough "off-air". Drives the canvas timing chips (run/tune/ramp + a bar's START chip).
+- **Ramp → Hold anchor** — `ui/ramp_editor.py` offers **"Hold (after Hold)"** in the anchor dropdown
+  when the timeline has a Hold (or the ramp already uses it — `findData`-based selection); `_sync_anchor`
+  treats it as a single forward-from-resume anchor (relabels the offset row "Offset from Hold (resume)",
+  hides the end-offset row), `_ft_sublabels`/the preview name it "on-resume"/"Hold (resume)", and the
+  on-air window-fit check (`step_within_task_error`) is skipped (window B is timed at proceed — mirrors
+  the step editor's hold-anchored tune). The down-ramp is the motivating case; canvas geometry
+  (`ramp_span`/`effective_anchor_offset`) + round-trip + the agent's `_resolve_ramp(hold_at=…)` already
+  handled it.
+- **Duration task → Hold anchor** — a bar can now be a **window-B duration task**: new
+  `BarItem.start_anchor` ("start" | "hold") hangs its START off the Hold (its STOP stays off-air).
+  `item_to_steps`/`steps_to_items` round-trip it; `bar_start_placement`/`_carry_order_key` place +
+  order the start at the hold divider; canvas geometry + the start-handle drag are hold-relative
+  (clamped ≥ resume); the step editor grows a **"Start anchor"** picker (ON-AIR / at Hold) shown for a
+  bar only when a Hold exists, relabelling the start-offset row; `api/models.collapse_hold` re-anchors
+  it for the schedule (generic — no change needed). The agent already resolves a `START(anchor="hold")`
+  in window B (no agent code change; the `_split_hold_windows` routing is covered by a new agent test).
+Tests: `tests/test_hold_ui_anchors.py` (hold timing labels; ramp Hold anchor option/rows/sublabels/
+round-trip; window-B bar round-trip/geometry/collapse/step-editor picker + save). Suite 807 → 817
+offscreen. Agent: `tests/test_sequence_hold_model.py::test_split_hold_windows_routes_window_b_start_and_ramp`
+(425 → 426).
+
 ## Current state — Windows high-DPI (125% scaling) robustness: COMPLETE (branch `claude/hidpi-windows-scaling`, client-only)
 A coworker's INSTALLED build at Windows 125% scaling looked "weird" (blurry/misaligned) while the owner's
 from-source run at 100% was crisp. Root causes + fixes (from a `/code-review` audit — Qt6 already
