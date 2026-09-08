@@ -59,7 +59,11 @@ Two owner-reported gaps in the Hold authoring UI (the runtime + canvas already r
 these were the missing authoring surfaces + a wrong label). Client-only; drift-guarded files untouched.
 - **Window-B timing labels** — `ui/timeline_editor.py::_timing_text` now handles `side="hold"`: a
   step anchored to the Hold reads **on-resume** (offset 0 or after) or **pre-hold** (before), never the
-  old fallthrough "off-air". Drives the canvas timing chips (run/tune/ramp + a bar's START chip).
+  old fallthrough "off-air". Drives the run/tune canvas chips (which pass the item's real anchor) and a
+  bar's START chip. A **ramp's** canvas chips are special: `ramp_span` maps a Hold ramp onto the START
+  axis at `hold_offset + offset` for geometry, so `_paint_ramp` remaps each end back via the new
+  `_ramp_end_side_off` (side `hold`, offset `end − hold_offset`) before labelling — else the chip read
+  "+X s · on-air".
 - **Ramp → Hold anchor** — `ui/ramp_editor.py` offers **"Hold (after Hold)"** in the anchor dropdown
   when the timeline has a Hold (or the ramp already uses it — `findData`-based selection); `_sync_anchor`
   treats it as a single forward-from-resume anchor (relabels the offset row "Offset from Hold (resume)",

@@ -157,6 +157,17 @@ def _timing_text(offset_s: float, side: str, with_side: bool) -> str:
     return f"{_fmt_offset(offset_s)} · {label}" if with_side else _fmt_offset(offset_s)
 
 
+def _ramp_end_side_off(item_anchor: str, end_anchor: str, end_off: float,
+                       h_off: Optional[float]) -> Tuple[str, float]:
+    """(side, offset) for a ramp END's timing chip. A Hold-anchored ramp's ends are stored
+    on the START axis (h_off + its offset) for geometry (see ramp_span); its chips must read
+    hold-relative ('on-resume'/'pre-hold'), so map them back to side='hold' at (end - h_off).
+    Every other ramp keeps its geometry anchor/offset."""
+    if item_anchor == "hold":
+        return "hold", end_off - (h_off or 0.0)
+    return end_anchor, end_off
+
+
 def _is_flag(s: str) -> bool:
     """True if `s` is a CLI flag rather than a value. A leading '-' normally marks
     a flag, but a negative number (e.g. '-20', '-3.5', '-1e6') is a value — without
@@ -680,12 +691,15 @@ class _TimelineCanvas(QWidget):
                               max(10, int(rect.width()) - 16))
         p.drawText(rect.adjusted(8, 0, -8, 0), int(Qt.AlignmentFlag.AlignCenter), label)
 
-        # Timing chip under each end (its anchor tells start vs stop).
+        # Timing chip under each end (its anchor tells start vs stop; a Hold-anchored ramp
+        # reads its ends on-resume/pre-hold, not on-air — see _ramp_end_side_off).
         (la, lo), (ra, ro) = g.get("ends", (("start", 0.0), ("start", 0.0)))
+        s_side, s_off = _ramp_end_side_off(getattr(it, "anchor", "start"), la, lo, self._hold_off)
+        e_side, e_off = _ramp_end_side_off(getattr(it, "anchor", "start"), ra, ro, self._hold_off)
         cap_y = int(y + LANE_H + 1)
-        self._paint_timing(p, sx, cap_y, _timing_text(lo, la, with_side=True))
+        self._paint_timing(p, sx, cap_y, _timing_text(s_off, s_side, with_side=True))
         if abs(px - sx) > RAMP_MIN_W / 2:
-            self._paint_timing(p, px, cap_y, _timing_text(ro, ra, with_side=True))
+            self._paint_timing(p, px, cap_y, _timing_text(e_off, e_side, with_side=True))
 
     def _paint_run(self, p, it):
         g = self._geom[it.uid]

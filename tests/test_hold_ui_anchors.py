@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import QApplication
 import api.models as m
 from ui import timeline_model as tlm
 from ui.ramp_editor import RampEditorDialog
-from ui.timeline_editor import _timing_text, StepEditorDialog
+from ui.timeline_editor import _timing_text, _ramp_end_side_off, StepEditorDialog
 from tests.test_step_editor_carried_bw import _editor as _chirp_editor, _bar
 
 _app = QApplication.instance() or QApplication([])
@@ -83,6 +83,19 @@ def test_ramp_anchor_offers_hold_when_editing_an_existing_hold_ramp():
     dlg = _ramp_dlg([_bar(10)], src_anchor="hold")
     assert dlg._anchor.findData("hold") >= 0
     assert dlg._anchor.currentData() == "hold"
+
+
+def test_ramp_canvas_chip_reads_from_the_hold():
+    # A Hold-anchored ramp's ends are stored on the START axis at (hold_offset + offset) for
+    # geometry, so the canvas chip must be mapped back to on-resume/pre-hold — never "on-air".
+    s_side, s_off = _ramp_end_side_off("hold", "start", 300.0, 300.0)     # FROM: 0 s from resume
+    assert _timing_text(s_off, s_side, with_side=True) == "on-resume"
+    e_side, e_off = _ramp_end_side_off("hold", "start", 360.0, 300.0)     # ramp end: +60 s
+    end_text = _timing_text(e_off, e_side, with_side=True)
+    assert end_text.endswith("· on-resume") and "on-air" not in end_text
+    # A normal (on-air) ramp end is unchanged.
+    n_side, n_off = _ramp_end_side_off("start", "start", 5.0, None)
+    assert _timing_text(n_off, n_side, with_side=True).endswith("· on-air")
 
 
 def test_selecting_hold_anchor_updates_rows_and_sublabels():
