@@ -79,6 +79,21 @@ Deferred (low-value/higher-risk, noted not done): the `ToggleSwitch`/`Dropdown` 
 agent/scripts change; drift-guarded files untouched. Tests: `tests/test_hidpi_ui.py` (buttons size-to-
 content; SVG icon renders + caches per DPR); full suite 802 → 804 offscreen.
 
+**Follow-up — vertical overflow on a shorter viewport (same branch).** Making the app genuinely
+DPI-aware means Qt now reports the TRUE (shorter) logical height at 125% (a 1366×768 panel is only
+~614 logical px tall), which exposed every dialog that hardcoded a tall height without capping to the
+screen — the footer buttons (Save/Cancel, outside the scroll) dropped off-screen and unreachable.
+Only `ramp_editor` had the cap. Fix: extract that cap into a shared **`widgets.fit_dialog_to_screen(
+dialog, w, h, *, cap_max=True)`** — resize to `(w, h)` but never past ~0.92×/0.94× of
+`availableGeometry()`, relax any forced minimum above the cap so a dialog can still shrink into view,
+and pin `setMaximumHeight` (skip it via `cap_max=False` for the resizable `main_window`, which must
+stay maximizable). Applied to `run_task_dialog`, `timeline_editor` StepEditor, `live_tune_dialog`,
+`plan_editor` ×2, `hold_edit_dialog`, `calibration_panel` (source-bias + JSON dialogs), and
+`main_window`. `arm_dialog` had NO scroll area (capping alone would clip), so its stacked sections were
+wrapped in a `QScrollArea` with the Arm/Cancel footer PINNED outside it, then capped. Tests added to
+`tests/test_hidpi_ui.py` (cap + minimum-relax; `cap_max=False` stays maximizable; arm footer outside
+the scroll); suite 804 → 807 offscreen.
+
 ## Current state — Hold step Phase 2 (client authoring + Proceed UI): COMPLETE (branch `claude/hold-step-phase-0-wwwxf7`, client-only)
 Design doc: **`docs/sequence-hold-step.md`** (cross-repo; the authoritative spec + owner decisions).
 A new **Hold** sequence step pauses a running sequence at the hold, holding system state exactly, until

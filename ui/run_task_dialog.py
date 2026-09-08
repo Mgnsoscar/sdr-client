@@ -38,6 +38,7 @@ from .param_form import (
 from .dialog_style import scrollbar_qss
 from .qt_adapter import DataHub
 from .theme import Palette, mono_font
+from .widgets import fit_dialog_to_screen
 
 
 # The task env key that carries the uncalibrated stop-gap gain (a script uses it only
@@ -136,8 +137,9 @@ class RunTaskDialog(QDialog):
         self.setMinimumWidth(560)
         self._build()
         # Open with generous vertical room — the parameter list is usually several
-        # fields tall, and opening compact meant resizing it by hand every time.
-        self.resize(620, 760)
+        # fields tall — but never taller than the screen, so the Start/Cancel footer
+        # (outside the scroll area) stays on-screen at 125% scaling / short panels.
+        fit_dialog_to_screen(self, 620, 760)
         self.hub.task_done.connect(self._on_task_done)
         self.finished.connect(lambda _=0: self._disconnect())
         self._load()

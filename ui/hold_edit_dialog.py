@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
 from api import models as m
 from .qt_adapter import DataHub
 from .theme import Palette
+from .widgets import fit_dialog_to_screen
 from .timeline_editor import TimelineEditor, task_signals_from_yaml
 
 
@@ -36,6 +37,7 @@ class HoldEditDialog(QDialog):
         self.setWindowTitle("Edit post-hold steps")
         self.setMinimumSize(780, 480)
         self._build()
+        fit_dialog_to_screen(self, 900, 620)   # relax the floor + cap width/height to the screen
         self._timeline.set_steps(sequence.steps)
         self.hub.task_done.connect(self._on_task_done)
         self.finished.connect(lambda _=0: self._disconnect())

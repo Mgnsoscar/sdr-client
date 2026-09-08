@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
 from api.client import AgentHTTPError
 from api.models import UNIT_TYPES, UNIT_TYPE_LABELS
 from .theme import Palette, mono_font
+from .widgets import fit_dialog_to_screen
 
 CAL_NAME = "calibration.json"
 CAL_CAPABILITY = "calibration"
@@ -1588,6 +1589,7 @@ class CalibrationPanel(QWidget):
         dlg = QDialog(self.window())
         dlg.setWindowTitle("Calibration document · JSON")
         dlg.setMinimumSize(700, 560)
+        fit_dialog_to_screen(dlg, 700, 560)            # cap to the screen on short/scaled panels
         v = QVBoxLayout(dlg); v.setSpacing(8)
         intro = QLabel("The raw calibration document. Edit here for anything the form "
                        "doesn't surface — “Apply” parses it back into the editor.")
@@ -2231,7 +2233,7 @@ class CalibrationPanel(QWidget):
         sb = dict((self._doc.get("source_bias") or {}))
         dlg = QDialog(self)
         dlg.setWindowTitle("Source bias — SDR power vs frequency")
-        dlg.resize(460, 520)                           # open tall enough to show several rows
+        fit_dialog_to_screen(dlg, 460, 520)            # tall enough for several rows, capped to screen
         lay = QVBoxLayout(dlg)
         info = QLabel(
             "Transmit a fixed-gain CW and read the delivered power at each frequency, then "

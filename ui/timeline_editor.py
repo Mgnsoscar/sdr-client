@@ -60,6 +60,7 @@ from .duration_spin import DurationSpinBox
 from .param_form import ParamForm, fmt_duration, fmt_value, hz_per_unit, power_mode_of_args
 from .ramp_editor import RampEditorDialog
 from .theme import Palette
+from .widgets import fit_dialog_to_screen
 
 # ── View geometry (paint sizes; timing geometry lives in timeline_model) ──────
 LANES_TOP = 34              # y of the first lane
@@ -1053,7 +1054,7 @@ class StepEditorDialog(QDialog):
         self.setWindowTitle("New step" if new else "Edit step")
         self.setMinimumWidth(440)
         self._build(item)
-        self.resize(540, 660)                    # open with room; the body scrolls if taller
+        fit_dialog_to_screen(self, 540, 660)     # room, but capped to the screen so the footer shows
         self._built = True
 
         if editor._hub is not None:

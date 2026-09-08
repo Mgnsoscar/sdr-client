@@ -17,11 +17,13 @@ import pytest
 pytest.importorskip("PyQt6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QDialogButtonBox, QScrollArea, QWidget
 
 from api import models as m
+import ui.arm_dialog as ad
 import ui.scripts_panel as scp
 import ui.sequences_panel as sp
+from ui.widgets import fit_dialog_to_screen
 
 _app = QApplication.instance() or QApplication([])
 
@@ -58,3 +60,42 @@ def test_file_tree_svg_icon_renders_and_caches_per_dpr():
     # cache key is now (name, device_pixel_ratio), so a mixed-DPI move re-renders crisply.
     key = next(iter(scp._ICON_CACHE))
     assert isinstance(key, tuple) and key[0] == "py" and len(key) == 2
+
+
+# ── vertical overflow on a shorter viewport: dialogs cap to the screen ──────────────────
+# When the screen is less tall (a short panel, or a 125%-scaled one now that the app is
+# genuinely DPI-aware), a dialog that hardcodes a tall height used to push its footer buttons
+# off-screen. fit_dialog_to_screen caps every tall dialog to the available geometry.
+
+def test_fit_dialog_to_screen_caps_height_and_relaxes_over_tall_minimum():
+    avail = _app.primaryScreen().availableGeometry()
+    cap_h = int(avail.height() * 0.92)
+    w = QWidget()
+    w.setMinimumHeight(avail.height() + 500)         # an unshrinkable floor taller than the screen
+    fit_dialog_to_screen(w, 100000, 100000)          # ask for an absurd size
+    assert w.maximumHeight() <= cap_h                # can't grow taller than the screen
+    assert w.minimumHeight() <= cap_h                # the over-tall floor was relaxed → shrinkable
+    assert w.height() <= cap_h
+
+
+def test_fit_dialog_to_screen_cap_max_false_stays_maximizable():
+    # A main window must remain freely resizable/maximizable: only the initial size is capped.
+    w = QWidget()
+    fit_dialog_to_screen(w, 100000, 100000, cap_max=False)
+    assert w.maximumHeight() == _QWIDGETSIZE_MAX     # no fixed maximum applied
+    assert w.height() <= int(_app.primaryScreen().availableGeometry().height() * 0.92)
+
+
+def test_arm_dialog_footer_is_pinned_outside_the_scroll_area():
+    # The arm/proceed dialog stacks many sections; its body now scrolls so the Arm/Cancel footer
+    # stays reachable on a short viewport. Guard: the button box is NOT inside the scroll body.
+    dlg = ad.ArmDialog("Arm test", 5.0, 60.0, 0.0)
+    try:
+        scrolls = dlg.findChildren(QScrollArea)
+        assert scrolls, "arm dialog body should live in a scroll area"
+        body = scrolls[0].widget()
+        box = dlg.findChild(QDialogButtonBox)
+        assert box is not None
+        assert not body.isAncestorOf(box)            # footer pinned outside the scroll
+    finally:
+        dlg.deleteLater()

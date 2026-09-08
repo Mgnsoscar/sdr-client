@@ -19,12 +19,13 @@ from typing import Callable, List, Optional
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QFrame, QGridLayout, QHBoxLayout,
-    QLabel, QPushButton, QVBoxLayout, QWidget,
+    QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from .duration_spin import DurationSpinBox
 from .param_form import fmt_duration
 from .theme import Palette
+from .widgets import fit_dialog_to_screen
 
 
 def _ceil_to(dt: datetime, step_s: int) -> datetime:
@@ -74,9 +75,22 @@ class ArmDialog(QDialog):
         # leaves focus in the field and the entry stays uncommitted.
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
-        outer = QVBoxLayout(self)
+        # The stacked sections live in a scroll area so that on a short / DPI-scaled viewport the
+        # Arm/Cancel footer (pinned to `root` below, OUTSIDE the scroll) stays reachable — the body
+        # scrolls instead of pushing the buttons off-screen.
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        _scroll = QScrollArea()
+        _scroll.setWidgetResizable(True)
+        _scroll.setFrameShape(QFrame.Shape.NoFrame)
+        _scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        _body = QWidget()
+        outer = QVBoxLayout(_body)
         outer.setContentsMargins(18, 16, 18, 14)
         outer.setSpacing(10)
+        _scroll.setWidget(_body)
+        root.addWidget(_scroll, 1)
 
         head = QLabel(heading)
         head.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {Palette.TEXT};")
@@ -222,7 +236,11 @@ class ArmDialog(QDialog):
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        outer.addWidget(buttons)
+        # Footer pinned OUTSIDE the scroll area so Arm/Cancel are always on-screen.
+        footer = QHBoxLayout()
+        footer.setContentsMargins(18, 8, 18, 12)
+        footer.addWidget(buttons)
+        root.addLayout(footer)
 
         # Start at the next whole minute at or after the floor.
         self._t0 = _ceil_to(self._floor(), 60)
@@ -234,6 +252,12 @@ class ArmDialog(QDialog):
         self._timer.timeout.connect(self._tick)
         self._timer.start(250)
         self._render()
+
+        # Open at the content's natural height (so a short arm has no empty scroll space), but
+        # never taller than the screen — the body then scrolls and the pinned footer stays on
+        # a short / DPI-scaled viewport.
+        want_h = max(420, _body.sizeHint().height() + 64)   # + footer & margins
+        fit_dialog_to_screen(self, 480, want_h)
 
     # ── Selection helpers ────────────────────────────────────────────────────
 

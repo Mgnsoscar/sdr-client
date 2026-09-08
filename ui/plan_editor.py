@@ -48,6 +48,7 @@ from .duration_spin import DurationSpinBox
 from .param_form import fmt_duration
 from .qt_adapter import DataHub
 from .theme import Palette
+from .widgets import fit_dialog_to_screen
 from .timeline_editor import _TimelineCanvas, TimelineEditor, DRAG_THRESHOLD, LANES_TOP, task_signals_from_yaml
 
 
@@ -90,6 +91,7 @@ class PlanItemDialog(QDialog):
         self.setWindowTitle("Edit plan sequence" if item else "Add plan sequence")
         self.setMinimumSize(840, 640)
         self._build()
+        fit_dialog_to_screen(self, 840, 640)   # relax the 640 floor + cap to a short/scaled screen
 
         self._hub.task_done.connect(self._on_task_done)
         self.finished.connect(lambda _=0: self._disconnect())
@@ -629,6 +631,7 @@ class PlanEditorDialog(QDialog):
         self.setWindowTitle("Edit plan" if self._editing else "New plan")
         self.setMinimumSize(820, 560)
         self._build()
+        fit_dialog_to_screen(self, 820, 560)   # relax the 560 floor + cap to a short/scaled screen
         if plan is not None:
             self._name.setText(plan.name)
             self._desc.setPlainText(plan.description)

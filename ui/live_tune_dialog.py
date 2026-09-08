@@ -29,6 +29,7 @@ from .dialog_style import scrollbar_qss
 from .param_form import ParamForm, fmt_value, num_or_none, power_mode_of_args
 from .qt_adapter import DataHub
 from .theme import Palette
+from .widgets import fit_dialog_to_screen
 
 
 # White card chrome so the Tune dialog sits on a clean surface like the Run dialog.
@@ -79,7 +80,7 @@ class LiveTuneDialog(QDialog):
         self.setWindowTitle(f"Tune '{task_name}' (live)")
         self.setMinimumWidth(520)
         self._build()
-        self.resize(560, 660)                    # open with generous vertical room
+        fit_dialog_to_screen(self, 560, 660)     # room, but capped so the Update/Close footer shows
 
         self.hub.task_done.connect(self._on_task_done)
         self.finished.connect(lambda _=0: self._disconnect())

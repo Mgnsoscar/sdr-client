@@ -30,6 +30,7 @@ from .alert_feed import AlertFeed
 from .library_tab import LibraryTab
 from .qt_adapter import DataHub
 from .theme import Palette
+from .widgets import fit_dialog_to_screen
 from .timeline_tab import TimelineTab
 from .units_tab import UnitsTab
 
@@ -65,7 +66,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.hub = hub
         self.setWindowTitle("SDR Broadcaster Control")
-        self.resize(1180, 760)
+        # Open at a comfortable size, but never larger than the screen (a 1366×768 panel at
+        # 125% is only ~1092×614 logical px). cap_max=False keeps the window freely resizable /
+        # maximizable — only the initial size is clamped.
+        fit_dialog_to_screen(self, 1180, 760, cap_max=False)
 
         root = QWidget()
         root.setObjectName("root")
