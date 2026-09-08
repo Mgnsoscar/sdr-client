@@ -48,6 +48,7 @@ from api import Fleet
 from api import models as m
 from state import PlanStore, ScheduleStore, new_scheduled_id
 from .plan_editor import PlanEditorDialog
+from .plans_tab import _collapsed_arm_steps
 from .qt_adapter import DataHub
 from .theme import Palette, mono_font
 
@@ -115,8 +116,10 @@ def _arm_scheduled(fleet: Fleet, plan: m.Plan, start_utc: datetime,
         off_air = (stop_utc + timedelta(seconds=item.off_air_offset_s + skew)).isoformat()
         # Compile any Hold OUT for the unattended schedule (docs/sequence-hold-step.md §7):
         # the run passes straight through, never pausing, and hold_aware stays False so the
-        # agent runs its normal two-anchor path.
-        sched_steps = m.collapse_hold(item.steps) if item.steps else None
+        # agent runs its normal two-anchor path — for a plan-local copy AND a stored-sequence
+        # reference (else a stored Hold-bearing sequence would be armed without hold_aware and
+        # the agent would refuse it).
+        sched_steps = _collapsed_arm_steps(fleet, item)
         req = m.ArmSequenceRequest(
             on_air_at=on_air,
             on_air_end=off_air,
@@ -124,7 +127,7 @@ def _arm_scheduled(fleet: Fleet, plan: m.Plan, start_utc: datetime,
             plan_id=plan.id,
             plan_name=plan.name,
             steps=(sched_steps or None),
-            step_overrides=([] if item.steps else item.overrides),
+            step_overrides=([] if sched_steps else item.overrides),
         )
         try:
             run = fleet.get(item.hostname).arm_sequence(item.sequence_id, req)

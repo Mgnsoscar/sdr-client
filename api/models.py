@@ -433,9 +433,9 @@ class ProceedRequest(BaseModel):
 
 # ── Hold step helpers (docs/sequence-hold-step.md §7) ─────────────────────────
 # Detect a Hold in a step list and compile it out for the unattended (scheduled /
-# plan) path, where an operator-gated pause is a footgun. Both duck-type over
-# SequenceStep (an .action / .anchor / .offset_s object) so they work on a stored
-# sequence, a plan-local step copy, or a dict.
+# plan) path, where an operator-gated pause is a footgun. `has_hold` duck-types over
+# SequenceStep or a dict; `collapse_hold` operates on SequenceStep objects (it uses
+# model_copy) — the callers always hold typed step lists.
 
 def _step_action(step) -> str:
     a = getattr(step, "action", None)
@@ -455,7 +455,8 @@ def collapse_hold(steps: List["SequenceStep"]) -> List["SequenceStep"]:
     ``start`` at ``hold_offset + its own offset`` — a zero-length pass-through, so the
     run executes straight through without pausing (the down-ramp starts immediately
     after the up-ramp). A Hold-free list is returned unchanged (same objects), so the
-    non-hold path is byte-identical. See docs/sequence-hold-step.md §7."""
+    non-hold path is byte-identical. Operates on ``SequenceStep`` objects (uses
+    ``model_copy``). See docs/sequence-hold-step.md §7."""
     steps = list(steps or [])
     hold_off = None
     for s in steps:

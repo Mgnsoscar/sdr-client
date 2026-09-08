@@ -140,6 +140,15 @@ def test_default_hold_offset_sits_past_the_furthest_window_a_point():
     assert ed2._canvas._default_hold_offset() == 60.0     # nothing precedes it → a default
 
 
+def test_default_hold_offset_lands_after_an_up_ramp_not_mid_ramp():
+    # A start-anchored up-ramp starting at +30 s running 60 s ends at +90 s; the default Hold must
+    # land at its END (90), not its start (30) — so it sits at the top of the run-up.
+    ramp = {"param": "power", "flag": "--power", "start": -40, "stop": -20, "steps": 5, "hold_s": 15}
+    ed = _editor([tlm.BarItem(task_name="tx", start_offset=0, stop_offset=0),
+                  tlm.RunItem(task_name="tx", action="ramp", anchor="start", offset=30.0, ramp=ramp)])
+    assert ed._canvas._default_hold_offset() == 30.0 + tlm._ramp_duration(ramp)
+
+
 def test_hold_editor_dialog_builds_a_hold_item():
     ed = _editor([tlm.BarItem(task_name="tx", start_offset=0, stop_offset=0)])
     dlg = HoldEditorDialog(_hold(0.0), ed, new=True)
@@ -159,6 +168,17 @@ def test_validate_accepts_a_hold_bearing_timeline():
     assert tlm.validate(items, known_tasks=["tx"]) is None
     # a Hold alone isn't a real on-air step
     assert tlm.validate([_hold(10.0)]) == "needs at least one on-air step"
+
+
+def test_validate_rejects_an_orphaned_hold_anchored_step():
+    # Removing the Hold but leaving its post-hold steps → an anchor="hold" step with no Hold to
+    # anchor to. That mis-places on the canvas/walk, so validate() must reject it (agent parity).
+    orphan = [tlm.BarItem(task_name="tx", start_offset=0, stop_offset=0),
+              tlm.RunItem(task_name="tx", action="tune", anchor="hold", offset=5, params={"g": 1})]
+    err = tlm.validate(orphan, known_tasks=["tx"])
+    assert err is not None and "Hold" in err
+    # Adding the Hold back makes it valid again.
+    assert tlm.validate(orphan + [_hold(50.0)], known_tasks=["tx"]) is None
 
 
 # ── The step editor's "Hold" anchor option ───────────────────────────────────

@@ -446,6 +446,11 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
         return "needs at least one on-air step"
     if not any(s["anchor"] == "stop" for s in steps):
         return "needs at least one off-air step (a duration task provides both)"
+    # A window-B (anchor="hold") step needs a Hold marker to anchor to — otherwise it's
+    # orphaned (e.g. the Hold was removed but its post-hold steps left behind), which the
+    # geometry/walk mis-place (mirrors the agent's _validate_steps).
+    if not has_hold(items) and any(s["anchor"] == "hold" for s in steps):
+        return "a post-hold (‘hold’-anchored) step needs a Hold — add one or re-anchor the step"
     # A tune step retunes a running duration task, so the task it targets must be
     # started by a duration (bar) step in this same sequence.
     duration_tasks = {it.task_name for it in items if getattr(it, "kind", None) == "bar"}

@@ -82,17 +82,21 @@ def test_hold_offset_of():
 # ── the arm helpers (fake clients, like test_arm_clock_skew) ─────────────────
 
 class _Client:
-    def __init__(self, skew=0.0, supports=("sequence-hold",)):
+    def __init__(self, skew=0.0, supports=("sequence-hold",), stored=None):
         self.skew = skew
         self._caps = set(supports)
         self.captured = []
         self.proceeded = []
+        self._stored = stored          # the unit's STORED sequence (for get_sequence)
 
     def clock_offset_s(self):
         return self.skew
 
     def supports(self, cap):
         return cap in self._caps
+
+    def get_sequence(self, seq_id):
+        return self._stored
 
     def arm_sequence(self, seq_id, req):
         self.captured.append(req)
@@ -152,6 +156,45 @@ def test_manual_plan_arm_collapses_the_hold():
     _arm_plan(_Fleet(c), plan, datetime(2030, 1, 1, 12, 0, 0, tzinfo=timezone.utc), duration_s=600.0)
     req = c.captured[0]
     assert req.hold_aware is False and not m.has_hold(req.steps)
+
+
+def test_arm_collapses_a_STORED_sequence_hold_with_no_plan_local_copy():
+    # An item with NO plan-local copy (steps=[]) references the unit's stored sequence. If that
+    # stored sequence holds a Hold, the arm must still compile it out (fetch + collapse) — else a
+    # Hold-bearing arm without hold_aware would be refused, contradicting the "runs straight
+    # through" promise. Both arm paths.
+    from ui.plans_tab import _arm_plan
+    from ui.timeline_tab import _arm_scheduled
+    stored = m.Sequence(id="s1", name="stored", steps=_hold_seq().steps)
+    plan = m.Plan(id="p", name="p", items=[m.PlanItem(hostname="a", sequence_id="s1", steps=[])])
+
+    c1 = _Client(stored=stored)
+    _arm_plan(_Fleet(c1), plan, datetime(2030, 1, 1, 12, 0, 0, tzinfo=timezone.utc), duration_s=600.0)
+    req1 = c1.captured[0]
+    assert req1.hold_aware is False and req1.steps is not None and not m.has_hold(req1.steps)
+    assert req1.step_overrides == []                          # explicit steps → no legacy overrides
+
+    c2 = _Client(stored=stored)
+    start = datetime(2030, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    _arm_scheduled(_Fleet(c2), plan, start, start + timedelta(minutes=10))
+    req2 = c2.captured[0]
+    assert req2.hold_aware is False and req2.steps is not None and not m.has_hold(req2.steps)
+
+
+def test_arm_of_a_stored_HOLD_FREE_sequence_falls_back_unchanged():
+    # A steps-less item whose stored sequence has NO Hold must behave exactly as before: send no
+    # inline steps (use the stored sequence) and keep any legacy overrides.
+    from ui.plans_tab import _arm_plan
+    plain = m.Sequence(id="s1", name="plain", steps=[
+        m.SequenceStep(anchor="start", offset_s=0, action=m.StepAction.START, task_name="tx"),
+        m.SequenceStep(anchor="stop", offset_s=0, action=m.StepAction.STOP, task_name="tx")])
+    ov = [m.StepOverride(index=0, args=["--x", "1"])]
+    plan = m.Plan(id="p", name="p", items=[
+        m.PlanItem(hostname="a", sequence_id="s1", steps=[], overrides=ov)])
+    c = _Client(stored=plain)
+    _arm_plan(_Fleet(c), plan, datetime(2030, 1, 1, 12, 0, 0, tzinfo=timezone.utc), duration_s=600.0)
+    req = c.captured[0]
+    assert req.steps is None and req.step_overrides == ov     # unchanged fallback
 
 
 # ── the api client wrapper ───────────────────────────────────────────────────

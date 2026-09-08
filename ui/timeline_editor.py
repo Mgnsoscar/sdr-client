@@ -996,13 +996,19 @@ class _TimelineCanvas(QWidget):
 
     def _default_hold_offset(self) -> float:
         """A sensible starting position for a new Hold: just past the furthest on-air
-        (window-A) point, so it sits at the top of the run. 60 s when nothing precedes it."""
+        (window-A) point, so it sits at the top of the run. A ramp counts by its END (so a
+        Hold lands after an up-ramp, not mid-ramp). 60 s when nothing precedes it."""
         latest = 0.0
         for it in self._items:
             if tlm._is_hold(it):
                 continue
             if getattr(it, "kind", None) == "bar":
                 latest = max(latest, float(getattr(it, "start_offset", 0.0)))
+            elif tlm._is_ramp(it):
+                # A ramp's furthest on-air moment is its right (start-anchored) end.
+                for anchor, off in tlm.ramp_span(it, self._hold_off):
+                    if anchor == "start":
+                        latest = max(latest, off)
             elif getattr(it, "anchor", "start") == "start":
                 _a, o = tlm.effective_anchor_offset(it, self._hold_off)
                 latest = max(latest, o)

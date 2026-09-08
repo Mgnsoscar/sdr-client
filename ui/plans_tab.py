@@ -116,6 +116,25 @@ def plans_to_yaml(plans: List[m.Plan]) -> str:
     return yaml.safe_dump({"plans": docs}, sort_keys=False, allow_unicode=True)
 
 
+def _collapsed_arm_steps(fleet: Fleet, item: m.PlanItem):
+    """The steps to send for a plan/scheduled arm, with any Hold compiled OUT (§7). A
+    plan-local copy (``item.steps``) is collapsed directly; an item with NO plan-local copy
+    references the unit's STORED sequence, which is fetched and collapsed ONLY if it contains a
+    Hold — so a Hold never reaches the agent without ``hold_aware`` (which the scheduled/plan
+    path never sets) and the run passes straight through, as the operator was told. Returns
+    None to fall back to the stored sequence + legacy overrides (the no-Hold case, unchanged).
+    Worker thread (best-effort: a fetch failure falls back to the stored sequence)."""
+    if item.steps:
+        return m.collapse_hold(item.steps)
+    try:
+        stored = fleet.get(item.hostname).get_sequence(item.sequence_id)
+    except Exception:  # noqa: BLE001 — best-effort; fall back to the stored sequence as before
+        return None
+    if stored is not None and m.has_hold(stored.steps):
+        return m.collapse_hold(stored.steps)
+    return None
+
+
 def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
               duration_s: Optional[float]) -> List[tuple]:
     """Arm every item of a plan around one operator-chosen on-air anchor (T0). Each
@@ -137,20 +156,20 @@ def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
         # does), so a skewed unit still goes on air at the intended wall-clock time.
         on_air_at_iso = (t0 + timedelta(seconds=item.on_air_offset_s + _off(item.hostname))
                          ).isoformat()
-        # A Hold has no effect in a plan (multi-unit, unattended-style): compile it out
-        # to a straight-through two-anchor list before arming, and never send hold_aware
-        # (docs/sequence-hold-step.md §7).
-        armed_steps = m.collapse_hold(item.steps) if item.steps else None
+        # A Hold has no effect in a plan (multi-unit, unattended-style): compile it out to a
+        # straight-through two-anchor list before arming — for a plan-local copy AND for a
+        # stored-sequence reference — and never send hold_aware (docs/sequence-hold-step.md §7).
+        armed_steps = _collapsed_arm_steps(fleet, item)
         req = m.ArmSequenceRequest(
             on_air_at=on_air_at_iso,
             open_ended=(duration_s is None),
             on_air_duration_s=(duration_s if duration_s is not None else None),
             plan_id=plan.id,
             plan_name=plan.name,
-            # A plan-local step copy runs as-is; older items fall back to the stored
-            # sequence with legacy per-arg overrides.
+            # A plan-local (or collapsed stored) step copy runs as-is; a no-Hold item with no
+            # copy falls back to the stored sequence with legacy per-arg overrides.
             steps=(armed_steps or None),
-            step_overrides=([] if item.steps else item.overrides),
+            step_overrides=([] if armed_steps else item.overrides),
         )
         try:
             run = fleet.get(item.hostname).arm_sequence(item.sequence_id, req)
