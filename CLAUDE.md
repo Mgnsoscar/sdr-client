@@ -32,7 +32,9 @@ bite: (1) the client DROPS loopback/colon addresses (`config._parse_unit`), so `
 a **bare host IP, no port, not `127.*`** — the helpers use `hostname -I`; (2) `SDR_CLIENT_DATA_DIR` is
 captured at import (`config.DEFAULT_UNITS_FILE`), so `screenshot.py` sets it BEFORE importing `paths`/
 `config`. A connected client shows "clocks: synced ✓" + the unit **online**; `sdr: none` is expected
-(no radio).
+(no radio). The agent seeds a sample calibration (Source flatness → cable → 0–95 dB attenuator → output
+cable) so the unit is calibrated by default — `screenshot.py --tab calibration` drills into the unit's
+Calibration panel to render it.
 
 ## Cross-repo invariants (do not break)
 - **Drift guard (enforced by `sdr-agent/tests/test_shared_source_drift.py`):**

@@ -48,6 +48,8 @@ from ui.theme import apply_theme              # noqa: E402
 
 logging.basicConfig(level=logging.WARNING)
 _TABS = {"timeline": 0, "units": 1, "library": 2}
+# "calibration" is a pseudo-tab: Units → first unit → Calibration sub-tab.
+_CHOICES = sorted(_TABS) + ["calibration"]
 
 
 def _seed_units_if_missing(agent_host: str) -> None:
@@ -80,8 +82,9 @@ def _build_fleet(cfg):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="/tmp/client.png", help="output PNG path")
-    ap.add_argument("--tab", default="units", choices=sorted(_TABS),
-                    help="tab to show (default: units)")
+    ap.add_argument("--tab", default="units", choices=_CHOICES,
+                    help="tab to show (default: units); 'calibration' drills into "
+                         "the first unit's Calibration panel")
     ap.add_argument("--agent", default=os.environ.get("SDR_AGENT_HOST", ""),
                     help="agent host to seed into units.yaml if absent "
                          "(default: this host's first IP)")
@@ -121,12 +124,24 @@ def main() -> int:
 
     def switch():
         window.resize(w, h)
+        settle = 2500
         try:
-            window._select_tab(_TABS[args.tab])
+            if args.tab == "calibration":
+                window._select_tab(1)                    # Units
+                ut = window.units_tab
+                units = list(hub.fleet.units())
+                if units:
+                    host = units[0].hostname
+                    ut._detail.set_unit(host)
+                    ut._stack.setCurrentIndex(1)         # detail view
+                    ut._detail._select_subtab(2)         # Calibration sub-tab
+                settle = 4000                            # panel fetches /calibration async
+            else:
+                window._select_tab(_TABS[args.tab])
         except Exception as exc:            # noqa: BLE001 — best-effort tab switch
             print(f"tab switch failed: {exc}")
         app.processEvents()
-        QTimer.singleShot(2500, grab)       # let the tab fetch its data
+        QTimer.singleShot(settle, grab)     # let the tab fetch its data
 
     def grab():
         window.resize(w, h)
