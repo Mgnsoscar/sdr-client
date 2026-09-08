@@ -34,7 +34,7 @@ import json
 from typing import Optional
 
 from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QRect, Qt, QTimer
-from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPen
+from PyQt6.QtGui import QColor, QKeySequence, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractItemDelegate, QAbstractItemView, QAbstractScrollArea, QApplication,
     QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
@@ -45,7 +45,7 @@ from PyQt6.QtWidgets import (
 
 from api.client import AgentHTTPError
 from api.models import UNIT_TYPES, UNIT_TYPE_LABELS
-from .theme import Palette
+from .theme import Palette, mono_font
 
 CAL_NAME = "calibration.json"
 CAL_CAPABILITY = "calibration"
@@ -679,8 +679,7 @@ class _FreqResponsePlot(QWidget):
         def Y(d):
             return y1 - (d - dmin) / (dmax - dmin) * (y1 - y0)
 
-        mono = QFont("monospace"); mono.setPointSize(8)
-        qp.setFont(mono)
+        qp.setFont(mono_font(10))          # real monospace family + px size (DPI-consistent)
         # y grid + labels (dB)
         qp.setPen(QColor(Palette.TEXT_FAINT))
         for frac in (0.0, 0.5, 1.0):
@@ -1595,7 +1594,7 @@ class CalibrationPanel(QWidget):
         intro.setWordWrap(True)
         intro.setStyleSheet(f"font-size:11px;color:{Palette.TEXT_FAINT};")
         v.addWidget(intro)
-        view = QPlainTextEdit(); view.setFont(QFont("monospace"))
+        view = QPlainTextEdit(); view.setFont(mono_font(12))   # real monospace family + px size
         view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         view.setPlainText(json.dumps(self._doc, indent=2) if self._doc is not None else "")
         v.addWidget(view, 1)

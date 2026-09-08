@@ -54,6 +54,31 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — Windows high-DPI (125% scaling) robustness: COMPLETE (branch `claude/hidpi-windows-scaling`, client-only)
+A coworker's INSTALLED build at Windows 125% scaling looked "weird" (blurry/misaligned) while the owner's
+from-source run at 100% was crisp. Root causes + fixes (from a `/code-review` audit — Qt6 already
+auto-scales and paints in LOGICAL px, so hardcoded pixel geometry is mostly safe; the real culprits are
+DPI-awareness, font conventions, and fixed rasters):
+- **The frozen EXE wasn't DPI-aware.** New **`packaging/app.manifest`** declares **PerMonitorV2**
+  (`<dpiAwareness>` + legacy `<dpiAware>`, `asInvoker`), embedded via **`sdr_client.spec`** `EXE(manifest=…)`.
+  Without it Windows bitmap-scales (blurs) the whole window at 125%. This is the primary fix.
+- **Deterministic scaling** (`main.py`, before `QApplication`): `setHighDpiScaleFactorRoundingPolicy(
+  PassThrough)` (keep the real 1.25, don't snap) + `AA_Use96Dpi` (pin point-size fonts to the same
+  96-DPI baseline the theme's pixel-size fonts use, so the two conventions can't diverge — chosen over a
+  risky wholesale `setPointSize`→`setPixelSize` sweep of the canvases/logs).
+- **`QFont("monospace", …)` → `mono_font(px)`** (`agent_update_dialog`, `provision_dialog`,
+  `calibration_panel` ×2): "monospace" is not a real Windows family and was point-sized, so log/JSON panes
+  fell back to a proportional font and lost column alignment. `theme.mono_font()` = IBM Plex Mono +
+  Monospace style hint + pixel size. (Dead `QFont` imports removed.)
+- **Crisp file-tree icons** (`scripts_panel._svg_icon`): render the SVG at `32×dpr` and
+  `setDevicePixelRatio`, cached per ratio, instead of one DPR-1.0 32px raster that upscales blurry.
+- **No-truncate action buttons** (`sequences_panel._SequenceRow`): `setFixedWidth` → `setMinimumWidth`
+  so "Proceed"/"Hold now"/"Edit…" grow to fit a wider fallback font instead of clipping.
+Deferred (low-value/higher-risk, noted not done): the `ToggleSwitch`/`Dropdown` 0.5-px crisp-line insets
+(`param_widgets.py`) soften slightly at fractional DPR — cosmetic, custom-paint, left alone. No
+agent/scripts change; drift-guarded files untouched. Tests: `tests/test_hidpi_ui.py` (buttons size-to-
+content; SVG icon renders + caches per DPR); full suite 802 → 804 offscreen.
+
 ## Current state — Hold step Phase 2 (client authoring + Proceed UI): COMPLETE (branch `claude/hold-step-phase-0-wwwxf7`, client-only)
 Design doc: **`docs/sequence-hold-step.md`** (cross-repo; the authoritative spec + owner decisions).
 A new **Hold** sequence step pauses a running sequence at the hold, holding system state exactly, until

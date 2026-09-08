@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import sys
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
@@ -65,6 +66,17 @@ def main() -> int:
     paths.seed_defaults()
 
     cfg = ClientConfig.load()
+
+    # High-DPI: make fractional OS scaling (e.g. Windows display scaling at 125%) deterministic
+    # and consistent across machines. Both calls MUST precede QApplication construction.
+    #   • PassThrough keeps the real fractional factor (1.25) instead of snapping it to 1.0/2.0,
+    #     so the owner at 100% and a coworker at 125% both get a faithfully-scaled window.
+    #   • Use96Dpi pins point-size fonts to the same 96-DPI baseline the app's pixel-size fonts
+    #     use, so the two size conventions (setPointSize on the canvases/logs vs setPixelSize in
+    #     the theme) can't diverge on a display whose reported logical DPI isn't 96.
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_Use96Dpi, True)
 
     app = QApplication(sys.argv)
     app.setApplicationName("SDR Broadcaster Control")

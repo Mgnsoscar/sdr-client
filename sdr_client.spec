@@ -31,6 +31,9 @@ from PyInstaller.utils.hooks import (
 ROOT = Path(SPECPATH).resolve()          # SPECPATH: injected by PyInstaller
 APP_NAME = "SDR Broadcaster Control"
 ICON = ROOT / "ui" / "assets" / "app.ico"
+# Per-monitor-v2 DPI-awareness manifest — so Windows doesn't bitmap-scale (blur) the app at
+# fractional display scaling (e.g. 125%). Embedded into the EXE below. See packaging/app.manifest.
+MANIFEST = ROOT / "packaging" / "app.manifest"
 
 # ── data files ───────────────────────────────────────────────────────────────
 datas = [
@@ -93,6 +96,8 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     icon=str(ICON) if ICON.exists() else None,
+    # Embed the per-monitor-v2 DPI-awareness manifest (Windows PE only; ignored elsewhere).
+    manifest=str(MANIFEST) if MANIFEST.exists() else None,
 )
 coll = COLLECT(
     exe,

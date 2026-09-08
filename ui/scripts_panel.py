@@ -34,7 +34,7 @@ from typing import Dict, List, Optional, Tuple
 from PyQt6.QtCore import QByteArray, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import (
-    QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
+    QApplication, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
     QMessageBox, QPushButton, QSplitter, QToolButton, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
@@ -70,15 +70,24 @@ _ICON_CACHE: dict = {}
 def _svg_icon(key: str, svg: bytes) -> QIcon:
     if not _HAVE_SVG:
         return QIcon()
-    ic = _ICON_CACHE.get(key)
+    # Render the vector at the DEVICE pixel size and tag the pixmap's ratio, so a fractional-
+    # scale display (e.g. Windows 125%) gets a crisp raster instead of a bitmap-upscaled 32px
+    # one. Cache per ratio so a later mixed-DPI move still resolves correctly.
+    scr = QApplication.primaryScreen()
+    dpr = float(scr.devicePixelRatio()) if scr is not None else 1.0
+    ck = (key, round(dpr, 3))
+    ic = _ICON_CACHE.get(ck)
     if ic is None:
-        pm = QPixmap(32, 32)
+        side = 32
+        px = max(1, round(side * dpr))
+        pm = QPixmap(px, px)
         pm.fill(Qt.GlobalColor.transparent)
         p = QPainter(pm)
         QSvgRenderer(QByteArray(svg)).render(p)
         p.end()
+        pm.setDevicePixelRatio(dpr)          # Qt now treats it as a 32×32 LOGICAL icon
         ic = QIcon(pm)
-        _ICON_CACHE[key] = ic
+        _ICON_CACHE[ck] = ic
     return ic
 
 

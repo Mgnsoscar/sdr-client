@@ -286,10 +286,13 @@ class _SequenceRow(QFrame):
         self._edit_wb.setToolTip("Edit the post-hold steps (the down-ramp / cool-down) before you "
                                  "Proceed — e.g. retarget the down-ramp to where lock was lost")
         self._edit_wb.setVisible(can_edit_wb)
+        # Minimum (not fixed) width: the row stays aligned at 100%, but a button grows to fit a
+        # longer label ("Proceed" > "Arm") or a wider fallback font at fractional scaling instead
+        # of clipping it to an ellipsis.
         for b in (self._start, self._stop, self._log, self._edit, self._delete):
-            b.setFixedWidth(66)
-        self._hold_now.setFixedWidth(72)
-        self._edit_wb.setFixedWidth(60)
+            b.setMinimumWidth(66)
+        self._hold_now.setMinimumWidth(72)
+        self._edit_wb.setMinimumWidth(60)
         self._start.setToolTip(
             "Proceed — schedule the post-hold window (the down-ramp) and resume the run"
             if holding else

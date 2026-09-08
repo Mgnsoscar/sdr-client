@@ -13,7 +13,6 @@ import time
 from typing import Optional
 
 from PyQt6.QtCore import QTimer
-from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
     QPushButton, QVBoxLayout,
@@ -23,7 +22,7 @@ from api.models import SequenceState
 
 from api.client import AgentHTTPError
 from .qt_adapter import DataHub
-from .theme import Palette
+from .theme import Palette, mono_font
 
 
 def _esc(s: str) -> str:
@@ -92,7 +91,7 @@ class AgentUpdateDialog(QDialog):
         self._log = QPlainTextEdit()
         self._log.setReadOnly(True)
         self._log.setFixedHeight(150)
-        self._log.setFont(QFont("monospace", 10))
+        self._log.setFont(mono_font(12))   # real monospace family + px size (DPI-consistent)
         self._log.setStyleSheet(
             f"background: {Palette.BG}; color: {Palette.TEXT_MUTED}; "
             f"border: 1px solid {Palette.BORDER}; border-radius: 6px;")

@@ -18,7 +18,6 @@ import time
 from typing import Callable, List, Optional
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSpinBox,
@@ -29,7 +28,7 @@ from config import ProvisionScheme
 from state.agent_bundle import bundle_version, find_bundle
 from state.provisioner import ProvisionParams, Provisioner
 from .qt_adapter import DataHub
-from .theme import Palette
+from .theme import Palette, mono_font
 
 # Callback the Units tab passes in to register a provisioned unit (label, addresses,
 # api_key) and returns the permanent uid it was given.
@@ -105,7 +104,7 @@ class ProvisionDialog(QDialog):
         self._log = QPlainTextEdit()
         self._log.setReadOnly(True)
         self._log.setFixedHeight(150)
-        self._log.setFont(QFont("monospace", 10))
+        self._log.setFont(mono_font(12))   # real monospace family + px size (DPI-consistent)
         self._log.setStyleSheet(
             f"background: {Palette.BG}; color: {Palette.TEXT_MUTED}; "
             f"border: 1px solid {Palette.BORDER}; border-radius: 6px;")

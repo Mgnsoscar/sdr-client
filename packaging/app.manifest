@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Windows application manifest embedded into the frozen SDR Broadcaster Control.exe
+  (referenced from sdr_client.spec via EXE(manifest=...)).
+
+  Purpose: declare PER-MONITOR-V2 DPI awareness so Windows does NOT bitmap-scale
+  (blur) the app at fractional display scaling such as 125%. Without this, an
+  installed build can run System-DPI-aware and Windows DPI-virtualizes the whole
+  window on a 125% display -> blurry text and fuzzy 1px borders, while a from-source
+  run that happens to end up per-monitor aware looks crisp. Qt6 targets PerMonitorV2;
+  declaring it in the manifest MATCHES that and avoids the runtime race (a process's
+  DPI awareness can be set only once, and a manifest wins over Qt's runtime call).
+
+  Both the modern 2016 <dpiAwareness> and the legacy 2005 <dpiAware> tags are given
+  so older Windows 10 builds honour it too. asInvoker keeps the app per-user (no
+  elevation), matching the no-admin installer.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+      type="win32"
+      name="SDRBroadcasterControl"
+      version="1.0.0.0"
+      processorArchitecture="*"/>
+
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+    </windowsSettings>
+  </application>
+
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and Windows 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+    </application>
+  </compatibility>
+</assembly>
