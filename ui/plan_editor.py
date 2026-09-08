@@ -143,11 +143,12 @@ class PlanItemDialog(QDialog):
         form.addRow("Off-air — before OFF-AIR", self._off_air)
         outer.addLayout(form)
 
-        # The full sequence timeline over the plan-local step copy. A plan is armed on
-        # the schedule/plan path, where a Hold is compiled out (docs/sequence-hold-step.md
-        # §7), so authoring one here would be misleading — hide the '+ Hold' button.
+        # The full sequence timeline over the plan-local step copy. A Hold is authorable
+        # here: the ARM path decides whether it actually pauses — a single-unit plan armed
+        # directly (operator-present) honours the Hold, while a multi-unit plan and the
+        # unattended schedule compile it out to a straight-through pass (the up-front notice
+        # in plans_tab / timeline_tab explains this). See docs/sequence-hold-step.md §6–§7.
         self._timeline = TimelineEditor()
-        self._timeline.set_hold_authoring(False)
         self._timeline.changed.connect(self._refresh_status)
         outer.addWidget(self._timeline, stretch=1)
 

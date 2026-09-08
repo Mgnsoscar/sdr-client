@@ -46,12 +46,21 @@ from .plan_editor import PlanEditorDialog
 from .plan_log_dialog import PlanLogDialog
 from .qt_adapter import DataHub
 from .theme import Palette
+from .timeline_model import (
+    SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY, hold_runtime_supported)
 from .widgets import StatusPill, natural_key
 
 ARM_MARGIN_S = 5.0
 CLOCK_WARN_SKEW_S = 1.0
 DEFAULT_STOP_DURATION_S = 60.0   # fallback when a plan has no derivable minimum
-_ACTIVE = (m.SequenceState.ARMED, m.SequenceState.RUNNING)
+# Default max-hold deadman offered when arming a Hold-aware plan (30 min; 0 = unlimited).
+DEFAULT_MAX_HOLD_S = 1800.0
+# Safety lead for a Proceed (mirrors sequences_panel): window B's first step fires at
+# resume + its offset ≥ 0, so a small margin covers clock skew and the immediate case.
+PROCEED_LEAD_S = 3.0
+# A plan run is "active" (blocks re-arm / delete, keeps Stop live) while armed, running, or
+# HOLDING (a single-unit hold-aware plan parked at its Hold with RF live, awaiting Proceed).
+_ACTIVE = (m.SequenceState.ARMED, m.SequenceState.RUNNING, m.SequenceState.HOLDING)
 
 
 def _lead_in(steps) -> float:
@@ -134,6 +143,25 @@ def _plan_has_hold(plan: m.Plan, seqs_by_host: Optional[dict] = None) -> bool:
     return False
 
 
+def _hold_aware_plan_item(plan: m.Plan, resolved: Dict[int, list],
+                          supports_runtime) -> Optional[m.PlanItem]:
+    """The single plan item to arm hold_aware (single-unit, operator-present), or None.
+
+    Eligible iff the plan has EXACTLY ONE item, that item's resolved steps contain a Hold, and
+    its unit runs the Hold runtime (``supports_runtime(hostname)`` True). Any other Hold-bearing
+    plan returns None → the Hold is compiled out and the run passes straight through: more than
+    one item (cross-unit Hold synchronisation is deferred — docs/sequence-hold-step.md §10), or a
+    unit whose agent is too old for the runtime (§11). ``resolved`` maps item index → its resolved
+    (uncollapsed) steps, as built by _finish_arm_preflight."""
+    if len(plan.items) != 1:
+        return None
+    item = plan.items[0]
+    steps = resolved.get(0)
+    if not (steps and m.has_hold(steps)):
+        return None
+    return item if supports_runtime(item.hostname) else None
+
+
 def _apply_step_overrides(steps: List[m.SequenceStep],
                           overrides: List[m.StepOverride]) -> List[m.SequenceStep]:
     """Bake legacy per-index StepOverrides into a step list (mirrors the agent: an override at
@@ -168,13 +196,31 @@ def _collapsed_arm_steps(fleet: Fleet, item: m.PlanItem):
     return None
 
 
+def _proceed_run(client, run_id: str, resume_laptop: datetime,
+                 steps: Optional[List[m.SequenceStep]] = None) -> m.SequenceRun:
+    """Resume a HOLDING plan run at the operator-chosen instant, translated to the unit's
+    clock (like _arm_plan). The agent resolves window B relative to it; `steps` (edit-while-
+    holding) re-resolves window B from the edited sequence. Worker thread. Mirrors
+    sequences_panel._proceed_run."""
+    resume_at = resume_laptop + timedelta(seconds=client.clock_offset_s())
+    return client.proceed_sequence_run(
+        run_id, m.ProceedRequest(proceed_at=resume_at.isoformat(), steps=steps))
+
+
 def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
-              duration_s: Optional[float]) -> List[tuple]:
+              duration_s: Optional[float], hold_aware: bool = False,
+              max_hold_s: float = DEFAULT_MAX_HOLD_S) -> List[tuple]:
     """Arm every item of a plan around one operator-chosen on-air anchor (T0). Each
     sequence is armed at T0 + its on_air_offset (absolute UTC), so a plan can stagger
     units relative to the anchor. When duration_s is set every sequence runs that
     long from its own on-air (skew-robust, and stop-anchored steps then fire);
     otherwise it's open-ended and runs until stopped. Worker thread.
+
+    hold_aware=True is the single-unit operator-present case (exactly one Hold-bearing item,
+    checked by the caller): the item's steps are sent VERBATIM (the Hold intact, not collapsed),
+    the arm is hold_aware + open-ended, and the run parks at the Hold awaiting Proceed
+    (docs/sequence-hold-step.md §6–§7). hold_aware=False (the default, multi-unit / unattended)
+    compiles any Hold OUT so the run passes straight through, and never sends hold_aware (§7).
     Returns [(item, SequenceRun|None, error|None), ...]."""
     out = []
     _offsets: dict = {}   # per-unit clock skew, fetched once per host
@@ -189,21 +235,48 @@ def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
         # does), so a skewed unit still goes on air at the intended wall-clock time.
         on_air_at_iso = (t0 + timedelta(seconds=item.on_air_offset_s + _off(item.hostname))
                          ).isoformat()
-        # A Hold has no effect in a plan (multi-unit, unattended-style): compile it out to a
-        # straight-through two-anchor list before arming — for a plan-local copy AND for a
-        # stored-sequence reference — and never send hold_aware (docs/sequence-hold-step.md §7).
-        armed_steps = _collapsed_arm_steps(fleet, item)
-        req = m.ArmSequenceRequest(
-            on_air_at=on_air_at_iso,
-            open_ended=(duration_s is None),
-            on_air_duration_s=(duration_s if duration_s is not None else None),
-            plan_id=plan.id,
-            plan_name=plan.name,
-            # A plan-local (or collapsed stored) step copy runs as-is; a no-Hold item with no
-            # copy falls back to the stored sequence with legacy per-arg overrides.
-            steps=(armed_steps or None),
-            step_overrides=([] if armed_steps else item.overrides),
-        )
+        if hold_aware:
+            # The Hold is real here: send the steps AS AUTHORED (Hold intact, NOT collapsed). The
+            # agent refuses step_overrides alongside a Hold, so a steps-less item's legacy overrides
+            # are baked into the stored sequence's steps and sent inline (mirrors the collapse path's
+            # override-baking, minus the collapse). If the stored fetch fails, fall back to the
+            # stored sequence with no overrides rather than risk an override+Hold refusal.
+            if item.steps:
+                hold_steps = list(item.steps)
+            else:
+                try:
+                    stored = fleet.get(item.hostname).get_sequence(item.sequence_id)
+                except Exception:  # noqa: BLE001 — best-effort; the agent still has the stored seq
+                    stored = None
+                hold_steps = (_apply_step_overrides(stored.steps, item.overrides)
+                              if stored is not None else None)
+            req = m.ArmSequenceRequest(
+                on_air_at=on_air_at_iso,
+                open_ended=True,               # window B is scheduled at Proceed, not now
+                on_air_duration_s=None,
+                plan_id=plan.id,
+                plan_name=plan.name,
+                steps=hold_steps,
+                step_overrides=[],             # never sent with a Hold (baked in above)
+                hold_aware=True,
+                max_hold_s=max_hold_s,
+            )
+        else:
+            # A Hold has no effect in a plan run this way (multi-unit / unattended-style):
+            # compile it out to a straight-through two-anchor list before arming — for a
+            # plan-local copy AND a stored-sequence reference — and never send hold_aware (§7).
+            armed_steps = _collapsed_arm_steps(fleet, item)
+            req = m.ArmSequenceRequest(
+                on_air_at=on_air_at_iso,
+                open_ended=(duration_s is None),
+                on_air_duration_s=(duration_s if duration_s is not None else None),
+                plan_id=plan.id,
+                plan_name=plan.name,
+                # A plan-local (or collapsed stored) step copy runs as-is; a no-Hold item with
+                # no copy falls back to the stored sequence with legacy per-arg overrides.
+                steps=(armed_steps or None),
+                step_overrides=([] if armed_steps else item.overrides),
+            )
         try:
             run = fleet.get(item.hostname).arm_sequence(item.sequence_id, req)
             out.append((item, run, None))
@@ -226,14 +299,22 @@ def _stop_plan(fleet: Fleet, runs: List[tuple]) -> List[tuple]:
 
 
 class _PlanRow(QFrame):
-    """One plan: name, unit/sequence summary, active-run pill, action buttons."""
+    """One plan: name, unit/sequence summary, active-run pill, action buttons.
+
+    A single-unit hold-aware plan run (docs/sequence-hold-step.md §6) surfaces the same run
+    controls as the Library row: while HOLDING the Arm button becomes Proceed, a RUNNING
+    hold-aware run offers Hold-now (Fast-Forward-to-Hold), and a HOLDING run offers Edit… (edit
+    the post-hold window before proceeding). The Hold controls are hidden for every ordinary
+    (multi-unit / non-hold) plan."""
 
     def __init__(self, plan: m.Plan, runs: List[m.SequenceRun], on_air_n: int,
-                 pending_n: int, on_arm, on_stop, on_edit, on_delete, on_log):
+                 pending_n: int, on_arm, on_stop, on_edit, on_delete, on_log,
+                 holding: bool = False, can_ff: bool = False, can_edit_wb: bool = False,
+                 on_proceed=None, on_hold_now=None, on_edit_wb=None):
         super().__init__()
         self.plan = plan
         self.setObjectName("card")
-        active = (on_air_n + pending_n) > 0
+        active = (on_air_n + pending_n) > 0 or holding
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
@@ -271,8 +352,10 @@ class _PlanRow(QFrame):
             box.addWidget(mind)
         lay.addLayout(box, stretch=1)
 
-        # On air (RF live) beats armed/warming: show whichever phase the plan is in.
-        if on_air_n:
+        # Holding (parked at a Hold, RF live) beats on-air beats armed/warming.
+        if holding:
+            word, status = "holding", "holding"
+        elif on_air_n:
             word, status = f"{on_air_n} on air", "running"
         elif pending_n:
             word, status = f"{pending_n} armed", "armed"
@@ -281,26 +364,56 @@ class _PlanRow(QFrame):
         self._pill = StatusPill(word, status)
         lay.addWidget(self._pill, alignment=Qt.AlignmentFlag.AlignTop)
 
-        self._arm = QPushButton("Arm")
+        # While HOLDING the Arm button becomes Proceed (schedule window B / resume).
+        self._arm = QPushButton("Proceed" if holding else "Arm")
         self._stop = QPushButton("Stop")
         self._log = QPushButton("Log")
         self._edit = QPushButton("Edit")
         self._delete = QPushButton("Delete")
+        # Fast-Forward-to-Hold + edit-while-holding, shown only when applicable.
+        self._hold_now = QPushButton("Hold now")
+        self._hold_now.setToolTip("Jump to the Hold now — skip the rest of the run-up and hold the "
+                                  "signal at its current value (then Proceed when ready)")
+        self._hold_now.setVisible(can_ff)
+        self._edit_wb = QPushButton("Edit…")
+        self._edit_wb.setToolTip("Edit the post-hold steps (the down-ramp / cool-down) before you "
+                                 "Proceed — e.g. retarget the down-ramp to where lock was lost")
+        self._edit_wb.setVisible(can_edit_wb)
+        # Minimum (not fixed) width so a longer label ("Proceed" > "Arm") grows instead of clipping.
         for b in (self._arm, self._stop, self._log, self._edit, self._delete):
-            b.setFixedWidth(66)
-        self._arm.setToolTip("Arm every sequence in this plan at one shared on-air time")
+            b.setMinimumWidth(66)
+        self._hold_now.setMinimumWidth(72)
+        self._edit_wb.setMinimumWidth(60)
+        self._arm.setToolTip(
+            "Proceed — schedule the post-hold window (the down-ramp) and resume the run"
+            if holding else
+            "Arm every sequence in this plan at one shared on-air time")
         self._stop.setToolTip("Stop every active run in this plan")
         self._log.setToolTip("View every sequence's run log across the plan's units, live")
-        self._arm.setEnabled(not active and bool(plan.items))
+        # Proceed is enabled while holding; Arm only when nothing is active.
+        self._arm.setEnabled(holding or (not active and bool(plan.items)))
         self._stop.setEnabled(active)
         self._log.setEnabled(bool(plan.items))
         self._delete.setEnabled(not active)
-        self._arm.clicked.connect(lambda: on_arm(plan))
+        if holding and on_proceed is not None:
+            self._arm.clicked.connect(lambda: on_proceed(plan))
+        else:
+            self._arm.clicked.connect(lambda: on_arm(plan))
         self._stop.clicked.connect(lambda: on_stop(plan))
         self._log.clicked.connect(lambda: on_log(plan))
         self._edit.clicked.connect(lambda: on_edit(plan))
         self._delete.clicked.connect(lambda: on_delete(plan))
-        for b in (self._arm, self._stop, self._log, self._edit, self._delete):
+        if can_ff and on_hold_now is not None:
+            self._hold_now.clicked.connect(lambda: on_hold_now(plan))
+        if can_edit_wb and on_edit_wb is not None:
+            self._edit_wb.clicked.connect(lambda: on_edit_wb(plan))
+        shown = [self._arm]
+        if can_ff:
+            shown.append(self._hold_now)     # only while a run-up is in progress
+        if can_edit_wb:
+            shown.append(self._edit_wb)      # only while holding
+        shown += [self._stop, self._log, self._edit, self._delete]
+        for b in shown:
             lay.addWidget(b, alignment=Qt.AlignmentFlag.AlignTop)
 
 
@@ -314,6 +427,9 @@ class PlansTab(QWidget):
         self._runs_by_host: Dict[str, List[m.SequenceRun]] = {}
         self._runs_pending = False
         self._runs_sig: object = None   # last-rendered active-run signature
+        # Per-run edited window-B steps (edit-while-holding): run_id → full edited step list,
+        # sent as ProceedRequest.steps on the next Proceed and cleared once applied.
+        self._wb_edits: dict = {}
         self._build()
         self.hub.task_done.connect(self._on_task_done)
         self.hub.event_received.connect(self._on_event)
@@ -575,8 +691,9 @@ class PlansTab(QWidget):
         max_eff_lead = 0.0
         plan_min_dur = 0.0   # longest sequence's minimum on-air window, across items
         missing_seq = []
-        has_hold = False     # any item carries an operator-gated Hold (collapsed for plans)
-        for item in plan.items:
+        has_hold = False     # any item carries an operator-gated Hold
+        resolved: Dict[int, list] = {}   # item index → its resolved (uncollapsed) steps
+        for idx, item in enumerate(plan.items):
             # A plan-local copy carries its own steps; otherwise the source
             # sequence must still exist on the unit.
             if item.steps:
@@ -587,14 +704,17 @@ class PlansTab(QWidget):
                     missing_seq.append(item.unit_label or item.hostname)
                     continue
                 steps = seq.steps
+            resolved[idx] = steps
             if m.has_hold(steps):
                 has_hold = True
-            # A plan compiles the Hold out (§7), so timing is derived from the
-            # straight-through sequence, not the paused one.
-            steps = m.collapse_hold(steps)
-            eff = _lead_in(steps) + clock_off.get(item.hostname, 0.0) - item.on_air_offset_s
+            # Timing is derived from the straight-through (Hold-collapsed) sequence in BOTH
+            # branches: the Hold marker is start-anchored and window B re-anchors to start at
+            # the same offset, so the warm-up lead-in and minimum window are identical whether
+            # the Hold is honoured (single-unit) or compiled out (multi-unit / schedule).
+            csteps = m.collapse_hold(steps)
+            eff = _lead_in(csteps) + clock_off.get(item.hostname, 0.0) - item.on_air_offset_s
             max_eff_lead = max(max_eff_lead, eff)
-            plan_min_dur = max(plan_min_dur, _ramp.min_on_air_duration(steps))
+            plan_min_dur = max(plan_min_dur, _ramp.min_on_air_duration(csteps))
         if missing_seq:
             QMessageBox.warning(
                 self, "Cannot arm plan",
@@ -602,23 +722,41 @@ class PlansTab(QWidget):
             self._set_status("arm cancelled", error=True)
             return
 
-        if has_hold and QMessageBox.warning(
-            self, "Plan contains a Hold",
-            "One or more sequences in this plan contain a Hold (an operator-gated pause). "
-            "A plan runs across units without an attendant, so the Hold is disabled here: "
-            "the sequence runs straight through without pausing (the down-ramp starts "
-            "immediately after the up-ramp). Run the sequence from its unit's Library tab "
-            "if you need the operator-gated pause.\n\nArm the plan anyway?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
-            self._set_status("arm cancelled")
-            return
-
         skew_note = ""
         if max_skew is not None and max_skew > CLOCK_WARN_SKEW_S:
             skew_note = (f"⚠ Unit clocks differ by {max_skew:.1f}s. A shared on-air "
                          f"time depends on synced clocks — units may go on air up to "
                          f"{max_skew:.1f}s apart.")
+
+        # A single-unit, single-sequence plan whose one item holds — on a unit running the Hold
+        # RUNTIME — is armed hold_aware (operator-present): the run parks at the Hold and awaits
+        # Proceed, exactly like the Library path (docs/sequence-hold-step.md §6–§7). Any OTHER
+        # Hold-bearing plan compiles the Hold out and runs straight through: more than one item
+        # (cross-unit Hold sync is deferred — §10), or a unit whose agent can't run the runtime.
+        hold_item = _hold_aware_plan_item(plan, resolved, self._unit_hold_runtime_ok)
+
+        if hold_item is not None:
+            self._arm_hold_aware_plan(plan, hold_item, resolved[0],
+                                      max(0.0, max_eff_lead), skew_note)
+            return
+
+        if has_hold:
+            if len(plan.items) > 1:
+                why = ("This plan arms more than one sequence together, and coordinating an "
+                       "operator-gated Hold across units isn't supported yet")
+            else:
+                why = ("This plan's unit can't run an operator-gated Hold (its agent needs the "
+                       "sequence-hold capability, agent 1.17+)")
+            if QMessageBox.warning(
+                self, "Plan contains a Hold",
+                f"{why}, so the Hold is disabled here: the sequence runs straight through "
+                "without pausing (the down-ramp starts immediately after the up-ramp). To use "
+                "the operator-gated pause, arm a single-sequence plan on a capable unit, or run "
+                "the sequence from its unit's Library tab.\n\nArm the plan anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+                self._set_status("arm cancelled")
+                return
 
         n_units = len({i.hostname for i in plan.items})
         default_dur = plan_min_dur if plan_min_dur > 0 else DEFAULT_STOP_DURATION_S
@@ -636,6 +774,177 @@ class PlansTab(QWidget):
             f"plan_arm:{plan.id}",
             lambda: _arm_plan(self.fleet, plan, t0, duration_s),
         )
+
+    def _arm_hold_aware_plan(self, plan: m.Plan, item: m.PlanItem, steps: list,
+                             safety_lead_s: float, skew_note: str) -> None:
+        """Arm a single-unit, single-sequence plan whose item holds — operator-present, so the
+        run parks at the Hold and awaits Proceed (the plan mirror of sequences_panel's
+        _arm_hold_aware). Always open-ended; the down-ramp (window B) is scheduled at Proceed
+        (docs/sequence-hold-step.md §6.2)."""
+        hold_off = next((s.offset_s for s in steps
+                         if m._step_action(s) == m.StepAction.HOLD.value), 0.0)
+        wa = fmt_duration(round(max(0.0, hold_off + _lead_in(steps))))
+        label = item.unit_label or item.hostname
+        dlg = ArmDialog(
+            f"Arm plan “{plan.name or plan.id}” (holds at the Hold)",
+            safety_lead_s + ARM_MARGIN_S, DEFAULT_STOP_DURATION_S, 0.0, skew_note, parent=self,
+            body_note=(f"This plan's sequence pauses at the Hold and awaits you. It runs to the "
+                       f"Hold on {label} in ~{wa}, then holds the signal exactly until you "
+                       f"Proceed (the post-hold window — the down-ramp — is scheduled when you "
+                       f"proceed). This is a single-unit, operator-present run; the schedule and "
+                       f"multi-unit plans run straight through a Hold."),
+            show_stop=False, max_hold_default_s=DEFAULT_MAX_HOLD_S)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            self._set_status("arm cancelled")
+            return
+        t0 = dlg.on_air_at()
+        max_hold = dlg.max_hold_s()
+        self._set_status(f"arming {plan.name or plan.id} (holds at the Hold)…")
+        self.hub.run_async(
+            f"plan_arm:{plan.id}",
+            lambda: _arm_plan(self.fleet, plan, t0, None,
+                              hold_aware=True, max_hold_s=max_hold),
+        )
+
+    # ── Proceed / Hold-now / Edit-while-holding (single-unit hold-aware plan runs) ──────
+
+    def _hold_run_for(self, plan: m.Plan, states) -> tuple:
+        """(hostname, SequenceRun) of this plan's first run in one of `states`, else
+        (None, None). A hold-aware plan is single-unit/single-item, so there is at most one."""
+        for host, runs in self._runs_by_host.items():
+            for r in runs:
+                if r.plan_id == plan.id and r.state in states:
+                    return host, r
+        return None, None
+
+    def _ff_run_for(self, plan: m.Plan) -> tuple:
+        """(hostname, SequenceRun) of this plan's RUNNING hold-aware run that hasn't reached its
+        Hold yet (can be fast-forwarded), else (None, None)."""
+        for host, runs in self._runs_by_host.items():
+            for r in runs:
+                if (r.plan_id == plan.id and r.state == m.SequenceState.RUNNING
+                        and getattr(r, "hold_aware", False) and r.held_actual is None):
+                    return host, r
+        return None, None
+
+    def _unit_supports(self, host: Optional[str], capability: str) -> bool:
+        if not host:
+            return False
+        try:
+            return bool(self.fleet.get(host).supports(capability))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _unit_hold_runtime_ok(self, host: Optional[str]) -> bool:
+        """True iff the unit runs the Hold RUNTIME (sequence-hold + >= 1.17.0), so a hold-aware
+        plan arm parks rather than being refused (docs/sequence-hold-step.md §11)."""
+        if not host:
+            return False
+        try:
+            return hold_runtime_supported(self.fleet.get(host))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _hold_status_text(self, run: m.SequenceRun) -> str:
+        """Live one-liner for the Proceed dialog: elapsed run time · time held · the remaining
+        max-hold allowance (mirrors sequences_panel._hold_status_text)."""
+        now = datetime.now(timezone.utc)
+        parts: List[str] = []
+        base = run.on_air_actual or run.started_actual or run.on_air_at
+        base_dt = _parse_iso(base)
+        if base_dt is not None:
+            parts.append(f"elapsed {fmt_duration(round(max(0.0, (now - base_dt).total_seconds())))}")
+        held_dt = _parse_iso(run.held_actual)
+        if held_dt is not None:
+            held = (now - held_dt).total_seconds()
+            parts.append(f"held {fmt_duration(round(max(0.0, held)))}")
+            if run.max_hold_s and run.max_hold_s > 0:
+                rem = run.max_hold_s - held
+                parts.append(f"auto-stops in {fmt_duration(round(rem))}" if rem > 0
+                             else "auto-stop imminent")
+        return "  ·  ".join(parts)
+
+    def _on_proceed(self, plan: m.Plan) -> None:
+        """Resume a HOLDING plan run: pick the resume instant (the same timing control as arm)
+        and schedule window B (docs/sequence-hold-step.md §6.3)."""
+        host, run = self._hold_run_for(plan, (m.SequenceState.HOLDING,))
+        if run is None:
+            self._set_status("no holding run to proceed", error=True)
+            self._refresh_runs()
+            return
+        dlg = ArmDialog(
+            f"Proceed “{plan.name or plan.id}”", PROCEED_LEAD_S, DEFAULT_STOP_DURATION_S,
+            0.0, parent=self, accept_label="Proceed", title="Proceed",
+            body_note=("Choose when the post-hold window (the down-ramp) starts. The held "
+                       "signal stays exactly where it is until then."),
+            show_stop=False, status_provider=lambda r=run: self._hold_status_text(r))
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            self._set_status("proceed cancelled")
+            return
+        resume = dlg.on_air_at()
+        edited = self._wb_edits.get(run.id)          # edit-while-holding, if any
+        client = self.fleet.get(host)
+        self._set_status(f"proceeding {plan.name or plan.id}"
+                         + (" with edited post-hold steps…" if edited else "…"))
+        self.hub.run_async(
+            f"plan_proceed:{plan.id}",
+            lambda: _proceed_run(client, run.id, resume, steps=edited),
+        )
+
+    def _on_hold_now(self, plan: m.Plan) -> None:
+        """Fast-Forward-to-Hold: jump a RUNNING hold-aware plan run straight to its Hold now,
+        skipping the rest of the run-up (docs/sequence-hold-step.md §5.4)."""
+        host, run = self._ff_run_for(plan)
+        if run is None:
+            self._set_status("no running hold-aware run to fast-forward", error=True)
+            self._refresh_runs()
+            return
+        if QMessageBox.question(
+            self, "Hold now",
+            f"Jump “{plan.name or plan.id}” to its Hold now?\n\nThe rest of the run-up is skipped "
+            f"and the signal holds its CURRENT value until you Proceed.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+            return
+        client = self.fleet.get(host)
+        self._set_status(f"holding {plan.name or plan.id} now…")
+        self.hub.run_async(
+            f"plan_holdnow:{plan.id}",
+            lambda: client.hold_now_sequence_run(run.id),
+        )
+
+    def _on_edit_wb(self, plan: m.Plan) -> None:
+        """Edit-while-holding: revise the post-hold (window-B) steps of a HOLDING plan run,
+        held per-run until the next Proceed applies them (docs/sequence-hold-step.md §6.4)."""
+        host, run = self._hold_run_for(plan, (m.SequenceState.HOLDING,))
+        if run is None:
+            self._set_status("no holding run to edit", error=True)
+            self._refresh_runs()
+            return
+        # The plan item whose sequence this run is executing (single-item for a hold-aware plan).
+        item = next((it for it in plan.items if it.sequence_id == run.sequence_id),
+                    plan.items[0] if plan.items else None)
+        if item is None:
+            self._set_status("no plan item to edit", error=True)
+            return
+        # Seed the editor with the pending edit for this run, else the plan-local steps, else the
+        # unit's stored sequence (a steps-less item references it).
+        pending = self._wb_edits.get(run.id)
+        steps = pending if pending is not None else (list(item.steps) if item.steps else None)
+        if steps is None:
+            try:
+                stored = self.fleet.get(host).get_sequence(item.sequence_id)
+            except Exception:  # noqa: BLE001
+                stored = None
+            steps = list(stored.steps) if stored is not None else []
+        seed = m.Sequence(id=item.sequence_id, name=item.sequence_name or item.sequence_id,
+                          steps=steps)
+        from .hold_edit_dialog import HoldEditDialog
+        dlg = HoldEditDialog(self.hub, host, seed, parent=self.window())
+        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.result_steps is None:
+            return
+        self._wb_edits[run.id] = dlg.result_steps
+        self._set_status("post-hold steps edited — Proceed to apply")
 
     def _on_stop(self, plan: m.Plan) -> None:
         runs = self._active_runs_for(plan)
@@ -697,6 +1006,20 @@ class PlansTab(QWidget):
         elif op == "plan_arm":
             self._report_arm(result)
             self._refresh_runs()
+        elif op == "plan_proceed":
+            if isinstance(result, Exception):
+                self._set_status("proceed failed", error=True)
+                QMessageBox.warning(self, "Could not proceed", str(result))
+            else:
+                self._set_status("proceeding — post-hold window scheduled")
+            self._refresh_runs()
+        elif op == "plan_holdnow":
+            if isinstance(result, Exception):
+                self._set_status("hold-now failed", error=True)
+                QMessageBox.warning(self, "Could not fast-forward to the Hold", str(result))
+            else:
+                self._set_status("holding — fast-forwarded to the Hold")
+            self._refresh_runs()
         elif op == "plan_stop":
             if isinstance(result, list):
                 bad = [(rid, e) for rid, e in result if e is not None]
@@ -737,6 +1060,13 @@ class PlansTab(QWidget):
     # ── Rendering ──────────────────────────────────────────────────────────────
 
     def _rebuild(self) -> None:
+        # Drop any edit-while-holding revisions for runs that are no longer HOLDING
+        # (proceeded — the edit was applied — or aborted).
+        if self._wb_edits:
+            holding_ids = {r.id for rs in self._runs_by_host.values() for r in rs
+                           if r.state == m.SequenceState.HOLDING}
+            self._wb_edits = {rid: v for rid, v in self._wb_edits.items() if rid in holding_ids}
+
         while self._list.count():
             w = self._list.takeAt(0).widget()
             if w is not None:
@@ -762,15 +1092,26 @@ class PlansTab(QWidget):
                     and query not in (plan.description or "").lower():
                 continue
             runs = self._active_run_objs(plan)
+            holding_n = sum(1 for r in runs if r.state == m.SequenceState.HOLDING)
             on_air_n = sum(1 for r in runs if _is_on_air(r))
-            pending_n = len(runs) - on_air_n
+            pending_n = len(runs) - on_air_n - holding_n
             if runs:
                 active_total += 1
+            # A single-unit hold-aware plan run surfaces the Hold controls (Proceed / Hold-now /
+            # Edit…), each gated on the run's state and the unit's advertised capability.
+            holding = holding_n > 0
+            hold_host, _hr = self._hold_run_for(plan, (m.SequenceState.HOLDING,))
+            ff_host, _fr = self._ff_run_for(plan)
+            can_ff = ff_host is not None and self._unit_supports(ff_host, SEQUENCE_HOLD_NOW_CAPABILITY)
+            can_edit_wb = holding and self._unit_supports(hold_host, SEQUENCE_HOLD_EDIT_CAPABILITY)
             shown += 1
             self._list.addWidget(_PlanRow(
                 plan, runs, on_air_n, pending_n,
                 on_arm=self._on_arm, on_stop=self._on_stop,
-                on_edit=self._on_edit, on_delete=self._on_delete, on_log=self._on_log))
+                on_edit=self._on_edit, on_delete=self._on_delete, on_log=self._on_log,
+                holding=holding, can_ff=can_ff, can_edit_wb=can_edit_wb,
+                on_proceed=self._on_proceed, on_hold_now=self._on_hold_now,
+                on_edit_wb=self._on_edit_wb))
         if shown == 0 and query:
             empty = QLabel(f"No plans match “{query}”.")
             empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")

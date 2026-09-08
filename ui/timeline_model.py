@@ -41,6 +41,44 @@ SEQUENCE_HOLD_NOW_CAPABILITY = "sequence-hold-now"
 # ≤1.18 agent would silently ignore the edit and run the stored window B).
 SEQUENCE_HOLD_EDIT_CAPABILITY = "sequence-hold-edit"
 
+# The `sequence-hold` capability is advertised from agent 1.16.0, but 1.16.0 shipped the Hold
+# DATA MODEL ONLY — a hold-aware arm was refused (the Phase-0 guard). The HOLDING RUNTIME (park →
+# proceed) only works from 1.17.0, behind the SAME capability string, so the capability alone can't
+# tell a 1.16.0 unit apart from a runnable one. `hold_runtime_supported` also checks the version so
+# a 1.16.0 unit gets a clean client-side block instead of an agent-side refusal. See §11.
+SEQUENCE_HOLD_RUNTIME_MIN_VERSION = (1, 17, 0)
+
+
+def _agent_version_tuple(version: str) -> tuple:
+    """Parse an agent version string ("1.17.0") to an int tuple for comparison. Stops at the
+    first non-numeric component and returns () for a blank/unparseable version (treated as
+    "unknown" by the caller)."""
+    parts: list = []
+    for chunk in str(version or "").split("."):
+        chunk = chunk.strip()
+        if not chunk.isdigit():
+            break
+        parts.append(int(chunk))
+    return tuple(parts)
+
+
+def hold_runtime_supported(client) -> bool:
+    """True iff the unit's agent both advertises `sequence-hold` AND runs the Phase-1 HOLDING
+    RUNTIME (agent >= 1.17.0), so a hold-aware arm will actually park at the Hold rather than be
+    refused. An unknown/blank version (e.g. before /info has been read) is treated as new enough
+    when the capability is present — the capability stays authoritative where the version is
+    simply unavailable — so this never blocks a real, capable unit. docs/sequence-hold-step.md §11."""
+    try:
+        if not client.supports(SEQUENCE_HOLD_CAPABILITY):
+            return False
+    except Exception:  # noqa: BLE001 — a client without a usable supports() can't run a Hold
+        return False
+    ver = _agent_version_tuple(getattr(client, "agent_version", "") or "")
+    if not ver:                     # version unknown → capability is authoritative
+        return True
+    ver = ver + (0,) * (len(SEQUENCE_HOLD_RUNTIME_MIN_VERSION) - len(ver))   # pad "1.17" → (1,17,0)
+    return ver >= SEQUENCE_HOLD_RUNTIME_MIN_VERSION
+
 # ── Geometry constants ───────────────────────────────────────────────────────
 SCALE = 3.0            # px per second in the warm-up / cool-down zones
 MIDDLE_GAP = 220       # base px between ON-AIR and OFF-AIR (the on-air band)

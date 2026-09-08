@@ -55,7 +55,8 @@ from .sequence_log_dialog import SequenceLogDialog
 from .theme import Palette
 from .hold_edit_dialog import HoldEditDialog
 from .timeline_model import (
-    SEQUENCE_HOLD_CAPABILITY, SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY)
+    SEQUENCE_HOLD_CAPABILITY, SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY,
+    hold_runtime_supported)
 from .widgets import StatusPill, natural_key
 
 _SEQ_FILTER_ALL = "__all__"
@@ -481,10 +482,12 @@ class SequencesPanel(QWidget):
 
     def _arm_hold_aware(self, seq: m.Sequence, hold_off: float) -> None:
         """Arm a Hold-bearing sequence from the Library/operator-present surface: the
-        run pauses at the Hold and awaits Proceed. Gated on the unit's agent advertising
-        `sequence-hold` (a safety gate — an older agent would refuse the arm, or worse,
-        run straight through with RF stuck). See docs/sequence-hold-step.md §6.2/§11."""
-        if not self._supports(SEQUENCE_HOLD_CAPABILITY):
+        run pauses at the Hold and awaits Proceed. Gated on the unit's agent running the
+        Hold RUNTIME (advertises `sequence-hold` AND is >= 1.17.0, via hold_runtime_supported):
+        1.16.0 advertised the capability for the data model only and refuses a hold-aware arm,
+        so the version check turns that into a clean client-side block rather than an
+        agent-side refusal. See docs/sequence-hold-step.md §6.2/§11."""
+        if not self._hold_runtime_ok():
             QMessageBox.warning(
                 self, "Hold not supported here",
                 f"“{seq.name or seq.id}” contains a Hold (an operator-gated pause), but "
@@ -609,6 +612,15 @@ class SequencesPanel(QWidget):
         except Exception:  # noqa: BLE001
             return False
         return bool(getattr(client, "supports", lambda _c: False)(capability))
+
+    def _hold_runtime_ok(self) -> bool:
+        """True iff this unit's agent runs the Hold RUNTIME (sequence-hold + >= 1.17.0), so a
+        hold-aware arm parks rather than being refused (docs/sequence-hold-step.md §11)."""
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001
+            return False
+        return hold_runtime_supported(client)
 
     def _on_stop(self, seq: m.Sequence) -> None:
         run_ids = [r.id for r in self._runs

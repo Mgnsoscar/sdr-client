@@ -54,6 +54,39 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — Hold step runnable in PLANS (single-unit, operator-present): COMPLETE (branch `claude/hold-step-phase-0-wwwxf7`, client-first)
+A deliberate scope expansion of the plan/schedule no-op (docs/sequence-hold-step.md §7/§12): a Hold is
+now **authorable in the plan editor** and **actually pauses when a plan is armed directly for a SINGLE
+unit** (operator-present). Multi-unit plans (cross-unit Hold sync deferred — §10) and the unattended
+schedule STILL compile the Hold out, with the up-front notice. Client-first — the agent already runs the
+runtime (1.19.0) and needs no code change (`arm` accepts any `hold_aware` arm, plan-stamped or not, and
+refuses only a Hold armed WITHOUT `hold_aware`). Pieces:
+- **Authoring** (`ui/plan_editor.py`): dropped `set_hold_authoring(False)` in `PlanItemDialog` — `+ Hold`
+  is available in the plan-local sequence editor (it round-trips via the shared `TimelineEditor`). The
+  ARM path, not the editor, decides whether a Hold pauses.
+- **Runtime gate** (`ui/timeline_model.py`): `hold_runtime_supported(client)` = advertises `sequence-hold`
+  AND agent ≥ **1.17.0** (`SEQUENCE_HOLD_RUNTIME_MIN_VERSION`, `_agent_version_tuple`). The cap is
+  advertised from 1.16.0 (data model only — a 1.16.0 agent REFUSES a hold-aware arm), so the version
+  check turns a would-be agent-side refusal into a clean client-side block. Unknown/blank version →
+  capability is authoritative (never blocks a real capable unit). The Library gate
+  (`sequences_panel._arm_hold_aware` → `_hold_runtime_ok`) now uses it too.
+- **Direct plan arm** (`ui/plans_tab.py`): `_hold_aware_plan_item(plan, resolved, supports_runtime)` is
+  eligible iff EXACTLY ONE item, its resolved steps hold, and the unit runs the runtime → `_arm_plan(…,
+  hold_aware=True, max_hold_s)` sends the Hold VERBATIM (open-ended, no collapse), via a Library-style
+  ArmDialog (`_arm_hold_aware_plan`: body note, `show_stop=False`, `max_hold_default_s`). A steps-less
+  item's legacy overrides are baked into inline steps (the agent refuses `step_overrides` with a Hold).
+  Any other Hold-bearing plan collapses + the (reason-tailored) notice. `_arm_scheduled`
+  (`ui/timeline_tab.py`) is untouched — still collapses.
+- **Holding plan run row** (`_PlanRow` + `PlansTab`): `_ACTIVE` now includes HOLDING; while HOLDING the
+  Arm button becomes **Proceed**, a RUNNING hold-aware not-yet-held run offers **Hold now**, and a
+  HOLDING run offers **Edit…** (gated per-unit on `sequence-hold-now`/`sequence-hold-edit`).
+  `_on_proceed`/`_on_hold_now`/`_on_edit_wb`/`_hold_status_text` mirror `sequences_panel`; `_wb_edits`
+  holds per-run window-B edits sent as `ProceedRequest.steps` on the next Proceed.
+Tests: `tests/test_plan_hold_arm.py` (runtime gate, plan-local + PlanItem round-trip, `+ Hold` enabled in
+the plan-item dialog, eligibility 4 cases, hold-aware arm sends the Hold verbatim + override-baking,
+multi-unit still collapses, Proceed/Hold-now/Edit row controls). Suite 818 → 833. Agent added one
+regression test only (see sdr-agent CLAUDE.md).
+
 ## Current state — Hold-step UI fixes: ramp/duration Hold-anchoring + window-B timing labels: COMPLETE (branch `claude/hold-step-phase-0-wwwxf7`, client-only)
 Two owner-reported gaps in the Hold authoring UI (the runtime + canvas already resolved `anchor="hold"`;
 these were the missing authoring surfaces + a wrong label). Client-only; drift-guarded files untouched.
