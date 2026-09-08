@@ -36,6 +36,10 @@ SEQUENCE_HOLD_CAPABILITY = "sequence-hold"
 # Agent >= 1.18.0 exposes POST /sequence-runs/{id}/hold-now (Fast-Forward-to-Hold, Phase 3b):
 # jump a RUNNING hold-aware run straight to its Hold. The client gates the "Hold now" button on it.
 SEQUENCE_HOLD_NOW_CAPABILITY = "sequence-hold-now"
+# Agent >= 1.19.0 honours ProceedRequest.steps (edit-while-holding, Phase 3c): proceed re-resolves
+# window B from the operator's edited sequence. The client gates its window-B edit UI on it (a
+# ≤1.18 agent would silently ignore the edit and run the stored window B).
+SEQUENCE_HOLD_EDIT_CAPABILITY = "sequence-hold-edit"
 
 # ── Geometry constants ───────────────────────────────────────────────────────
 SCALE = 3.0            # px per second in the warm-up / cool-down zones

@@ -142,8 +142,25 @@ marks un-fired window-A steps skipped, `RUNNING → HOLDING`, stamps `held_actua
 hold-aware run with a pending Hold). Client-only files touched here; no drift-guarded change. Tests:
 `tests/test_hold_arm_proceed.py` (`hold_now_sequence_run` posts to `/hold-now`; the row shows "Hold
 now" only for a running hold-aware run with the capability, hidden once held or when unsupported); suite
-788 → 790 offscreen. **NEXT — Phase 3c**: edit-while-holding (the agent's `proceed` honours
-`ProceedRequest.steps` + a client window-B edit flow, §6.4).
+788 → 790 offscreen.
+
+## Current state — Hold step Phase 3c (edit-while-holding): COMPLETE — the Hold step is feature-complete (branch `claude/hold-step-phase-0-wwwxf7`, cross-repo)
+Design §6.4. While a run is HOLDING, the operator can retarget the **post-hold (window-B) steps** — e.g.
+aim the down-ramp at the −50 dBm where the receiver actually lost lock — then Proceed with the revision.
+Client: **`ui/hold_edit_dialog.py::HoldEditDialog`** hosts the same `TimelineEditor` used to author a
+sequence, loaded with the running sequence and wired to the unit (tasks/yaml/calibration); a banner
+states only post-hold steps take effect (window A has run), and OK returns the edited **full** step list
+(`result_steps`, requiring the Hold to survive). An **"Edit…"** row button (`ui/sequences_panel.py::
+_SequenceRow`) shows only on a HOLDING run when the agent advertises `sequence-hold-edit`, wired to
+`_on_edit_wb` → the dialog; the edit is held per-run in `SequencesPanel._wb_edits` and passed to
+`_on_proceed` → `_proceed_run(..., steps=edited)` → `ProceedRequest.steps` (`_rebuild` prunes it once
+the run leaves HOLDING — applied or aborted). New constant `SEQUENCE_HOLD_EDIT_CAPABILITY`. Agent
+(`sdr-agent` 1.19.0, capability `sequence-hold-edit`): `proceed` validates `req.steps` and re-extracts
+window B from it (window A ignored — already fired); a ≤1.18 agent ignores `req.steps`, hence the gate.
+Client-only files here; drift-guarded files untouched. Tests: `tests/test_hold_arm_proceed.py` (the
+"Edit…" button shows only while holding + supported; `_proceed_run` carries/omits edited steps;
+`HoldEditDialog` returns the edited full list with the Hold + window B intact); suite 790 → 793
+offscreen. Phases 0–3 of the Hold step (design `docs/sequence-hold-step.md`) are now all shipped.
 
 ## Current state — Tune form renders live-sourced derived readouts: COMPLETE (branch `claude/l1c-sidelobes-slider`)
 `ui/live_tune_dialog.py` `_prepare_specs` used to route EVERY non-live spec — derived fields

@@ -53,7 +53,9 @@ from .scope_selector import scope_chip, confirm_delete
 from .sequence_editor import SequenceEditorDialog
 from .sequence_log_dialog import SequenceLogDialog
 from .theme import Palette
-from .timeline_model import SEQUENCE_HOLD_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY
+from .hold_edit_dialog import HoldEditDialog
+from .timeline_model import (
+    SEQUENCE_HOLD_CAPABILITY, SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY)
 from .widgets import StatusPill, natural_key
 
 _SEQ_FILTER_ALL = "__all__"
@@ -142,12 +144,15 @@ def _arm_at(client, seq: m.Sequence, t0_laptop: datetime,
     return client.arm_sequence(seq.id, req)
 
 
-def _proceed_run(client, run_id: str, resume_laptop: datetime) -> m.SequenceRun:
+def _proceed_run(client, run_id: str, resume_laptop: datetime,
+                 steps: Optional[List[m.SequenceStep]] = None) -> m.SequenceRun:
     """Resume a HOLDING run at the operator-chosen instant, translating it to the
-    agent's clock (like _arm_at). The agent resolves window B relative to it. Worker
-    thread."""
+    agent's clock (like _arm_at). The agent resolves window B relative to it. When
+    `steps` is given (edit-while-holding), the agent re-resolves window B from that
+    edited sequence instead of the one stored at arm. Worker thread."""
     resume_at = resume_laptop + timedelta(seconds=client.clock_offset_s())
-    return client.proceed_sequence_run(run_id, m.ProceedRequest(proceed_at=resume_at.isoformat()))
+    return client.proceed_sequence_run(
+        run_id, m.ProceedRequest(proceed_at=resume_at.isoformat(), steps=steps))
 
 
 def _abort_runs(client, run_ids: List[str]) -> List[Result]:
@@ -207,7 +212,7 @@ class _SequenceRow(QFrame):
                  on_start, on_stop, on_edit, on_delete, on_log,
                  can_edit: bool = True, can_run: bool = True,
                  show_scope: bool = False, on_proceed=None, on_hold_now=None,
-                 hold_now_ok: bool = False):
+                 hold_now_ok: bool = False, on_edit_wb=None, edit_wb_ok: bool = False):
         super().__init__()
         self.seq = seq
         self.setObjectName("card")
@@ -218,6 +223,8 @@ class _SequenceRow(QFrame):
                   and active_run.state == m.SequenceState.RUNNING
                   and getattr(active_run, "hold_aware", False)
                   and active_run.held_actual is None)
+        # While HOLDING, the post-hold (window-B) steps can be edited before proceeding.
+        can_edit_wb = holding and edit_wb_ok and on_edit_wb is not None
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
@@ -274,9 +281,15 @@ class _SequenceRow(QFrame):
         self._hold_now.setToolTip("Jump to the Hold now — skip the rest of the run-up and hold the "
                                   "signal at its current value (then Proceed when ready)")
         self._hold_now.setVisible(can_ff)
+        # Edit-while-holding: retarget the post-hold steps before proceeding.
+        self._edit_wb = QPushButton("Edit…")
+        self._edit_wb.setToolTip("Edit the post-hold steps (the down-ramp / cool-down) before you "
+                                 "Proceed — e.g. retarget the down-ramp to where lock was lost")
+        self._edit_wb.setVisible(can_edit_wb)
         for b in (self._start, self._stop, self._log, self._edit, self._delete):
             b.setFixedWidth(66)
         self._hold_now.setFixedWidth(72)
+        self._edit_wb.setFixedWidth(60)
         self._start.setToolTip(
             "Proceed — schedule the post-hold window (the down-ramp) and resume the run"
             if holding else
@@ -300,11 +313,15 @@ class _SequenceRow(QFrame):
         self._delete.clicked.connect(lambda: on_delete(seq))
         if can_ff:
             self._hold_now.clicked.connect(lambda: on_hold_now(seq))
+        if can_edit_wb:
+            self._edit_wb.clicked.connect(lambda: on_edit_wb(seq))
         shown = []
         if can_run:
             shown += [self._start]
             if can_ff:
                 shown.append(self._hold_now)     # only while a run-up is in progress
+            if can_edit_wb:
+                shown.append(self._edit_wb)      # only while holding
             shown += [self._stop, self._log]
         if can_edit:
             shown += [self._edit, self._delete]
@@ -326,6 +343,9 @@ class SequencesPanel(QWidget):
         self._active_type = DEFAULT_UNIT_TYPE   # library view: set by the unit-type selector
         self._sequences: List[m.Sequence] = []
         self._runs: List[m.SequenceRun] = []
+        # Per-run edited window-B steps (edit-while-holding): run_id -> full edited step list,
+        # sent as ProceedRequest.steps on the next Proceed and cleared once applied.
+        self._wb_edits: dict = {}
         self._seq_loaded = False
         self._runs_pending = False
         self._export_path: Optional[str] = None
@@ -509,12 +529,32 @@ class SequencesPanel(QWidget):
             self._set_status("proceed cancelled")
             return
         resume = dlg.on_air_at()
+        edited = self._wb_edits.get(run.id)          # edit-while-holding, if any
         client = self.hub.fleet.get(self.hostname)
-        self._set_status(f"proceeding {seq.name or seq.id}…")
+        self._set_status(f"proceeding {seq.name or seq.id}"
+                         + (" with edited post-hold steps…" if edited else "…"))
         self.hub.run_async(
             f"seq_proceed:{self.hostname}:{seq.id}",
-            lambda: _proceed_run(client, run.id, resume),
+            lambda: _proceed_run(client, run.id, resume, steps=edited),
         )
+
+    def _on_edit_wb(self, seq: m.Sequence) -> None:
+        """Edit-while-holding: revise the post-hold (window-B) steps of a HOLDING run,
+        held per-run until the next Proceed applies them (docs/sequence-hold-step.md §6.4)."""
+        run = next((r for r in self._runs if r.sequence_id == seq.id
+                    and r.state == m.SequenceState.HOLDING), None)
+        if run is None:
+            self._set_status("no holding run to edit", error=True)
+            self._refresh_runs()
+            return
+        # Seed the editor with any pending edit for this run, else the stored definition.
+        pending = self._wb_edits.get(run.id)
+        seed = seq.model_copy(update={"steps": pending}) if pending else seq
+        dlg = HoldEditDialog(self.hub, self.hostname, seed, parent=self.window())
+        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.result_steps is None:
+            return
+        self._wb_edits[run.id] = dlg.result_steps
+        self._set_status("post-hold steps edited — Proceed to apply")
 
     def _on_hold_now(self, seq: m.Sequence) -> None:
         """Fast-Forward-to-Hold: jump a RUNNING hold-aware run straight to its Hold now,
@@ -802,6 +842,12 @@ class SequencesPanel(QWidget):
         return None
 
     def _rebuild(self) -> None:
+        # Drop any edit-while-holding revisions for runs that are no longer HOLDING
+        # (proceeded — the edit was applied — or aborted).
+        if self._wb_edits:
+            holding_ids = {r.id for r in self._runs if r.state == m.SequenceState.HOLDING}
+            self._wb_edits = {rid: v for rid, v in self._wb_edits.items() if rid in holding_ids}
+
         while self._list.count():
             item = self._list.takeAt(0)
             w = item.widget()
@@ -846,6 +892,8 @@ class SequencesPanel(QWidget):
                 show_scope=self.can_edit, on_proceed=self._on_proceed,
                 on_hold_now=self._on_hold_now,
                 hold_now_ok=self.can_run and self._supports(SEQUENCE_HOLD_NOW_CAPABILITY),
+                on_edit_wb=self._on_edit_wb,
+                edit_wb_ok=self.can_run and self._supports(SEQUENCE_HOLD_EDIT_CAPABILITY),
             ))
             shown += 1
         if shown == 0:

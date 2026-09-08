@@ -319,3 +319,77 @@ def test_holding_run_row_shows_proceed_button():
     assert row._stop.isEnabled() is True                     # holding is still "active"
     row._start.click()
     assert proceeds["n"] == 1
+
+
+# ── Edit-while-holding (Phase 3c, §6.4) ──────────────────────────────────────
+
+def test_edit_while_holding_row_shows_edit_only_when_holding_and_supported():
+    held = m.SequenceRun(id="r", sequence_id="s1", sequence_name="LoL test",
+                         state=m.SequenceState.HOLDING, on_air_at="2030-01-01T00:00:00+00:00",
+                         hold_aware=True, held_actual="2030-01-01T00:02:00+00:00")
+    edits = {"n": 0}
+    row = sp._SequenceRow(_hold_seq(), held, on_start=lambda s: None, on_stop=lambda s: None,
+                          on_edit=lambda s: None, on_delete=lambda s: None, on_log=lambda s: None,
+                          can_run=True, can_edit=False, on_proceed=lambda s: None,
+                          on_edit_wb=lambda s: edits.__setitem__("n", edits["n"] + 1),
+                          edit_wb_ok=True)
+    assert row._edit_wb.isVisibleTo(row) is True
+    row._edit_wb.click()
+    assert edits["n"] == 1
+
+    # Hidden without the capability, and on a run that isn't holding.
+    row2 = sp._SequenceRow(_hold_seq(), held, on_start=lambda s: None, on_stop=lambda s: None,
+                           on_edit=lambda s: None, on_delete=lambda s: None, on_log=lambda s: None,
+                           can_run=True, can_edit=False, on_proceed=lambda s: None,
+                           on_edit_wb=lambda s: None, edit_wb_ok=False)
+    assert row2._edit_wb.isVisibleTo(row2) is False
+    running = held.model_copy(update={"state": m.SequenceState.RUNNING, "held_actual": None})
+    row3 = sp._SequenceRow(_hold_seq(), running, on_start=lambda s: None, on_stop=lambda s: None,
+                           on_edit=lambda s: None, on_delete=lambda s: None, on_log=lambda s: None,
+                           can_run=True, can_edit=False, on_edit_wb=lambda s: None, edit_wb_ok=True)
+    assert row3._edit_wb.isVisibleTo(row3) is False
+
+
+def test_proceed_run_carries_edited_steps():
+    c = _Client()
+    edited = _hold_seq().steps                               # the edited full step list
+    sp._proceed_run(c, "run-9", datetime(2030, 1, 1, tzinfo=timezone.utc), steps=edited)
+    _run_id, req = c.proceeded[0]
+    assert req.steps is not None and len(req.steps) == len(edited)
+    # And no edit → steps stays None (the agent uses the window B stored at arm).
+    sp._proceed_run(c, "run-9", datetime(2030, 1, 1, tzinfo=timezone.utc))
+    assert c.proceeded[1][1].steps is None
+
+
+def test_hold_edit_dialog_returns_the_edited_steps():
+    from ui.hold_edit_dialog import HoldEditDialog
+
+    class _EditHub(QObject):
+        task_done = pyqtSignal(str, object)
+
+        def __init__(self):
+            super().__init__()
+            client = type("C", (), {
+                "list_tasks": lambda self_: [type("T", (), {"name": "tx"})()],
+                "get_tasks_yaml": lambda self_: "tasks:\n  - name: tx\n    command: [python3, tx.py]\n",
+                "get_calibration": lambda self_: {"unit_type": "broadcaster", "valid": True,
+                                                  "signals": {}},
+            })()
+            self.fleet = type("F", (), {"get": lambda self_, h: client})()
+
+        def run_async(self, label, fn):
+            try:
+                res = fn()
+            except Exception as exc:                         # noqa: BLE001
+                res = exc
+            self.task_done.emit(label, res)
+
+    dlg = HoldEditDialog(_EditHub(), "unit", _hold_seq())
+    _app.processEvents()
+    # Retarget the window-B tune, then accept → the edited full step list comes back.
+    steps = dlg._timeline.steps()
+    assert any(s.action == m.StepAction.HOLD for s in steps)   # the Hold survives the round-trip
+    dlg._accept()
+    assert dlg.result_steps is not None
+    assert any(s.action == m.StepAction.HOLD for s in dlg.result_steps)
+    assert any(s.anchor == "hold" for s in dlg.result_steps)   # window B present
