@@ -126,9 +126,24 @@ path). Client-only; no agent/scripts change; drift-guarded files untouched. Test
 `tests/test_achievability_hold_boundary.py` (held density clamps on a window-B widen, in-range stays
 silent, the hold orders window B after window A, a window-B down-ramp clamps at its fire-time width, the
 deploy precompute injects a window-B `--bw` change, a lone marker doesn't perturb a normal walk); suite
-780 → 788 offscreen. **NEXT — Phase 3b/3c** (cross-repo, need `sdr-agent`): Fast-Forward-to-Hold
-(`POST /sequence-runs/{id}/hold-now` + a "Hold now" button, design §5.4) and edit-while-holding (the
-agent's `proceed` honours `ProceedRequest.steps` + a client window-B edit flow, §6.4).
+780 → 788 offscreen.
+
+## Current state — Hold step Phase 3b (Fast-Forward-to-Hold): COMPLETE (branch `claude/hold-step-phase-0-wwwxf7`, cross-repo)
+Design §5.4. A **"Hold now"** button jumps a RUNNING hold-aware run straight to its Hold, skipping the
+rest of the run-up (the up-ramp stops emitting; the signal holds its current value) — so the test
+reaches the interesting state without waiting out a ramp whose outcome is already known. Client
+(`sdr-client`): `api/client.py::hold_now_sequence_run` (`POST /sequence-runs/{id}/hold-now`, no body);
+`SEQUENCE_HOLD_NOW_CAPABILITY = "sequence-hold-now"` (`ui/timeline_model.py`); a **"Hold now"** button
+on the sequence row (`ui/sequences_panel.py::_SequenceRow`) shown only for a RUNNING hold-aware
+not-yet-held run (`held_actual` None) when the agent advertises the capability, wired to `_on_hold_now`
+(a confirm, then `client.hold_now_sequence_run` → the run flips to HOLDING and the row's Proceed button
+takes over). Agent (`sdr-agent` 1.18.0, capability `sequence-hold-now`): `SequenceRunner.hold_now`
+marks un-fired window-A steps skipped, `RUNNING → HOLDING`, stamps `held_actual` (409 if not a running
+hold-aware run with a pending Hold). Client-only files touched here; no drift-guarded change. Tests:
+`tests/test_hold_arm_proceed.py` (`hold_now_sequence_run` posts to `/hold-now`; the row shows "Hold
+now" only for a running hold-aware run with the capability, hidden once held or when unsupported); suite
+788 → 790 offscreen. **NEXT — Phase 3c**: edit-while-holding (the agent's `proceed` honours
+`ProceedRequest.steps` + a client window-B edit flow, §6.4).
 
 ## Current state — Tune form renders live-sourced derived readouts: COMPLETE (branch `claude/l1c-sidelobes-slider`)
 `ui/live_tune_dialog.py` `_prepare_specs` used to route EVERY non-live spec — derived fields

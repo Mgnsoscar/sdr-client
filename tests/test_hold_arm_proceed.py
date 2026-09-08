@@ -172,6 +172,21 @@ def test_client_proceed_posts_to_the_run(monkeypatch):
     assert run.state == m.SequenceState.RUNNING
 
 
+def test_client_hold_now_posts_to_the_run(monkeypatch):
+    c = AgentClient("unit_x", addresses=["10.0.0.5"])
+    seen = {}
+
+    def fake_request(method, path, json=None, **k):
+        seen.update(method=method, path=path)
+        return {"id": "r5", "sequence_id": "s1", "sequence_name": "n",
+                "on_air_at": "2030-01-01T00:00:00+00:00", "state": "holding"}
+
+    monkeypatch.setattr(c, "_request", fake_request)
+    run = c.hold_now_sequence_run("r5")
+    assert seen["method"] == "POST" and seen["path"] == "/sequence-runs/r5/hold-now"
+    assert run.state == m.SequenceState.HOLDING
+
+
 # ── the ArmDialog serves both arm and Proceed ────────────────────────────────
 
 def test_arm_dialog_hold_variant_shows_max_hold_and_hides_stop():
@@ -255,6 +270,39 @@ def test_hold_arm_proceeds_when_supported(monkeypatch):
     p.hub._last_fn()                                         # run the queued arm
     req = client.captured[0]
     assert req.hold_aware is True and req.open_ended is True and req.max_hold_s == 900.0
+
+
+def test_running_hold_aware_row_shows_hold_now(monkeypatch):
+    from datetime import datetime, timezone
+    seq = _hold_seq()
+    running = m.SequenceRun(id="r", sequence_id="s1", sequence_name="LoL test",
+                            state=m.SequenceState.RUNNING,
+                            on_air_at="2030-01-01T00:00:00+00:00",
+                            hold_aware=True, held_actual=None)
+    ff = {"n": 0}
+    row = sp._SequenceRow(seq, running, on_start=lambda s: None, on_stop=lambda s: None,
+                          on_edit=lambda s: None, on_delete=lambda s: None, on_log=lambda s: None,
+                          can_run=True, can_edit=False,
+                          on_hold_now=lambda s: ff.__setitem__("n", ff["n"] + 1), hold_now_ok=True)
+    assert row._hold_now.isVisibleTo(row) is True and row._hold_now.isEnabled() is True
+    row._hold_now.click()
+    assert ff["n"] == 1
+
+    # Once HOLDING (held_actual set), there's nothing to fast-forward → hidden.
+    held = running.model_copy(update={"state": m.SequenceState.HOLDING,
+                                      "held_actual": "2030-01-01T00:02:00+00:00"})
+    row2 = sp._SequenceRow(seq, held, on_start=lambda s: None, on_stop=lambda s: None,
+                           on_edit=lambda s: None, on_delete=lambda s: None, on_log=lambda s: None,
+                           can_run=True, can_edit=False, on_proceed=lambda s: None,
+                           on_hold_now=lambda s: None, hold_now_ok=True)
+    assert row2._hold_now.isVisibleTo(row2) is False
+
+    # Agent lacks the capability → hidden even while the run-up is in progress.
+    row3 = sp._SequenceRow(seq, running, on_start=lambda s: None, on_stop=lambda s: None,
+                           on_edit=lambda s: None, on_delete=lambda s: None, on_log=lambda s: None,
+                           can_run=True, can_edit=False, on_hold_now=lambda s: None,
+                           hold_now_ok=False)
+    assert row3._hold_now.isVisibleTo(row3) is False
 
 
 def test_holding_run_row_shows_proceed_button():

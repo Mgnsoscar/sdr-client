@@ -783,6 +783,14 @@ class AgentClient:
         return m.SequenceRun(**self._request(
             "POST", f"/sequence-runs/{run_id}/proceed", json=request.model_dump()))
 
+    def hold_now_sequence_run(self, run_id: str) -> m.SequenceRun:
+        """Fast-Forward-to-Hold: jump a RUNNING hold-aware run straight to its Hold now,
+        skipping the rest of window A (the up-ramp stops; the task holds its current live
+        value). Returns the run as HOLDING. 409 if it is not a RUNNING hold-aware run with
+        a pending Hold. Needs agent capability `sequence-hold-now` (docs/sequence-hold-step.md
+        §5.4)."""
+        return m.SequenceRun(**self._request("POST", f"/sequence-runs/{run_id}/hold-now"))
+
     # ══════════════════════════════════════════════════════════════════════════
     # Library (deploy / snapshot the whole definition set)
     # ══════════════════════════════════════════════════════════════════════════

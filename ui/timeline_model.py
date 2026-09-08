@@ -33,6 +33,9 @@ from typing import Dict, List, Optional, Tuple
 # ui/calibration_panel.py; wiring the _supports/_blocks_on_* gate into the arm/
 # authoring UI is Phase 2 (docs/sequence-hold-step.md §11).
 SEQUENCE_HOLD_CAPABILITY = "sequence-hold"
+# Agent >= 1.18.0 exposes POST /sequence-runs/{id}/hold-now (Fast-Forward-to-Hold, Phase 3b):
+# jump a RUNNING hold-aware run straight to its Hold. The client gates the "Hold now" button on it.
+SEQUENCE_HOLD_NOW_CAPABILITY = "sequence-hold-now"
 
 # ── Geometry constants ───────────────────────────────────────────────────────
 SCALE = 3.0            # px per second in the warm-up / cool-down zones

@@ -53,7 +53,7 @@ from .scope_selector import scope_chip, confirm_delete
 from .sequence_editor import SequenceEditorDialog
 from .sequence_log_dialog import SequenceLogDialog
 from .theme import Palette
-from .timeline_model import SEQUENCE_HOLD_CAPABILITY
+from .timeline_model import SEQUENCE_HOLD_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY
 from .widgets import StatusPill, natural_key
 
 _SEQ_FILTER_ALL = "__all__"
@@ -206,12 +206,18 @@ class _SequenceRow(QFrame):
     def __init__(self, seq: m.Sequence, active_run: Optional[m.SequenceRun],
                  on_start, on_stop, on_edit, on_delete, on_log,
                  can_edit: bool = True, can_run: bool = True,
-                 show_scope: bool = False, on_proceed=None):
+                 show_scope: bool = False, on_proceed=None, on_hold_now=None,
+                 hold_now_ok: bool = False):
         super().__init__()
         self.seq = seq
         self.setObjectName("card")
         active = active_run is not None and active_run.state in _ACTIVE
         holding = active_run is not None and active_run.state == m.SequenceState.HOLDING
+        # A RUNNING hold-aware run that hasn't reached its Hold yet can be fast-forwarded.
+        can_ff = (hold_now_ok and on_hold_now is not None and active_run is not None
+                  and active_run.state == m.SequenceState.RUNNING
+                  and getattr(active_run, "hold_aware", False)
+                  and active_run.held_actual is None)
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
@@ -263,8 +269,14 @@ class _SequenceRow(QFrame):
         self._log = QPushButton("Log")
         self._edit = QPushButton("Edit")
         self._delete = QPushButton("Delete")
+        # Fast-Forward-to-Hold: jump a running hold-aware run to its Hold now.
+        self._hold_now = QPushButton("Hold now")
+        self._hold_now.setToolTip("Jump to the Hold now — skip the rest of the run-up and hold the "
+                                  "signal at its current value (then Proceed when ready)")
+        self._hold_now.setVisible(can_ff)
         for b in (self._start, self._stop, self._log, self._edit, self._delete):
             b.setFixedWidth(66)
+        self._hold_now.setFixedWidth(72)
         self._start.setToolTip(
             "Proceed — schedule the post-hold window (the down-ramp) and resume the run"
             if holding else
@@ -286,9 +298,14 @@ class _SequenceRow(QFrame):
         self._log.clicked.connect(lambda: on_log(seq))
         self._edit.clicked.connect(lambda: on_edit(seq))
         self._delete.clicked.connect(lambda: on_delete(seq))
+        if can_ff:
+            self._hold_now.clicked.connect(lambda: on_hold_now(seq))
         shown = []
         if can_run:
-            shown += [self._start, self._stop, self._log]
+            shown += [self._start]
+            if can_ff:
+                shown.append(self._hold_now)     # only while a run-up is in progress
+            shown += [self._stop, self._log]
         if can_edit:
             shown += [self._edit, self._delete]
         for b in shown:
@@ -497,6 +514,30 @@ class SequencesPanel(QWidget):
         self.hub.run_async(
             f"seq_proceed:{self.hostname}:{seq.id}",
             lambda: _proceed_run(client, run.id, resume),
+        )
+
+    def _on_hold_now(self, seq: m.Sequence) -> None:
+        """Fast-Forward-to-Hold: jump a RUNNING hold-aware run straight to its Hold now,
+        skipping the rest of the run-up. See docs/sequence-hold-step.md §5.4."""
+        run = next((r for r in self._runs if r.sequence_id == seq.id
+                    and r.state == m.SequenceState.RUNNING
+                    and getattr(r, "hold_aware", False) and r.held_actual is None), None)
+        if run is None:
+            self._set_status("no running hold-aware run to fast-forward", error=True)
+            self._refresh_runs()
+            return
+        if QMessageBox.question(
+            self, "Hold now",
+            f"Jump “{seq.name or seq.id}” to its Hold now?\n\nThe rest of the run-up is skipped and "
+            f"the signal holds its CURRENT value until you Proceed.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+            return
+        client = self.hub.fleet.get(self.hostname)
+        self._set_status(f"holding {seq.name or seq.id} now…")
+        self.hub.run_async(
+            f"seq_holdnow:{self.hostname}:{seq.id}",
+            lambda: client.hold_now_sequence_run(run.id),
         )
 
     def _hold_status_text(self, run: m.SequenceRun) -> str:
@@ -728,6 +769,13 @@ class SequencesPanel(QWidget):
             else:
                 self._set_status("proceeding — post-hold window scheduled")
             self._refresh_runs()
+        elif op == "seq_holdnow":
+            if isinstance(result, Exception):
+                self._set_status("hold-now failed", error=True)
+                QMessageBox.warning(self, "Could not fast-forward to the Hold", str(result))
+            else:
+                self._set_status("holding — fast-forwarded to the Hold")
+            self._refresh_runs()
         elif op == "seq_stop":
             if isinstance(result, list):
                 bad = [(rid, e) for rid, e in result if e is not None]
@@ -796,6 +844,8 @@ class SequencesPanel(QWidget):
                 on_edit=self._on_edit, on_delete=self._on_delete,
                 on_log=self._on_log, can_edit=self.can_edit, can_run=self.can_run,
                 show_scope=self.can_edit, on_proceed=self._on_proceed,
+                on_hold_now=self._on_hold_now,
+                hold_now_ok=self.can_run and self._supports(SEQUENCE_HOLD_NOW_CAPABILITY),
             ))
             shown += 1
         if shown == 0:
