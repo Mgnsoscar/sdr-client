@@ -19,6 +19,21 @@ QT_QPA_PLATFORM=offscreen python3 -m pytest -q        # ~556 tests, headless Qt
 ```
 `QT_QPA_PLATFORM=offscreen` is **required** — tests instantiate real Qt widgets.
 
+## Run it live, headless (real client + agent, no hardware)
+Drive the real client against a live local `sdr-agent`, no unit and no monitor — full recipe + gotchas in
+**`../sdr-agent/docs/local-integration-run.md`**. Start the agent first (`../sdr-agent/deploy/run_local.sh`,
+backgrounded), then:
+```bash
+bash tools/run_local.sh                                       # client headless (Qt offscreen)
+python3 tools/screenshot.py --tab units --out /tmp/units.png  # …or a one-shot PNG (builds its own client)
+```
+Both write a scratch `units.yaml` into `/tmp/sdr-local/client-data` (never the repo). Two gotchas that
+bite: (1) the client DROPS loopback/colon addresses (`config._parse_unit`), so `units.yaml` must point at
+a **bare host IP, no port, not `127.*`** — the helpers use `hostname -I`; (2) `SDR_CLIENT_DATA_DIR` is
+captured at import (`config.DEFAULT_UNITS_FILE`), so `screenshot.py` sets it BEFORE importing `paths`/
+`config`. A connected client shows "clocks: synced ✓" + the unit **online**; `sdr: none` is expected
+(no radio).
+
 ## Cross-repo invariants (do not break)
 - **Drift guard (enforced by `sdr-agent/tests/test_shared_source_drift.py`):**
   `api/argspec.py` and `api/ramp.py` MUST stay **byte-identical** to `sdr-agent/agent/argspec.py`
