@@ -169,11 +169,14 @@ def effective_anchor_offset(item, h_off: Optional[float]) -> Tuple[str, float]:
     (`anchor="hold"`) is placed as if start-anchored at `hold_offset + its offset`
     (the hold sits at `hold_offset` on the on-air side, and window B flows on from
     there); every other item keeps its own anchor/offset. The stored item keeps its
-    real `anchor="hold"` — this mapping is purely for drawing, never for round-trip."""
+    real `anchor="hold"` — this mapping is purely for drawing, never for round-trip.
+    An ORPHANED hold anchor (no Hold on the timeline, `h_off` is None — an invalid state
+    that `validate()` rejects at save) is placed start-side at its own offset, so it draws
+    sanely on the on-air side rather than jumping to off-air."""
     anchor = getattr(item, "anchor", "start")
     off = float(getattr(item, "offset", 0.0))
-    if anchor == "hold" and h_off is not None:
-        return "start", h_off + off
+    if anchor == "hold":
+        return "start", (h_off or 0.0) + off
     return anchor, off
 
 
@@ -544,18 +547,28 @@ def _args_to_values(args: List[str], flag_to_dest: Dict[str, str]) -> Dict[str, 
     return out
 
 
-def _carry_order_key(it) -> Tuple[int, float]:
-    """A best-effort absolute-order key for carrying parameter state forward along one
-    task's items. Start-anchored items (a bar's start, a start-anchored tune) order by
-    their on-air offset; stop-anchored items happen near the end, so they sort after every
-    start-anchored one. (The on-air window length isn't known at author time, so start- and
-    stop-anchored offsets can't be interleaved exactly — this orders the common case, a
-    series of start-anchored steps, correctly.)"""
-    anchor = getattr(it, "anchor", "start")
-    if it.kind == "bar":
+def carry_order_key(anchor: str, offset: float, h_off: Optional[float]) -> Tuple[int, float]:
+    """Fire-order key for carrying parameter state forward, HOLD-boundary aware. Three phases
+    so window B is replayed after window A: window A start-anchored work (phase 0, by on-air
+    offset), then window B — a hold-anchored step (phase 1, at ``hold_offset + its offset``,
+    so it inherits the operating point held across the hold) then stop/off-air work (phase 2).
+    ``h_off`` is the timeline's hold offset (None when there's no Hold — the pre-hold behaviour,
+    with stop-anchored steps still after start ones)."""
+    if anchor == "hold" and h_off is not None:
+        return (1, h_off + offset)
+    if anchor == "stop":
+        return (2, offset)
+    return (0, offset)
+
+
+def _carry_order_key(it, h_off: Optional[float] = None) -> Tuple[int, float]:
+    """``carry_order_key`` for a timeline item. A duration bar starts the task (phase 0 at its
+    start offset); a run/tune/ramp keys off its anchor + offset (window-B steps ordered past the
+    hold when ``h_off`` is given)."""
+    if getattr(it, "kind", None) == "bar":
         return (0, float(getattr(it, "start_offset", 0.0)))
-    off = float(getattr(it, "offset", 0.0))
-    return (1, off) if anchor == "stop" else (0, off)
+    return carry_order_key(getattr(it, "anchor", "start"),
+                           float(getattr(it, "offset", 0.0)), h_off)
 
 
 def sequence_effective_values(items, task: str, base_args: List[str], specs: List[dict],
@@ -576,10 +589,11 @@ def sequence_effective_values(items, task: str, base_args: List[str], specs: Lis
     state = _args_to_values(base_args or [], flag_to_dest)
     mine = [it for it in items if getattr(it, "task_name", None) == task
             and getattr(it, "uid", None) != target_uid]
+    h_off = hold_offset(items)                          # place window B after window A
     if target_key is None:
-        target_key = (1, float("inf"))                 # no anchor info → replay all priors
-    for it in sorted(mine, key=_carry_order_key):
-        if _carry_order_key(it) >= target_key:
+        target_key = (float("inf"), float("inf"))      # no anchor info → replay all priors
+    for it in sorted(mine, key=lambda it: _carry_order_key(it, h_off)):
+        if _carry_order_key(it, h_off) >= target_key:
             continue
         if it.kind == "bar":
             if getattr(it, "replace_args", True):

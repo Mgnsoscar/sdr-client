@@ -875,6 +875,9 @@ class SequencesPanel(QWidget):
         seqs = sorted(self._sequences, key=lambda s: natural_key(s.name or s.id))
         active_n = 0
         shown = 0
+        # The two Hold capabilities are per-unit — resolve them once, not per row.
+        hold_now_ok = self.can_run and self._supports(SEQUENCE_HOLD_NOW_CAPABILITY)
+        edit_wb_ok = self.can_run and self._supports(SEQUENCE_HOLD_EDIT_CAPABILITY)
         for seq in seqs:
             if want != _SEQ_FILTER_ALL and not m.applies_to_type(seq.types, want):
                 continue
@@ -890,10 +893,8 @@ class SequencesPanel(QWidget):
                 on_edit=self._on_edit, on_delete=self._on_delete,
                 on_log=self._on_log, can_edit=self.can_edit, can_run=self.can_run,
                 show_scope=self.can_edit, on_proceed=self._on_proceed,
-                on_hold_now=self._on_hold_now,
-                hold_now_ok=self.can_run and self._supports(SEQUENCE_HOLD_NOW_CAPABILITY),
-                on_edit_wb=self._on_edit_wb,
-                edit_wb_ok=self.can_run and self._supports(SEQUENCE_HOLD_EDIT_CAPABILITY),
+                on_hold_now=self._on_hold_now, hold_now_ok=hold_now_ok,
+                on_edit_wb=self._on_edit_wb, edit_wb_ok=edit_wb_ok,
             ))
             shown += 1
         if shown == 0:

@@ -54,8 +54,9 @@ def test_effective_anchor_offset_maps_window_b_to_the_hold_side():
     wb = tlm.RunItem(task_name="tx", action="tune", anchor="hold", offset=20.0)
     # A window-B item is PLACED as start-anchored at hold_offset + its own offset…
     assert tlm.effective_anchor_offset(wb, 300.0) == ("start", 320.0)
-    # …but only when a hold exists (else it keeps its own anchor).
-    assert tlm.effective_anchor_offset(wb, None) == ("hold", 20.0)
+    # …and an ORPHANED hold anchor (no Hold on the timeline — an invalid state validate()
+    # rejects) is placed start-side at its own offset, so it draws on-air (not off-air).
+    assert tlm.effective_anchor_offset(wb, None) == ("start", 20.0)
     # A normal start item is unaffected.
     run = tlm.RunItem(task_name="tx", anchor="start", offset=5.0)
     assert tlm.effective_anchor_offset(run, 300.0) == ("start", 5.0)
@@ -75,6 +76,39 @@ def test_compute_anchors_places_window_b_right_of_the_hold():
     wb_x = tlm.offset_to_x(*tlm.effective_anchor_offset(items[2], 120.0), on, off)
     assert on < hold_x < wb_x < off
     assert (off - on) > (off0 - on0)          # the band grew to hold window B
+
+
+# ── Carried-state fold across the hold (the down-ramp calibration case) ──────
+
+def test_carry_order_key_orders_window_b_after_window_a():
+    # window A (start) < window B hold < window B stop — so state is replayed in fire order.
+    ka = tlm.carry_order_key("start", 50.0, 300.0)
+    kb = tlm.carry_order_key("hold", 10.0, 300.0)    # -> (1, 310)
+    ks = tlm.carry_order_key("stop", -5.0, 300.0)    # -> (2, -5)
+    assert ka < kb < ks
+    # A hold step orders by hold_offset + its offset, so it lands after every window-A start step.
+    assert tlm.carry_order_key("hold", 0.0, 300.0) > tlm.carry_order_key("start", 250.0, 300.0)
+    # No Hold present → a stray hold anchor falls back to the legacy start-phase ordering.
+    assert tlm.carry_order_key("hold", 10.0, None) == tlm.carry_order_key("start", 10.0, None)
+
+
+def test_sequence_effective_values_carries_window_a_across_the_hold():
+    # A window-A tune (--bw 5 at on-air +50) must be carried into a window-B step at hold+10,
+    # even though 50 > 10 — the down-ramp folds --power at the bandwidth HELD across the hold,
+    # not the bar baseline. (Before the fix the window-A tune was skipped as "later".)
+    specs = [{"dest": "bw", "flags": ["--bw"], "name": "bw"},
+             {"dest": "power", "flags": ["--power"], "name": "power"}]
+    bar = tlm.BarItem(task_name="tx", args=["--bw", "20", "--power", "-30"],
+                      start_offset=0.0, stop_offset=600.0)
+    wa = tlm.RunItem(task_name="tx", action="tune", anchor="start", offset=50.0, params={"bw": 5})
+    hold = _hold(300.0)
+    wb = tlm.RunItem(task_name="tx", action="tune", anchor="hold", offset=10.0,
+                     params={"power": -25}, uid=999)
+    items = [bar, wa, hold, wb]
+    state = tlm.sequence_effective_values(
+        items, "tx", ["--bw", "20", "--power", "-30"], specs, 999,
+        target_key=tlm._carry_order_key(wb, tlm.hold_offset(items)))
+    assert state["bw"] == 5.0        # carried across the hold — NOT the bar's 20
 
 
 # ── The editor canvas: paint, hit, add ───────────────────────────────────────
@@ -105,6 +139,27 @@ def test_hold_marker_paints_and_is_its_own_divider():
     # A click on the divider grabs the Hold, not the wide bar body sharing that x.
     hit = ed._canvas._hit(g["cx"], 60)
     assert hit is not None and hit[0] is hold and hit[1] == "hold_body"
+
+
+def test_dragging_a_window_b_pill_measures_offset_from_the_hold():
+    # A window-B (anchor="hold") one-shot is placed from the Hold divider, so a drag must measure
+    # its new offset from the hold — not from off-air (which produced a corrupted negative offset).
+    items = [tlm.BarItem(task_name="tx", start_offset=0, stop_offset=0),
+             _hold(100.0),
+             tlm.RunItem(task_name="tx", action="tune", anchor="hold", offset=5, params={"g": 1})]
+    ed = _editor(items)
+    c = ed._canvas
+    wb = items[2]
+    # The drag base for a window-B pill is the Hold's x, and a hold-anchored tune isn't span-clamped.
+    hold_x = c._on + c._hold_off * c._eff()
+    assert abs(c._anchor_base_x(wb) - hold_x) < 1e-6
+    assert c._clamp_tune_offset(wb, 40.0) == 40.0            # window B not clamped to the on-air span
+    # A drag to 40 s past the hold yields offset +40 (positive), and _live_relayout round-trips it.
+    target_x = hold_x + 40 * c._eff()
+    wb.offset = tlm._snap((target_x - c._anchor_base_x(wb)) / c._eff())
+    assert wb.offset == 40.0
+    c._live_relayout(wb)
+    assert abs(c._geom[wb.uid]["cx"] - target_x) < 1.0
 
 
 def test_hold_marker_owns_no_lane():

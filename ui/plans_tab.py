@@ -116,14 +116,47 @@ def plans_to_yaml(plans: List[m.Plan]) -> str:
     return yaml.safe_dump({"plans": docs}, sort_keys=False, allow_unicode=True)
 
 
+def _plan_has_hold(plan: m.Plan, seqs_by_host: Optional[dict] = None) -> bool:
+    """True if any of a plan's items resolves to a Hold-bearing sequence — a plan-local step
+    copy, or (when ``seqs_by_host`` — a ``sequences_all`` result ``{host: [Sequence]|exc}`` — is
+    supplied) the unit's STORED sequence the item references. Used for the up-front schedule /
+    plan 'contains a Hold' notice so it matches what the arm path actually collapses."""
+    for item in plan.items:
+        if item.steps:
+            if m.has_hold(item.steps):
+                return True
+            continue
+        val = (seqs_by_host or {}).get(item.hostname)
+        if isinstance(val, list):
+            stored = next((s for s in val if s.id == item.sequence_id), None)
+            if stored is not None and m.has_hold(stored.steps):
+                return True
+    return False
+
+
+def _apply_step_overrides(steps: List[m.SequenceStep],
+                          overrides: List[m.StepOverride]) -> List[m.SequenceStep]:
+    """Bake legacy per-index StepOverrides into a step list (mirrors the agent: an override at
+    index i REPLACES that step's args + replace_args). Used to preserve a steps-less item's
+    overrides when we must send explicit collapsed steps for a stored-sequence Hold."""
+    out = list(steps)
+    for ov in overrides or []:
+        if 0 <= ov.index < len(out):
+            out[ov.index] = out[ov.index].model_copy(
+                update={"args": list(ov.args), "replace_args": ov.replace_args})
+    return out
+
+
 def _collapsed_arm_steps(fleet: Fleet, item: m.PlanItem):
     """The steps to send for a plan/scheduled arm, with any Hold compiled OUT (§7). A
     plan-local copy (``item.steps``) is collapsed directly; an item with NO plan-local copy
     references the unit's STORED sequence, which is fetched and collapsed ONLY if it contains a
     Hold — so a Hold never reaches the agent without ``hold_aware`` (which the scheduled/plan
-    path never sets) and the run passes straight through, as the operator was told. Returns
-    None to fall back to the stored sequence + legacy overrides (the no-Hold case, unchanged).
-    Worker thread (best-effort: a fetch failure falls back to the stored sequence)."""
+    path never sets) and the run passes straight through, as the operator was told. The item's
+    legacy per-arg overrides are baked into the stored steps first (they address original
+    indices), so they aren't lost when we send explicit collapsed steps. Returns None to fall
+    back to the stored sequence + legacy overrides (the no-Hold case, unchanged). Worker thread
+    (best-effort: a fetch failure falls back to the stored sequence)."""
     if item.steps:
         return m.collapse_hold(item.steps)
     try:
@@ -131,7 +164,7 @@ def _collapsed_arm_steps(fleet: Fleet, item: m.PlanItem):
     except Exception:  # noqa: BLE001 — best-effort; fall back to the stored sequence as before
         return None
     if stored is not None and m.has_hold(stored.steps):
-        return m.collapse_hold(stored.steps)
+        return m.collapse_hold(_apply_step_overrides(stored.steps, item.overrides))
     return None
 
 

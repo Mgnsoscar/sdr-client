@@ -181,6 +181,44 @@ def test_arm_collapses_a_STORED_sequence_hold_with_no_plan_local_copy():
     assert req2.hold_aware is False and req2.steps is not None and not m.has_hold(req2.steps)
 
 
+def test_stored_sequence_hold_arm_preserves_legacy_overrides():
+    # A steps-less item WITH legacy overrides referencing a stored Hold-bearing sequence: the
+    # overrides must be baked into the collapsed steps (not silently dropped) since we now send
+    # explicit steps for that item.
+    from ui.plans_tab import _arm_plan
+    stored = m.Sequence(id="s1", name="stored", steps=[
+        m.SequenceStep(anchor="start", offset_s=0, action=m.StepAction.START, task_name="tx",
+                       args=["--power", "-40"]),
+        m.SequenceStep(anchor="start", offset_s=120, action=m.StepAction.HOLD, task_name=""),
+        m.SequenceStep(anchor="hold", offset_s=0, action=m.StepAction.TUNE, task_name="tx",
+                       params={"gain": 10}),
+        m.SequenceStep(anchor="stop", offset_s=0, action=m.StepAction.STOP, task_name="tx")])
+    ov = [m.StepOverride(index=0, args=["--power", "-55"], replace_args=True)]
+    plan = m.Plan(id="p", name="p", items=[
+        m.PlanItem(hostname="a", sequence_id="s1", steps=[], overrides=ov)])
+    c = _Client(stored=stored)
+    _arm_plan(_Fleet(c), plan, datetime(2030, 1, 1, tzinfo=timezone.utc), duration_s=600.0)
+    req = c.captured[0]
+    assert not m.has_hold(req.steps) and req.step_overrides == []   # collapsed, overrides baked in
+    start = next(s for s in req.steps if s.action == m.StepAction.START)
+    assert start.args == ["--power", "-55"]                         # the override survived
+
+
+def test_plan_has_hold_detects_inline_and_stored():
+    from ui.plans_tab import _plan_has_hold
+    hold = _hold_seq().steps
+    plain = [m.SequenceStep(anchor="start", offset_s=0, action=m.StepAction.START, task_name="tx"),
+             m.SequenceStep(anchor="stop", offset_s=0, action=m.StepAction.STOP, task_name="tx")]
+    # inline hold
+    assert _plan_has_hold(m.Plan(id="p", name="p", items=[
+        m.PlanItem(hostname="a", sequence_id="s1", steps=hold)])) is True
+    # stored hold surfaces only when the sequences_all result is supplied
+    ref = m.Plan(id="p", name="p", items=[m.PlanItem(hostname="a", sequence_id="s1", steps=[])])
+    assert _plan_has_hold(ref, {"a": [m.Sequence(id="s1", name="n", steps=hold)]}) is True
+    assert _plan_has_hold(ref, {}) is False                         # inline-only, no fetch → miss
+    assert _plan_has_hold(ref, {"a": [m.Sequence(id="s1", name="n", steps=plain)]}) is False
+
+
 def test_arm_of_a_stored_HOLD_FREE_sequence_falls_back_unchanged():
     # A steps-less item whose stored sequence has NO Hold must behave exactly as before: send no
     # inline steps (use the stored sequence) and keep any legacy overrides.

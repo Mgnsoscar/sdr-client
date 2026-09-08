@@ -48,7 +48,7 @@ from api import Fleet
 from api import models as m
 from state import PlanStore, ScheduleStore, new_scheduled_id
 from .plan_editor import PlanEditorDialog
-from .plans_tab import _collapsed_arm_steps
+from .plans_tab import _collapsed_arm_steps, _plan_has_hold
 from .qt_adapter import DataHub
 from .theme import Palette, mono_font
 
@@ -1407,14 +1407,22 @@ class TimelineTab(QWidget):
         hostnames = sorted({i.hostname for i in plan.items})
         self._arm_busy = True
         self._status.setText(f"pre-flight for {plan.name}…")
-        self.hub.run_async(f"tl_preflight:{entry.id}",
-                           lambda: self.hub.fleet.clock_skew(hostnames))
+        # Fetch clock skew AND each unit's sequences, so the Hold notice can also see a Hold in
+        # a STORED sequence an item references (not just plan-local step copies).
+        self.hub.run_async(
+            f"tl_preflight:{entry.id}",
+            lambda: (self.hub.fleet.clock_skew(hostnames),
+                     self.hub.fleet.sequences_all(hostnames)))
 
     def _finish_preflight(self, entry: m.ScheduledPlan, result) -> None:
         plan = self._plan_for(entry)
         if plan is None:
             return
-        max_skew = result[1] if isinstance(result, tuple) and len(result) == 2 else None
+        # result = (clock_skew_result, sequences_all_result); tolerate the old 2-tuple shape.
+        skew_result, seqs = (result if isinstance(result, tuple) and len(result) == 2
+                             and isinstance(result[0], tuple) else (result, {}))
+        max_skew = (skew_result[1] if isinstance(skew_result, tuple) and len(skew_result) == 2
+                    else None)
         start_utc, stop_utc = _to_utc(entry.start), _to_utc(entry.stop)
         s, e = _parse(entry.start), _parse(entry.stop)
         skew_note = ""
@@ -1423,9 +1431,10 @@ class TimelineTab(QWidget):
                          f"depends on synced clocks; units may differ by that much.")
         n_units = len({i.hostname for i in plan.items})
         # A Hold has no effect on the schedule (unattended): the run passes straight
-        # through it (docs/sequence-hold-step.md §7). Tell the operator up-front.
+        # through it (docs/sequence-hold-step.md §7). Tell the operator up-front — checking a
+        # plan-local step copy AND a stored sequence an item references.
         hold_note = ""
-        if any(m.has_hold(i.steps) for i in plan.items if i.steps):
+        if _plan_has_hold(plan, seqs):
             hold_note = ("\n\n⏸ This plan contains a Hold. Scheduled runs are unattended, so "
                          "the Hold is disabled here: the sequence runs straight through without "
                          "pausing (the down-ramp starts immediately after the up-ramp). Run it "

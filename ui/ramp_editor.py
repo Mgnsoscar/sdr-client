@@ -552,11 +552,14 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
 
     def _ramp_order_key(self):
         """This ramp's best-effort position on its task's timeline (mirrors
-        timeline_model._carry_order_key), so carried state comes only from earlier steps.
-        A window-filling ('both') ramp starts at on-air, so it orders like a start anchor."""
+        timeline_model.carry_order_key), so carried state comes only from earlier steps.
+        A window-filling ('both') ramp starts at on-air, so it orders like a start anchor; a
+        window-B (anchor='hold') ramp orders after window A (hold-boundary aware)."""
         anchor = self._anchor.currentData() or "start"
         off = round(float(self._offset.value()), 1)
-        return (1, off) if anchor == "stop" else (0, off)
+        items_getter = getattr(self._editor, "items", None)
+        h_off = tlm.hold_offset(items_getter()) if items_getter is not None else None
+        return tlm.carry_order_key(anchor, off, h_off)
 
     def _freq_unit_factor(self, freq_param: str) -> float:
         """Hz per unit of the ramped script's calibration frequency field, so a carried

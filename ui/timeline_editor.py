@@ -834,7 +834,9 @@ class _TimelineCanvas(QWidget):
             # A one-shot (or the Hold marker) keeps its anchor (changed only in the
             # editor); dragging only moves the offset, measured to scale from that fixed
             # anchor — so the seconds scale with the distance to the anchor and never jump.
-            anchor_x = self._on if it.anchor == "start" else self._off
+            # A window-B (anchor="hold") one-shot is placed from the Hold's position, so its
+            # offset is measured from the hold divider, not from off-air.
+            anchor_x = self._anchor_base_x(it)
             it.offset = self._clamp_tune_offset(it, tlm._snap((x - anchor_x) / self._eff()))
             self._live_relayout(it)
             return
@@ -850,12 +852,21 @@ class _TimelineCanvas(QWidget):
             it.stop_offset = max(self._drag["stop0"] + ds, (mid - self._off) / eff)
         self._live_relayout(it)
 
+    def _anchor_base_x(self, it) -> float:
+        """The x a one-shot's offset is measured from while dragging: on-air for a start
+        anchor, off-air for a stop anchor, and the Hold divider for a window-B (anchor='hold')
+        one-shot (placed at hold_offset + its offset)."""
+        if getattr(it, "anchor", "start") == "hold" and self._hold_off is not None:
+            return self._on + self._hold_off * self._eff()
+        return self._on if it.anchor == "start" else self._off
+
     def _clamp_tune_offset(self, it, offset: float) -> float:
         """Keep a tune point inside the on-air span of the task it acts on: a
         start-anchored tune can't be dragged before the task's on-air start, a
-        stop-anchored one can't pass its off-air stop. One-shots (not tunes) act on
+        stop-anchored one can't pass its off-air stop. One-shots (not tunes), and window-B
+        (anchor='hold') tunes — timed at proceed, not against the on-air window — act on
         their own task, so they're free to sit anywhere."""
-        if getattr(it, "action", "run") != "tune":
+        if getattr(it, "action", "run") != "tune" or it.anchor not in ("start", "stop"):
             return offset
         spans = [(b.start_offset, b.stop_offset) for b in self._items
                  if getattr(b, "kind", None) == "bar" and b.task_name == it.task_name]
@@ -875,7 +886,9 @@ class _TimelineCanvas(QWidget):
             g["start_x"] = tlm.offset_to_x("start", it.start_offset, self._on, self._off, self._zoom)
             g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off, self._zoom)
         else:
-            g["cx"] = tlm.offset_to_x(it.anchor, it.offset, self._on, self._off, self._zoom)
+            # _run_cx maps a window-B (anchor='hold') item to the Hold's side, so the pill
+            # tracks the cursor correctly instead of jumping to the off-air anchor.
+            g["cx"] = self._run_cx(it)
         if "panel" in g:
             g["panel"] = (self._item_left(it) + 2, g["panel"][1], g["panel"][2], g["panel"][3])
         self.update()
@@ -1462,12 +1475,13 @@ class StepEditorDialog(QDialog):
 
     def _current_order_key(self):
         """This step's best-effort position on the task's timeline (see
-        timeline_model._carry_order_key), so state is carried forward only from earlier
-        steps. A duration bar starts the task (rank 0); a tune/ramp uses its anchor+offset."""
+        timeline_model.carry_order_key), so state is carried forward only from earlier
+        steps. A duration bar starts the task (rank 0); a tune/ramp uses its anchor+offset —
+        hold-boundary aware, so a window-B (anchor='hold') step orders after window A."""
         if self._is_tune() or self._type.currentData() == "ramp":
             anchor = self._anchor.currentData() or "start"
             off = round(self._run_off.value(), 1)
-            return (1, off) if anchor == "stop" else (0, off)
+            return tlm.carry_order_key(anchor, off, tlm.hold_offset(self._editor.items()))
         return (0, 0.0)                                  # a bar / run starts the task
 
     def _carried_values(self, task: str, script: str, specs: list) -> dict:
@@ -2108,7 +2122,8 @@ class TimelineEditor(QWidget):
                 specs = info.get("specs") or []
                 carried = tlm.sequence_effective_values(
                     self._canvas.items(), task, info.get("base_args") or [], specs,
-                    getattr(item, "uid", None), target_key=tlm._carry_order_key(item))
+                    getattr(item, "uid", None),
+                    target_key=tlm._carry_order_key(item, tlm.hold_offset(self._canvas.items())))
                 from state.power_fold import resolve_keyed_values
                 keyed = resolve_keyed_values(specs, carried, law.params())
                 delta = law.delta_db(keyed) if keyed else law.rep_delta_db()
