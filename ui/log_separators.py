@@ -23,10 +23,12 @@ SEPARATOR = "-" * 56
 
 class StepSeparators:
     def __init__(self, is_step: Callable[[str], bool], separator: str = SEPARATOR,
-                 transform: Optional[Callable[[str], str]] = None):
+                 transform: Optional[Callable[[str], str]] = None,
+                 drop: Optional[Callable[[str], bool]] = None):
         self._is_step = is_step
         self._sep = separator
         self._transform = transform          # optional per-line rewrite (e.g. timezone localize)
+        self._drop = drop                    # optional per-line filter (e.g. hide script output)
         self._pending = ""       # trailing partial line, held until its newline arrives
         self._emitted = False    # any line emitted yet? (suppresses a leading separator)
 
@@ -47,6 +49,8 @@ class StepSeparators:
         for line in parts:
             if self._transform is not None:  # applied to WHOLE lines only (no chunk-split hazard)
                 line = self._transform(line)
+            if self._drop is not None and self._drop(line):
+                continue                     # a dropped line gets no separator and never "emits"
             if self._emitted and self._is_step(line):
                 out.append(self._sep)
             out.append(line)
@@ -136,8 +140,26 @@ class _SeqTimeLocalizer:
         return f"[{utc.astimezone().strftime('%H:%M:%S')}{m.group(4) or ''}]"
 
 
-def sequence_separators() -> StepSeparators:
-    return StepSeparators(_bracket_step, transform=_SeqTimeLocalizer())
+# ── Hide script-produced output in the sequence/plan run log ───────────────────────────────────
+# The agent interleaves each transmit script's own stdout into the run log, prefixed '  <task>: '
+# (two spaces + the task name + a colon — see agent RunLog._emit_line). The agent's own
+# choreography is either a '[HH:MM:SS] …' line or a deeper-indented value row, so this prefix
+# uniquely marks a program-output line. Deployed signals can be very chatty, so the run-log views
+# offer a "Hide script output" toggle (default on) that drops exactly these lines, leaving the
+# clean armed / ON AIR / step / OFF AIR choreography.
+_PROGRAM_LINE_RE = re.compile(r"^  [^\s:]+: ")
+
+
+def is_program_output(line: str) -> bool:
+    """A run-log line that is a transmit script's own stdout (agent-prefixed '  <task>: …')."""
+    return bool(_PROGRAM_LINE_RE.match(line))
+
+
+def sequence_separators(hide_program: bool = False) -> StepSeparators:
+    """Separators for the sequence/plan run log. ``hide_program`` drops the interleaved script
+    stdout lines (leaving the agent's choreography), and localizes UTC timestamps to the PC's tz."""
+    return StepSeparators(_bracket_step, transform=_SeqTimeLocalizer(),
+                          drop=is_program_output if hide_program else None)
 
 
 def task_separators() -> StepSeparators:

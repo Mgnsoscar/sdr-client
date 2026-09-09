@@ -6,7 +6,7 @@ import time
 import pytest
 
 from ui.log_separators import (
-    SEPARATOR, StepSeparators, sequence_separators, task_separators,
+    SEPARATOR, StepSeparators, is_program_output, sequence_separators, task_separators,
 )
 
 
@@ -117,6 +117,38 @@ def test_sequence_localizer_is_a_noop_at_utc():
     lines = [ln for ln in out.split("\n") if not ln.startswith("-")]
     assert lines[1] == "[13:55:06] armed"
     assert "2026-09-09T13:55:08+00:00" in lines[0]
+
+
+def test_is_program_output_matches_only_agent_prefixed_script_lines():
+    assert is_program_output("  mock_prn: 2026 INFO gain 0")
+    assert is_program_output("  atten_set: RESULT attenuation_db=95")
+    assert not is_program_output("[10:00:00] armed")                       # a choreography line
+    assert not is_program_output("            -150 dBm/Hz  • Spectral density")  # a 12-space value row
+    assert not is_program_output("===== run =====")                        # the header
+
+
+def test_hide_program_drops_script_output_keeps_choreography():
+    s = sequence_separators(hide_program=True)
+    text = s.feed(
+        "===== run =====\n"
+        "[10:00:00] armed\n"
+        "[10:00:01] start mock_prn\n"
+        "  mock_prn: 2026 INFO gain 0\n"                    # script output — dropped
+        "  mock_prn: 2026 INFO amp 0.5\n"                   # script output — dropped
+        "            -150 dBm/Hz  • Spectral density\n"     # agent value row — kept
+        "[10:00:02] tune mock_prn\n")
+    lines = [ln for ln in text.split("\n") if ln]
+    assert not any(ln.startswith("  mock_prn:") for ln in lines)           # every script line gone
+    assert "            -150 dBm/Hz  • Spectral density" in lines          # value row kept
+    assert "[10:00:01] start mock_prn" in lines and "[10:00:02] tune mock_prn" in lines
+    # separators still sit above each choreography step (one per [..] line, none leading)
+    assert lines.count(SEPARATOR) == 3
+
+
+def test_show_program_keeps_script_output():
+    s = sequence_separators(hide_program=False)
+    text = s.feed("[10:00:01] start\n  mock_prn: hello world\n")
+    assert "  mock_prn: hello world" in text
 
 
 def test_blank_and_plain_task_lines_are_not_record_starts():

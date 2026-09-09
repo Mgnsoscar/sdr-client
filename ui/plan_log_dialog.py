@@ -18,7 +18,7 @@ from typing import List
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QFont, QTextCursor
 from PyQt6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QTabWidget,
+    QCheckBox, QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QTabWidget,
     QVBoxLayout, QWidget,
 )
 
@@ -43,7 +43,8 @@ class _UnitSeqLogPane(QWidget):
         self.hostname = hostname
         self.item = item
         self._tailer = LogTailer()
-        self._seps = sequence_separators()   # a dashed rule above each [HH:MM:SS…] step
+        self._raw = ""                       # every chunk received, so a toggle can re-render
+        self._seps = None                    # built in _build once the "hide" checkbox exists
         self._build()
         self._text.connect(self._append)
         self._status.connect(self._on_status)
@@ -65,13 +66,19 @@ class _UnitSeqLogPane(QWidget):
         self._status_lbl.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         row.addWidget(self._status_lbl)
         row.addStretch(1)
+        self._hide_prog = QCheckBox("Hide script output")
+        self._hide_prog.setChecked(True)     # default hide — deployed signals are chatty
+        self._hide_prog.setToolTip("Hide the transmit scripts' own log/print output, leaving the "
+                                   "sequence choreography (armed / ON AIR / each step / OFF AIR).")
+        self._hide_prog.toggled.connect(self._on_hide_toggled)
+        row.addWidget(self._hide_prog)
         self._autoscroll = QPushButton("Autoscroll: on")
         self._autoscroll.setCheckable(True)
         self._autoscroll.setChecked(True)
         self._autoscroll.toggled.connect(self._on_autoscroll_toggled)
         row.addWidget(self._autoscroll)
         clear = QPushButton("Clear")
-        clear.clicked.connect(lambda: (self._view.clear(), self._seps.reset()))
+        clear.clicked.connect(self._on_clear)
         row.addWidget(clear)
         outer.addLayout(row)
 
@@ -85,6 +92,10 @@ class _UnitSeqLogPane(QWidget):
             f"QPlainTextEdit {{ background: #1E2530; color: #D6DCE5; "
             f"border: 1px solid {Palette.BORDER}; border-radius: 8px; padding: 8px; }}")
         outer.addWidget(self._view, stretch=1)
+        self._seps = self._make_seps()       # now that the "hide" checkbox exists
+
+    def _make_seps(self):
+        return sequence_separators(hide_program=self._hide_prog.isChecked())
 
     def _unit_name(self) -> str:
         try:
@@ -107,6 +118,7 @@ class _UnitSeqLogPane(QWidget):
         self._tailer.stop()
 
     def _append(self, chunk: str) -> None:
+        self._raw += chunk                   # keep the raw stream so a toggle can re-render
         text = self._seps.feed(chunk)
         if not text:
             return
@@ -116,6 +128,27 @@ class _UnitSeqLogPane(QWidget):
         cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.insertText(text)
         if self._autoscroll.isChecked() and at_bottom:
+            bar.setValue(bar.maximum())
+
+    def _on_hide_toggled(self, _checked: bool) -> None:
+        self._rerender()
+
+    def _on_clear(self) -> None:
+        self._raw = ""
+        self._view.clear()
+        self._seps.reset()
+
+    def _rerender(self) -> None:
+        """Re-render the whole buffered log under the current 'hide script output' setting."""
+        self._seps = self._make_seps()
+        self._view.clear()
+        text = self._seps.feed(self._raw)
+        if text:
+            cursor = self._view.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertText(text)
+        if self._autoscroll.isChecked():
+            bar = self._view.verticalScrollBar()
             bar.setValue(bar.maximum())
 
     def _on_autoscroll_toggled(self, on: bool) -> None:
