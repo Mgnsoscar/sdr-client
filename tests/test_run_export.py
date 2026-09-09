@@ -213,3 +213,16 @@ def test_plan_row_export_button_hidden_when_unsupported():
                       on_edit=lambda p: None, on_delete=lambda p: None, on_log=lambda p: None,
                       on_export=lambda p: None, export_ok=False)
     assert row._export.isVisibleTo(row) is False
+
+
+def test_run_log_export_method_is_distinct_from_the_yaml_export_method():
+    """Regression: each panel's ROW Export button wires ``_on_export_log`` (takes the
+    plan/sequence), which must NOT be shadowed by the tab-level YAML ``_on_export`` (no arg).
+    A same-name collision made clicking Export on a plan crash: '_on_export() takes 1
+    positional argument but 2 were given'."""
+    import inspect
+    for cls in (pt.PlansTab, sp.SequencesPanel):
+        log_params = list(inspect.signature(cls._on_export_log).parameters)
+        assert len(log_params) == 2 and log_params[0] == "self", (cls.__name__, log_params)
+        yaml_params = list(inspect.signature(cls._on_export).parameters)
+        assert yaml_params == ["self"], (cls.__name__, yaml_params)

@@ -561,7 +561,7 @@ class PlansTab(QWidget):
         dlg.setModal(False)
         dlg.show()
 
-    def _on_export(self, plan: m.Plan) -> None:
+    def _on_export_log(self, plan: m.Plan) -> None:
         """Export a ran plan's log — pick one of the plan's last runs; one sheet per unit. v1
         plans are single-unit; the picker lists runs of the first item's sequence stamped with
         this plan's id."""
@@ -1144,7 +1144,7 @@ class PlansTab(QWidget):
                 on_edit=self._on_edit, on_delete=self._on_delete, on_log=self._on_log,
                 holding=holding, can_ff=can_ff, can_edit_wb=can_edit_wb,
                 on_proceed=self._on_proceed, on_hold_now=self._on_hold_now,
-                on_edit_wb=self._on_edit_wb, on_export=self._on_export, export_ok=export_ok))
+                on_edit_wb=self._on_edit_wb, on_export=self._on_export_log, export_ok=export_ok))
         if shown == 0 and query:
             empty = QLabel(f"No plans match “{query}”.")
             empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")

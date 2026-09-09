@@ -474,7 +474,7 @@ class SequencesPanel(QWidget):
         dlg.setModal(False)
         dlg.show()
 
-    def _on_export(self, seq: m.Sequence) -> None:
+    def _on_export_log(self, seq: m.Sequence) -> None:
         """Export a ran log to a spreadsheet — pick one of this sequence's last runs on this unit."""
         from .run_export import RunExportDialog
         try:
@@ -938,7 +938,7 @@ class SequencesPanel(QWidget):
                 show_scope=self.can_edit, on_proceed=self._on_proceed,
                 on_hold_now=self._on_hold_now, hold_now_ok=hold_now_ok,
                 on_edit_wb=self._on_edit_wb, edit_wb_ok=edit_wb_ok,
-                on_export=self._on_export, export_ok=export_ok,
+                on_export=self._on_export_log, export_ok=export_ok,
             ))
             shown += 1
         if shown == 0:
