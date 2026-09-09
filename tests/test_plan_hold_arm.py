@@ -279,3 +279,21 @@ def test_plan_row_hold_now_can_show_without_holding():
     assert row._hold_now.isVisibleTo(row) is True
     row._hold_now.click()
     assert calls.get("ff") is plan
+
+
+def _edit_row(on_air_n=0, pending_n=0, holding=False):
+    plan = m.Plan(id="p", name="p", items=[_item(steps=_hold_steps())])
+    return pt._PlanRow(
+        plan, [], on_air_n, pending_n,
+        on_arm=lambda p: None, on_stop=lambda p: None, on_edit=lambda p: None,
+        on_delete=lambda p: None, on_log=lambda p: None,
+        holding=holding, on_proceed=lambda p: None, on_hold_now=lambda p: None,
+        on_edit_wb=lambda p: None)
+
+
+def test_plan_row_edit_enabled_only_when_holding_or_idle():
+    # Edit the definition only when idle, or window B while HOLDING — never mid-run.
+    assert _edit_row()._edit.isEnabled() is True               # idle
+    assert _edit_row(holding=True)._edit.isEnabled() is True   # holding (edit window B)
+    assert _edit_row(on_air_n=1)._edit.isEnabled() is False    # on air → disabled
+    assert _edit_row(pending_n=1)._edit.isEnabled() is False   # armed → disabled

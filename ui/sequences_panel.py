@@ -315,6 +315,11 @@ class _SequenceRow(QFrame):
         self._start.setEnabled(holding or not active)
         self._stop.setEnabled(active)
         self._delete.setEnabled(not active)   # the agent refuses to delete an active one
+        # Edit the definition only when idle or HOLDING; disabled while armed/on-air (the running
+        # run already captured its steps — window B is edited via the separate "Edit…" button).
+        self._edit.setEnabled(holding or not active)
+        self._edit.setToolTip("Edit this sequence" if (holding or not active) else
+                              "Stop the run (or wait for it to finish) to edit the sequence")
         if holding and on_proceed is not None:
             self._start.clicked.connect(lambda: on_proceed(seq))
         else:

@@ -474,3 +474,26 @@ def test_hold_edit_dialog_returns_the_edited_steps():
     assert dlg.result_steps is not None
     assert any(s.action == m.StepAction.HOLD for s in dlg.result_steps)
     assert any(s.anchor == "hold" for s in dlg.result_steps)   # window B present
+
+
+def test_sequence_row_edit_enabled_only_when_holding_or_idle():
+    # The definition "Edit" is available when idle, or while HOLDING; disabled while a run is
+    # armed/on-air (the running run captured its steps; window B is edited via "Edit…").
+    seq = _hold_seq()
+
+    def _row(run):
+        return sp._SequenceRow(seq, run, on_start=lambda s: None, on_stop=lambda s: None,
+                               on_edit=lambda s: None, on_delete=lambda s: None,
+                               on_log=lambda s: None, can_run=True, can_edit=True,
+                               on_proceed=lambda s: None)
+
+    def _run(state):
+        return m.SequenceRun(id="r", sequence_id="s1", sequence_name="n", state=state,
+                             on_air_at="2030-01-01T00:00:00+00:00",
+                             held_actual=("2030-01-01T00:02:00+00:00"
+                                          if state == m.SequenceState.HOLDING else None))
+
+    assert _row(None)._edit.isEnabled() is True                              # idle
+    assert _row(_run(m.SequenceState.HOLDING))._edit.isEnabled() is True     # holding
+    assert _row(_run(m.SequenceState.RUNNING))._edit.isEnabled() is False    # on air → disabled
+    assert _row(_run(m.SequenceState.ARMED))._edit.isEnabled() is False      # armed → disabled

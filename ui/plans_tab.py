@@ -401,6 +401,10 @@ class _PlanRow(QFrame):
         self._stop.setEnabled(active)
         self._log.setEnabled(bool(plan.items))
         self._delete.setEnabled(not active)
+        # Edit is available only when the plan is HOLDING (retarget window B) or NOT active
+        # (edit the definition). While a run is armed/on-air it's disabled — there's nothing to
+        # edit mid-flight (the run captured its steps at arm; window B is editable once holding).
+        self._edit.setEnabled(holding or not active)
         if holding and on_proceed is not None:
             self._arm.clicked.connect(lambda: on_proceed(plan))
         else:
@@ -415,6 +419,8 @@ class _PlanRow(QFrame):
                                   "Proceed — e.g. retarget the down-ramp to where lock was lost")
             self._edit.clicked.connect(lambda: on_edit_wb(plan))
         else:
+            self._edit.setToolTip("Edit this plan" if not active else
+                                  "Stop the run (or wait for it to finish) to edit the plan")
             self._edit.clicked.connect(lambda: on_edit(plan))
         if can_ff and on_hold_now is not None:
             self._hold_now.clicked.connect(lambda: on_hold_now(plan))
