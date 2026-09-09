@@ -13,6 +13,7 @@ the last ≤10 runs of a sequence/plan and exports the chosen one.
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import Qt
@@ -98,10 +99,84 @@ def save_workbook(path: str, sheets: List[Tuple[str, dict]]) -> None:
     build_workbook(sheets).save(path)
 
 
+# ── Timezone localization ────────────────────────────────────────────────────────────────────
+# The agent stamps the run in UTC (its "Time" column is a UTC HH:MM:SS.mmm). The operator reads
+# the sheet on their PC, so we present the time in the PC's LOCAL timezone: the single "Time"
+# column becomes THREE — "Timezone" (the PC's UTC offset, e.g. UTC+02:00), "Date" and "Time" (the
+# local date + time). Client-only: the PC's timezone is only known here, and older agents are
+# unaffected (they still send a UTC time-only string, which we convert).
+
+def _parse_iso_utc(s) -> Optional[datetime]:
+    """Parse an ISO timestamp to a tz-aware UTC datetime (assume UTC when it carries no offset)."""
+    if not isinstance(s, str) or not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _tz_label(dt: datetime) -> str:
+    """The datetime's UTC offset as 'UTC±HH:MM' (e.g. 'UTC+02:00')."""
+    off = dt.utcoffset() or timedelta(0)
+    total = int(off.total_seconds())
+    sign = "+" if total >= 0 else "-"
+    total = abs(total)
+    return f"UTC{sign}{total // 3600:02d}:{(total % 3600) // 60:02d}"
+
+
+def _localize_time_cell(cell, anchor_utc: datetime):
+    """A UTC 'HH:MM:SS[.mmm]' time-of-day → (tz, date, time) in the PC's local timezone. ``anchor_utc``
+    (the run's on-air instant) supplies the DATE — the time-of-day is snapped to the day nearest the
+    anchor so a run that straddles midnight lands on the right date. None if ``cell`` isn't a time."""
+    if not isinstance(cell, str):
+        return None
+    mt = re.match(r"^\s*(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?\s*$", cell)
+    if not mt:
+        return None
+    h, m, s = int(mt.group(1)), int(mt.group(2)), int(mt.group(3))
+    us = int((mt.group(4) or "0").ljust(6, "0")[:6])
+    try:
+        utc = datetime(anchor_utc.year, anchor_utc.month, anchor_utc.day, h, m, s, us,
+                       tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    while (utc - anchor_utc).total_seconds() > 12 * 3600:    # snap to the day nearest the anchor
+        utc -= timedelta(days=1)
+    while (anchor_utc - utc).total_seconds() > 12 * 3600:
+        utc += timedelta(days=1)
+    loc = utc.astimezone()
+    return (_tz_label(loc), loc.strftime("%Y-%m-%d"),
+            loc.strftime("%H:%M:%S") + f".{loc.microsecond // 1000:03d}")
+
+
+def _localize_table(table: dict, on_air_at) -> dict:
+    """Rewrite a table's leading UTC "Time" column into local "Timezone", "Date", "Time" columns.
+    A no-op for a table that doesn't lead with a "Time" column (returns it unchanged)."""
+    cols = list(table.get("columns") or [])
+    if not cols or cols[0] != "Time":
+        return table
+    anchor = _parse_iso_utc(on_air_at) or datetime.now(timezone.utc)
+    new_rows: List[list] = []
+    for row in (table.get("rows") or []):
+        row = list(row)
+        loc = _localize_time_cell(row[0] if row else "", anchor)
+        if loc is None:
+            new_rows.append(["", "", (row[0] if row else "")] + row[1:])
+        else:
+            new_rows.append([loc[0], loc[1], loc[2]] + row[1:])
+    return {**table, "columns": ["Timezone", "Date", "Time"] + cols[1:], "rows": new_rows}
+
+
 def tables_to_sheets(unit_label: str, log_table: dict) -> List[Tuple[str, dict]]:
     """Split one unit's /log-table payload into (sheet_name, table) pairs — one sheet named by the
-    unit when it ran a single duration task, else '<unit> — <task>' per task."""
-    tables = log_table.get("tables") or []
+    unit when it ran a single duration task, else '<unit> — <task>' per task. Each table's UTC time
+    is localized to the PC's timezone (Timezone/Date/Time columns) using the run's on-air instant."""
+    on_air = log_table.get("on_air_at")
+    tables = [_localize_table(t, on_air) for t in (log_table.get("tables") or [])]
     if len(tables) <= 1:
         t = tables[0] if tables else {"columns": [], "rows": []}
         return [(unit_label, t)]

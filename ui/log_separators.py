@@ -15,15 +15,18 @@ separator is emitted before the very first line (so the view has no stray top ru
 from __future__ import annotations
 
 import re
-from typing import Callable
+from datetime import datetime, timezone
+from typing import Callable, Optional
 
 SEPARATOR = "-" * 56
 
 
 class StepSeparators:
-    def __init__(self, is_step: Callable[[str], bool], separator: str = SEPARATOR):
+    def __init__(self, is_step: Callable[[str], bool], separator: str = SEPARATOR,
+                 transform: Optional[Callable[[str], str]] = None):
         self._is_step = is_step
         self._sep = separator
+        self._transform = transform          # optional per-line rewrite (e.g. timezone localize)
         self._pending = ""       # trailing partial line, held until its newline arrives
         self._emitted = False    # any line emitted yet? (suppresses a leading separator)
 
@@ -31,6 +34,8 @@ class StepSeparators:
         """Forget buffered state — call when the view is cleared."""
         self._pending = ""
         self._emitted = False
+        if self._transform is not None and hasattr(self._transform, "reset"):
+            self._transform.reset()
 
     def feed(self, chunk: str) -> str:
         """Transform a streamed chunk: return the text to append, with a separator line
@@ -40,6 +45,8 @@ class StepSeparators:
         self._pending = parts.pop()          # last element is the incomplete line (or "")
         out = []
         for line in parts:
+            if self._transform is not None:  # applied to WHOLE lines only (no chunk-split hazard)
+                line = self._transform(line)
             if self._emitted and self._is_step(line):
                 out.append(self._sep)
             out.append(line)
@@ -74,8 +81,63 @@ def _timestamp_step(line: str) -> bool:
     return bool(_TIMESTAMP_RE.match(line))
 
 
+# ── Timezone localization for the sequence/plan run log ────────────────────────────────────────
+# The agent stamps the run log in UTC — each '[HH:MM:SS(.mmm)] …' step line and the ISO on-air
+# times in the '===== … on-air <ISO> → <ISO> =====' header. The operator reads it on their PC, so
+# we rewrite those to the machine's LOCAL timezone at display time (the PC's timezone is only known
+# here). The run's UTC date, captured from the header, reconstructs a full instant for each
+# time-only [HH:MM:SS] so the offset is the right one for that date; before a header is seen it
+# falls back to today. Purely presentational — nothing but the displayed digits changes.
+_ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)")
+_LEAD_CLOCK_RE = re.compile(r"^\[(\d{2}):(\d{2}):(\d{2})(\.\d+)?\]")
+
+
+def _parse_iso_utc(s: str) -> Optional[datetime]:
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+class _SeqTimeLocalizer:
+    """Rewrite a sequence/plan run-log line's UTC timestamps to the PC's local timezone."""
+
+    def __init__(self):
+        self._date = None                    # the run's UTC date, from the header (for [HH:MM:SS])
+
+    def reset(self) -> None:
+        self._date = None
+
+    def __call__(self, line: str) -> str:
+        if _ISO_RE.search(line):             # a header line: convert its ISO on-air times to local
+            return _ISO_RE.sub(self._iso_sub, line)
+        if _LEAD_CLOCK_RE.match(line):        # a '[HH:MM:SS] …' step line
+            return _LEAD_CLOCK_RE.sub(self._clock_sub, line, count=1)
+        return line
+
+    def _iso_sub(self, m: "re.Match") -> str:
+        dt = _parse_iso_utc(m.group(0))
+        if dt is None:
+            return m.group(0)
+        if self._date is None:
+            self._date = dt.date()
+        return dt.astimezone().isoformat()
+
+    def _clock_sub(self, m: "re.Match") -> str:
+        d = self._date or datetime.now(timezone.utc).date()
+        try:
+            utc = datetime(d.year, d.month, d.day, int(m.group(1)), int(m.group(2)),
+                           int(m.group(3)), tzinfo=timezone.utc)
+        except ValueError:
+            return m.group(0)
+        return f"[{utc.astimezone().strftime('%H:%M:%S')}{m.group(4) or ''}]"
+
+
 def sequence_separators() -> StepSeparators:
-    return StepSeparators(_bracket_step)
+    return StepSeparators(_bracket_step, transform=_SeqTimeLocalizer())
 
 
 def task_separators() -> StepSeparators:

@@ -1,8 +1,29 @@
-"""The dashed step separators inserted into the task / sequence / plan log views
+"""The dashed step separators + timezone localization for the task / sequence / plan log views
 (ui/log_separators.py) — pure text transform, no Qt needed."""
+import os
+import time
+
+import pytest
+
 from ui.log_separators import (
     SEPARATOR, StepSeparators, sequence_separators, task_separators,
 )
+
+
+@pytest.fixture(autouse=True)
+def _utc_tz():
+    """Pin the process timezone to UTC so the sequence localizer is a no-op and the separator
+    assertions (exact [HH:MM:SS]) are deterministic wherever the suite runs. A test that exercises
+    localization overrides TZ in its own body; teardown restores the original either way."""
+    prev = os.environ.get("TZ")
+    os.environ["TZ"] = "UTC"
+    time.tzset()
+    yield
+    if prev is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = prev
+    time.tzset()
 
 
 def test_sequence_separator_above_bracket_steps_only():
@@ -70,6 +91,32 @@ def test_reset_clears_pending_and_leading_suppression():
     s.reset()
     # After reset the next first line has no leading separator and the old partial is gone.
     assert s.feed("[10:00:02] start\n") == "[10:00:02] start\n"
+
+
+def test_sequence_localizer_shifts_utc_timestamps_to_local():
+    # The agent stamps the run log in UTC; the sequence view shows the PC's local time. At UTC+02:00
+    # the [HH:MM:SS] step lines shift +2h and the header ISO on-air times convert to local.
+    os.environ["TZ"] = "Europe/Oslo"                 # UTC+02:00 on 2026-09-09 (CEST)
+    time.tzset()
+    s = sequence_separators()
+    out = s.feed(
+        "===== run r on-air 2026-09-09T13:55:08+00:00 → 2026-09-09T13:55:11+00:00 =====\n"
+        "[13:55:06] armed\n"
+        "[13:55:08] ON AIR (T0)\n")
+    lines = [ln for ln in out.split("\n") if not ln.startswith("-")]
+    assert "2026-09-09T15:55:08+02:00" in lines[0]    # header ISO → local
+    assert "2026-09-09T15:55:11+02:00" in lines[0]
+    assert lines[1] == "[15:55:06] armed"             # [HH:MM:SS] shifted +2h using the run's date
+    assert lines[2] == "[15:55:08] ON AIR (T0)"
+
+
+def test_sequence_localizer_is_a_noop_at_utc():
+    # Under the pinned UTC fixture, timestamps are unchanged (the separator tests rely on this).
+    s = sequence_separators()
+    out = s.feed("===== run on-air 2026-09-09T13:55:08+00:00 =====\n[13:55:06] armed\n")
+    lines = [ln for ln in out.split("\n") if not ln.startswith("-")]
+    assert lines[1] == "[13:55:06] armed"
+    assert "2026-09-09T13:55:08+00:00" in lines[0]
 
 
 def test_blank_and_plain_task_lines_are_not_record_starts():

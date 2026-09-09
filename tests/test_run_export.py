@@ -140,19 +140,63 @@ def test_save_workbook_round_trips(tmp_path):
 # ── tables_to_sheets ───────────────────────────────────────────────────────────
 
 def test_tables_to_sheets_single_task_uses_the_unit_name():
-    t = _table(task="tx")
-    assert rx.tables_to_sheets("Unit A", {"tables": [t]}) == [("Unit A", t)]
+    out = rx.tables_to_sheets("Unit A", {"tables": [_table(task="tx")]})
+    assert [name for name, _ in out] == ["Unit A"]
 
 
 def test_tables_to_sheets_multi_task_prefixes_the_unit():
-    t1, t2 = _table(task="tx1"), _table(task="tx2")
-    out = rx.tables_to_sheets("Unit A", {"tables": [t1, t2]})
-    assert out == [("Unit A — tx1", t1), ("Unit A — tx2", t2)]
+    out = rx.tables_to_sheets("Unit A", {"tables": [_table(task="tx1"), _table(task="tx2")]})
+    assert [name for name, _ in out] == ["Unit A — tx1", "Unit A — tx2"]
 
 
 def test_tables_to_sheets_no_tables_yields_an_empty_unit_sheet():
     out = rx.tables_to_sheets("Unit A", {"tables": []})
     assert out == [("Unit A", {"columns": [], "rows": []})]
+
+
+def test_tables_to_sheets_localizes_utc_time_to_the_pc_timezone():
+    # The agent's UTC "Time" column becomes local Timezone / Date / Time (the PC's tz). Pin the tz
+    # so the assertion is deterministic regardless of where the suite runs.
+    import time
+    prev = os.environ.get("TZ")
+    os.environ["TZ"] = "Europe/Oslo"                 # UTC+02:00 on 2026-09-09 (CEST)
+    time.tzset()
+    try:
+        t = _table(columns=("Time", "Power [dBm]"), rows=(("13:55:07.229", -60.0),))
+        out = rx.tables_to_sheets("U", {"on_air_at": "2026-09-09T13:55:08+00:00", "tables": [t]})
+        _, tbl = out[0]
+        assert tbl["columns"] == ["Timezone", "Date", "Time", "Power [dBm]"]
+        assert tbl["rows"][0] == ["UTC+02:00", "2026-09-09", "15:55:07.229", -60.0]
+    finally:
+        if prev is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = prev
+        time.tzset()
+
+
+def test_tables_to_sheets_crossing_midnight_snaps_to_the_right_local_date():
+    # A warm-up row a few seconds before an on-air at 00:00:02Z belongs to the previous UTC day; it
+    # must not be stamped with the on-air date. Pin UTC so date arithmetic is unambiguous.
+    import time
+    prev = os.environ.get("TZ")
+    os.environ["TZ"] = "UTC"
+    time.tzset()
+    try:
+        t = _table(columns=("Time", "RF on"),
+                   rows=(("23:59:58.000", 0), ("00:00:03.000", 1)))
+        out = rx.tables_to_sheets("U", {"on_air_at": "2026-09-10T00:00:02+00:00", "tables": [t]})
+        _, tbl = out[0]
+        assert [r[:3] for r in tbl["rows"]] == [
+            ["UTC+00:00", "2026-09-09", "23:59:58.000"],     # snapped back a day
+            ["UTC+00:00", "2026-09-10", "00:00:03.000"],
+        ]
+    finally:
+        if prev is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = prev
+        time.tzset()
 
 
 # ── the row "Export…" button ─────────────────────────────────────────────────
