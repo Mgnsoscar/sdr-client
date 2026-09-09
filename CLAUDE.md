@@ -71,6 +71,37 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — spreadsheet run-log export (client): COMPLETE (branch `claude/hold-step-phase-0-wwwxf7-lty0i5`, cross-repo)
+Export a ran sequence/plan's log as an **.xlsx** — one ROW PER STATE CHANGE (a tune that changes
+nothing adds no row), every power quantity + realized SDR gain/attenuation + each live/derived param in
+its own column (fixed params like PRN/Frequency at the end; RF as 0/1), and (for a multi-unit plan) one
+SHEET PER UNIT. The **agent** builds each run's per-change tables (`GET /sequence-runs/{id}/log-table`,
+capability `sequence-log-table`, agent `1.21.0`; see `sdr-agent/CLAUDE.md`); the **client** turns them
+into the workbook. Shipped, client-only beyond the agent endpoint; drift-guarded files untouched:
+- **`api/client.py`** — `sequence_run_log_table(run_id)` (`GET …/log-table` → the
+  `{run_id,sequence_name,state,on_air_at,tables:[{task,columns,rows}]}` payload).
+- **`ui/run_export.py`** — pure helpers + the dialog. `run_has_data` (a run with ≥1 fired step) /
+  `recent_runs(runs, sequence_id, plan_id="", limit=10)` (exportable runs, newest first, capped 10,
+  scoped to the sequence and optionally the plan); `_safe_sheet` (≤31 chars, strip `[]:*?/\`,
+  uniquify `… (2)`); `build_workbook`/`save_workbook` (openpyxl; a styled header row, freeze panes,
+  column widths; never an empty workbook); `tables_to_sheets(unit_label, payload)` (1 task → a
+  unit-named sheet, multi → `"<unit> — <task>"` per task). **`RunExportDialog`** (the row entry point):
+  lists the last ≤10 runs, gathers one `/log-table` per target unit, writes one .xlsx.
+- **Row buttons** — an **"Export…"** button on `ui/sequences_panel._SequenceRow` (gated
+  `can_run and export_ok`) and `ui/plans_tab._PlanRow` (gated `export_ok`), wired to `_on_export` →
+  `RunExportDialog`. `export_ok` = the unit advertises `SEQUENCE_LOG_TABLE_CAPABILITY`
+  (`ui/timeline_model`; plan row: ANY target unit supports it).
+- **Packaging** — `openpyxl` added to `requirements.txt` + `sdr_client.spec`.
+- **KNOWN LIMITATION / TODO** — a multi-unit plan export targets the FIRST unit's run only: v1 plans
+  are single-unit, and `RunExportDialog` gathers one `/log-table` per target but keys them all by the
+  SAME `run_id` (which only holds for one unit). Per-unit run-id resolution across a plan arm is a TODO
+  (the run row would need to map each unit → its own run for that arm).
+Tests: `tests/test_run_export.py` (pure: `recent_runs` scoping/order/cap, `run_has_data`, `_safe_sheet`,
+`build_workbook`/`save_workbook` round-trip, `tables_to_sheets` single/multi/empty; rows: `_SequenceRow`
++ `_PlanRow` show/hide the Export button on `export_ok` and a click calls `on_export`). Suite 833 → 847
+offscreen. Verified live end-to-end against the agent: a PRN run (RF on → `--sidelobes` 5→10 → a no-op
+tune → RF off) exports 4 rows for 6 fired steps — the no-op tune adds no row.
+
 ## Current state — Hold step runnable in PLANS (single-unit, operator-present): COMPLETE (branch `claude/hold-step-phase-0-wwwxf7`, client-first)
 A deliberate scope expansion of the plan/schedule no-op (docs/sequence-hold-step.md §7/§12): a Hold is
 now **authorable in the plan editor** and **actually pauses when a plan is armed directly for a SINGLE
