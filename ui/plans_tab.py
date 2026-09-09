@@ -47,7 +47,8 @@ from .plan_log_dialog import PlanLogDialog
 from .qt_adapter import DataHub
 from .theme import Palette
 from .timeline_model import (
-    SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY, hold_runtime_supported)
+    SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY, SEQUENCE_LOG_TABLE_CAPABILITY,
+    hold_runtime_supported)
 from .widgets import StatusPill, natural_key
 
 ARM_MARGIN_S = 5.0
@@ -311,7 +312,8 @@ class _PlanRow(QFrame):
     def __init__(self, plan: m.Plan, runs: List[m.SequenceRun], on_air_n: int,
                  pending_n: int, on_arm, on_stop, on_edit, on_delete, on_log,
                  holding: bool = False, can_ff: bool = False, can_edit_wb: bool = False,
-                 on_proceed=None, on_hold_now=None, on_edit_wb=None):
+                 on_proceed=None, on_hold_now=None, on_edit_wb=None,
+                 on_export=None, export_ok: bool = False):
         super().__init__()
         self.plan = plan
         self.setObjectName("card")
@@ -376,10 +378,18 @@ class _PlanRow(QFrame):
         self._hold_now.setToolTip("Jump to the Hold now — skip the rest of the run-up and hold the "
                                   "signal at its current value (then Proceed when ready)")
         self._hold_now.setVisible(can_ff)
+        # Export a ran log to a spreadsheet (pick one of the plan's last runs).
+        can_export = export_ok and on_export is not None
+        self._export = QPushButton("Export…")
+        self._export.setToolTip("Export a run's log to a spreadsheet — one row per state change, "
+                                "every parameter (and power quantity) in its own column; one sheet "
+                                "per unit")
+        self._export.setVisible(can_export)
         # Minimum (not fixed) width so a longer label ("Proceed" > "Arm") grows instead of clipping.
         for b in (self._arm, self._stop, self._log, self._edit, self._delete):
             b.setMinimumWidth(66)
         self._hold_now.setMinimumWidth(72)
+        self._export.setMinimumWidth(66)
         self._arm.setToolTip(
             "Proceed — schedule the post-hold window (the down-ramp) and resume the run"
             if holding else
@@ -408,10 +418,15 @@ class _PlanRow(QFrame):
             self._edit.clicked.connect(lambda: on_edit(plan))
         if can_ff and on_hold_now is not None:
             self._hold_now.clicked.connect(lambda: on_hold_now(plan))
+        if can_export:
+            self._export.clicked.connect(lambda: on_export(plan))
         shown = [self._arm]
         if can_ff:
             shown.append(self._hold_now)     # only while a run-up is in progress
-        shown += [self._stop, self._log, self._edit, self._delete]
+        shown += [self._stop, self._log]
+        if can_export:
+            shown.append(self._export)       # export a ran log to a spreadsheet
+        shown += [self._edit, self._delete]
         for b in shown:
             lay.addWidget(b, alignment=Qt.AlignmentFlag.AlignTop)
 
@@ -539,6 +554,17 @@ class PlansTab(QWidget):
         dlg = PlanLogDialog(self.hub, plan, parent=self.window())
         dlg.setModal(False)
         dlg.show()
+
+    def _on_export(self, plan: m.Plan) -> None:
+        """Export a ran plan's log — pick one of the plan's last runs; one sheet per unit. v1
+        plans are single-unit; the picker lists runs of the first item's sequence stamped with
+        this plan's id."""
+        from .run_export import RunExportDialog
+        if not plan.items:
+            return
+        targets = [(it.hostname, it.unit_label or it.hostname) for it in plan.items]
+        RunExportDialog(self.hub, targets, plan.items[0].sequence_id, plan.name or plan.id,
+                        plan_id=plan.id, parent=self.window()).exec()
 
     def _on_delete(self, plan: m.Plan) -> None:
         if QMessageBox.question(
@@ -1103,6 +1129,8 @@ class PlansTab(QWidget):
             ff_host, _fr = self._ff_run_for(plan)
             can_ff = ff_host is not None and self._unit_supports(ff_host, SEQUENCE_HOLD_NOW_CAPABILITY)
             can_edit_wb = holding and self._unit_supports(hold_host, SEQUENCE_HOLD_EDIT_CAPABILITY)
+            export_ok = any(self._unit_supports(it.hostname, SEQUENCE_LOG_TABLE_CAPABILITY)
+                            for it in plan.items)
             shown += 1
             self._list.addWidget(_PlanRow(
                 plan, runs, on_air_n, pending_n,
@@ -1110,7 +1138,7 @@ class PlansTab(QWidget):
                 on_edit=self._on_edit, on_delete=self._on_delete, on_log=self._on_log,
                 holding=holding, can_ff=can_ff, can_edit_wb=can_edit_wb,
                 on_proceed=self._on_proceed, on_hold_now=self._on_hold_now,
-                on_edit_wb=self._on_edit_wb))
+                on_edit_wb=self._on_edit_wb, on_export=self._on_export, export_ok=export_ok))
         if shown == 0 and query:
             empty = QLabel(f"No plans match “{query}”.")
             empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")

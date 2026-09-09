@@ -56,7 +56,7 @@ from .theme import Palette
 from .hold_edit_dialog import HoldEditDialog
 from .timeline_model import (
     SEQUENCE_HOLD_CAPABILITY, SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY,
-    hold_runtime_supported)
+    SEQUENCE_LOG_TABLE_CAPABILITY, hold_runtime_supported)
 from .widgets import StatusPill, natural_key
 
 _SEQ_FILTER_ALL = "__all__"
@@ -213,7 +213,8 @@ class _SequenceRow(QFrame):
                  on_start, on_stop, on_edit, on_delete, on_log,
                  can_edit: bool = True, can_run: bool = True,
                  show_scope: bool = False, on_proceed=None, on_hold_now=None,
-                 hold_now_ok: bool = False, on_edit_wb=None, edit_wb_ok: bool = False):
+                 hold_now_ok: bool = False, on_edit_wb=None, edit_wb_ok: bool = False,
+                 on_export=None, export_ok: bool = False):
         super().__init__()
         self.seq = seq
         self.setObjectName("card")
@@ -287,6 +288,12 @@ class _SequenceRow(QFrame):
         self._edit_wb.setToolTip("Edit the post-hold steps (the down-ramp / cool-down) before you "
                                  "Proceed — e.g. retarget the down-ramp to where lock was lost")
         self._edit_wb.setVisible(can_edit_wb)
+        # Export a ran log to a spreadsheet (pick one of the last runs).
+        can_export = can_run and export_ok and on_export is not None
+        self._export = QPushButton("Export…")
+        self._export.setToolTip("Export a run's log to a spreadsheet — one row per state change, "
+                                "every parameter (and power quantity) in its own column")
+        self._export.setVisible(can_export)
         # Minimum (not fixed) width: the row stays aligned at 100%, but a button grows to fit a
         # longer label ("Proceed" > "Arm") or a wider fallback font at fractional scaling instead
         # of clipping it to an ellipsis.
@@ -294,6 +301,7 @@ class _SequenceRow(QFrame):
             b.setMinimumWidth(66)
         self._hold_now.setMinimumWidth(72)
         self._edit_wb.setMinimumWidth(60)
+        self._export.setMinimumWidth(66)
         self._start.setToolTip(
             "Proceed — schedule the post-hold window (the down-ramp) and resume the run"
             if holding else
@@ -319,6 +327,8 @@ class _SequenceRow(QFrame):
             self._hold_now.clicked.connect(lambda: on_hold_now(seq))
         if can_edit_wb:
             self._edit_wb.clicked.connect(lambda: on_edit_wb(seq))
+        if can_export:
+            self._export.clicked.connect(lambda: on_export(seq))
         shown = []
         if can_run:
             shown += [self._start]
@@ -327,6 +337,8 @@ class _SequenceRow(QFrame):
             if can_edit_wb:
                 shown.append(self._edit_wb)      # only while holding
             shown += [self._stop, self._log]
+            if can_export:
+                shown.append(self._export)       # export a ran log to a spreadsheet
         if can_edit:
             shown += [self._edit, self._delete]
         for b in shown:
@@ -456,6 +468,16 @@ class SequencesPanel(QWidget):
         dlg = SequenceLogDialog(self.hub, self.hostname, seq, parent=self.window())
         dlg.setModal(False)
         dlg.show()
+
+    def _on_export(self, seq: m.Sequence) -> None:
+        """Export a ran log to a spreadsheet — pick one of this sequence's last runs on this unit."""
+        from .run_export import RunExportDialog
+        try:
+            label = getattr(self.hub.fleet.get(self.hostname), "label", "") or self.hostname
+        except Exception:  # noqa: BLE001
+            label = self.hostname
+        RunExportDialog(self.hub, [(self.hostname, label)], seq.id,
+                        seq.name or seq.id, parent=self.window()).exec()
 
     def _on_start(self, seq: m.Sequence) -> None:
         hold_off = _hold_offset_of(seq)
@@ -893,6 +915,7 @@ class SequencesPanel(QWidget):
         # The two Hold capabilities are per-unit — resolve them once, not per row.
         hold_now_ok = self.can_run and self._supports(SEQUENCE_HOLD_NOW_CAPABILITY)
         edit_wb_ok = self.can_run and self._supports(SEQUENCE_HOLD_EDIT_CAPABILITY)
+        export_ok = self.can_run and self._supports(SEQUENCE_LOG_TABLE_CAPABILITY)
         for seq in seqs:
             if want != _SEQ_FILTER_ALL and not m.applies_to_type(seq.types, want):
                 continue
@@ -910,6 +933,7 @@ class SequencesPanel(QWidget):
                 show_scope=self.can_edit, on_proceed=self._on_proceed,
                 on_hold_now=self._on_hold_now, hold_now_ok=hold_now_ok,
                 on_edit_wb=self._on_edit_wb, edit_wb_ok=edit_wb_ok,
+                on_export=self._on_export, export_ok=export_ok,
             ))
             shown += 1
         if shown == 0:

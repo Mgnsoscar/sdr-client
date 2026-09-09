@@ -768,6 +768,12 @@ class AgentClient:
     def get_sequence_run(self, run_id: str) -> m.SequenceRun:
         return m.SequenceRun(**self._request("GET", f"/sequence-runs/{run_id}"))
 
+    def sequence_run_log_table(self, run_id: str) -> dict:
+        """The run's spreadsheet-shaped log: {run_id, sequence_name, state, on_air_at, tables:[…]},
+        each table {task, columns:[str], rows:[[…]]} — one row per state change. The client turns
+        each unit's tables into sheets of an .xlsx. Needs agent capability `sequence-log-table`."""
+        return self._request("GET", f"/sequence-runs/{run_id}/log-table")
+
     def patch_sequence_run(self, run_id: str, on_air_end: str) -> m.SequenceRun:
         body = m.PatchSequenceRunRequest(on_air_end=on_air_end).model_dump()
         return m.SequenceRun(**self._request("PATCH", f"/sequence-runs/{run_id}", json=body))

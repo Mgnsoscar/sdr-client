@@ -40,6 +40,9 @@ SEQUENCE_HOLD_NOW_CAPABILITY = "sequence-hold-now"
 # window B from the operator's edited sequence. The client gates its window-B edit UI on it (a
 # ≤1.18 agent would silently ignore the edit and run the stored window B).
 SEQUENCE_HOLD_EDIT_CAPABILITY = "sequence-hold-edit"
+# Agent >= 1.21.0 serves GET /sequence-runs/{id}/log-table (the run's spreadsheet-shaped log). The
+# client gates its "Export log…" button on it — an older agent has no such endpoint to export from.
+SEQUENCE_LOG_TABLE_CAPABILITY = "sequence-log-table"
 
 # The `sequence-hold` capability is advertised from agent 1.16.0, but 1.16.0 shipped the Hold
 # DATA MODEL ONLY — a hold-aware arm was refused (the Phase-0 guard). The HOLDING RUNTIME (park →

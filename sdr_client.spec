@@ -60,7 +60,7 @@ hiddenimports = ["PyQt6.Qsci"]
 # collected whole because requirements.txt floats its version and paramiko
 # optionally imports version-specific submodules (e.g. cryptography.hazmat.decrepit,
 # added in cryptography 43) that a version-sensitive import graph would miss.
-for pkg in ("zeroconf", "paramiko", "cryptography", "pydantic", "pydantic_core"):
+for pkg in ("zeroconf", "paramiko", "cryptography", "pydantic", "pydantic_core", "openpyxl"):
     hiddenimports += collect_submodules(pkg)
 
 binaries = collect_dynamic_libs("zeroconf")   # zeroconf's Cython _c/_utils extensions
