@@ -373,14 +373,17 @@ class _PlanRow(QFrame):
         self._log = QPushButton("Log")
         self._edit = QPushButton("Edit")
         self._delete = QPushButton("Delete")
-        # Fast-Forward-to-Hold, shown only when applicable.
-        self._hold_now = QPushButton("Hold now")
+        # Fast-Forward-to-Hold, shown only when applicable. Parented to `self` at creation because
+        # it (and Export below) are setVisible()'d *before* being added to the layout — a
+        # setVisible(True) on a parentless widget briefly top-levels it (a tiny window flashes on
+        # Windows) until addWidget reparents it.
+        self._hold_now = QPushButton("Hold now", self)
         self._hold_now.setToolTip("Jump to the Hold now — skip the rest of the run-up and hold the "
                                   "signal at its current value (then Proceed when ready)")
         self._hold_now.setVisible(can_ff)
         # Export a ran log to a spreadsheet (pick one of the plan's last runs).
         can_export = export_ok and on_export is not None
-        self._export = QPushButton("Export…")
+        self._export = QPushButton("Export…", self)
         self._export.setToolTip("Export a run's log to a spreadsheet — one row per state change, "
                                 "every parameter (and power quantity) in its own column; one sheet "
                                 "per unit")

@@ -226,3 +226,29 @@ def test_run_log_export_method_is_distinct_from_the_yaml_export_method():
         assert len(log_params) == 2 and log_params[0] == "self", (cls.__name__, log_params)
         yaml_params = list(inspect.signature(cls._on_export).parameters)
         assert yaml_params == ["self"], (cls.__name__, yaml_params)
+
+
+def test_conditional_row_buttons_are_never_setvisible_while_parentless(monkeypatch):
+    """Regression: a button setVisible()'d BEFORE it is added to the layout still has no parent,
+    so setVisible(True) briefly makes it a top-level window (a tiny window flashes on Windows)
+    until addWidget reparents it. Every conditionally-shown row button (_hold_now/_edit_wb/_export)
+    must be parented to the row at creation. Post-construction `.parent()` can't catch this (the
+    layout reparents anyway), so spy on setVisible and flag any parentless-visible call."""
+    from PyQt6.QtWidgets import QPushButton
+    orphaned: list = []
+    orig = QPushButton.setVisible
+
+    def spy(self, visible):
+        if visible and self.parent() is None:
+            orphaned.append(self.text())
+        orig(self, visible)
+
+    monkeypatch.setattr(QPushButton, "setVisible", spy)
+    sp._SequenceRow(_seq(), None, on_start=lambda s: None, on_stop=lambda s: None,
+                    on_edit=lambda s: None, on_delete=lambda s: None, on_log=lambda s: None,
+                    can_run=True, can_edit=False, on_hold_now=lambda s: None,
+                    on_edit_wb=lambda s: None, on_export=lambda s: None, export_ok=True)
+    pt._PlanRow(_plan(), [], 0, 0, on_arm=lambda p: None, on_stop=lambda p: None,
+                on_edit=lambda p: None, on_delete=lambda p: None, on_log=lambda p: None,
+                can_ff=True, on_hold_now=lambda p: None, on_export=lambda p: None, export_ok=True)
+    assert orphaned == [], f"buttons setVisible()'d while parentless (top-level flash): {orphaned}"

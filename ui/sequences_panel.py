@@ -279,18 +279,22 @@ class _SequenceRow(QFrame):
         self._edit = QPushButton("Edit")
         self._delete = QPushButton("Delete")
         # Fast-Forward-to-Hold: jump a running hold-aware run to its Hold now.
-        self._hold_now = QPushButton("Hold now")
+        # NB: _hold_now / _edit_wb / _export are setVisible()'d BELOW *before* they are added to
+        # the layout, so they MUST be parented to `self` at creation — a setVisible(True) on a
+        # parentless widget briefly makes it a top-level window (a tiny window flashes on Windows)
+        # until addWidget reparents it.
+        self._hold_now = QPushButton("Hold now", self)
         self._hold_now.setToolTip("Jump to the Hold now — skip the rest of the run-up and hold the "
                                   "signal at its current value (then Proceed when ready)")
         self._hold_now.setVisible(can_ff)
         # Edit-while-holding: retarget the post-hold steps before proceeding.
-        self._edit_wb = QPushButton("Edit…")
+        self._edit_wb = QPushButton("Edit…", self)
         self._edit_wb.setToolTip("Edit the post-hold steps (the down-ramp / cool-down) before you "
                                  "Proceed — e.g. retarget the down-ramp to where lock was lost")
         self._edit_wb.setVisible(can_edit_wb)
         # Export a ran log to a spreadsheet (pick one of the last runs).
         can_export = can_run and export_ok and on_export is not None
-        self._export = QPushButton("Export…")
+        self._export = QPushButton("Export…", self)
         self._export.setToolTip("Export a run's log to a spreadsheet — one row per state change, "
                                 "every parameter (and power quantity) in its own column")
         self._export.setVisible(can_export)
