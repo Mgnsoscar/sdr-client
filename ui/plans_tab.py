@@ -303,9 +303,10 @@ class _PlanRow(QFrame):
 
     A single-unit hold-aware plan run (docs/sequence-hold-step.md §6) surfaces the same run
     controls as the Library row: while HOLDING the Arm button becomes Proceed, a RUNNING
-    hold-aware run offers Hold-now (Fast-Forward-to-Hold), and a HOLDING run offers Edit… (edit
-    the post-hold window before proceeding). The Hold controls are hidden for every ordinary
-    (multi-unit / non-hold) plan."""
+    hold-aware run offers Hold-now (Fast-Forward-to-Hold), and a HOLDING run's own Edit button
+    retargets the post-hold window before proceeding (rather than opening the plan editor — one
+    Edit button, not two). The Hold controls are hidden for every ordinary (multi-unit /
+    non-hold) plan."""
 
     def __init__(self, plan: m.Plan, runs: List[m.SequenceRun], on_air_n: int,
                  pending_n: int, on_arm, on_stop, on_edit, on_delete, on_log,
@@ -370,20 +371,15 @@ class _PlanRow(QFrame):
         self._log = QPushButton("Log")
         self._edit = QPushButton("Edit")
         self._delete = QPushButton("Delete")
-        # Fast-Forward-to-Hold + edit-while-holding, shown only when applicable.
+        # Fast-Forward-to-Hold, shown only when applicable.
         self._hold_now = QPushButton("Hold now")
         self._hold_now.setToolTip("Jump to the Hold now — skip the rest of the run-up and hold the "
                                   "signal at its current value (then Proceed when ready)")
         self._hold_now.setVisible(can_ff)
-        self._edit_wb = QPushButton("Edit…")
-        self._edit_wb.setToolTip("Edit the post-hold steps (the down-ramp / cool-down) before you "
-                                 "Proceed — e.g. retarget the down-ramp to where lock was lost")
-        self._edit_wb.setVisible(can_edit_wb)
         # Minimum (not fixed) width so a longer label ("Proceed" > "Arm") grows instead of clipping.
         for b in (self._arm, self._stop, self._log, self._edit, self._delete):
             b.setMinimumWidth(66)
         self._hold_now.setMinimumWidth(72)
-        self._edit_wb.setMinimumWidth(60)
         self._arm.setToolTip(
             "Proceed — schedule the post-hold window (the down-ramp) and resume the run"
             if holding else
@@ -401,17 +397,20 @@ class _PlanRow(QFrame):
             self._arm.clicked.connect(lambda: on_arm(plan))
         self._stop.clicked.connect(lambda: on_stop(plan))
         self._log.clicked.connect(lambda: on_log(plan))
-        self._edit.clicked.connect(lambda: on_edit(plan))
         self._delete.clicked.connect(lambda: on_delete(plan))
+        # One Edit button: while HOLDING (with edit-while-holding support) it retargets the
+        # post-hold (window-B) steps before Proceed; otherwise it opens the plan editor.
+        if can_edit_wb and on_edit_wb is not None:
+            self._edit.setToolTip("Edit the post-hold steps (the down-ramp / cool-down) before you "
+                                  "Proceed — e.g. retarget the down-ramp to where lock was lost")
+            self._edit.clicked.connect(lambda: on_edit_wb(plan))
+        else:
+            self._edit.clicked.connect(lambda: on_edit(plan))
         if can_ff and on_hold_now is not None:
             self._hold_now.clicked.connect(lambda: on_hold_now(plan))
-        if can_edit_wb and on_edit_wb is not None:
-            self._edit_wb.clicked.connect(lambda: on_edit_wb(plan))
         shown = [self._arm]
         if can_ff:
             shown.append(self._hold_now)     # only while a run-up is in progress
-        if can_edit_wb:
-            shown.append(self._edit_wb)      # only while holding
         shown += [self._stop, self._log, self._edit, self._delete]
         for b in shown:
             lay.addWidget(b, alignment=Qt.AlignmentFlag.AlignTop)

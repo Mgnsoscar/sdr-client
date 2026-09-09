@@ -230,7 +230,7 @@ def _row(holding=False, can_ff=False, can_edit_wb=False):
     row = pt._PlanRow(
         plan, [], 0, 0,
         on_arm=lambda p: calls.__setitem__("arm", p),
-        on_stop=lambda p: None, on_edit=lambda p: None,
+        on_stop=lambda p: None, on_edit=lambda p: calls.__setitem__("edit", p),
         on_delete=lambda p: None, on_log=lambda p: None,
         holding=holding, can_ff=can_ff, can_edit_wb=can_edit_wb,
         on_proceed=lambda p: calls.__setitem__("proceed", p),
@@ -253,16 +253,23 @@ def test_plan_row_relabels_arm_to_proceed_while_holding():
     assert calls.get("proceed") is plan and "arm" not in calls
     # Hold-only controls are hidden unless their run state + capability say otherwise.
     assert row._hold_now.isVisibleTo(row) is False
-    assert row._edit_wb.isVisibleTo(row) is False
+    # There is exactly ONE Edit button, never a separate "Edit…". Without edit-while-holding
+    # support it still opens the plan editor.
+    assert not hasattr(row, "_edit_wb")
+    assert row._edit.text() == "Edit"
+    row._edit.click()
+    assert calls.get("edit") is plan and "wb" not in calls
 
 
 def test_plan_row_shows_hold_now_and_edit_when_flagged():
     row, calls, plan = _row(holding=True, can_ff=True, can_edit_wb=True)
     assert row._hold_now.isVisibleTo(row) is True
-    assert row._edit_wb.isVisibleTo(row) is True
+    # No second edit button: the single Edit button drives edit-while-holding here.
+    assert not hasattr(row, "_edit_wb")
+    assert row._edit.isVisibleTo(row) is True
     row._hold_now.click()
-    row._edit_wb.click()
-    assert calls.get("ff") is plan and calls.get("wb") is plan
+    row._edit.click()
+    assert calls.get("ff") is plan and calls.get("wb") is plan and "edit" not in calls
 
 
 def test_plan_row_hold_now_can_show_without_holding():
