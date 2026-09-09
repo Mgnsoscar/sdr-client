@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout,
 )
 
+from .log_separators import task_separators
 from .qt_adapter import DataHub
 from .theme import Palette
 from state.log_tail import LogTailer
@@ -38,6 +39,7 @@ class TaskLogDialog(QDialog):
         self.task_name = task_name
         self._running = running
         self._tailer = LogTailer()
+        self._seps = task_separators()   # a dashed rule above each log line
 
         self.setWindowTitle(f"Task log — {task_name}")
         self.setMinimumSize(760, 460)
@@ -82,7 +84,7 @@ class TaskLogDialog(QDialog):
         self._autoscroll.toggled.connect(self._on_autoscroll_toggled)
         row.addWidget(self._autoscroll)
         clear = QPushButton("Clear")
-        clear.clicked.connect(lambda: self._view.clear())
+        clear.clicked.connect(lambda: (self._view.clear(), self._seps.reset()))
         row.addWidget(clear)
         outer.addLayout(row)
 
@@ -118,11 +120,14 @@ class TaskLogDialog(QDialog):
         # Insert via a detached cursor (never self._view.moveCursor, which forces
         # the viewport to follow and would scroll even with autoscroll off). Only
         # scroll when autoscroll is on and the user hadn't scrolled up to read back.
+        text = self._seps.feed(chunk)
+        if not text:
+            return
         bar = self._view.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - 4
         cursor = self._view.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
-        cursor.insertText(chunk)
+        cursor.insertText(text)
         if self._autoscroll.isChecked() and at_bottom:
             bar.setValue(bar.maximum())
 

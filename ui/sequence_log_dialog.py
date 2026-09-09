@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
 )
 
 from api import models as m
+from .log_separators import sequence_separators
 from .qt_adapter import DataHub
 from .theme import Palette
 from state.log_tail import LogTailer
@@ -37,6 +38,7 @@ class SequenceLogDialog(QDialog):
         self.hostname = hostname
         self.sequence = sequence
         self._tailer = LogTailer()
+        self._seps = sequence_separators()   # a dashed rule above each [HH:MM:SS…] step
 
         self.setWindowTitle(f"Sequence log — {sequence.name or sequence.id}")
         self.setMinimumSize(760, 460)
@@ -81,7 +83,7 @@ class SequenceLogDialog(QDialog):
         self._autoscroll.toggled.connect(self._on_autoscroll_toggled)
         row.addWidget(self._autoscroll)
         clear = QPushButton("Clear")
-        clear.clicked.connect(lambda: self._view.clear())
+        clear.clicked.connect(lambda: (self._view.clear(), self._seps.reset()))
         row.addWidget(clear)
         outer.addLayout(row)
 
@@ -112,11 +114,14 @@ class SequenceLogDialog(QDialog):
         # detached cursor (not self._view.moveCursor, which forces the viewport to
         # follow the cursor and so scrolls even with autoscroll off). Only scroll
         # when autoscroll is on and the user hadn't scrolled up to read history.
+        text = self._seps.feed(chunk)
+        if not text:
+            return
         bar = self._view.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - 4
         cursor = self._view.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
-        cursor.insertText(chunk)
+        cursor.insertText(text)
         if self._autoscroll.isChecked() and at_bottom:
             bar.setValue(bar.maximum())
 

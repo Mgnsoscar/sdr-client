@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
 )
 
 from api import models as m
+from .log_separators import sequence_separators
 from .qt_adapter import DataHub
 from .theme import Palette
 from state.log_tail import LogTailer
@@ -42,6 +43,7 @@ class _UnitSeqLogPane(QWidget):
         self.hostname = hostname
         self.item = item
         self._tailer = LogTailer()
+        self._seps = sequence_separators()   # a dashed rule above each [HH:MM:SS…] step
         self._build()
         self._text.connect(self._append)
         self._status.connect(self._on_status)
@@ -69,7 +71,7 @@ class _UnitSeqLogPane(QWidget):
         self._autoscroll.toggled.connect(self._on_autoscroll_toggled)
         row.addWidget(self._autoscroll)
         clear = QPushButton("Clear")
-        clear.clicked.connect(lambda: self._view.clear())
+        clear.clicked.connect(lambda: (self._view.clear(), self._seps.reset()))
         row.addWidget(clear)
         outer.addLayout(row)
 
@@ -105,11 +107,14 @@ class _UnitSeqLogPane(QWidget):
         self._tailer.stop()
 
     def _append(self, chunk: str) -> None:
+        text = self._seps.feed(chunk)
+        if not text:
+            return
         bar = self._view.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - 4
         cursor = self._view.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
-        cursor.insertText(chunk)
+        cursor.insertText(text)
         if self._autoscroll.isChecked() and at_bottom:
             bar.setValue(bar.maximum())
 
