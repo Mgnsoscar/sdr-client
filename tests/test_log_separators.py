@@ -26,11 +26,33 @@ def test_sequence_separator_above_bracket_steps_only():
     assert lines.count(SEPARATOR) == 3                          # one per step, none leading
 
 
-def test_task_separator_above_each_line():
+def test_task_separator_above_timestamped_record_starts_only():
     s = task_separators()
-    text = s.feed("line one\nline two\nline three\n")
+    # Two real records, each with a non-timestamped continuation line beneath it. A separator
+    # sits above each record START; the continuation lines stay grouped (no separator).
+    text = s.feed(
+        "2026-09-09 11:32:00,465 INFO   power (target) : -190\n"
+        "    gain would be 0.0 dB\n"
+        "RESULT gain_db=0.0 power_dbm=-190 source=cal\n"
+        "2026-09-09 11:32:01,001 INFO   power (target) : -180\n"
+        "── mock_cw self-test ──\n")
     lines = text.split("\n")
-    assert lines == ["line one", SEPARATOR, "line two", SEPARATOR, "line three", ""]
+    assert lines[0] == "2026-09-09 11:32:00,465 INFO   power (target) : -190"   # first, no leading sep
+    assert lines[1] == "    gain would be 0.0 dB"                               # continuation — no sep
+    assert lines[2] == "RESULT gain_db=0.0 power_dbm=-190 source=cal"          # continuation — no sep
+    assert lines[3] == SEPARATOR and lines[4].endswith("power (target) : -180")  # next record start
+    assert lines[5] == "── mock_cw self-test ──"                               # banner continuation
+    assert lines.count(SEPARATOR) == 1                                          # one per record, none leading
+
+
+def test_bare_hhmmss_is_a_record_start():
+    s = task_separators()
+    text = s.feed("11:32:00 first record\n  indented continuation\n11:32:01 second record\n")
+    lines = text.split("\n")
+    assert lines[0] == "11:32:00 first record"                # first, no leading sep
+    assert lines[1] == "  indented continuation"              # continuation — no sep
+    assert lines[2] == SEPARATOR and lines[3] == "11:32:01 second record"
+    assert lines.count(SEPARATOR) == 1
 
 
 def test_partial_lines_buffered_across_chunks():
@@ -50,8 +72,15 @@ def test_reset_clears_pending_and_leading_suppression():
     assert s.feed("[10:00:02] start\n") == "[10:00:02] start\n"
 
 
-def test_blank_task_lines_are_not_steps():
+def test_blank_and_plain_task_lines_are_not_record_starts():
     s = task_separators()
-    text = s.feed("first\n\nsecond\n")
-    # A blank line is not a step (no separator above it); the next real line still gets one.
-    assert text.split("\n") == ["first", "", SEPARATOR, "second", ""]
+    text = s.feed(
+        "2026-09-09 11:32:00,465 INFO   started\n"
+        "\n"                                             # blank — not a record start
+        "plain continuation line\n"                      # non-timestamped — not a record start
+        "2026-09-09 11:32:02,000 INFO   done\n")
+    lines = text.split("\n")
+    assert lines[0].endswith("started")                  # first record, no leading sep
+    assert lines[1] == "" and lines[2] == "plain continuation line"   # neither gets a separator
+    assert lines[3] == SEPARATOR and lines[4].endswith("done")        # only the next record start
+    assert lines.count(SEPARATOR) == 1

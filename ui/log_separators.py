@@ -3,7 +3,9 @@
 The task / sequence / plan log views all stream text into a QPlainTextEdit. To visually
 separate entries we put a line of ``-`` above each STEP — for the sequence/plan logs that's
 each ``[HH:MM:SS…] …`` choreography line (its indented device output stays grouped beneath,
-un-separated); for the task log it's each output line.
+un-separated); for the task log it's each line that STARTS A NEW TIMESTAMPED RECORD
+(continuation lines — indented output, tracebacks, banners, ``RESULT …`` lines, blanks —
+stay grouped beneath the preceding record).
 
 The stream arrives in arbitrary chunks that may split mid-line, so we can't decide "is this a
 step?" on a chunk boundary. ``StepSeparators.feed`` buffers a trailing partial line until its
@@ -12,6 +14,7 @@ separator is emitted before the very first line (so the view has no stray top ru
 """
 from __future__ import annotations
 
+import re
 from typing import Callable
 
 SEPARATOR = "-" * 56
@@ -51,9 +54,24 @@ def _bracket_step(line: str) -> bool:
     return line.startswith("[")
 
 
-def _line_step(line: str) -> bool:
-    """A task-log entry — every non-blank output line (a raw task log has no sub-structure)."""
-    return bool(line.strip())
+# A task-log RECORD START: a line beginning with a full 'YYYY-MM-DD HH:MM:SS' (optionally a
+# 'T' date/time separator and a ',mmm'/'.mmm' fraction) OR a bare 'HH:MM:SS[,mmm]'. Anchored
+# at column 0, so INDENTED continuation lines never match. A real mock task-log record looks
+# like "2026-09-09 11:32:00,465 INFO   power (target) : -190 …".
+_TIMESTAMP_RE = re.compile(
+    r"""^(?:
+        \d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?   # YYYY-MM-DD HH:MM:SS[,mmm]
+      | \d{2}:\d{2}:\d{2}(?:[.,]\d+)?                        # HH:MM:SS[,mmm]
+    )""",
+    re.VERBOSE,
+)
+
+
+def _timestamp_step(line: str) -> bool:
+    """A task-log entry — a line that STARTS A NEW TIMESTAMPED RECORD. Continuation lines
+    (indented output, tracebacks, banners like the mock's '── … ──' rule, 'RESULT …' lines,
+    blanks) don't match, so they stay grouped under the preceding record."""
+    return bool(_TIMESTAMP_RE.match(line))
 
 
 def sequence_separators() -> StepSeparators:
@@ -61,4 +79,4 @@ def sequence_separators() -> StepSeparators:
 
 
 def task_separators() -> StepSeparators:
-    return StepSeparators(_line_step)
+    return StepSeparators(_timestamp_step)
