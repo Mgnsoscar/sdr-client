@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import QApplication
 
 from ui import timeline_model as tlm
 from ui.ramp_editor import RampEditorDialog
-from ui.timeline_editor import StepEditorDialog
+from ui.timeline_editor import StepEditorDialog, LANE_H
 from tests.test_step_editor_carried_bw import _editor as _chirp_editor, _bar
 
 _app = QApplication.instance() or QApplication([])
@@ -139,3 +139,77 @@ def test_ramp_editor_target_rows_show_only_for_step():
     dlg._anchor.setCurrentIndex(dlg._anchor.findData("start"))
     _app.processEvents()
     assert not dlg._target_row.isVisible()
+
+
+# ── Canvas: click-to-select, drag-to-anchor, remove-anchor (100% UI) ────────────
+
+def _ramp_item(off, sid="", task="chirp"):
+    return tlm.RunItem(task_name=task, action="ramp", anchor="start", offset=off, step_id=sid,
+                       ramp={"param": "power", "start": -90.0, "stop": -50.0,
+                             "steps": 3, "duration_s": 6.0})
+
+
+def test_canvas_make_anchor_connects_two_steps():
+    """A drag-to-anchor drop sets anchor="step" + target id + edge + a >= 0 offset, and the
+    target is assigned a stable id — no dialog."""
+    up = _ramp_item(0.0)                              # start 0, end 6 (no id yet)
+    later = _tune(20.0)
+    cv = _chirp_editor([_bar(), up, later])._canvas
+    cv._make_anchor(later.uid, up, "end")
+    assert later.anchor == "step"
+    assert up.step_id and later.anchor_step_id == up.step_id     # id assigned in place
+    assert later.anchor_edge == "end"
+    assert later.offset == 14.0                       # 20 - 6, kept in place
+
+
+def test_canvas_make_anchor_rejects_ineligible_drop():
+    up = _ramp_item(0.0, sid="up")
+    later = _tune(20.0)
+    cv = _chirp_editor([_bar(), up, later])._canvas
+    # a bar isn't a Phase-1 target → no anchor created
+    bar = next(it for it in cv._items if it.kind == "bar")
+    cv._make_anchor(later.uid, bar, "end")
+    assert later.anchor == "start" and not later.anchor_step_id
+
+
+def test_canvas_detach_anchor_reverts_to_start_in_place():
+    up = _ramp_item(0.0, sid="up")                   # end 6
+    down = tlm.RunItem(task_name="chirp", action="ramp", anchor="step", offset=3.0,
+                       anchor_step_id="up", anchor_edge="end",
+                       ramp={"param": "power", "start": -50.0, "stop": -90.0,
+                             "steps": 3, "duration_s": 6.0})
+    cv = _chirp_editor([_bar(), up, down])._canvas
+    cv._detach_anchor(down.uid)
+    assert down.anchor == "start"
+    assert not down.anchor_step_id and down.anchor_edge == "end"
+    assert down.offset == 9.0                         # resolved base (6 + 3) — stays put
+
+
+def test_canvas_selection_records_the_remove_chip_only_when_anchored():
+    up = _ramp_item(0.0, sid="up")
+    down = tlm.RunItem(task_name="chirp", action="ramp", anchor="step", offset=3.0,
+                       anchor_step_id="up", anchor_edge="end",
+                       ramp={"param": "power", "start": -50.0, "stop": -90.0,
+                             "steps": 3, "duration_s": 6.0})
+    cv = _chirp_editor([_bar(), up, down])._canvas
+    cv._selected = down.uid                           # a step-anchored item → chip appears
+    cv.grab()                                         # force a paint
+    assert cv._rmchip is not None
+    cv._selected = up.uid                             # a plain item → no chip
+    cv.grab()
+    assert cv._rmchip is None
+
+
+def test_canvas_edge_at_finds_handles_and_drop_target_respects_eligibility():
+    up = _ramp_item(0.0, sid="up")                   # a ramp: start + end handles
+    later = _tune(20.0)
+    cv = _chirp_editor([_bar(), up, later])._canvas
+    g = cv._geom[up.uid]; cy = g["y"] + LANE_H / 2
+    assert cv._edge_at(g["start_x"], cy) == (up, "start")
+    assert cv._edge_at(g["stop_x"], cy) == (up, "end")
+    # a drag from `later` can drop on the ramp's end (eligible)…
+    tgt = cv._drop_target(g["stop_x"], cy, later.uid)
+    assert tgt is not None and tgt[0] is up and tgt[1] == "end"
+    # …but not on itself
+    gl = cv._geom[later.uid]
+    assert cv._drop_target(gl["cx"], gl["y"] + LANE_H / 2, later.uid) is None

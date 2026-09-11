@@ -76,6 +76,7 @@ BAR_R = 9                   # capsule corner radius
 HUE_RAIL = 3               # left hue rail width inside a bar
 HANDLE_W = 10               # drawn width of a bar's grip
 HANDLE_HIT = 11             # px each side of a handle centre that grabs it
+PIN_HIT = 10                # px around a pin / ramp edge dot that starts a drag-to-anchor
 HOLD_HIT = 9                # px each side of the Hold divider that grabs it
 RUN_MIN_W = 120             # minimum run-pill width
 RUN_MAX_W = 260
@@ -289,6 +290,10 @@ class _TimelineCanvas(QWidget):
         self._baseline = self._content_h - BASELINE_FROM_BOTTOM
         self._zoom = 1.0                 # horizontal (time-axis) zoom factor
         self._scroll = None              # host QScrollArea, for zoom-to-cursor
+        self._selected: Optional[int] = None    # uid of the selected item (highlight + chip)
+        self._connect: Optional[dict] = None    # active drag-to-anchor: {src, edge, cursor, target, moved}
+        self._rmchip: Optional[QRectF] = None   # hit rect of the painted "Remove anchor" chip
+        self._rmchip_pos: Optional[tuple] = None  # (cx, cy) where the chip paints, set each paint
         self.setMouseTracking(True)
         self.grabGesture(Qt.GestureType.PinchGesture)   # touchpad pinch (where routed as a gesture)
         self.relayout()
@@ -319,6 +324,8 @@ class _TimelineCanvas(QWidget):
 
     def set_items(self, items: List) -> None:
         self._items = list(items)
+        self._selected = None
+        self._connect = None
         self.relayout()
         self.changed.emit()
 
@@ -338,12 +345,16 @@ class _TimelineCanvas(QWidget):
     def remove_item(self, uid: int) -> None:
         self._items = [it for it in self._items if it.uid != uid]
         self._collapsed.discard(uid)
+        if self._selected == uid:
+            self._selected = None
         self.relayout()
         self.changed.emit()
 
     def clear(self) -> None:
         self._items = []
         self._collapsed.clear()
+        self._selected = None
+        self._connect = None
         self.relayout()
         self.changed.emit()
 
@@ -545,6 +556,8 @@ class _TimelineCanvas(QWidget):
     def paintEvent(self, _e):  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._rmchip = None            # recomputed below when a step-anchored item is selected
+        self._rmchip_pos = None
         baseline = int(self._baseline)
         on_x, off_x = int(self._on), int(self._off)
         top = LANES_TOP - 8
@@ -576,6 +589,11 @@ class _TimelineCanvas(QWidget):
                 self._paint_pin(p, it)
         for it in self._holds:
             self._paint_hold(p, it)
+        self._paint_selection(p)
+        if self._rmchip_pos is not None:
+            self._paint_remove_chip(p, *self._rmchip_pos)
+        self._paint_connect_drag(p)
+        self._paint_drag_readout(p)
         p.end()
 
     # ── Redesign paint helpers ────────────────────────────────────────────────
@@ -979,24 +997,156 @@ class _TimelineCanvas(QWidget):
             x2 = gi.get("start_x", gi.get("cx"))
             y2 = gi["y"] + LANE_H / 2
             base, _e, _fa, _fb, ink = self._item_colors(it)
-            self._draw_connector(p, x1, y1, x2, y2, base, ink,
-                                 float(getattr(it, "offset", 0.0)))
+            sel = (it.uid == self._selected)
+            xm = self._draw_connector(p, x1, y1, x2, y2, base, ink,
+                                      float(getattr(it, "offset", 0.0)), sel)
+            # a selected connector offers "Remove anchor" on its lower leg (drawn on top,
+            # after the bars) — it never covers the offset chip on the upper leg.
+            if sel:
+                self._rmchip_pos = ((xm + x2) / 2, y2)
 
-    def _draw_connector(self, p, x1, y1, x2, y2, base, ink, offset):
+    def _draw_connector(self, p, x1, y1, x2, y2, base, ink, offset, selected=False):
         r = 7.0
         xm = x1 + max(14.0, (x2 - x1) * 0.45)
         dy = 1.0 if y2 >= y1 else -1.0
         path = QPainterPath(); path.moveTo(x1, y1)
         path.lineTo(xm - r, y1); path.quadTo(xm, y1, xm, y1 + r * dy)
         path.lineTo(xm, y2 - r * dy); path.quadTo(xm, y2, xm + r, y2); path.lineTo(x2, y2)
-        pen = QPen(base, 2); pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        stroke = QColor(Palette.ACCENT) if selected else base
+        if selected:                                   # soft under-glow when selected
+            halo = QColor(Palette.ACCENT); halo.setAlpha(55)
+            gpen = QPen(halo, 7); gpen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            gpen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(gpen); p.setBrush(Qt.BrushStyle.NoBrush); p.drawPath(path)
+        pen = QPen(stroke, 2.4 if selected else 2); pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush); p.drawPath(path)
         # arrowhead into the dependent's start
         p.drawLine(int(x2 - 6), int(y2 - 4), int(x2), int(y2))
         p.drawLine(int(x2 - 6), int(y2 + 4), int(x2), int(y2))
         # offset chip on the upper leg
-        self._chip(p, (x1 + xm) / 2, y1, "+" + self._mmss(offset), base, ink)
+        self._chip(p, (x1 + xm) / 2, y1, "+" + self._mmss(offset),
+                   stroke, stroke if selected else ink)
+        return xm
+
+    # ── Selection / drag affordances (drawn on top of the items) ──────────────
+    def _paint_selection(self, p):
+        """An accent ring around the selected item (bar / ramp capsule or a pin dot)."""
+        if self._selected is None:
+            return
+        it = next((o for o in self._rows if o.uid == self._selected), None)
+        g = self._geom.get(self._selected) if it is not None else None
+        if not g:
+            return
+        accent = QColor(Palette.ACCENT)
+        halo = QColor(Palette.ACCENT); halo.setAlpha(45)
+        y = g["y"]
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        if it.kind == "bar" or tlm._is_ramp(it):
+            sx, px = g.get("start_x", 0.0), g.get("stop_x", 0.0)
+            wmin = HANDLE_W * 2.0 if it.kind == "bar" else RAMP_MIN_W
+            rect = QRectF(min(sx, px) - 2.5, y - 2.5, max(wmin, abs(px - sx)) + 5, LANE_H + 5)
+            p.setPen(QPen(halo, 6)); p.drawRoundedRect(rect, BAR_R + 2, BAR_R + 2)
+            p.setPen(QPen(accent, 2)); p.drawRoundedRect(rect, BAR_R + 2, BAR_R + 2)
+        else:
+            cx, cy = g.get("cx", 0.0), y + LANE_H / 2
+            p.setPen(QPen(halo, 6)); p.drawEllipse(QPointF(cx, cy), 11.0, 11.0)
+            p.setPen(QPen(accent, 2)); p.drawEllipse(QPointF(cx, cy), 11.0, 11.0)
+
+    def _paint_remove_chip(self, p, cx, cy):
+        """The clickable '✕ Remove anchor' pill on a selected connector. Records its hit
+        rect in self._rmchip so a press detaches the anchor (no dialog)."""
+        text = "Remove anchor"
+        f = self._f(9, True); p.setFont(f); fm = QFontMetrics(f)
+        w = fm.horizontalAdvance(text) + 32
+        r = QRectF(cx - w / 2, cy - 10, w, 20)
+        r.moveLeft(max(2.0, min(r.left(), self.width() - w - 2)))
+        col = QColor(Palette.CRASH)
+        p.setPen(QPen(col, 1)); p.setBrush(QColor(Palette.SURFACE))
+        p.drawRoundedRect(r, 10, 10)
+        gx, gy = r.left() + 13, r.center().y()
+        p.setPen(QPen(col, 1.6))
+        p.drawLine(QPointF(gx - 3, gy - 3), QPointF(gx + 3, gy + 3))
+        p.drawLine(QPointF(gx - 3, gy + 3), QPointF(gx + 3, gy - 3))
+        p.setPen(col)
+        p.drawText(QRectF(r.left() + 20, r.top(), r.width() - 22, r.height()),
+                   int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), text)
+        self._rmchip = r
+
+    def _paint_connect_drag(self, p):
+        """The live rubber-band while dragging an anchor from a source handle to a target
+        edge, plus a readout of the resulting offset."""
+        if self._connect is None or not self._connect.get("moved"):
+            return
+        src = next((o for o in self._rows if o.uid == self._connect["src"]), None)
+        g = self._geom.get(self._connect["src"]) if src is not None else None
+        if not g:
+            return
+        x1 = g.get("start_x", g.get("cx", 0.0))
+        y1 = g["y"] + LANE_H / 2
+        cur = self._connect["cursor"]; x2, y2 = cur.x(), cur.y()
+        tgt = self._connect["target"]
+        ok = tgt is not None
+        col = QColor(Palette.ACCENT) if ok else QColor(Palette.TEXT_FAINT)
+        if ok:
+            t, edge = tgt
+            x2 = self._edge_x(t, edge); y2 = self._geom[t.uid]["y"] + LANE_H / 2
+            p.setPen(QPen(QColor("#FFFFFF"), 2)); p.setBrush(QColor(Palette.ACCENT))
+            p.drawEllipse(QPointF(x2, y2), 6.0, 6.0)
+        pen = QPen(col, 2.2)
+        pen.setStyle(Qt.PenStyle.SolidLine if ok else Qt.PenStyle.DashLine)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+        path = QPainterPath(); path.moveTo(x1, y1)
+        path.cubicTo(x1 + (x2 - x1) * 0.5, y1, x1 + (x2 - x1) * 0.5, y2, x2, y2)
+        p.drawPath(path)
+        p.setPen(QPen(QColor("#FFFFFF"), 2)); p.setBrush(col)
+        p.drawEllipse(QPointF(x1, y1), 5.5, 5.5)
+        if ok:
+            off = tlm.step_drop_offset(self._items, self._connect["src"], t.uid, edge,
+                                       self._hold_off, self._step_bases)
+            label = f"+{self._mmss(off or 0.0)} after {t.task_name or '?'} · {edge}"
+        else:
+            label = "drop on a step edge to anchor"
+        self._paint_tag(p, x2, y2 - 16, label, ok)
+
+    def _paint_drag_readout(self, p):
+        """While moving an item, a floating tag shows the time it now fires at."""
+        if self._drag is None or not self._drag.get("moved"):
+            return
+        it, part = self._drag["item"], self._drag["part"]
+        g = self._geom.get(it.uid)
+        if not g:
+            return
+        y = g["y"]
+        if part == "bar_stop":
+            label = _timing_text(float(getattr(it, "stop_offset", 0.0)), "stop", True)
+            x = g.get("stop_x", 0.0)
+        elif part in ("bar_start", "bar_body"):
+            side = "hold" if getattr(it, "start_anchor", "start") == "hold" else "start"
+            label = _timing_text(float(getattr(it, "start_offset", 0.0)), side, True)
+            x = g.get("start_x", 0.0)
+        elif part == "hold_body":
+            label = "Hold · " + _timing_text(float(getattr(it, "offset", 0.0)), "start", True)
+            x = g.get("cx", 0.0)
+        else:                                   # run_body (a tune / one-shot pin)
+            anc = getattr(it, "anchor", "start")
+            side = anc if anc in ("start", "stop", "hold") else "start"
+            label = _timing_text(float(getattr(it, "offset", 0.0)), side, True)
+            x = g.get("cx", 0.0)
+        self._paint_tag(p, x, y - 13, label, True)
+
+    def _paint_tag(self, p, cx, cy, text, strong=True):
+        """A compact floating tag (accent when strong, muted otherwise), clamped on-canvas."""
+        f = mono_font(10); p.setFont(f); fm = QFontMetrics(f)
+        w = fm.horizontalAdvance(text) + 16
+        r = QRectF(cx - w / 2, cy - 10, w, 20)
+        r.moveLeft(max(2.0, min(r.left(), max(2.0, self.width() - w - 2))))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(Palette.ACCENT) if strong else QColor(Palette.TEXT_MUTED))
+        p.drawRoundedRect(r, 6, 6)
+        p.setPen(QColor("#FFFFFF"))
+        p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
 
     def row_layout(self):
         """[{item, y, hue, child, row_h}] for the row-header column, in row order."""
@@ -1059,6 +1209,12 @@ class _TimelineCanvas(QWidget):
             g = self._geom.get(it.uid)
             if g and abs(x - g["cx"]) <= HOLD_HIT and (LANES_TOP - 14) <= y <= self._baseline + 20:
                 return it, "hold_body"
+        # Connection handles (ramp edge dots / a pin's dot) win over the body so a press on
+        # a handle starts a drag-to-anchor, not a move/edit.
+        edge = self._edge_at(x, y)
+        if edge is not None:
+            it, side = edge
+            return it, "edge_" + side
         for it in self._items:
             g = self._geom.get(it.uid)
             if not g or g.get("kind") == "hold":
@@ -1089,21 +1245,80 @@ class _TimelineCanvas(QWidget):
                         return it, "open"
         return None
 
+    # ── Drag-to-anchor (connection handles) ───────────────────────────────────
+    def _edge_at(self, x: float, y: float) -> Optional[Tuple[object, str]]:
+        """The (item, edge) of a connection handle under (x, y): a ramp's start/end edge
+        dot, or a pin's dot. Bars and the Hold are not Phase-1 anchor participants, so they
+        carry no connect handle. Returns None away from every dot."""
+        for it in self._rows:
+            g = self._geom.get(it.uid)
+            if not g:
+                continue
+            cy = g["y"] + LANE_H / 2
+            if abs(y - cy) > PIN_HIT + 3:
+                continue
+            if tlm._is_ramp(it):
+                if abs(x - g.get("start_x", -1e9)) <= PIN_HIT:
+                    return it, "start"
+                if abs(x - g.get("stop_x", -1e9)) <= PIN_HIT:
+                    return it, "end"
+            elif it.kind != "bar" and not tlm._is_hold(it):
+                if abs(x - g.get("cx", -1e9)) <= PIN_HIT:
+                    return it, "start"
+        return None
+
+    def _is_anchor_source(self, it) -> bool:
+        """An item that can be a step-anchor DEPENDENT (dragged onto a target): a point
+        (tune / one-shot) or a ramp. Bars and the Hold cannot (Phase 1)."""
+        return (not tlm._is_hold(it) and getattr(it, "kind", None) != "bar"
+                and getattr(it, "action", "run") in ("run", "tune", "ramp"))
+
+    def _drop_target(self, x: float, y: float, src_uid: int) -> Optional[Tuple[object, str]]:
+        """The (target, edge) a connect drag from `src_uid` would land on at (x, y): an
+        edge handle of an ELIGIBLE target (cycle-safe, on-air), never the source itself."""
+        hit = self._edge_at(x, y)
+        if hit is None:
+            return None
+        tgt, edge = hit
+        if getattr(tgt, "uid", None) == src_uid:
+            return None
+        if tgt not in tlm.eligible_step_targets(self._items, src_uid):
+            return None
+        return tgt, edge
+
     # ── Mouse ─────────────────────────────────────────────────────────────────
 
     def mousePressEvent(self, e):  # noqa: N802
         if e.button() != Qt.MouseButton.LeftButton:
             return
         pos = e.position()
+        # "Remove anchor" chip on the selected connector wins over everything under it.
+        if self._rmchip is not None and self._rmchip.contains(pos):
+            self._detach_anchor(self._selected)
+            return
         hit = self._hit(pos.x(), pos.y())
         if hit is None:
             self._drag = None
+            if self._selected is not None:      # click on empty canvas → deselect
+                self._selected = None
+                self.update()
             return
         it, part = hit
         if part == "caret":
             self._drag = None
             self._toggle_collapsed(it)
             return
+        # Selecting on press highlights the item and reveals its "Remove anchor" chip.
+        if self._selected != it.uid:
+            self._selected = it.uid
+            self.update()
+        # A press on a connection handle of an anchorable item starts a drag-to-anchor.
+        if part.startswith("edge_") and part == "edge_start" and self._is_anchor_source(it):
+            self._connect = {"src": it.uid, "cursor": pos, "target": None,
+                             "moved": False, "press_x": pos.x()}
+            self._drag = None
+            return
+        self._connect = None
         self._drag = {
             "item": it, "part": part, "press_x": pos.x(), "moved": False,
             "start0": getattr(it, "start_offset", 0.0),
@@ -1119,9 +1334,24 @@ class _TimelineCanvas(QWidget):
 
     def mouseMoveEvent(self, e):  # noqa: N802
         pos = e.position()
+        # A live drag-to-anchor: rubber-band from the source handle to the cursor, snapping
+        # onto an eligible target edge under the pointer.
+        if self._connect is not None:
+            if not (e.buttons() & Qt.MouseButton.LeftButton):
+                return
+            if not self._connect["moved"] and abs(pos.x() - self._connect["press_x"]) < DRAG_THRESHOLD:
+                return
+            self._connect["moved"] = True
+            self._connect["cursor"] = pos
+            self._connect["target"] = self._drop_target(pos.x(), pos.y(), self._connect["src"])
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.update()
+            return
         if self._drag is None:
             hit = self._hit(pos.x(), pos.y())
-            if hit and hit[1] in ("bar_start", "bar_stop"):
+            if hit and hit[1].startswith("edge_"):
+                self.setCursor(Qt.CursorShape.CrossCursor)
+            elif hit and hit[1] in ("bar_start", "bar_stop"):
                 self.setCursor(Qt.CursorShape.SizeHorCursor)
             elif hit:
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1208,15 +1438,71 @@ class _TimelineCanvas(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, e):  # noqa: N802
-        if e.button() != Qt.MouseButton.LeftButton or self._drag is None:
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        if self._connect is not None:
+            conn = self._connect
+            self._connect = None
+            if conn["moved"] and conn["target"] is not None:
+                tgt, edge = conn["target"]
+                self._make_anchor(conn["src"], tgt, edge)
+            else:
+                self.update()          # cancelled — clear the rubber-band
+            return
+        if self._drag is None:
             return
         drag = self._drag
         self._drag = None
         if drag["moved"]:
             self.relayout()
             self.changed.emit()
-        else:
-            self.edit_item(drag["item"])
+        # A non-moved press only selects (done in mousePress); double-click opens the editor.
+
+    def mouseDoubleClickEvent(self, e):  # noqa: N802
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        hit = self._hit(e.position().x(), e.position().y())
+        if hit is not None and hit[1] != "caret":
+            self.edit_item(hit[0])
+
+    # ── Anchor create / detach (100% UI, no forms) ─────────────────────────────
+    def _make_anchor(self, src_uid: int, tgt, edge: str) -> None:
+        """Anchor the source item's start to `tgt`'s `edge` (a drag-to-anchor drop). Keeps
+        the source visually in place (offset = the current gap, clamped >= 0)."""
+        src = next((it for it in self._items if it.uid == src_uid), None)
+        if src is None:
+            return
+        off = tlm.step_drop_offset(self._items, src_uid, tgt.uid, edge,
+                                   self._hold_off, self._step_bases)
+        if off is None:
+            self.update()
+            return
+        sid = tlm.ensure_step_id(tgt)
+        if not sid:
+            self.update()
+            return
+        src.anchor = "step"
+        src.anchor_step_id = sid
+        src.anchor_edge = edge
+        src.offset = off
+        self._selected = src_uid
+        self.relayout()
+        self.changed.emit()
+
+    def _detach_anchor(self, uid: Optional[int]) -> None:
+        """Remove a step anchor (the "Remove anchor" chip / a UI detach): revert the item to
+        a plain on-air start anchor at the offset it currently resolves to, so it stays put."""
+        it = next((o for o in self._items if o.uid == uid), None)
+        if it is None or getattr(it, "anchor", "") != "step":
+            return
+        base = self._step_bases.get(uid)
+        it.offset = base if base is not None else float(getattr(it, "offset", 0.0))
+        it.anchor = "start"
+        it.anchor_step_id = ""
+        it.anchor_edge = "end"
+        self.relayout()
+        self.changed.emit()
 
     # ── Zoom (Ctrl+wheel on a mouse; pinch on a touchpad) ─────────────────────
 
@@ -1320,6 +1606,8 @@ class _TimelineCanvas(QWidget):
         r = dlg.exec()
         if r == QDialog.DialogCode.Accepted and dlg.result_item is not None:
             self.add_item(dlg.result_item)
+            self._selected = dlg.result_item.uid
+            self.update()
 
     def _default_hold_offset(self) -> float:
         """A sensible starting position for a new Hold: just past the furthest on-air
@@ -2300,7 +2588,7 @@ class TimelineEditor(QWidget):
         self._mindur = QLabel("")
         self._mindur.setStyleSheet(f"font-size: 11px; color: {Palette.ACCENT};")
         bar.addWidget(self._mindur)
-        self._hint = QLabel("Drag a bar to move it · click to edit")
+        self._hint = QLabel("Drag a bar to move it · click to select, double-click to edit")
         self._hint.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         bar.addWidget(self._hint)
         # Fit-to-view + zoom readout.
@@ -2601,7 +2889,8 @@ class TimelineEditor(QWidget):
         if not self._tasks:
             self._hint.setText("no tasks on this unit — define one in the Tasks tab first")
         else:
-            self._hint.setText("Drag handles to set timing · click to edit")
+            self._hint.setText("Drag handles to set timing · drag an edge dot to another "
+                               "step to anchor · click to select, double-click to edit")
         self._canvas.relayout()
 
     def available_tasks(self) -> List[str]:

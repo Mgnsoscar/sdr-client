@@ -478,6 +478,50 @@ def ensure_step_id(it) -> str:
     return sid
 
 
+def _by_uid(items, uid):
+    for it in items:
+        if getattr(it, "uid", None) == uid:
+            return it
+    return None
+
+
+def _item_edge_offset(items, it, edge: str, h_off: Optional[float],
+                      step_bases: Optional[Dict[int, float]] = None) -> Optional[float]:
+    """On-air offset of `it`'s start/end edge for GEOMETRY (its start-side base, from
+    effective_anchor_offset — so a hold/step-anchored item resolves through step_bases),
+    or None when the edge isn't on the on-air clock (a stop/both-anchored item)."""
+    a, base = effective_anchor_offset(it, h_off, step_bases)
+    if a != "start":
+        return None
+    if edge == "end" and _is_ramp(it):
+        return base + _ramp_duration(dict(getattr(it, "ramp", None) or {}))
+    return base
+
+
+def step_drop_offset(items, source_uid, target_uid, edge: str,
+                     h_off: Optional[float],
+                     step_bases: Optional[Dict[int, float]] = None) -> Optional[float]:
+    """The forward offset (>= 0) that anchors `source_uid`'s start to `target_uid`'s
+    `edge` while keeping the source visually where it already sits — i.e. the gap between
+    the source's current start and the target edge, snapped and clamped at 0 (the ordering
+    invariant: a dependent never precedes its anchor). None when the drop is invalid: the
+    target isn't an eligible (cycle-safe, on-air) target for the source, or its edge isn't
+    on the on-air clock. Pure — the caller assigns the ids and records the anchor."""
+    src = _by_uid(items, source_uid)
+    tgt = _by_uid(items, target_uid)
+    if src is None or tgt is None or src is tgt:
+        return None
+    if tgt not in eligible_step_targets(items, source_uid):
+        return None
+    tgt_edge = _item_edge_offset(items, tgt, edge, h_off, step_bases)
+    if tgt_edge is None:
+        return None
+    src_base = _item_edge_offset(items, src, "start", h_off, step_bases)
+    if src_base is None:                      # a stop/both-anchored source snaps to the edge
+        return 0.0
+    return max(0.0, _snap(src_base - tgt_edge))
+
+
 def bar_start_placement(item, h_off: Optional[float]) -> Tuple[str, float]:
     """(anchor, offset) for drawing a duration bar's START handle. A window-B bar
     (`start_anchor="hold"`) places its start at the Hold divider (`hold_offset +

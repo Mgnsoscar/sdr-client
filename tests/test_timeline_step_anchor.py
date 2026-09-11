@@ -51,6 +51,43 @@ def test_ramp_end_edge_is_start_plus_duration():
     assert bases[at_start.uid] == 2.0
 
 
+# ── step_drop_offset (drag-to-anchor drop, UI) ──────────────────────────────────
+
+def test_step_drop_offset_keeps_the_source_in_place():
+    """Dropping a later step onto a target edge anchors it at the gap it already has, so it
+    doesn't jump — dragging the target then moves it."""
+    r = _ramp(off=2.0, sid="rmp")                        # start 2, end 8
+    later = _tune(off=20.0)                              # sits at 20
+    items = [_bar(), r, later]
+    bases = tlm.resolve_step_offsets(items, None)
+    # anchor `later` to the ramp's END (8): offset = 20 - 8 = 12
+    off = tlm.step_drop_offset(items, later.uid, r.uid, "end", None, bases)
+    assert off == 12.0
+    # to its START (2): offset = 20 - 2 = 18
+    assert tlm.step_drop_offset(items, later.uid, r.uid, "start", None, bases) == 18.0
+
+
+def test_step_drop_offset_clamps_a_source_before_the_edge_to_zero():
+    r = _ramp(off=10.0, sid="rmp")                       # end 16
+    early = _tune(off=3.0)                               # before the edge
+    items = [_bar(), r, early]
+    off = tlm.step_drop_offset(items, early.uid, r.uid, "end", None, None)
+    assert off == 0.0                                    # never precedes its anchor
+
+
+def test_step_drop_offset_rejects_ineligible_targets():
+    r = _ramp(off=2.0, sid="rmp")
+    later = _tune(off=20.0)
+    bar = _bar()
+    items = [bar, r, later]
+    assert tlm.step_drop_offset(items, later.uid, later.uid, "end", None, None) is None  # self
+    assert tlm.step_drop_offset(items, later.uid, bar.uid, "end", None, None) is None    # a bar
+    # a cycle: r already anchors to later → later can't anchor back to r
+    later.step_id = "later"
+    r.anchor = "step"; r.anchor_step_id = "later"; r.anchor_edge = "end"
+    assert tlm.step_drop_offset(items, later.uid, r.uid, "end", None, None) is None
+
+
 def test_effective_anchor_offset_uses_step_base():
     a = _tune(off=5.0, sid="a")
     b = _tune(off=2.0, anchor="step", ref="a", edge="end")

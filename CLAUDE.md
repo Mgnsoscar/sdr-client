@@ -98,9 +98,37 @@ axis, connectors. Phased build: **visual redesign → drag/drop → connectors (
   primary Save-sequence buttons, and a **Ready / Needs-a-fix validity pill** (`_set_ready`). Kept the
   tested surface (`_run_label`, `_place`, `render`,
   `_geom`, `_hit`, `_lane_of`, `_default_hold_offset`, `has_hold`, `set_items`) so the whole suite (904)
-  stays green. **NOT YET DONE** (later phases, per plan): interactive drag-to-anchor connectors + handles,
-  context menus, drag ghosts/snapping/marquee/multi-select, undo/redo, hover tooltips, the minimap, the
-  validity pill. `docs/sequence-editor-mockup.html` is the visual spec.
+  stays green. `docs/sequence-editor-mockup.html` is the visual spec.
+- **Ramp pill (option B, `docs/ramp-pill-mockup.html`):** a ramp capsule's rising/falling slope moved off
+  the text into a dedicated right **end-cap** (`RAMP_CAP_W`; faint tinted zone + hairline divider + a
+  slope mark ending in a dot at the destination level); the badge · from→to range · duration sit
+  flush-left, elided to the space before the divider. `_paint_ramp` + `_paint_slope`.
+- **Phase 2 — interactive selection + drag-to-anchor + drag readout (COMPLETE):** anchoring is now
+  100% on-canvas, no forms.
+  - **Click-to-select + highlight** — the canvas holds `_selected` (a uid); a single click selects (accent
+    ring around the bar/ramp capsule or the pin dot), a click on empty deselects, and **double-click**
+    opens the editor (was single-click; `mouseDoubleClickEvent`). A newly-added item is auto-selected.
+  - **Remove anchor (UI)** — a selected step-anchored item paints a clickable red **"✕ Remove anchor"**
+    pill on the lower leg of its (accent-highlighted) connector; a press detaches via `_detach_anchor`
+    (reverts to a plain on-air `start` anchor at the offset it currently resolves to, so it stays put) —
+    no dialog. The chip's hit rect is `_rmchip` (recomputed each paint, position recorded in
+    `_paint_connectors`).
+  - **Drag-to-anchor** — every ramp edge dot + pin dot is a connection handle (`_edge_at`; bars/Hold are
+    not Phase-1 participants). Pressing a source handle (a ramp/point's START) begins a connect-drag
+    (`_connect`); `mouseMove` rubber-bands to the cursor and snaps onto an eligible target edge
+    (`_drop_target` → `tlm.eligible_step_targets`), `mouseRelease` creates the anchor via `_make_anchor`
+    (`tlm.step_drop_offset` → offset = the current gap, clamped ≥ 0 so the source stays in place +
+    honours the ordering invariant; `tlm.ensure_step_id` stamps the target). `_paint_connect_drag`.
+  - **Live time readout while dragging** — `_paint_drag_readout` floats an accent tag (`_paint_tag`) at
+    the dragged edge showing the resolved time (`_timing_text`, e.g. `+45 s · on-air`, `off-air −0:30`,
+    `Hold · on-resume`); the connect-drag readout reads `+M:SS after <task> · <edge>`.
+  - Pure model: **`timeline_model.step_drop_offset(items, src, tgt, edge, h_off, step_bases)`** (+ helpers
+    `_by_uid`/`_item_edge_offset`). Tests: `tests/test_timeline_step_anchor.py` (step_drop_offset keeps in
+    place / clamps to 0 / rejects self·bar·cycle) + `tests/test_timeline_step_anchor_ui.py` (canvas
+    `_make_anchor`/`_detach_anchor`, the remove chip appears only when anchored, `_edge_at`/`_drop_target`
+    eligibility). Suite 904 → 912 offscreen. Drift-guarded files untouched.
+  - **NOT YET DONE** (later phases, per plan): context menus, drag ghosts/snapping/marquee/multi-select,
+    undo/redo, hover tooltips, the minimap.
 
 ## Current state — step-to-step anchoring Phase 1 (client authoring + geometry): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo; stacked on `run-task-conflict-guards`)
 Owner ask: anchor a step not only to on-air/off-air/Hold but to ANOTHER step's start/end edge — e.g. a
