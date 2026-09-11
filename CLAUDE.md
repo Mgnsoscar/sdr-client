@@ -71,6 +71,33 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — sequence editor REDESIGN, Phase 1 (visual + Gantt layout): IN PROGRESS (branch `claude/step-to-step-anchoring`, client-only)
+Owner ask: redesign the sequence timeline editor to look **exactly** like the approved mockup
+(`docs/sequence-editor-mockup.html`, published Artifact) — compact/modern, per-task colour, real-time
+axis, connectors. Phased build: **visual redesign → drag/drop → connectors (interactive) → context menu
+→ time axis**. **Phase 1 (this) = the visual + layout overhaul**, verified offscreen against the mockup
+(dev harness `tools/_seqshot.py`, headless Chromium/Qt grab). Shipped:
+- **`ui/timeline_model.py`** (pure, tested): `TASK_HUES` + `task_hue_map(items)` (each duration task a
+  stable hue distinct from the reserved green/amber/red; tunes/ramps inherit their parent task's hue via
+  shared `task_name`); `display_order(items)` → (rows, holds) grouping a task's tunes/ramps directly
+  under it, groups ordered by earliest fire time. Tests: `tests/test_timeline_redesign_model.py`.
+- **`ui/timeline_editor.py`** — the canvas (`_TimelineCanvas`) is now **one row per item** (Gantt),
+  panels/captions dropped. New paint language: capsule bars with a hue rail + vertical gradient + edge
+  connection dots; ramps with a rising/falling slope motif + parent-task badge + duration; **tunes/one-
+  shots as PINS** (filled circle / diamond) + borderless caption (never a capsule → no false duration);
+  the **Hold** divider; on-air/off-air **pills**; a **REAL-TIME axis** — concrete mm:ss ticks across the
+  anchored/defined span (`_def_x`), then a **hatched "relative" region** to off-air (length set at arm);
+  step-to-step **connectors** drawn as orthogonal rounded SVG-style paths with an always-on `+M:SS`
+  offset chip (`_paint_connectors`/`_draw_connector`). Layout LEFT-anchors (small pre-roll gutter, no dead
+  warm-up), the axis rides under the rows, and the editor **auto-fits on open** (`_fit`, `showEvent`).
+  New **`_RowHeader`** column ("TASKS & STEPS"): task swatch / indented kin-line for children, name + sub
+  + type badge, in the task hue — the parent-task encoding shown three ways (position, colour, badge).
+  Toolbar restyled to pill chips + Fit. Kept the tested surface (`_run_label`, `_place`, `render`,
+  `_geom`, `_hit`, `_lane_of`, `_default_hold_offset`, `has_hold`, `set_items`) so the whole suite (904)
+  stays green. **NOT YET DONE** (later phases, per plan): interactive drag-to-anchor connectors + handles,
+  context menus, drag ghosts/snapping/marquee/multi-select, undo/redo, hover tooltips, the minimap, the
+  validity pill. `docs/sequence-editor-mockup.html` is the visual spec.
+
 ## Current state — step-to-step anchoring Phase 1 (client authoring + geometry): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo; stacked on `run-task-conflict-guards`)
 Owner ask: anchor a step not only to on-air/off-air/Hold but to ANOTHER step's start/end edge — e.g. a
 ramp right after another ramp's end — so editing the target moves everything downstream (a DAG).

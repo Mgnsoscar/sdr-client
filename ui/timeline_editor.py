@@ -43,8 +43,9 @@ from __future__ import annotations
 import shlex
 from typing import Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import QEvent, QRectF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen
+from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QLinearGradient, QPainter,
+                         QPainterPath, QPen)
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea,
@@ -59,23 +60,27 @@ from api.fleet import LIBRARY_HOST
 from .duration_spin import DurationSpinBox
 from .param_form import ParamForm, fmt_duration, fmt_value, hz_per_unit, power_mode_of_args
 from .ramp_editor import RampEditorDialog
-from .theme import Palette
+from .theme import Fonts, Palette, mono_font
 from .widgets import fit_dialog_to_screen
 
 # ── View geometry (paint sizes; timing geometry lives in timeline_model) ──────
-LANES_TOP = 34              # y of the first lane
-LANE_H = 34                 # bar / pill (name row) height
-LANE_VGAP = 12              # vertical gap between lanes
-CAPTION_H = 17              # the offset-timing chip row under a name
-AXIS_GAP = 14               # min gap between the lowest task and the time axis
-BASELINE_FROM_BOTTOM = 50   # baseline sits this far above the canvas bottom
-HANDLE_W = 12               # drawn width of a bar's grip
+# Redesign: one row per item (Gantt-style), a compact capsule/pin visual language,
+# a real-time axis, and per-task colour. See docs/sequence-editor-mockup.html.
+LANES_TOP = 20              # y of the first row
+LANE_H = 30                 # bar / pin row height
+LANE_VGAP = 12              # vertical gap between rows
+CAPTION_H = 16              # timing-pill height (Hold offset chip)
+AXIS_GAP = 16               # gap between the last row and the time axis
+BASELINE_FROM_BOTTOM = 50   # (legacy) unused now the axis rides under the rows
+BAR_R = 9                   # capsule corner radius
+HUE_RAIL = 3               # left hue rail width inside a bar
+HANDLE_W = 10               # drawn width of a bar's grip
 HANDLE_HIT = 11             # px each side of a handle centre that grabs it
 HOLD_HIT = 9                # px each side of the Hold divider that grabs it
 RUN_MIN_W = 120             # minimum run-pill width
 RUN_MAX_W = 260
 RAMP_MIN_W = 44             # minimum ramp-bar width (so a short/zero-span ramp is clickable)
-CARET_W = 20                # width of the ▾/▴ expand-collapse zone on an item
+CARET_W = 20                # (legacy) inline-panel caret zone — panels dropped in the redesign
 TICK_S = 30                 # base tick interval (seconds); adapts with zoom
 DRAG_THRESHOLD = 4          # px of movement before a press counts as a drag
 
@@ -222,6 +227,9 @@ class _TimelineCanvas(QWidget):
         self._c_on, self._c_off = self._on, self._off
         self._lane_of: Dict[int, int] = {}
         self._lane_y: Dict[int, int] = {}
+        self._rows: List = []            # non-Hold items, one per row (display_order)
+        self._holds: List = []           # Hold markers (own no row; paint as dividers)
+        self._hue: Dict[str, str] = {}   # task_name -> hue hex (task_hue_map)
         self._hold_off: Optional[float] = None       # the Hold marker's on-air offset (None = none)
         self._step_bases: dict = {}                   # uid -> resolved on-air base for step anchors
         self._baseline = self._content_h - BASELINE_FROM_BOTTOM
@@ -319,7 +327,7 @@ class _TimelineCanvas(QWidget):
     # ── Inline argument panel (shown by default; toggled by the caret) ────────
 
     def _expanded(self, item) -> bool:
-        return bool(item.args) and item.uid not in self._collapsed
+        return False   # inline arg panels dropped in the redesign (args live in the editor)
 
     def _panel_width(self, item) -> int:
         fmf = QFontMetrics(self._arg_font)
@@ -351,11 +359,8 @@ class _TimelineCanvas(QWidget):
         return self._run_cx(item) - self._run_width(item) / 2
 
     def _foot_h(self, item) -> int:
-        """Total vertical footprint: name row + caption row + panel (if expanded)."""
-        h = LANE_H + CAPTION_H
-        if self._expanded(item):
-            h += self._panel_height(item)
-        return h
+        """Row footprint — uniform in the redesign (one capsule/pin per row)."""
+        return LANE_H
 
     def _span(self, item) -> Tuple[float, float]:
         """Horizontal [left, right] the item occupies (for lane packing) — includes
@@ -379,23 +384,12 @@ class _TimelineCanvas(QWidget):
         return left, right
 
     def _assign_lanes(self) -> Dict[int, int]:
-        placed: List[List[Tuple[float, float]]] = []
-        lane_of: Dict[int, int] = {}
-        # The Hold marker is a full-height divider, not a lane pill — it never
-        # participates in lane packing (see _paint_hold).
-        laid = [it for it in self._items if not tlm._is_hold(it)]
-        ordered = sorted(laid, key=lambda it: self._span(it)[0])
-        for it in ordered:
-            left, right = self._span(it)
-            for idx, spans in enumerate(placed):
-                if all(right + LANE_VGAP <= l or left >= r + LANE_VGAP for (l, r) in spans):
-                    spans.append((left, right))
-                    lane_of[it.uid] = idx
-                    break
-            else:
-                placed.append([(left, right)])
-                lane_of[it.uid] = len(placed) - 1
-        return lane_of
+        """Redesign: ONE ROW PER ITEM, grouped so a task's tunes/ramps sit directly under
+        it (tlm.display_order). The Hold owns no row (it paints as a divider). Also caches
+        the per-task hue map. Returns {uid: row index}."""
+        self._rows, self._holds = tlm.display_order(self._items)
+        self._hue = tlm.task_hue_map(self._items)
+        return {it.uid: i for i, it in enumerate(self._rows)}
 
     def relayout(self) -> None:
         """Recompute content metrics (depend only on the items), then place.
@@ -414,19 +408,16 @@ class _TimelineCanvas(QWidget):
         self._lane_of = self._assign_lanes()
         n_lanes = (max(self._lane_of.values()) + 1) if self._lane_of else 1
 
-        row_h: Dict[int, int] = {}
-        for it in self._items:
-            if it.uid not in self._lane_of:
-                continue                           # the Hold divider owns no lane
-            lane = self._lane_of[it.uid]
-            row_h[lane] = max(row_h.get(lane, LANE_H + CAPTION_H), self._foot_h(it))
+        # Uniform rows (no inline arg panels in the redesign).
         self._lane_y = {}
         y = LANES_TOP
         for lane in range(n_lanes):
             self._lane_y[lane] = y
-            y += row_h.get(lane, LANE_H + CAPTION_H) + LANE_VGAP
+            y += LANE_H + LANE_VGAP
         stack_bottom = y - LANE_VGAP
-        self._content_h = max(210, stack_bottom + AXIS_GAP + BASELINE_FROM_BOTTOM)
+        # The time axis rides directly under the rows (not pinned to the widget bottom).
+        self._rows_bottom = stack_bottom
+        self._content_h = max(200, stack_bottom + AXIS_GAP + 30)
         # The host QScrollArea is widget-resizable: minimums let the canvas STRETCH
         # to fill a bigger viewport (never shrinking below the content), and only
         # scroll when the content is larger.
@@ -445,14 +436,30 @@ class _TimelineCanvas(QWidget):
         band horizontally, keep the tasks top-anchored, and pin the time axis to
         the bottom (extra height opens a gap in the middle)."""
         avail_w = max(self.width(), self._content_w)
-        mid0 = (self._c_on + self._c_off) / 2.0
-        shift = avail_w / 2.0 - mid0
-        shift = max(0.0, min(shift, max(0.0, avail_w - self._content_w)))
+        if self._content_w <= avail_w:
+            # Content fits: centre the band in the viewport (as before).
+            mid0 = (self._c_on + self._c_off) / 2.0
+            shift = avail_w / 2.0 - mid0
+            shift = max(0.0, min(shift, max(0.0, avail_w - self._content_w)))
+        else:
+            # Content is wider than the viewport: LEFT-anchor it so on-air sits near the
+            # left edge with only a small pre-roll gutter (no dead warm-up whitespace).
+            eff = self._eff()
+            offs = []
+            for it in self._items:
+                if it.kind == "bar":
+                    offs.append(float(getattr(it, "start_offset", 0.0)))
+                elif not tlm._is_hold(it):
+                    a, o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases)
+                    if a == "start":
+                        offs.append(o)
+            preroll = max(0.0, -min(offs)) if offs else 0.0
+            target_on = tlm.EDGE_PAD + min(self._c_on - tlm.EDGE_PAD, (preroll + 16) * eff)
+            shift = target_on - self._c_on          # <= 0: pull left, trimming empty warm-up
         self._on = self._c_on + shift
         self._off = self._c_off + shift
-        # Tasks are laid out from the top (lane y's); the axis rides the widget
-        # bottom, so a taller widget grows the gap between them.
-        self._baseline = max(self._content_h, self.height()) - BASELINE_FROM_BOTTOM
+        # The axis rides directly under the last row (Gantt-style), not the widget bottom.
+        self._baseline = getattr(self, "_rows_bottom", LANES_TOP) + AXIS_GAP
 
         self._geom = {}
         for it in self._items:
@@ -475,10 +482,7 @@ class _TimelineCanvas(QWidget):
             else:
                 g["cx"] = self._run_cx(it)
                 g["w"] = self._run_width(it)
-            if self._expanded(it):
-                g["panel"] = (self._item_left(it) + 2, y + LANE_H + CAPTION_H,
-                              self._panel_width(it), self._panel_height(it))
-            g["foot_h"] = self._foot_h(it)
+            g["foot_h"] = LANE_H
             self._geom[it.uid] = g
         self.update()
 
@@ -489,43 +493,151 @@ class _TimelineCanvas(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         baseline = int(self._baseline)
         on_x, off_x = int(self._on), int(self._off)
+        top = LANES_TOP - 8
+        def_x = int(self._def_x())
 
-        # On-air band (the fixed, not-to-scale middle) — a faint fill so it reads
-        # as the "busiest" region.
-        p.fillRect(on_x, LANES_TOP - 10, off_x - on_x, baseline - (LANES_TOP - 10),
-                   QColor(Palette.ONLINE_SOFT))
+        # Defined on-air region — a whisper of the on-air (green) tint.
+        tint = QColor(Palette.ONLINE); tint.setAlpha(11)
+        p.fillRect(QRectF(on_x, top, max(0, def_x - on_x), baseline - top), tint)
+        # Undefined ("relative") region — diagonal hatch; the window length is only set at arm.
+        self._paint_hatch(p, def_x, off_x, top, baseline)
+        if off_x - def_x > 6:
+            pen = QPen(QColor(Palette.BORDER_STRONG), 1)
+            pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
+            p.drawLine(def_x, top, def_x, baseline + 4)
 
-        p.setPen(QPen(QColor(Palette.BORDER_STRONG), 2))
-        p.drawLine(tlm.EDGE_PAD // 2, baseline, self.width() - tlm.EDGE_PAD // 2, baseline)
+        self._paint_anchor(p, on_x, top, baseline, "ON-AIR", Palette.ONLINE)
+        self._paint_anchor(p, off_x, top, baseline, "OFF-AIR", Palette.CRASH)
+        self._paint_axis(p, baseline, on_x, def_x, off_x)
+        if off_x - def_x > 82:
+            self._paint_rel_badge(p, (def_x + off_x) // 2, (top + baseline) // 2)
 
-        tick_font = QFont(); tick_font.setPointSize(8)
-        p.setFont(tick_font)
-        self._paint_ticks(p, baseline, on_x, negative=True)
-        self._paint_ticks(p, baseline, off_x, negative=False)
-
-        self._paint_anchor(p, on_x, baseline, "ON-AIR", Palette.ONLINE)
-        self._paint_anchor(p, off_x, baseline, "OFF-AIR", Palette.CRASH)
-
-        cap_font = QFont(); cap_font.setPointSize(9); cap_font.setItalic(True)
-        p.setFont(cap_font)
-        p.setPen(QColor(Palette.TEXT_FAINT))
-        p.drawText(tlm.EDGE_PAD, 16, max(0, on_x - tlm.EDGE_PAD), 14,
-                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), "warm-up")
-        p.drawText(on_x, baseline + 26, off_x - on_x, 14,
-                   int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter), "· on air ·")
-        p.drawText(off_x, 16, max(0, self.width() - off_x - tlm.EDGE_PAD), 14,
-                   int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), "cool-down")
-
-        for it in self._items:
-            if tlm._is_hold(it):
-                self._paint_hold(p, it)
-            elif it.kind == "bar":
+        self._paint_connectors(p)
+        for it in self._rows:
+            if it.kind == "bar":
                 self._paint_bar(p, it)
             elif tlm._is_ramp(it):
                 self._paint_ramp(p, it)
             else:
-                self._paint_run(p, it)
+                self._paint_pin(p, it)
+        for it in self._holds:
+            self._paint_hold(p, it)
         p.end()
+
+    # ── Redesign paint helpers ────────────────────────────────────────────────
+    @staticmethod
+    def _mmss(t: float) -> str:
+        sign = "−" if t < 0 else ""
+        t = abs(t); m, s = int(t // 60), int(round(t % 60))
+        return f"{sign}{m}:{s:02d}" if m else f"{sign}{s}s"
+
+    def _def_x(self) -> float:
+        """Rightmost on-air x that is actually pinned by an anchor/offset — the end of the
+        DEFINED (real-time) region. Beyond it the band is hatched 'relative'."""
+        x = float(self._on)
+        for it in self._rows:
+            g = self._geom.get(it.uid)
+            if not g:
+                continue
+            if it.kind == "bar":
+                x = max(x, g.get("start_x", x))            # start is on-air; stop is off-air
+            elif tlm._is_ramp(it):
+                if getattr(it, "anchor", "start") in ("start", "step"):
+                    x = max(x, g.get("stop_x", x))         # the ramp's end
+            else:
+                a, _o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases)
+                if a == "start":
+                    x = max(x, g.get("cx", x))
+        return x
+
+    def _hues(self, hexstr: str):
+        base = QColor(hexstr)
+        edge = QColor(hexstr); edge.setAlpha(125)
+        fa = QColor(hexstr); fa.setAlpha(42)
+        fb = QColor(hexstr); fb.setAlpha(13)
+        ink = base.darker(142)
+        return base, edge, fa, fb, ink
+
+    def _hue_for(self, it):
+        return self._hue.get(getattr(it, "task_name", "") or "")
+
+    def _item_colors(self, it):
+        """(base, edge, fa, fb, ink) for an item: its task hue when the task is known,
+        else the red 'unknown task' treatment (so a typo still reads as a problem)."""
+        hexs = self._hue_for(it)
+        if self.task_known(getattr(it, "task_name", "")) and hexs:
+            return self._hues(hexs)
+        base = QColor(Palette.CRASH); edge = QColor(Palette.CRASH); edge.setAlpha(150)
+        fa = QColor(Palette.CRASH); fa.setAlpha(30); fb = QColor(Palette.CRASH); fb.setAlpha(10)
+        return base, edge, fa, fb, QColor(Palette.CRASH)
+
+    def _paint_hatch(self, p, x0, x1, top, bot):
+        if x1 - x0 <= 0:
+            return
+        p.fillRect(QRectF(x0, top, x1 - x0, bot - top), QColor("#F4F6F9"))
+        p.save()
+        p.setClipRect(QRectF(x0, top, x1 - x0, bot - top))
+        p.setPen(QPen(QColor("#DFE4EA"), 1))
+        h = bot - top
+        xx = x0 - h
+        while xx < x1:
+            p.drawLine(int(xx), int(bot), int(xx + h), int(top))
+            xx += 7
+        p.restore()
+
+    def _paint_anchor(self, p, x, top, baseline, label, color):
+        col = QColor(color)
+        p.setPen(QPen(col, 2)); p.drawLine(x, top - 2, x, baseline + 4)
+        f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPointSize(8); f.setBold(True)
+        p.setFont(f)
+        fm = QFontMetrics(f); tw = fm.horizontalAdvance(label) + 12
+        r = QRectF(x - tw / 2, top - 11, tw, 15)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(col); p.drawRoundedRect(r, 5, 5)
+        p.setPen(QColor("#FFFFFF")); p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), label)
+
+    def _paint_axis(self, p, baseline, on_x, def_x, off_x):
+        eff = self._eff(); tick_s = self._tick_interval()
+        f = QFont(Fonts.MONO.split(",")[0].strip('"')); f.setPointSize(8); p.setFont(f)
+
+        def tick(x, t, major):
+            col = QColor(Palette.TEXT_FAINT if major else Palette.BORDER_STRONG)
+            p.setPen(QPen(col, 1))
+            p.drawLine(int(x), baseline, int(x), baseline + (7 if major else 4))
+            if major:
+                p.setPen(QColor(Palette.TEXT_MUTED))
+                p.drawText(int(x) - 30, baseline + 9, 60, 12,
+                           int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
+                           "0" if t == 0 else self._mmss(t))
+
+        # Real-time ticks across the defined region.
+        t = 0
+        while on_x + t * eff <= def_x + 1:
+            tick(on_x + t * eff, t, True)
+            if tick_s >= 2:
+                mid = on_x + (t + tick_s / 2) * eff
+                if mid <= def_x + 1:
+                    tick(mid, t, False)
+            t += tick_s
+        # Warm-up (negative) ticks to the visible left edge.
+        t = tick_s
+        while on_x - t * eff >= tlm.EDGE_PAD:
+            tick(on_x - t * eff, -t, True)
+            t += tick_s
+        # The off-air instant's absolute time is unknown (chosen at arm).
+        p.setPen(QColor(Palette.TEXT_FAINT))
+        p.drawText(int(off_x) - 30, baseline + 9, 60, 12,
+                   int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop), "arm")
+
+    def _paint_rel_badge(self, p, cx, cy):
+        f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPointSize(8); f.setBold(True)
+        p.setFont(f)
+        text = "relative — length set at arm"
+        fm = QFontMetrics(f); tw = fm.horizontalAdvance(text) + 22
+        r = QRectF(cx - tw / 2, cy - 9, tw, 18)
+        pen = QPen(QColor(Palette.BORDER_STRONG), 1); pen.setStyle(Qt.PenStyle.DashLine)
+        p.setPen(pen); p.setBrush(QColor(Palette.SURFACE)); p.drawRoundedRect(r, 9, 9)
+        p.setPen(QColor(Palette.TEXT_MUTED))
+        p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), "◇  " + text)
 
     def _tick_interval(self) -> int:
         """Seconds between ticks — the smallest 'nice' value whose on-screen
@@ -554,15 +666,6 @@ class _TimelineCanvas(QWidget):
             p.drawText(int(x) - 27, baseline + 6, 54, 12,
                        int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop), label)
             i += 1
-
-    def _paint_anchor(self, p, x, baseline, label, color):
-        p.setPen(QPen(QColor(color), 2))
-        p.drawLine(x, LANES_TOP - 12, x, baseline + 6)
-        f = QFont(); f.setPointSize(9); f.setBold(True)
-        p.setFont(f)
-        p.setPen(QColor(color))
-        p.drawText(x - 60, baseline + 8, 120, 16,
-                   int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop), label)
 
     def _paint_caret(self, p, it, g, color):
         """A small rounded chip that expands (▾) or collapses (▴) the arg panel."""
@@ -619,119 +722,194 @@ class _TimelineCanvas(QWidget):
                        int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), vtext)
             row_y += ARG_ROW_H
 
+    def _f(self, px: int, bold: bool = False) -> QFont:
+        f = QFont(Fonts.SANS.split(",")[0].strip('"'))
+        f.setPixelSize(px)
+        f.setWeight(QFont.Weight(600 if bold else 500))
+        return f
+
+    def _capsule(self, p, rect, base, edge, fa, fb, rail=True):
+        grad = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        grad.setColorAt(0.0, fa); grad.setColorAt(1.0, fb)
+        p.setPen(QPen(edge, 1)); p.setBrush(QBrush(grad))
+        p.drawRoundedRect(rect, BAR_R, BAR_R)
+        if rail:
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(base)
+            p.drawRoundedRect(QRectF(rect.left() + 3, rect.top() + 6, HUE_RAIL, rect.height() - 12),
+                              1.5, 1.5)
+
+    def _paint_edge_dot(self, p, x, cy, base, linked=False):
+        r = QRectF(x - 5, cy - 5, 10, 10)
+        if linked:
+            p.setPen(QPen(QColor("#FFFFFF"), 2)); p.setBrush(base)
+        else:
+            p.setPen(QPen(base, 2)); p.setBrush(QColor(Palette.SURFACE))
+        p.drawEllipse(r)
+
+    def _edge_linked(self, it, edge: str) -> bool:
+        sid = getattr(it, "step_id", "") or ""
+        if not sid:
+            return False
+        return any(getattr(o, "anchor", "") == "step"
+                   and (getattr(o, "anchor_step_id", "") or "") == sid
+                   and (getattr(o, "anchor_edge", "end") or "end") == edge
+                   for o in self._rows)
+
+    def _chip(self, p, cx, cy, text, border, ink, mono=True):
+        f = mono_font(10) if mono else self._f(10, True)
+        p.setFont(f); fm = QFontMetrics(f)
+        w = fm.horizontalAdvance(text) + 14
+        r = QRectF(cx - w / 2, cy - 9, w, 18)
+        p.setPen(QPen(border, 1)); p.setBrush(QColor(Palette.SURFACE))
+        p.drawRoundedRect(r, 9, 9)
+        p.setPen(ink); p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
+
     def _paint_bar(self, p, it):
         g = self._geom[it.uid]
         y, sx, px = g["y"], g["start_x"], g["stop_x"]
-        known = self.task_known(it.task_name)
-        border = QColor(Palette.ONLINE if known else Palette.CRASH)
-        left = min(sx, px)
-        rect = QRectF(left, y, max(HANDLE_W * 2.0, abs(px - sx)), LANE_H)
-        p.setPen(QPen(border, 2))
-        p.setBrush(QBrush(QColor(Palette.SURFACE)))
-        p.drawRoundedRect(rect, 9, 9)
-
-        # Two handle grips.
-        for hx in (sx, px):
-            hr = QRectF(hx - HANDLE_W / 2, y + 3, HANDLE_W, LANE_H - 6)
-            p.setBrush(QBrush(border))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawRoundedRect(hr, 4, 4)
-            p.setPen(QPen(QColor(Palette.SURFACE), 1))
-            for gx in (hx - 2, hx + 1):
-                p.drawLine(int(gx), int(y + 9), int(gx), int(y + LANE_H - 9))
-
-        # Centered label.
-        p.setFont(self._label_font)
-        p.setPen(QColor(Palette.TEXT if known else Palette.CRASH))
-        fm = QFontMetrics(self._label_font)
-        pad = HANDLE_W * 2 + 8 + (CARET_W if it.args else 0)
-        label = fm.elidedText(self._bar_label(it), Qt.TextElideMode.ElideRight,
-                              max(10, int(rect.width()) - pad))
-        p.drawText(rect.adjusted(HANDLE_W + 2, 0, -(HANDLE_W + 2 + (CARET_W if it.args else 0)), 0),
-                   int(Qt.AlignmentFlag.AlignCenter), label)
-        if it.args:
-            self._paint_caret(p, it, g, border)
-
-        # Timing chips under each handle (side is implied by the handle). A window-B bar's
-        # START is timed from the Hold's resume instant, so its chip reads on-resume/pre-hold.
-        cap_y = int(y + LANE_H + 1)
-        start_side = "hold" if getattr(it, "start_anchor", "start") == "hold" else "start"
-        self._paint_timing(p, sx, cap_y, _timing_text(it.start_offset, start_side, with_side=False))
-        self._paint_timing(p, px, cap_y, _timing_text(it.stop_offset, "stop", with_side=False))
-        self._paint_panel(p, it, g, border)
+        base, edge, fa, fb, ink = self._item_colors(it)
+        left = min(sx, px); w = max(HANDLE_W * 2.0, abs(px - sx))
+        rect = QRectF(left, y, w, LANE_H)
+        self._capsule(p, rect, base, edge, fa, fb)
+        p.setFont(self._f(12, True)); p.setPen(ink)
+        fm = QFontMetrics(self._f(12, True))
+        label = fm.elidedText(it.task_name or "(no task)", Qt.TextElideMode.ElideRight,
+                              max(10, int(w) - 26))
+        p.drawText(QRectF(left + 12, y, w - 22, LANE_H),
+                   int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), label)
+        cy = y + LANE_H / 2
+        self._paint_edge_dot(p, sx, cy, base, self._edge_linked(it, "start"))
+        self._paint_edge_dot(p, px, cy, base, self._edge_linked(it, "end"))
 
     def _paint_ramp(self, p, it):
-        """A ramp draws as a duration bar between its two anchored ends, with a
-        diagonal cue for direction and a timing chip under each end (so the anchor,
-        start and stop are all legible — like a duration task)."""
+        """A ramp draws as a capsule between its two anchored ends, with a diagonal slope
+        cue (rising/falling), the parent-task badge and its duration."""
         g = self._geom[it.uid]
         y, sx, px = g["y"], g["start_x"], g["stop_x"]
-        known = self.task_known(it.task_name)
-        border = QColor(Palette.ACCENT if known else Palette.CRASH)
-        fill = QColor(Palette.ACCENT_SOFT if known else Palette.CRASH_SOFT)
-        left = min(sx, px)
-        rect = QRectF(left, y, max(RAMP_MIN_W, abs(px - sx)), LANE_H)
-        p.setPen(QPen(border, 2))
-        p.setBrush(QBrush(fill))
-        p.drawRoundedRect(rect, 9, 9)
-
-        # Diagonal direction cue: rises if the value increases, else falls.
+        base, edge, fa, fb, ink = self._item_colors(it)
+        left = min(sx, px); w = max(RAMP_MIN_W, abs(px - sx))
+        rect = QRectF(left, y, w, LANE_H)
+        self._capsule(p, rect, base, edge, fa, fb)
+        # slope motif
         r = dict(getattr(it, "ramp", None) or {})
         a, b = r.get("start"), r.get("stop")
         rising = (a is not None and b is not None and b >= a)
-        guide = QColor(border); guide.setAlpha(90)
-        p.setPen(QPen(guide, 1.5))
-        y0, y1 = ((rect.bottom() - 7, rect.top() + 7) if rising
-                  else (rect.top() + 7, rect.bottom() - 7))
-        p.drawLine(int(rect.left() + 7), int(y0), int(rect.right() - 7), int(y1))
+        guide = QColor(base); guide.setAlpha(150)
+        p.setPen(QPen(guide, 1.8))
+        y0, y1 = ((rect.bottom() - 8, rect.top() + 8) if rising
+                  else (rect.top() + 8, rect.bottom() - 8))
+        p.drawLine(int(rect.left() + 9), int(y0), int(rect.right() - 9), int(y1))
+        # parent-task badge (left) — colour already says which task; the badge names it
+        bx = left + 10
+        if w > 78:
+            badge = it.task_name or ""
+            f = self._f(9, True); p.setFont(f); fm = QFontMetrics(f)
+            bw = fm.horizontalAdvance(badge) + 12
+            br = QRectF(bx, y + (LANE_H - 15) / 2, bw, 15)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(fa); p.drawRoundedRect(br, 4, 4)
+            p.setPen(ink); p.drawText(br, int(Qt.AlignmentFlag.AlignCenter), badge)
+        # duration chip (right)
+        try:
+            dur = tlm._ramp_duration(r)
+        except Exception:  # noqa: BLE001
+            dur = 0.0
+        if dur and w > 100:
+            f = mono_font(10); p.setFont(f); fm = QFontMetrics(f)
+            dt = self._mmss(dur); dw = fm.horizontalAdvance(dt)
+            p.setPen(ink)
+            p.drawText(QRectF(rect.right() - dw - 12, y, dw, LANE_H),
+                       int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), dt)
+        cy = y + LANE_H / 2
+        self._paint_edge_dot(p, sx, cy, base, self._edge_linked(it, "start"))
+        self._paint_edge_dot(p, px, cy, base, self._edge_linked(it, "end"))
 
-        # Centered label.
-        p.setFont(self._label_font)
-        p.setPen(QColor(Palette.ACCENT if known else Palette.CRASH))
-        fm = QFontMetrics(self._label_font)
-        label = fm.elidedText(_ramp_summary(r, it.anchor), Qt.TextElideMode.ElideRight,
-                              max(10, int(rect.width()) - 16))
-        p.drawText(rect.adjusted(8, 0, -8, 0), int(Qt.AlignmentFlag.AlignCenter), label)
-
-        # Timing chip under each end (its anchor tells start vs stop; a Hold-anchored ramp
-        # reads its ends on-resume/pre-hold, not on-air — see _ramp_end_side_off).
-        (la, lo), (ra, ro) = g.get("ends", (("start", 0.0), ("start", 0.0)))
-        s_side, s_off = _ramp_end_side_off(getattr(it, "anchor", "start"), la, lo, self._hold_off)
-        e_side, e_off = _ramp_end_side_off(getattr(it, "anchor", "start"), ra, ro, self._hold_off)
-        cap_y = int(y + LANE_H + 1)
-        self._paint_timing(p, sx, cap_y, _timing_text(s_off, s_side, with_side=True))
-        if abs(px - sx) > RAMP_MIN_W / 2:
-            self._paint_timing(p, px, cap_y, _timing_text(e_off, e_side, with_side=True))
-
-    def _paint_run(self, p, it):
+    def _paint_pin(self, p, it):
+        """A tune / one-shot is an INSTANT: a filled pin at the exact time + a borderless
+        caption (never a capsule, so it never reads as having a duration)."""
         g = self._geom[it.uid]
-        y, cx, w = g["y"], g["cx"], g["w"]
-        known = self.task_known(it.task_name)
-        is_live = getattr(it, "action", "run") in ("tune", "ramp")
-        if not known:
-            border, fill, text = Palette.CRASH, Palette.CRASH_SOFT, Palette.CRASH
-        elif is_live:                       # tune/ramp points read as a distinct accent
-            border, fill, text = Palette.ACCENT, Palette.ACCENT_SOFT, Palette.ACCENT
+        y, cx = g["y"], g["cx"]
+        base, edge, fa, fb, ink = self._item_colors(it)
+        cy = y + LANE_H / 2
+        one_shot = getattr(it, "action", "run") == "run"
+        p.setPen(QPen(QColor("#FFFFFF"), 2.4)); p.setBrush(base)
+        if one_shot:
+            path = QPainterPath()
+            path.moveTo(cx, cy - 7); path.lineTo(cx + 7, cy)
+            path.lineTo(cx, cy + 7); path.lineTo(cx - 7, cy); path.closeSubpath()
+            p.drawPath(path)
         else:
-            border, fill, text = Palette.ARMED, Palette.ARMED_SOFT, Palette.TEXT
-        border = QColor(border)
-        rect = QRectF(cx - w / 2, y, w, LANE_H)
-        p.setPen(QPen(border, 2))
-        p.setBrush(QBrush(QColor(fill)))
-        p.drawRoundedRect(rect, LANE_H / 2, LANE_H / 2)
-        p.setFont(self._label_font)
-        p.setPen(QColor(text))
-        fm = QFontMetrics(self._label_font)
-        pad = 20 + (CARET_W if it.args else 0)
-        label = fm.elidedText(self._run_label(it), Qt.TextElideMode.ElideRight, max(10, int(w) - pad))
-        p.drawText(rect.adjusted(10, 0, -(6 + (CARET_W if it.args else 0)), 0),
-                   int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), label)
-        if it.args:
-            self._paint_caret(p, it, g, border)
-        # Timing chip under the pill (a run re-anchors, so keep the side label).
-        self._paint_timing(p, cx, int(y + LANE_H + 1),
-                           _timing_text(it.offset, it.anchor, with_side=True))
-        self._paint_panel(p, it, g, border)
+            p.drawEllipse(QRectF(cx - 6.5, cy - 6.5, 13, 13))
+        # caption: parent badge (tune) + text, borderless
+        tx = cx + 13
+        if not one_shot:
+            badge = it.task_name or ""
+            f = self._f(9, True); p.setFont(f); fm = QFontMetrics(f)
+            bw = fm.horizontalAdvance(badge) + 12
+            br = QRectF(tx, cy - 7.5, bw, 15)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(fa); p.drawRoundedRect(br, 4, 4)
+            p.setPen(ink); p.drawText(br, int(Qt.AlignmentFlag.AlignCenter), badge)
+            tx += bw + 6
+            overrides = self._editor._pill_power_display(it)
+            text = ", ".join(f"{k}={overrides.get(k, v)}" for k, v in (it.params or {}).items())
+        else:
+            text = it.task_name or "(no task)"
+        p.setFont(self._f(12, True)); p.setPen(QColor(Palette.TEXT))
+        p.drawText(QRectF(tx, y, 260, LANE_H),
+                   int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), text)
+
+    # ── Connectors (step-to-step anchors, rendered under the bars) ────────────
+    def _edge_x(self, tgt, edge: str) -> float:
+        g = self._geom.get(tgt.uid) or {}
+        if tgt.kind == "bar" or tlm._is_ramp(tgt):
+            return g.get("stop_x", g.get("start_x", 0.0)) if edge == "end" \
+                else g.get("start_x", 0.0)
+        return g.get("cx", 0.0)
+
+    def _paint_connectors(self, p):
+        by_sid = {getattr(it, "step_id", "") or "": it for it in self._rows
+                  if getattr(it, "step_id", "")}
+        for it in self._rows:
+            if getattr(it, "anchor", "") != "step":
+                continue
+            tgt = by_sid.get(getattr(it, "anchor_step_id", "") or "")
+            gi = self._geom.get(it.uid)
+            if tgt is None or gi is None or tgt.uid not in self._geom:
+                continue
+            x1 = self._edge_x(tgt, getattr(it, "anchor_edge", "end") or "end")
+            y1 = self._geom[tgt.uid]["y"] + LANE_H / 2
+            x2 = gi.get("start_x", gi.get("cx"))
+            y2 = gi["y"] + LANE_H / 2
+            base, _e, _fa, _fb, ink = self._item_colors(it)
+            self._draw_connector(p, x1, y1, x2, y2, base, ink,
+                                 float(getattr(it, "offset", 0.0)))
+
+    def _draw_connector(self, p, x1, y1, x2, y2, base, ink, offset):
+        r = 7.0
+        xm = x1 + max(14.0, (x2 - x1) * 0.45)
+        dy = 1.0 if y2 >= y1 else -1.0
+        path = QPainterPath(); path.moveTo(x1, y1)
+        path.lineTo(xm - r, y1); path.quadTo(xm, y1, xm, y1 + r * dy)
+        path.lineTo(xm, y2 - r * dy); path.quadTo(xm, y2, xm + r, y2); path.lineTo(x2, y2)
+        pen = QPen(base, 2); pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush); p.drawPath(path)
+        # arrowhead into the dependent's start
+        p.drawLine(int(x2 - 6), int(y2 - 4), int(x2), int(y2))
+        p.drawLine(int(x2 - 6), int(y2 + 4), int(x2), int(y2))
+        # offset chip on the upper leg
+        self._chip(p, (x1 + xm) / 2, y1, "+" + self._mmss(offset), base, ink)
+
+    def row_layout(self):
+        """[{item, y, hue, child, row_h}] for the row-header column, in row order."""
+        out = []
+        for i, it in enumerate(self._rows):
+            out.append({
+                "item": it, "y": self._lane_y.get(i, LANES_TOP),
+                "hue": self._hue_for(it),
+                "child": getattr(it, "action", "run") in ("tune", "ramp"),
+                "row_h": LANE_H,
+            })
+        return out
 
     def _paint_hold(self, p, it):
         """The Hold marker — a dashed vertical divider across the on-air band at the
@@ -1849,6 +2027,106 @@ class HoldEditorDialog(QDialog):
         self.accept()
 
 
+class _RowHeader(QWidget):
+    """The Gantt-style row-header column, left of the canvas: one row per timeline item
+    (a task's tunes/ramps indented beneath it in the task's hue), aligned to the canvas
+    rows. Reads the canvas's row_layout() so it always tracks the same order/positions."""
+
+    HDR_W = 210
+
+    def __init__(self, canvas: "_TimelineCanvas"):
+        super().__init__()
+        self._canvas = canvas
+        self.setFixedWidth(self.HDR_W)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(self.HDR_W, getattr(self._canvas, "_content_h", 200))
+
+    def refresh(self) -> None:
+        self.setMinimumHeight(getattr(self._canvas, "_content_h", 200))
+        self.update()
+
+    def _meta(self, it):
+        """(name, sub, type_label) for a row header entry."""
+        act = getattr(it, "action", "run")
+        if getattr(it, "kind", None) == "bar":
+            return it.task_name or "(no task)", "on-air → off-air", "Duration"
+        if act == "ramp":
+            r = dict(getattr(it, "ramp", None) or {})
+            a, b = r.get("start"), r.get("stop")
+            rng = f"{fmt_value(a)} → {fmt_value(b)}" if a is not None and b is not None else ""
+            return f"{r.get('param') or 'param'} ramp", rng, "Ramp"
+        if act == "tune":
+            summ = ", ".join(f"{k}={v}" for k, v in (it.params or {}).items())
+            return f"{it.task_name} tune", summ, "Tune"
+        return it.task_name or "(no task)", "one-shot", "One-shot"
+
+    def paintEvent(self, _e):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.fillRect(self.rect(), QColor(Palette.SURFACE))
+        p.setPen(QPen(QColor(Palette.HAIRLINE if hasattr(Palette, "HAIRLINE") else Palette.BORDER), 1))
+        p.drawLine(self.width() - 1, 0, self.width() - 1, self.height())
+        # caption
+        f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPixelSize(10); f.setBold(True)
+        p.setFont(f); p.setPen(QColor(Palette.TEXT_FAINT))
+        p.drawText(16, 6, self.width() - 24, 12,
+                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                   "TASKS & STEPS")
+        for row in self._canvas.row_layout():
+            it, y, hue, child = row["item"], row["y"], row["hue"], row["child"]
+            known = self._canvas.task_known(getattr(it, "task_name", ""))
+            base = QColor(hue) if (hue and known) else QColor(Palette.CRASH)
+            cy = y + LANE_H / 2
+            name, sub, typ = self._meta(it)
+            if child:
+                # indent + a small kin elbow in the task hue
+                kin = QColor(base); kin.setAlpha(120)
+                p.setPen(QPen(kin, 1.5)); p.setBrush(Qt.BrushStyle.NoBrush)
+                path = QPainterPath(); path.moveTo(22, y - 6); path.lineTo(22, cy)
+                path.lineTo(30, cy)
+                p.drawPath(path)
+                nx = 34
+            else:
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(base)
+                p.drawRoundedRect(QRectF(14, cy - 4.5, 9, 9), 2.5, 2.5)
+                nx = 30
+            # name (top) + sub (bottom), or centred if no sub
+            fn = QFont(Fonts.SANS.split(",")[0].strip('"')); fn.setPixelSize(12)
+            fn.setWeight(QFont.Weight(600 if not child else 500))
+            fm = QFontMetrics(fn)
+            badge_w = self._type_badge(p, typ, base, known, y)   # draws + returns width
+            avail = self.width() - nx - badge_w - 16
+            if sub:
+                p.setFont(fn); p.setPen(QColor(Palette.TEXT if known else Palette.CRASH))
+                p.drawText(nx, int(y + 3), avail, 15,
+                           int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                           fm.elidedText(name, Qt.TextElideMode.ElideRight, avail))
+                fs = QFont(Fonts.SANS.split(",")[0].strip('"')); fs.setPixelSize(10)
+                p.setFont(fs); p.setPen(QColor(Palette.TEXT_FAINT))
+                fms = QFontMetrics(fs)
+                p.drawText(nx, int(y + LANE_H - 14), avail, 12,
+                           int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                           fms.elidedText(sub, Qt.TextElideMode.ElideRight, avail))
+            else:
+                p.setFont(fn); p.setPen(QColor(Palette.TEXT if known else Palette.CRASH))
+                p.drawText(nx, int(y), avail, LANE_H,
+                           int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                           fm.elidedText(name, Qt.TextElideMode.ElideRight, avail))
+        p.end()
+
+    def _type_badge(self, p, text, base, known, y) -> int:
+        f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPixelSize(8); f.setBold(True)
+        p.setFont(f); fm = QFontMetrics(f)
+        w = fm.horizontalAdvance(text) + 10
+        r = QRectF(self.width() - w - 12, y + (LANE_H - 14) / 2, w, 14)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(Palette.INSET))
+        p.drawRoundedRect(r, 4, 4)
+        p.setPen(QColor(Palette.TEXT_MUTED))
+        p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
+        return w + 12
+
+
 # ── Public editor: toolbar + scrollable canvas ────────────────────────────────
 
 class TimelineEditor(QWidget):
@@ -1890,16 +2168,20 @@ class TimelineEditor(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(8)
 
+        _chip = (f"QPushButton {{ border:1px solid {Palette.BORDER}; border-radius:999px; "
+                 f"padding:5px 12px; background:{Palette.SURFACE}; color:{Palette.TEXT_MUTED}; "
+                 f"font-weight:600; font-size:12px; }} "
+                 f"QPushButton:hover {{ color:{Palette.TEXT}; border-color:{Palette.BORDER_STRONG}; }}")
         bar = QHBoxLayout()
-        self._add_bar = QPushButton("+ Duration")
+        self._add_bar = QPushButton("Duration")
         self._add_bar.setToolTip("A task that runs across the on-air window (start + stop)")
-        self._add_run = QPushButton("+ One-shot")
+        self._add_run = QPushButton("One-shot")
         self._add_run.setToolTip("A task that fires once and exits (many allowed)")
-        self._add_tune = QPushButton("+ Tune")
+        self._add_tune = QPushButton("Tune")
         self._add_tune.setToolTip("Change a running duration task's live parameters at a set time")
-        self._add_ramp = QPushButton("+ Ramp")
+        self._add_ramp = QPushButton("Ramp")
         self._add_ramp.setToolTip("Sweep a running duration task's live parameter over time")
-        self._add_hold = QPushButton("+ Hold")
+        self._add_hold = QPushButton("Hold")
         self._add_hold.setToolTip("Pause the run here and await the operator (the Hold step); "
                                   "post-hold steps anchor to it. Library / operator-present runs "
                                   "only — the schedule runs straight through it.")
@@ -1908,25 +2190,32 @@ class TimelineEditor(QWidget):
         self._add_tune.clicked.connect(lambda: self._canvas.add_new("tune"))
         self._add_ramp.clicked.connect(lambda: self._canvas.add_new("ramp"))
         self._add_hold.clicked.connect(lambda: self._canvas.add_new("hold"))
-        bar.addWidget(self._add_bar)
-        bar.addWidget(self._add_run)
-        bar.addWidget(self._add_tune)
-        bar.addWidget(self._add_ramp)
-        bar.addWidget(self._add_hold)
+        for b in (self._add_bar, self._add_run, self._add_tune, self._add_ramp, self._add_hold):
+            b.setStyleSheet(_chip)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            bar.addWidget(b)
         bar.addStretch(1)
         # Minimum on-air duration the current steps require (ramps at both ends etc).
         self._mindur = QLabel("")
         self._mindur.setStyleSheet(f"font-size: 11px; color: {Palette.ACCENT};")
         bar.addWidget(self._mindur)
-        self._hint = QLabel("Drag handles to set timing · click to edit")
+        self._hint = QLabel("Drag a bar to move it · click to edit")
         self._hint.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         bar.addWidget(self._hint)
-        # Zoom readout — Ctrl+wheel / pinch to zoom; click to reset to 100%.
+        # Fit-to-view + zoom readout.
+        self._fit_btn = QPushButton("Fit")
+        self._fit_btn.setStyleSheet(_chip)
+        self._fit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fit_btn.setToolTip("Fit the whole sequence to the view")
+        self._fit_btn.clicked.connect(self._fit)
+        bar.addWidget(self._fit_btn)
         self._zoom_btn = QPushButton("100%")
         self._zoom_btn.setFixedWidth(52)
         self._zoom_btn.setFlat(True)
         self._zoom_btn.setToolTip("Horizontal zoom — Ctrl+scroll or pinch. Click to reset.")
-        self._zoom_btn.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
+        self._zoom_btn.setStyleSheet(
+            f"font-size: 11px; color: {Palette.TEXT_MUTED}; border:1px solid {Palette.BORDER}; "
+            f"border-radius:999px; padding:4px 8px;")
         self._zoom_btn.clicked.connect(lambda: self._canvas.reset_zoom())
         bar.addWidget(self._zoom_btn)
         outer.addLayout(bar)
@@ -1966,14 +2255,45 @@ class TimelineEditor(QWidget):
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setMinimumHeight(240)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setStyleSheet(
-            f"QScrollArea {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER}; "
-            f"border-radius: 8px; }}")
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(f"QScrollArea {{ background: {Palette.SURFACE}; border: none; }}")
         self._canvas.set_scroll_area(scroll)
-        outer.addWidget(scroll, stretch=1)
+
+        # Gantt-style row-header column, left of the canvas; both wrapped in one bordered
+        # "stage" frame so they read as a single panel (the mockup layout).
+        self._rowhdr = _RowHeader(self._canvas)
+        self._canvas.changed.connect(self._rowhdr.refresh)
+        stage = QFrame(); stage.setObjectName("tlStage")
+        stage.setStyleSheet(
+            f"#tlStage {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER}; "
+            f"border-radius: 10px; }}")
+        srow = QHBoxLayout(stage); srow.setContentsMargins(0, 0, 0, 0); srow.setSpacing(0)
+        srow.addWidget(self._rowhdr)
+        srow.addWidget(scroll, stretch=1)
+        outer.addWidget(stage, stretch=1)
+
+    def showEvent(self, e):  # noqa: N802
+        super().showEvent(e)
+        # Open framed to the whole sequence (like the mockup), once, after layout settles.
+        if not getattr(self, "_did_autofit", False) and self._canvas.items():
+            self._did_autofit = True
+            QTimer.singleShot(0, self._fit)
 
     def _sync_zoom(self) -> None:
         self._zoom_btn.setText(f"{round(self._canvas._zoom * 100)}%")
+
+    def _fit(self) -> None:
+        """Zoom so the whole sequence fits the viewport width."""
+        c = self._canvas
+        vp = c._scroll.viewport().width() if c._scroll is not None else self.width()
+        nat = c._content_w / max(c._zoom, 1e-6)     # content width at zoom 1
+        if nat <= 0 or vp <= 0:
+            return
+        z = max(ZOOM_MIN, min(1.5, (vp - 6) / nat))
+        if abs(z - c._zoom) > 1e-4:
+            c._zoom = z
+            c.relayout()
+            self._sync_zoom()
 
     def set_hold_authoring(self, enabled: bool) -> None:
         """Show/hide the '+ Hold' button. Hidden on surfaces where a Hold has no

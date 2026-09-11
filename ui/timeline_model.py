@@ -245,6 +245,64 @@ def has_hold(items) -> bool:
     return any(_is_hold(it) for it in items)
 
 
+# ── Per-task colour + row ordering (editor redesign) ──────────────────────────────
+# Each DURATION task gets a stable hue; its tunes/ramps inherit it (same task_name);
+# a one-shot task gets its own. Hues are picked DISTINCT from the reserved status trio
+# (green #1D9E75 / amber #BA7517 / red #C23B3B) so colour means "which task", never state.
+TASK_HUES = ["#1E8FA3", "#6D5AC4", "#B5487E", "#3F63C4", "#157F93", "#7E4FB0", "#B06A2E", "#2E7D57"]
+
+
+def task_hue_map(items) -> Dict[str, str]:
+    """task_name -> hue hex, assigned in first-seen order over the (non-Hold) items. A tune
+    or ramp shares its parent duration task's ``task_name``, so it resolves to the same hue;
+    a one-shot's own task gets the next hue. Deterministic for a given item order."""
+    order: List[str] = []
+    for it in items:
+        if _is_hold(it):
+            continue
+        name = getattr(it, "task_name", "") or ""
+        if name and name not in order:
+            order.append(name)
+    return {name: TASK_HUES[i % len(TASK_HUES)] for i, name in enumerate(order)}
+
+
+def _row_fire(it) -> float:
+    """Best-effort on-air offset used only to ORDER a task's steps within its group."""
+    if getattr(it, "kind", None) == "bar":
+        return float(getattr(it, "start_offset", 0.0))
+    return float(getattr(it, "offset", 0.0))
+
+
+def display_order(items):
+    """(rows, holds) for the Gantt-style canvas: every non-Hold item grouped under its
+    task — the duration bar first, then that task's tunes/ramps/one-shots by fire time —
+    with tasks in first-seen order, so a task's steps always sit directly beneath it.
+    Holds own no row (they paint as dividers) and are returned separately. Pure; does not
+    mutate the input and is never used for serialisation (that keeps the authored order)."""
+    holds = [it for it in items if _is_hold(it)]
+    seen: List[str] = []
+    groups: Dict[str, list] = {}
+    for it in items:
+        if _is_hold(it):
+            continue
+        name = getattr(it, "task_name", "") or ""
+        if name not in groups:
+            groups[name] = []
+            seen.append(name)
+        groups[name].append(it)
+    # Order groups by their earliest fire time (a task that goes on air sooner sits higher),
+    # first-seen index breaking ties so the order is stable.
+    def _group_key(name):
+        g = groups[name]
+        return (min(_row_fire(it) for it in g), seen.index(name))
+    rows: list = []
+    for name in sorted(seen, key=_group_key):
+        g = sorted(groups[name],
+                   key=lambda it: (0 if getattr(it, "kind", None) == "bar" else 1, _row_fire(it)))
+        rows.extend(g)
+    return rows, holds
+
+
 def effective_anchor_offset(item, h_off: Optional[float],
                             step_bases: Optional[Dict[int, float]] = None) -> Tuple[str, float]:
     """(anchor, offset) used for GEOMETRY/placement only. A window-B item
