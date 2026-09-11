@@ -160,17 +160,18 @@ body{
 .bar.ramp .lab{color:var(--ink)}
 .bar.ramp .slope{position:absolute;inset:0;opacity:.5}
 /* node — tune / one-shot */
-.node{position:absolute; height:30px; display:flex; align-items:center; gap:6px; cursor:grab;
-  transform:translateX(-15px); user-select:none}
-.node .dot{width:14px;height:14px;border-radius:50%;background:#fff;border:2.5px solid var(--hue);
-  box-shadow:var(--shadow-sm);flex:none;transition:.12s}
+/* an instant (tune / one-shot): a filled PIN at the exact time + a borderless
+   caption — deliberately NOT a capsule, so it never reads as having a duration/end */
+.node{position:absolute; height:30px; display:flex; align-items:center; gap:7px; cursor:grab;
+  transform:translateX(-7px); user-select:none}
+.node .dot{width:13px;height:13px;border-radius:50%;background:var(--hue);border:2.5px solid #fff;
+  box-shadow:0 0 0 1px var(--edge), var(--shadow-sm);flex:none;transition:.12s}
 .node.oneshot .dot{border-radius:3px;transform:rotate(45deg)}
-.node:hover .dot{transform:scale(1.12)}
-.node.oneshot:hover .dot{transform:rotate(45deg) scale(1.12)}
-.node .nl{font-size:11px;font-weight:600;color:var(--ink);background:#fff;border:1px solid var(--edge);
-  border-radius:7px;padding:2px 7px;white-space:nowrap;box-shadow:var(--shadow-sm)}
-.node .nl .bd{font-size:8.5px;font-weight:700;letter-spacing:.3px;color:var(--hue);margin-right:4px;
-  text-transform:uppercase}
+.node:hover .dot{transform:scale(1.14)}
+.node.oneshot:hover .dot{transform:rotate(45deg) scale(1.14)}
+.node .nl{font-size:11.5px;font-weight:600;color:var(--ink);white-space:nowrap;letter-spacing:-.1px}
+.node .nl .bd{font-size:8.5px;font-weight:700;letter-spacing:.3px;color:var(--hue);margin-right:5px;
+  text-transform:uppercase;background:var(--fill-a);padding:2px 5px;border-radius:4px}
 
 /* connection handles on task edges */
 .handle{position:absolute; width:11px;height:11px;border-radius:50%;background:#fff;
@@ -221,6 +222,13 @@ body{
 .kbd{font-family:var(--mono);font-size:10px;background:var(--inset);border:1px solid var(--border);
   border-bottom-width:2px;border-radius:5px;padding:1px 5px;color:var(--muted)}
 .foot .k{display:inline-flex;align-items:center;gap:5px}
+
+/* always-on offset chip on a connector: how long after the anchored edge it fires */
+.gapchip{position:absolute;transform:translate(-50%,-50%);z-index:6;display:inline-flex;align-items:center;
+  gap:5px;background:var(--surface);border:1px solid var(--gc);color:var(--gci);
+  font-family:var(--mono);font-size:10.5px;font-weight:600;border-radius:999px;padding:2px 9px;
+  box-shadow:var(--shadow-sm);white-space:nowrap;font-variant-numeric:tabular-nums}
+.gapchip .arw{font-family:var(--sans);font-size:9px;font-weight:700;color:var(--gc);letter-spacing:.2px}
 
 /* remove-anchor chip on a selected connector */
 .rmchip{position:absolute;transform:translate(-50%,-50%);z-index:6;display:flex;align-items:center;gap:5px;
@@ -452,12 +460,17 @@ body{
 
     // ── connectors (drawn under bars) ──
     rows.filter(r=>r.anchor).forEach(r=>{
-      const tgt=byId[r.anchor.to];
+      const tgt=byId[r.anchor.to], h=hues[r.hue];
       const x1 = r.anchor.edge==='end'?endX(tgt):startX(tgt);
       const y1 = laneCY(tgt._i);
       const x2 = startX(r);
       const y2 = laneCY(r._i);
-      drawConnector(r.id, x1,y1,x2,y2, hues[r.hue].hue, r.id===selected);
+      const g = drawConnector(r.id, x1,y1,x2,y2, h.hue, r.id===selected);
+      // ALWAYS: how long after the anchored edge this step fires (the offset), on the top segment
+      addGapChip((g.x1+g.xm)/2, g.y1, '+'+fmt(r.anchor.off), h,
+                 `starts ${fmt(r.anchor.off)} after ${tgt.name}'s ${r.anchor.edge}`);
+      // WHEN SELECTED: the detach action, on the lower segment (so it never covers the offset)
+      if(r.id===selected) addRemoveChip((g.xm+g.x2)/2, g.y2);
     });
 
     // ── bars / nodes ──
@@ -493,6 +506,7 @@ body{
         n.dataset.id=r.id;
         n.style.left=startX(r)+'px'; n.style.top=y+'px'; n.style.setProperty('--hue',h.hue);
         n.style.setProperty('--ink',h.ink); n.style.setProperty('--edge',h.edge);
+        n.style.setProperty('--fill-a',h.fa);
         const bd = r.parent?`<span class="bd">${byId[r.parent].name}</span>`:'';
         n.innerHTML=`<span class="dot"></span><span class="nl">${bd}${r.name}</span>`;
         canvas.appendChild(n);
@@ -510,7 +524,6 @@ body{
     canvas.appendChild(rb);
 
     buildAxis(baseBot);
-    if(selected && byId[selected] && byId[selected].anchor) drawRemoveChip();
     positionMenuInitial();
     buildMinimap();
   }
@@ -561,14 +574,19 @@ body{
     a.setAttribute('fill','none'); a.setAttribute('stroke', sel?'#2C6E9B':hue);
     a.setAttribute('stroke-width', sel?2.4:2); a.setAttribute('stroke-linecap','round');
     a.setAttribute('stroke-linejoin','round'); svg.appendChild(a);
-    // store mid for the remove chip
-    if(sel){ drawConnector._mid=[xm,(y1+y2)/2]; }
+    return {x1,y1,x2,y2,xm};
   }
 
-  function drawRemoveChip(){
-    const m=drawConnector._mid; if(!m) return;
+  function addGapChip(x,y,txt,h,title){
+    const c=document.createElement('div'); c.className='gapchip';
+    c.style.left=x+'px'; c.style.top=y+'px';
+    c.style.setProperty('--gc',h.hue); c.style.setProperty('--gci',h.ink);
+    c.title=title||''; c.innerHTML=`<span class="arw">then</span>${txt}`;
+    canvas.appendChild(c);
+  }
+  function addRemoveChip(x,y){
     const c=document.createElement('div'); c.className='rmchip';
-    c.style.left=m[0]+'px'; c.style.top=m[1]+'px';
+    c.style.left=x+'px'; c.style.top=y+'px';
     c.innerHTML='<svg viewBox="0 0 24 24"><path d="M6 6 L18 18 M18 6 L6 18"/></svg>Remove anchor';
     c.title='Detach this step from its anchor';
     canvas.appendChild(c);
