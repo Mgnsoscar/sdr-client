@@ -213,3 +213,55 @@ def test_canvas_edge_at_finds_handles_and_drop_target_respects_eligibility():
     # …but not on itself
     gl = cv._geom[later.uid]
     assert cv._drop_target(gl["cx"], gl["y"] + LANE_H / 2, later.uid) is None
+
+
+# ── Context menu (Edit · Duplicate · Remove anchor · Delete) ────────────────────
+
+def test_context_menu_spec_varies_by_item():
+    up = _ramp_item(0.0, sid="up")
+    down = tlm.RunItem(task_name="chirp", action="ramp", anchor="step", offset=3.0,
+                       anchor_step_id="up", anchor_edge="end",
+                       ramp={"param": "power", "start": -50.0, "stop": -90.0,
+                             "steps": 3, "duration_s": 6.0})
+    cv = _chirp_editor([_bar(), up, down, _hold(400.0)])._canvas
+    # an anchored item gets Remove anchor; a plain item doesn't; a Hold has no Duplicate
+    assert cv._context_menu_spec(down) == ["Edit…", "Duplicate", "Remove anchor", "—", "Delete"]
+    assert "Remove anchor" not in cv._context_menu_spec(up)
+    hold = next(it for it in cv._items if tlm._is_hold(it))
+    hspec = cv._context_menu_spec(hold)
+    assert "Duplicate" not in hspec and "Remove anchor" not in hspec
+    assert hspec[0] == "Edit…" and hspec[-1] == "Delete"
+
+
+def test_canvas_duplicate_clones_with_fresh_uid_and_no_step_id():
+    orig = _tune(20.0, sid="tgt")
+    cv = _chirp_editor([_bar(), orig])._canvas
+    cv._duplicate_item(orig)
+    tunes = [it for it in cv._items if getattr(it, "action", "") == "tune"]
+    assert len(tunes) == 2
+    clone = next(it for it in tunes if it.uid != orig.uid)
+    assert clone.step_id == ""                       # the copy is not a reference target
+    assert clone.offset == 35.0                      # nudged 20 + 15
+    assert cv._selected == clone.uid
+
+
+def test_canvas_delete_reanchors_dependents_to_on_air():
+    up = _ramp_item(0.0, sid="up")                   # start 0, end 6
+    down = tlm.RunItem(task_name="chirp", action="ramp", anchor="step", offset=3.0,
+                       anchor_step_id="up", anchor_edge="end",
+                       ramp={"param": "power", "start": -50.0, "stop": -90.0,
+                             "steps": 3, "duration_s": 6.0})       # fires at 6 + 3 = 9
+    cv = _chirp_editor([_bar(), up, down])._canvas
+    cv._delete_with_reanchor(up.uid)
+    assert all(it.uid != up.uid for it in cv._items)   # up is gone
+    assert down.anchor == "start" and not down.anchor_step_id
+    assert down.offset == 9.0                          # kept at its would-be fire time
+
+
+def test_canvas_delete_plain_item_just_removes_it():
+    up = _ramp_item(0.0, sid="up")
+    later = _tune(20.0)
+    cv = _chirp_editor([_bar(), up, later])._canvas
+    n = len(cv._items)
+    cv._delete_with_reanchor(later.uid)
+    assert len(cv._items) == n - 1 and all(it.uid != later.uid for it in cv._items)

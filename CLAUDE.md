@@ -122,13 +122,26 @@ axis, connectors. Phased build: **visual redesign → drag/drop → connectors (
   - **Live time readout while dragging** — `_paint_drag_readout` floats an accent tag (`_paint_tag`) at
     the dragged edge showing the resolved time (`_timing_text`, e.g. `+45 s · on-air`, `off-air −0:30`,
     `Hold · on-resume`); the connect-drag readout reads `+M:SS after <task> · <edge>`.
+  - **Right-click context menu** (`contextMenuEvent` → `_open_context_menu`) — **Edit…** (`edit_item`),
+    **Duplicate** (`_duplicate_item`: deep-copy + fresh `tlm._ids` uid + cleared `step_id` so the copy
+    isn't a reference target, nudged +15 s, then selected; a Hold is unique so it's excluded), **Remove
+    anchor** (only when `anchor=="step"` → `_detach_anchor`), and **Delete** (`_delete_with_reanchor`).
+    Menu contents come from the pure `_context_menu_spec(it)` (tested) + `_run_context_action`.
+  - **Delete re-anchors dependents** — `_delete_with_reanchor` deletes the item, but first, for every
+    DIRECT dependent (anchor="step", anchor_step_id == the deleted item's step_id), re-anchors it to a
+    plain on-air `start` at the offset it currently resolves to (`_step_bases[dep.uid]`, captured before
+    removal) — so a dependent stays at the instant it was meant to fire instead of orphaning. Chained
+    dependents (anchored to a direct dependent) are unaffected: the direct dependent keeps its `step_id`
+    and its position, so they still resolve.
   - Pure model: **`timeline_model.step_drop_offset(items, src, tgt, edge, h_off, step_bases)`** (+ helpers
     `_by_uid`/`_item_edge_offset`). Tests: `tests/test_timeline_step_anchor.py` (step_drop_offset keeps in
     place / clamps to 0 / rejects self·bar·cycle) + `tests/test_timeline_step_anchor_ui.py` (canvas
     `_make_anchor`/`_detach_anchor`, the remove chip appears only when anchored, `_edge_at`/`_drop_target`
-    eligibility). Suite 904 → 912 offscreen. Drift-guarded files untouched.
-  - **NOT YET DONE** (later phases, per plan): context menus, drag ghosts/snapping/marquee/multi-select,
-    undo/redo, hover tooltips, the minimap.
+    eligibility; context-menu spec varies by item, duplicate clones with a fresh uid + no step_id, delete
+    re-anchors dependents to on-air, delete of a plain item just removes it). Suite 904 → 916 offscreen.
+    Drift-guarded files untouched.
+  - **NOT YET DONE** (later phases, per plan): drag ghosts/snapping/marquee/multi-select, undo/redo,
+    hover tooltips, the minimap.
 
 ## Current state — step-to-step anchoring Phase 1 (client authoring + geometry): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo; stacked on `run-task-conflict-guards`)
 Owner ask: anchor a step not only to on-air/off-air/Hold but to ANOTHER step's start/end edge — e.g. a

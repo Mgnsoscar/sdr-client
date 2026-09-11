@@ -40,6 +40,7 @@ the canvas; the step editor fetches a script's parameter schema via the hub.
 """
 from __future__ import annotations
 
+import copy
 import shlex
 from typing import Dict, List, Optional, Tuple
 
@@ -48,7 +49,7 @@ from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QIcon, QLinearGrad
                          QPainterPath, QPen, QPixmap)
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea,
+    QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QScrollArea,
     QVBoxLayout, QWidget,
 )
 
@@ -1504,6 +1505,89 @@ class _TimelineCanvas(QWidget):
         self.relayout()
         self.changed.emit()
 
+    def _duplicate_item(self, it) -> None:
+        """Clone an item (a fresh uid + no step_id — the copy is not a reference target),
+        nudged a little so it doesn't sit exactly on the original, and select it. A Hold is
+        unique per sequence, so it isn't duplicable."""
+        if tlm._is_hold(it):
+            return
+        clone = copy.deepcopy(it)
+        clone.uid = next(tlm._ids)
+        clone.step_id = ""
+        nudge = 15.0
+        if clone.kind == "bar":
+            clone.start_offset = float(getattr(clone, "start_offset", 0.0)) + nudge
+        else:
+            clone.offset = float(getattr(clone, "offset", 0.0)) + nudge
+        self.add_item(clone)
+        self._selected = clone.uid
+        self.update()
+
+    def _delete_with_reanchor(self, uid: Optional[int]) -> None:
+        """Delete an item. If OTHER steps anchor to it, re-anchor each dependent to a plain
+        on-air `start` at the time it currently resolves to — so a dependent stays at the
+        instant it was meant to fire instead of orphaning when its anchor disappears."""
+        target = next((o for o in self._items if o.uid == uid), None)
+        if target is None:
+            return
+        sid = getattr(target, "step_id", "") or ""
+        if sid:
+            for dep in self._items:
+                if dep is target or getattr(dep, "anchor", "") != "step":
+                    continue
+                if (getattr(dep, "anchor_step_id", "") or "") != sid:
+                    continue
+                base = self._step_bases.get(dep.uid)
+                dep.offset = base if base is not None else float(getattr(dep, "offset", 0.0))
+                dep.anchor = "start"
+                dep.anchor_step_id = ""
+                dep.anchor_edge = "end"
+        self.remove_item(uid)
+
+    # ── Right-click context menu ──────────────────────────────────────────────
+    def contextMenuEvent(self, e):  # noqa: N802
+        hit = self._hit(e.pos().x(), e.pos().y())
+        if hit is None:
+            e.ignore()
+            return
+        it = hit[0]
+        self._selected = it.uid
+        self.update()
+        self._open_context_menu(it, e.globalPos())
+        e.accept()
+
+    def _context_menu_spec(self, it) -> List[str]:
+        """Labels for the right-click menu on `it`, in order ('—' = a separator)."""
+        spec = ["Edit…"]
+        if not tlm._is_hold(it):
+            spec.append("Duplicate")
+        if getattr(it, "anchor", "") == "step":
+            spec.append("Remove anchor")
+        spec += ["—", "Delete"]
+        return spec
+
+    def _run_context_action(self, it, label: str) -> None:
+        if label == "Edit…":
+            self.edit_item(it)
+        elif label == "Duplicate":
+            self._duplicate_item(it)
+        elif label == "Remove anchor":
+            self._detach_anchor(it.uid)
+        elif label == "Delete":
+            self._delete_with_reanchor(it.uid)
+
+    def _open_context_menu(self, it, global_pos) -> None:
+        menu = QMenu(self)
+        actions = {}
+        for label in self._context_menu_spec(it):
+            if label == "—":
+                menu.addSeparator()
+            else:
+                actions[menu.addAction(label)] = label
+        chosen = menu.exec(global_pos)
+        if chosen in actions:
+            self._run_context_action(it, actions[chosen])
+
     # ── Zoom (Ctrl+wheel on a mouse; pinch on a touchpad) ─────────────────────
 
     def wheelEvent(self, e):  # noqa: N802
@@ -2889,8 +2973,8 @@ class TimelineEditor(QWidget):
         if not self._tasks:
             self._hint.setText("no tasks on this unit — define one in the Tasks tab first")
         else:
-            self._hint.setText("Drag handles to set timing · drag an edge dot to another "
-                               "step to anchor · click to select, double-click to edit")
+            self._hint.setText("Drag handles to set timing · drag an edge dot to another step to "
+                               "anchor · click to select, double-click to edit · right-click for more")
         self._canvas.relayout()
 
     def available_tasks(self) -> List[str]:
