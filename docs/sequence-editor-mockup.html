@@ -1,0 +1,716 @@
+<title>Sequence Editor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  color-scheme: light;
+  --ground:#EEF0F3; --surface:#FFFFFF; --surface-alt:#FAFBFC; --inset:#F1F4F7;
+  --border:#E2E5EA; --border-strong:#CDD2DA; --hairline:#ECEEF1;
+  --text:#1E2530; --muted:#5C6675; --faint:#8A93A2;
+  --accent:#2C6E9B; --accent-soft:#E8F0F6; --accent-ink:#1F5476;
+  --online:#1D9E75; --online-soft:#E1F5EE;
+  --armed:#BA7517; --armed-soft:#FAEEDA;
+  --crash:#C23B3B; --crash-soft:#FBE9E9;
+  /* per-task hues — chosen distinct from the reserved green/amber/red status trio */
+  --teal:#1E8FA3;   --teal-ink:#12707F;
+  --violet:#6D5AC4; --violet-ink:#54449B;
+  --magenta:#B5487E; --magenta-ink:#8E3763;
+  --sans:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --mono:"IBM Plex Mono","DejaVu Sans Mono",ui-monospace,monospace;
+  --r:14px; --r-sm:9px; --r-xs:6px;
+  --shadow-sm:0 1px 2px rgba(22,32,48,.06), 0 1px 3px rgba(22,32,48,.05);
+  --shadow-md:0 2px 6px rgba(22,32,48,.07), 0 8px 24px rgba(22,32,48,.09);
+  --shadow-lg:0 10px 40px rgba(22,32,48,.16);
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:
+    radial-gradient(1200px 500px at 15% -10%, #F6F8FB, transparent 60%),
+    var(--ground);
+  color:var(--text); font-family:var(--sans);
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  padding:22px; min-height:100vh;
+}
+.wrap{max-width:1180px; margin:0 auto}
+
+/* ── App window ─────────────────────────────────────────────── */
+.app{
+  background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--r); box-shadow:var(--shadow-md); overflow:hidden;
+}
+
+/* Titlebar */
+.title{
+  display:flex; align-items:center; gap:14px;
+  padding:13px 18px; border-bottom:1px solid var(--hairline);
+  background:linear-gradient(180deg,#FFFFFF, #FCFDFE);
+}
+.title .dot-grp{display:flex; gap:7px}
+.title .wd{width:11px;height:11px;border-radius:50%}
+.wd.r{background:#F0655C}.wd.y{background:#F4C24C}.wd.g{background:#5FC26B}
+.title h1{font-size:13px; font-weight:600; letter-spacing:.2px; margin:0; color:var(--muted)}
+.title h1 b{color:var(--text); font-weight:600}
+.title .sp{flex:1}
+.pill{
+  display:inline-flex; align-items:center; gap:6px; height:24px; padding:0 10px;
+  border-radius:999px; font-size:11.5px; font-weight:600; letter-spacing:.2px;
+}
+.pill .led{width:7px;height:7px;border-radius:50%}
+.pill.ready{background:var(--online-soft); color:#137257}
+.pill.ready .led{background:var(--online); box-shadow:0 0 0 3px rgba(29,158,117,.16)}
+
+/* Header: name + scope + actions */
+.head{display:flex; align-items:center; gap:12px; padding:14px 18px 12px}
+.field{flex:1; min-width:0}
+.field label{display:block; font-size:10.5px; font-weight:600; letter-spacing:.7px;
+  text-transform:uppercase; color:var(--faint); margin-bottom:5px}
+.field .name{
+  font-size:16px; font-weight:600; color:var(--text);
+  border:1px solid transparent; border-radius:var(--r-sm); padding:5px 9px; margin:-5px -9px;
+  background:transparent; width:100%; letter-spacing:-.1px;
+}
+.field .name:hover{background:var(--surface-alt)}
+.field .name:focus{outline:none; background:#fff; border-color:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-soft)}
+.scope{display:flex; gap:6px; align-items:center; color:var(--muted); font-size:12px}
+.chip{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 10px;
+  border-radius:999px;background:var(--inset);border:1px solid var(--border);
+  font-size:12px;color:var(--muted);font-weight:500}
+.btn{height:32px;padding:0 14px;border-radius:var(--r-sm);border:1px solid var(--border-strong);
+  background:#fff;font:inherit;font-size:12.5px;font-weight:600;color:var(--text);cursor:pointer}
+.btn:hover{background:var(--surface-alt)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:#25597E}
+
+/* Toolbar */
+.toolbar{display:flex; align-items:center; gap:6px; padding:0 18px 14px; flex-wrap:wrap}
+.tool{
+  display:inline-flex; align-items:center; gap:7px; height:30px; padding:0 11px 0 9px;
+  border-radius:999px; border:1px solid var(--border); background:#fff; cursor:pointer;
+  font-size:12.5px; font-weight:600; color:var(--muted); transition:.13s;
+}
+.tool:hover{color:var(--text); border-color:var(--border-strong); box-shadow:var(--shadow-sm)}
+.tool svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.8}
+.tool .g{color:var(--online)} .tool .v{color:var(--violet)} .tool .a{color:var(--armed)}
+.tbar-sp{flex:1}
+.zoom{display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:999px;
+  background:#fff;height:30px;overflow:hidden}
+.zoom button{width:30px;height:30px;border:0;background:#fff;cursor:pointer;color:var(--muted);
+  font-size:15px;line-height:1}
+.zoom button:hover{background:var(--surface-alt);color:var(--text)}
+.zoom .lvl{padding:0 8px;font-family:var(--mono);font-size:11.5px;color:var(--muted);
+  border-left:1px solid var(--border);border-right:1px solid var(--border);height:100%;
+  display:flex;align-items:center;font-variant-numeric:tabular-nums}
+.ghost{border:1px solid var(--border);background:#fff;height:30px;border-radius:999px;padding:0 12px;
+  font:inherit;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer}
+.ghost:hover{color:var(--text);border-color:var(--border-strong)}
+
+/* ── Timeline ───────────────────────────────────────────────── */
+.stage{border-top:1px solid var(--hairline); background:
+  linear-gradient(180deg,#FCFDFE, #F8FAFC);}
+.grid{display:grid; grid-template-columns:214px 1fr}
+.rowhdr{border-right:1px solid var(--hairline); padding:14px 0 0}
+.rowhdr .hcap{font-size:10.5px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;
+  color:var(--faint); padding:0 16px 10px}
+.rrow{display:flex; align-items:center; gap:9px; padding:0 14px; cursor:default}
+.rrow .sw{width:9px;height:9px;border-radius:3px;flex:none}
+.rrow .rl{min-width:0}
+.rrow .rn{font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;letter-spacing:-.1px}
+.rrow .rt{font-size:10.5px;color:var(--faint);font-weight:500;white-space:nowrap}
+.rrow.child{padding-left:30px; position:relative}
+.rrow.child .rn{font-weight:500}
+.rrow.child::before{content:"";position:absolute;left:20px;top:-4px;bottom:50%;width:8px;
+  border-left:1.5px solid var(--kin);border-bottom:1.5px solid var(--kin);
+  border-bottom-left-radius:6px;opacity:.5}
+.rtype{margin-left:auto;font-size:9px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;
+  color:var(--muted);background:var(--inset);border-radius:4px;padding:2px 5px;flex:none}
+
+/* Canvas */
+.canvas-scroll{overflow-x:auto; overflow-y:hidden; padding-top:14px}
+.canvas-scroll::-webkit-scrollbar{height:10px}
+.canvas-scroll::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:6px;
+  border:2px solid var(--surface)}
+.canvas{position:relative}
+.svgL{position:absolute;inset:0;overflow:visible;pointer-events:none}
+.svgL .conn{pointer-events:stroke;cursor:pointer}
+
+/* lane bars */
+.bar{position:absolute; height:30px; border-radius:9px; display:flex; align-items:center;
+  gap:7px; padding:0 10px; cursor:grab; user-select:none; transition:box-shadow .12s, transform .06s;
+  box-shadow:var(--shadow-sm);}
+.bar:active{cursor:grabbing}
+.bar:hover{box-shadow:var(--shadow-md)}
+.bar .lab{font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar .badge{font-size:9px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;
+  padding:2px 5px;border-radius:4px;flex:none}
+.bar .tm{margin-left:auto;font-family:var(--mono);font-size:10.5px;font-weight:500;
+  opacity:0;transition:.12s;white-space:nowrap;font-variant-numeric:tabular-nums}
+.bar:hover .tm,.bar.sel .tm{opacity:.85}
+/* duration */
+.bar.dur{border:1px solid var(--edge);
+  background:linear-gradient(180deg,var(--fill-a),var(--fill-b));}
+.bar.dur .lab{color:var(--ink)}
+.bar.dur::before{content:"";position:absolute;left:0;top:6px;bottom:6px;width:3px;border-radius:2px;
+  background:var(--hue)}
+/* ramp — a sloped motif */
+.bar.ramp{border:1px solid var(--edge);overflow:hidden;
+  background:linear-gradient(180deg,var(--fill-a),var(--fill-b));}
+.bar.ramp .lab{color:var(--ink)}
+.bar.ramp .slope{position:absolute;inset:0;opacity:.5}
+/* node — tune / one-shot */
+.node{position:absolute; height:30px; display:flex; align-items:center; gap:6px; cursor:grab;
+  transform:translateX(-15px); user-select:none}
+.node .dot{width:14px;height:14px;border-radius:50%;background:#fff;border:2.5px solid var(--hue);
+  box-shadow:var(--shadow-sm);flex:none;transition:.12s}
+.node.oneshot .dot{border-radius:3px;transform:rotate(45deg)}
+.node:hover .dot{transform:scale(1.12)}
+.node.oneshot:hover .dot{transform:rotate(45deg) scale(1.12)}
+.node .nl{font-size:11px;font-weight:600;color:var(--ink);background:#fff;border:1px solid var(--edge);
+  border-radius:7px;padding:2px 7px;white-space:nowrap;box-shadow:var(--shadow-sm)}
+.node .nl .bd{font-size:8.5px;font-weight:700;letter-spacing:.3px;color:var(--hue);margin-right:4px;
+  text-transform:uppercase}
+
+/* connection handles on task edges */
+.handle{position:absolute; width:11px;height:11px;border-radius:50%;background:#fff;
+  border:2px solid var(--hue); transform:translate(-50%,-50%); cursor:crosshair; z-index:4;
+  transition:.12s; box-shadow:var(--shadow-sm)}
+.handle:hover{transform:translate(-50%,-50%) scale(1.28); background:var(--hue)}
+.handle.linked{background:var(--hue); box-shadow:0 0 0 4px var(--halo)}
+
+/* selection ring */
+.sel{outline:2px solid var(--accent); outline-offset:2px; box-shadow:0 0 0 4px var(--accent-soft), var(--shadow-md)!important}
+.node.sel .dot{outline:2px solid var(--accent);outline-offset:3px}
+
+/* on-air / off-air guides + labels */
+.guide-lab{position:absolute;top:-2px;font-size:9.5px;font-weight:700;letter-spacing:.7px;
+  padding:2px 7px;border-radius:5px;white-space:nowrap;transform:translateX(-50%)}
+.guide-lab.on{color:#fff;background:var(--online)}
+.guide-lab.off{color:#fff;background:var(--crash)}
+.zone-lab{position:absolute;font-size:9.5px;font-weight:600;color:var(--faint);letter-spacing:.4px;
+  white-space:nowrap;transform:translateX(-50%)}
+.relbadge{position:absolute; transform:translate(-50%,-50%); background:var(--surface);
+  border:1px dashed var(--border-strong); color:var(--muted); font-size:10px; font-weight:600;
+  border-radius:999px; padding:4px 11px; letter-spacing:.3px; box-shadow:var(--shadow-sm);
+  display:flex;align-items:center;gap:6px}
+.relbadge b{color:var(--text);font-weight:700}
+
+/* axis ruler */
+.axis{position:relative; height:34px; margin-top:2px}
+.tick{position:absolute;top:0;width:1px;height:6px;background:var(--border-strong)}
+.tick.major{height:9px;background:var(--faint)}
+.tlab{position:absolute;top:11px;font-family:var(--mono);font-size:10px;color:var(--muted);
+  transform:translateX(-50%);white-space:nowrap;font-variant-numeric:tabular-nums}
+.tlab.anchor{font-weight:600}
+
+/* minimap */
+.minimap{display:flex;align-items:center;gap:10px;padding:11px 18px;border-top:1px solid var(--hairline);
+  background:var(--surface-alt)}
+.mm-cap{font-size:10px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;color:var(--faint)}
+.mm{position:relative;flex:1;height:26px;background:#fff;border:1px solid var(--border);border-radius:7px;
+  overflow:hidden}
+.mm .seg{position:absolute;height:5px;border-radius:3px}
+.mm .view{position:absolute;top:0;bottom:0;border:1.5px solid var(--accent);border-radius:6px;
+  background:rgba(44,110,155,.07)}
+.mm .mline{position:absolute;top:0;bottom:0;width:1px}
+
+/* footer hint */
+.foot{display:flex;align-items:center;gap:16px;padding:9px 18px;border-top:1px solid var(--hairline);
+  color:var(--faint);font-size:11px;flex-wrap:wrap}
+.kbd{font-family:var(--mono);font-size:10px;background:var(--inset);border:1px solid var(--border);
+  border-bottom-width:2px;border-radius:5px;padding:1px 5px;color:var(--muted)}
+.foot .k{display:inline-flex;align-items:center;gap:5px}
+
+/* remove-anchor chip on a selected connector */
+.rmchip{position:absolute;transform:translate(-50%,-50%);z-index:6;display:flex;align-items:center;gap:5px;
+  background:var(--surface);border:1px solid var(--accent);color:var(--accent-ink);font-size:10.5px;
+  font-weight:600;border-radius:999px;padding:3px 9px 3px 7px;box-shadow:var(--shadow-md);cursor:pointer}
+.rmchip svg{width:12px;height:12px;stroke:currentColor;stroke-width:2;fill:none}
+.rmchip:hover{background:var(--crash-soft);border-color:var(--crash);color:var(--crash)}
+
+/* context menu */
+.menu{position:fixed; z-index:20; min-width:196px; background:var(--surface);
+  border:1px solid var(--border); border-radius:11px; box-shadow:var(--shadow-lg); padding:6px;
+  font-size:12.5px}
+.menu .mh{font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--faint);
+  padding:5px 9px 6px; display:flex; align-items:center; gap:7px}
+.menu .mh .sw{width:8px;height:8px;border-radius:3px}
+.mi{display:flex;align-items:center;gap:10px;padding:7px 9px;border-radius:7px;color:var(--text);cursor:pointer}
+.mi:hover{background:var(--accent-soft);color:var(--accent-ink)}
+.mi .ic{width:15px;text-align:center;color:var(--faint);font-size:12px}
+.mi:hover .ic{color:var(--accent)}
+.mi.danger{color:var(--crash)} .mi.danger .ic{color:var(--crash)}
+.mi.danger:hover{background:var(--crash-soft)}
+.msep{height:1px;background:var(--hairline);margin:5px 4px}
+.mi .sc{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--faint)}
+
+/* tooltip */
+.tip{position:fixed;z-index:30;pointer-events:none;background:var(--text);color:#fff;
+  border-radius:8px;padding:7px 10px;font-size:11px;box-shadow:var(--shadow-md);opacity:0;
+  transition:opacity .1s;transform:translate(-50%,-100%);white-space:nowrap;line-height:1.5}
+.tip .tt{font-weight:600;margin-bottom:2px}
+.tip .tr{color:#C9D2DE;font-family:var(--mono);font-size:10px;font-variant-numeric:tabular-nums}
+.tip::after{content:"";position:absolute;left:50%;bottom:-5px;transform:translateX(-50%);
+  border:5px solid transparent;border-top-color:var(--text)}
+
+.legend{display:flex;gap:14px;align-items:center;padding:10px 18px 0;flex-wrap:wrap}
+.lg{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
+.lg .sw{width:10px;height:10px;border-radius:3px}
+.note{max-width:1180px;margin:14px auto 0;color:var(--faint);font-size:11.5px;line-height:1.6;
+  padding:0 4px}
+.note b{color:var(--muted)}
+@media (max-width:720px){ .grid{grid-template-columns:150px 1fr} .head{flex-wrap:wrap} }
+</style>
+
+<div class="wrap">
+ <div class="app">
+
+  <div class="title">
+    <div class="dot-grp"><span class="wd r"></span><span class="wd y"></span><span class="wd g"></span></div>
+    <h1><b>Sequence editor</b> &nbsp;·&nbsp; broadcaster-2</h1>
+    <div class="sp"></div>
+    <span class="pill ready"><span class="led"></span>Ready · 0 warnings</span>
+  </div>
+
+  <div class="head">
+    <div class="field">
+      <label for="seqname">Sequence name</label>
+      <input id="seqname" class="name" value="GPS L1 C/A — reacquisition sweep" spellcheck="false">
+    </div>
+    <div class="scope"><span class="chip">🛰️ broadcaster</span></div>
+    <button class="btn">Cancel</button>
+    <button class="btn primary">Save sequence</button>
+  </div>
+
+  <div class="toolbar">
+    <button class="tool"><svg viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="8" rx="2"/></svg>Duration</button>
+    <button class="tool"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/></svg>One-shot</button>
+    <button class="tool"><svg viewBox="0 0 24 24"><path d="M4 15h5l3-9 3 12 2-6h3"/></svg>Tune</button>
+    <button class="tool"><svg viewBox="0 0 24 24"><path d="M4 18 L20 6"/><path d="M4 18h16"/></svg>Ramp</button>
+    <button class="tool"><svg viewBox="0 0 24 24"><rect x="7" y="5" width="3" height="14" rx="1"/><rect x="14" y="5" width="3" height="14" rx="1"/></svg>Hold</button>
+    <div class="tbar-sp"></div>
+    <button class="ghost" id="fit">Fit</button>
+    <div class="zoom"><button id="zo">−</button><span class="lvl" id="zl">100%</span><button id="zi">+</button></div>
+  </div>
+
+  <div class="legend">
+    <span class="lg"><span class="sw" style="background:var(--teal)"></span>GPS C/A</span>
+    <span class="lg"><span class="sw" style="background:var(--violet)"></span>Chirp sweep</span>
+    <span class="lg"><span class="sw" style="background:var(--magenta)"></span>Marker</span>
+    <span class="lg" style="margin-left:auto;color:var(--faint)">Tunes &amp; ramps inherit their parent task's colour</span>
+  </div>
+
+  <div class="stage">
+    <div class="grid">
+      <div class="rowhdr" id="rowhdr">
+        <div class="hcap">Tasks &amp; steps</div>
+      </div>
+      <div class="canvas-scroll" id="scroll">
+        <div class="canvas" id="canvas">
+          <svg class="svgL" id="svg"></svg>
+          <!-- bars / nodes / handles / labels injected here -->
+          <div class="axis" id="axis"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="minimap">
+      <span class="mm-cap">Overview</span>
+      <div class="mm" id="mm"></div>
+    </div>
+
+    <div class="foot">
+      <span class="k">Drag a bar to move it · drag a handle <span style="color:var(--muted)">◦</span> to another edge to anchor</span>
+      <span class="k"><span class="kbd">⌦</span> delete</span>
+      <span class="k"><span class="kbd">⌘D</span> duplicate</span>
+      <span class="k"><span class="kbd">← →</span> nudge</span>
+      <span class="k"><span class="kbd">⌘Z</span> undo</span>
+      <span style="margin-left:auto">Right-click any element for actions</span>
+    </div>
+  </div>
+ </div>
+</div>
+
+<p class="note">
+  <b>Mockup — not wired to data.</b> Real-time axis: the first <b>7:00</b> of the on-air window is fully
+  defined (up-ramp 0:00–2:00, then the down-ramp anchored to its end +3:00 → 5:00–7:00), so the ruler shows
+  concrete time there; the remainder is hatched <b>“relative”</b> because the window length is only chosen at
+  arm. Click a bar, node, or the selected connector; right-click for the context menu; hover a duration bar for
+  its exact start/end/duration.
+</p>
+
+<!-- context menu + tooltip live at body level, positioned by JS -->
+<div class="menu" id="menu" hidden></div>
+<div class="tip" id="tip"></div>
+
+<script>
+(function(){
+  // ── time / geometry model ───────────────────────────────────────────────
+  const PPS0 = 0.85;                 // px per second in the DEFINED region at 100%
+  let zoom = 1;
+  const PAD = 20;
+  const WARM = 60, DEF = 420, HATCH = 168, COOL = 60;   // seconds / px(hatch)
+  const ROWH = 44, GAP = 8, TOP = 6;
+
+  const hues = {
+    teal:   {hue:'#1E8FA3', ink:'#12707F', fa:'rgba(30,143,163,.16)', fb:'rgba(30,143,163,.05)', edge:'rgba(30,143,163,.42)', halo:'rgba(30,143,163,.20)'},
+    violet: {hue:'#6D5AC4', ink:'#54449B', fa:'rgba(109,90,196,.16)', fb:'rgba(109,90,196,.05)', edge:'rgba(109,90,196,.42)', halo:'rgba(109,90,196,.20)'},
+    magenta:{hue:'#B5487E', ink:'#8E3763', fa:'rgba(181,72,126,.16)', fb:'rgba(181,72,126,.05)', edge:'rgba(181,72,126,.42)', halo:'rgba(181,72,126,.20)'},
+  };
+
+  // rows: duration tasks with indented child tunes/ramps under them
+  const rows = [
+    {id:'ca',   kind:'dur',  name:'GPS C/A',        type:'Duration', hue:'teal',    t0:0,   t1:'off', sub:'1575.42 MHz'},
+    {id:'up',   kind:'ramp', name:'Power up-ramp',  type:'Ramp', hue:'teal', parent:'ca', t0:0, dur:120, dir:'up',   sub:'−90 → −50 dBm'},
+    {id:'dn',   kind:'ramp', name:'Power down-ramp',type:'Ramp', hue:'teal', parent:'ca', t0:300, dur:120, dir:'down',sub:'−50 → −90 dBm', anchor:{to:'up', edge:'end', off:180}},
+    {id:'chp',  kind:'dur',  name:'Chirp sweep',    type:'Duration', hue:'violet',  t0:30,  t1:'off', sub:'L2 · 1227.6 MHz'},
+    {id:'rf',   kind:'tune', name:'RF on',          type:'Tune', hue:'violet', parent:'chp', t0:30, sub:'gate → on'},
+    {id:'mk',   kind:'one',  name:'Log marker',     type:'One-shot', hue:'magenta', t0:360, sub:'annotate'},
+  ];
+  const byId = Object.fromEntries(rows.map((r,i)=>(r._i=i,[r.id,r])));
+
+  let selected = 'dn';               // pre-selected: the anchored down-ramp
+
+  // geometry helpers
+  function pps(){ return PPS0*zoom; }
+  function onAirX(){ return PAD + WARM*pps(); }
+  function defEndX(){ return onAirX() + DEF*pps(); }
+  function hatchW(){ return HATCH*zoom; }
+  function offAirX(){ return defEndX() + hatchW(); }
+  function totalW(){ return offAirX() + COOL*pps() + PAD; }
+  function rowY(i){ return TOP + i*(ROWH+GAP); }
+  function laneCY(i){ return rowY(i) + ROWH/2 + 7; }        // +7: bars sit 7px below row top
+  // time → x. anchor 'start' uses on-air; a t1==='off' end uses off-air.
+  function tX(t){ return onAirX() + t*pps(); }
+  function endX(r){ return r.t1==='off' ? offAirX() : tX(r.t0 + (r.dur||0)); }
+  function startX(r){ return tX(r.t0); }
+
+  const svg = document.getElementById('svg');
+  const canvas = document.getElementById('canvas');
+  const axis = document.getElementById('axis');
+  const hdr = document.getElementById('rowhdr');
+  const SVGNS='http://www.w3.org/2000/svg';
+
+  function fmt(t){ const m=Math.floor(t/60), s=Math.round(t%60);
+    return m>0 ? `${m}:${String(s).padStart(2,'0')}` : `${s}s`; }
+
+  // ── row header column ────────────────────────────────────────────────────
+  function buildHeader(){
+    [...hdr.querySelectorAll('.rrow')].forEach(e=>e.remove());
+    rows.forEach((r,i)=>{
+      const h=hues[r.hue];
+      const el=document.createElement('div');
+      el.className='rrow'+(r.parent?' child':'');
+      el.style.height=(ROWH+GAP)+'px';
+      el.style.setProperty('--kin',h.hue);
+      el.dataset.id=r.id;
+      el.innerHTML = (r.parent?'':`<span class="sw" style="background:${h.hue}"></span>`) +
+        `<div class="rl"><div class="rn">${r.name}</div><div class="rt">${r.sub}</div></div>`+
+        `<span class="rtype">${r.type}</span>`;
+      hdr.appendChild(el);
+    });
+  }
+
+  // ── canvas render ─────────────────────────────────────────────────────────
+  function clearCanvas(){
+    [...canvas.querySelectorAll('.bar,.node,.handle,.guide-lab,.zone-lab,.relbadge,.rmchip')].forEach(e=>e.remove());
+    while(svg.firstChild) svg.removeChild(svg.firstChild);
+  }
+
+  function addHandle(x,y,hue,linked,halo){
+    const d=document.createElement('div'); d.className='handle'+(linked?' linked':'');
+    d.style.left=x+'px'; d.style.top=y+'px'; d.style.setProperty('--hue',hue);
+    if(halo) d.style.setProperty('--halo',halo);
+    canvas.appendChild(d); return d;
+  }
+
+  function render(){
+    const W=Math.round(totalW()), H=rowY(rows.length)+40;
+    canvas.style.width=W+'px'; canvas.style.height=(H+40)+'px';
+    svg.setAttribute('width',W); svg.setAttribute('height',H+40);
+    svg.setAttribute('viewBox',`0 0 ${W} ${H+40}`);
+    clearCanvas();
+
+    const oa=onAirX(), de=defEndX(), off=offAirX(), baseTop=TOP-2, baseBot=H;
+
+    // hatch pattern for the undefined (relative) region
+    const defs=document.createElementNS(SVGNS,'defs');
+    defs.innerHTML=`<pattern id="hatch" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+        <rect width="7" height="7" fill="#F3F5F8"/><line x1="0" y1="0" x2="0" y2="7" stroke="#DDE2E8" stroke-width="1.4"/></pattern>`;
+    svg.appendChild(defs);
+
+    // on-air band (defined) faint tint
+    rect(oa, baseTop, de-oa, baseBot-baseTop, 'rgba(29,158,117,.045)');
+    // hatched relative region
+    rect(de, baseTop, off-de, baseBot-baseTop, 'url(#hatch)');
+    line(de, baseTop, de, baseBot+6, '#CDD2DA', 1.5, '5 4');
+
+    // on-air / off-air guides
+    line(oa, baseTop-6, oa, baseBot+6, '#1D9E75', 2);
+    line(off, baseTop-6, off, baseBot+6, '#C23B3B', 2);
+
+    // ── connectors (drawn under bars) ──
+    rows.filter(r=>r.anchor).forEach(r=>{
+      const tgt=byId[r.anchor.to];
+      const x1 = r.anchor.edge==='end'?endX(tgt):startX(tgt);
+      const y1 = laneCY(tgt._i);
+      const x2 = startX(r);
+      const y2 = laneCY(r._i);
+      drawConnector(r.id, x1,y1,x2,y2, hues[r.hue].hue, r.id===selected);
+    });
+
+    // ── bars / nodes ──
+    rows.forEach((r,i)=>{
+      const h=hues[r.hue], y=rowY(i)+7;
+      if(r.kind==='dur' || r.kind==='ramp'){
+        const x=startX(r), x2=endX(r), w=Math.max(r.kind==='ramp'?40:26, x2-x);
+        const b=document.createElement('div');
+        b.className='bar '+(r.kind==='dur'?'dur':'ramp')+(r.id===selected?' sel':'');
+        b.dataset.id=r.id;
+        b.style.left=x+'px'; b.style.top=y+'px'; b.style.width=w+'px';
+        b.style.setProperty('--hue',h.hue); b.style.setProperty('--ink',h.ink);
+        b.style.setProperty('--edge',h.edge); b.style.setProperty('--fill-a',h.fa); b.style.setProperty('--fill-b',h.fb);
+        const badge = r.parent ? `<span class="badge" style="background:${h.fa};color:${h.ink}">${byId[r.parent].name}</span>` : '';
+        const dur = r.t1==='off' ? '' : `<span class="tm" style="color:${h.ink}">${fmt(r.dur||0)}</span>`;
+        b.innerHTML = (r.kind==='ramp'?slopeSVG(r.dir,h.hue):'') +
+           `<span class="lab">${r.name}</span>${badge}${dur}`;
+        canvas.appendChild(b);
+        // edge connection handles
+        if(r.kind==='dur'){
+          addHandle(x, laneCY(i), h.hue, false);
+          addHandle(x2, laneCY(i), h.hue, false);
+        } else {
+          const startLinked = rows.some(o=>o.anchor && o.anchor.to===r.id && o.anchor.edge==='start');
+          const endLinked   = rows.some(o=>o.anchor && o.anchor.to===r.id && o.anchor.edge==='end');
+          addHandle(x, laneCY(i), h.hue, r.anchor && r.anchor && r.id===selected ? true:startLinked, h.halo);
+          addHandle(x2, laneCY(i), h.hue, endLinked, h.halo);
+        }
+      } else {
+        // node (tune / one-shot)
+        const n=document.createElement('div');
+        n.className='node '+(r.kind==='one'?'oneshot ':'')+(r.id===selected?'sel ':'');
+        n.dataset.id=r.id;
+        n.style.left=startX(r)+'px'; n.style.top=y+'px'; n.style.setProperty('--hue',h.hue);
+        n.style.setProperty('--ink',h.ink); n.style.setProperty('--edge',h.edge);
+        const bd = r.parent?`<span class="bd">${byId[r.parent].name}</span>`:'';
+        n.innerHTML=`<span class="dot"></span><span class="nl">${bd}${r.name}</span>`;
+        canvas.appendChild(n);
+      }
+    });
+
+    // guide + zone labels
+    glab(oa, 'ON-AIR', 'on'); glab(off, 'OFF-AIR', 'off');
+    zlab(PAD/2 + WARM*pps()/2 - 4, baseBot+30, 'pre-roll');
+    zlab((off+ (off+COOL*pps()))/2, baseBot+30, 'cool-down');
+    // "relative" pill centred in the hatched region
+    const rb=document.createElement('div'); rb.className='relbadge';
+    rb.style.left=(de+off)/2+'px'; rb.style.top=(baseTop+baseBot)/2+'px';
+    rb.innerHTML='◇ <b>relative</b> — length set at arm';
+    canvas.appendChild(rb);
+
+    buildAxis(baseBot);
+    if(selected && byId[selected] && byId[selected].anchor) drawRemoveChip();
+    positionMenuInitial();
+    buildMinimap();
+  }
+
+  function slopeSVG(dir,hue){
+    const d = dir==='up' ? 'M6 22 L54 8' : 'M6 8 L54 22';
+    return `<svg class="slope" viewBox="0 0 60 30" preserveAspectRatio="none">
+      <path d="${d}" stroke="${hue}" stroke-width="2" fill="none" opacity=".55"/>
+      <circle cx="${dir==='up'?54:54}" cy="${dir==='up'?8:22}" r="2.4" fill="${hue}"/></svg>`;
+  }
+
+  // svg helpers
+  function rect(x,y,w,h,fill){ const r=document.createElementNS(SVGNS,'rect');
+    r.setAttribute('x',x);r.setAttribute('y',y);r.setAttribute('width',Math.max(0,w));r.setAttribute('height',h);
+    r.setAttribute('fill',fill); svg.appendChild(r); return r; }
+  function line(x1,y1,x2,y2,stroke,w,dash){ const l=document.createElementNS(SVGNS,'line');
+    l.setAttribute('x1',x1);l.setAttribute('y1',y1);l.setAttribute('x2',x2);l.setAttribute('y2',y2);
+    l.setAttribute('stroke',stroke);l.setAttribute('stroke-width',w||1); if(dash)l.setAttribute('stroke-dasharray',dash);
+    svg.appendChild(l); return l; }
+
+  function drawConnector(id,x1,y1,x2,y2,hue,sel){
+    // orthogonal route with rounded bends: out from source edge, down, into target start
+    const r=7, midGap=Math.max(14,(x2-x1)/2);
+    const xm = x1 + Math.min(midGap, Math.max(14,(x2-x1)*0.45));
+    const dy = y2>y1?1:-1;
+    const d = `M ${x1} ${y1}
+               H ${xm-r}
+               Q ${xm} ${y1} ${xm} ${y1+r*dy}
+               V ${y2-r*dy}
+               Q ${xm} ${y2} ${xm+r} ${y2}
+               H ${x2}`;
+    // soft under-glow when selected
+    if(sel){ const g=document.createElementNS(SVGNS,'path'); g.setAttribute('d',d);
+      g.setAttribute('fill','none'); g.setAttribute('stroke','rgba(44,110,155,.22)');
+      g.setAttribute('stroke-width','7'); g.setAttribute('stroke-linecap','round');
+      g.setAttribute('stroke-linejoin','round'); svg.appendChild(g); }
+    const p=document.createElementNS(SVGNS,'path'); p.setAttribute('d',d); p.setAttribute('fill','none');
+    p.setAttribute('stroke', sel? '#2C6E9B': hue); p.setAttribute('stroke-width', sel?2.4:2);
+    p.setAttribute('stroke-linecap','round'); p.setAttribute('stroke-linejoin','round');
+    p.setAttribute('opacity', sel?1:.85); p.setAttribute('class','conn'); p.dataset.id=id;
+    if(!sel) p.setAttribute('stroke-dasharray','1 0');
+    p.addEventListener('click',(e)=>{e.stopPropagation(); select(id);});
+    p.addEventListener('contextmenu',(e)=>{e.preventDefault();e.stopPropagation(); select(id); openMenu(e.clientX,e.clientY,id,'conn');});
+    svg.appendChild(p);
+    // arrowhead into target
+    const a=document.createElementNS(SVGNS,'path');
+    a.setAttribute('d',`M ${x2-6} ${y2-4} L ${x2} ${y2} L ${x2-6} ${y2+4}`);
+    a.setAttribute('fill','none'); a.setAttribute('stroke', sel?'#2C6E9B':hue);
+    a.setAttribute('stroke-width', sel?2.4:2); a.setAttribute('stroke-linecap','round');
+    a.setAttribute('stroke-linejoin','round'); svg.appendChild(a);
+    // store mid for the remove chip
+    if(sel){ drawConnector._mid=[xm,(y1+y2)/2]; }
+  }
+
+  function drawRemoveChip(){
+    const m=drawConnector._mid; if(!m) return;
+    const c=document.createElement('div'); c.className='rmchip';
+    c.style.left=m[0]+'px'; c.style.top=m[1]+'px';
+    c.innerHTML='<svg viewBox="0 0 24 24"><path d="M6 6 L18 18 M18 6 L6 18"/></svg>Remove anchor';
+    c.title='Detach this step from its anchor';
+    canvas.appendChild(c);
+  }
+
+  function glab(x,text,cls){ const d=document.createElement('div'); d.className='guide-lab '+cls;
+    d.style.left=x+'px'; d.textContent=text; canvas.appendChild(d); }
+  function zlab(x,y,text){ const d=document.createElement('div'); d.className='zone-lab';
+    d.style.left=x+'px'; d.style.top=y+'px'; d.textContent=text; canvas.appendChild(d); }
+
+  // ── axis ─────────────────────────────────────────────────────────────────
+  function buildAxis(baseBot){
+    axis.innerHTML=''; axis.style.top=(baseBot+6)+'px'; axis.style.left='0'; axis.style.right='0';
+    axis.style.position='absolute';
+    // real-time ticks across the DEFINED region (every 60s), plus 0
+    for(let t=0;t<=DEF;t+=60){
+      const x=tX(t); mkTick(x, true); mkLab(x, t===0?'0':fmt(t), true);
+    }
+    // minor ticks every 30s
+    for(let t=30;t<DEF;t+=60){ mkTick(tX(t), false); }
+    // warm-up tick
+    mkTick(onAirX()-WARM*pps(), false); mkLab(onAirX()-WARM*pps(), '−1:00', false);
+    // anchor labels handled by guide labels; add off-air time is undefined → no numeric
+    mkLab(offAirX(), 'arm', false);
+  }
+  function mkTick(x,major){ const t=document.createElement('div'); t.className='tick'+(major?' major':'');
+    t.style.left=x+'px'; axis.appendChild(t); }
+  function mkLab(x,txt,anchor){ const l=document.createElement('div'); l.className='tlab'+(anchor?' anchor':'');
+    l.style.left=x+'px'; l.textContent=txt; axis.appendChild(l); }
+
+  // ── minimap ────────────────────────────────────────────────────────────────
+  function buildMinimap(){
+    const mm=document.getElementById('mm'); mm.innerHTML='';
+    const W=totalW(); const scale = mm.clientWidth ? mm.clientWidth/W : 0.28;
+    // guides
+    [[onAirX(),'#1D9E75'],[offAirX(),'#C23B3B']].forEach(([x,c])=>{
+      const l=document.createElement('div'); l.className='mline'; l.style.left=(x*scale)+'px';
+      l.style.background=c; mm.appendChild(l);
+    });
+    rows.forEach((r,i)=>{
+      const s=document.createElement('div'); s.className='seg';
+      const x1=startX(r), x2=(r.kind==='dur'||r.kind==='ramp')?endX(r):startX(r)+8;
+      s.style.left=(x1*scale)+'px'; s.style.width=Math.max(3,(x2-x1)*scale)+'px';
+      s.style.top=(3+i*3.4)+'px'; s.style.background=hues[r.hue].hue; s.style.opacity=r.parent?.7:1;
+      mm.appendChild(s);
+    });
+    const v=document.createElement('div'); v.className='view';
+    const sc=document.getElementById('scroll');
+    v.style.left=(sc.scrollLeft*scale)+'px'; v.style.width=(sc.clientWidth*scale)+'px'; mm.appendChild(v);
+  }
+
+  // ── selection + context menu + tooltip ─────────────────────────────────────
+  function select(id){ selected=id; render(); }
+  canvas.addEventListener('click',(e)=>{
+    const el=e.target.closest('.bar,.node'); if(el){ select(el.dataset.id); }
+    else { selected=null; render(); }
+    closeMenu();
+  });
+
+  const MENUS = {
+    dur:{title:r=>r.name, hue:r=>r.hue, items:[
+      ['✎','Edit…',''],['⧉','Duplicate','⌘D'],['↳','Add tune here',''],['◹','Add ramp here',''],
+      'sep',['⚓','Anchor start to…',''],['⚓','Anchor end to…',''],'sep',['🗑','Delete','⌦','danger']]},
+    ramp:{title:r=>r.name, hue:r=>r.hue, items:[
+      ['✎','Edit…',''],['⧉','Duplicate','⌘D'],'sep',['⚓','Re-anchor to…',''],['⤢','Nudge to on-air',''],
+      ['✂','Remove anchor',''],'sep',['🗑','Delete','⌦','danger']]},
+    tune:{title:r=>r.name, hue:r=>r.hue, items:[
+      ['✎','Edit…',''],['⧉','Duplicate','⌘D'],'sep',['⚓','Re-anchor to…',''],'sep',['🗑','Delete','⌦','danger']]},
+    one:{title:r=>r.name, hue:r=>r.hue, items:[
+      ['✎','Edit…',''],['⧉','Duplicate','⌘D'],'sep',['🗑','Delete','⌦','danger']]},
+    conn:{title:()=>'Anchor', hue:r=>r.hue, items:[
+      ['✂','Remove anchor',''],['⇄','Flip edge (start ↔ end)',''],['✎','Edit offset…',''] ]},
+    empty:{title:()=>'Timeline', hue:()=>null, items:[
+      ['▬','Add duration here',''],['●','Add one-shot here',''],['◹','Add ramp here',''],['⏸','Add hold here',''],
+      'sep',['⤢','Fit to content',''],['⟲','Reset zoom','']]},
+  };
+  const menu=document.getElementById('menu');
+  function buildMenu(kind, r){
+    const spec=MENUS[kind]; if(!spec) return;
+    const h = r&&spec.hue(r)?hues[spec.hue(r)].hue:null;
+    let html = `<div class="mh">${h?`<span class="sw" style="background:${h}"></span>`:''}${spec.title(r||{})}</div>`;
+    spec.items.forEach(it=>{
+      if(it==='sep'){ html+='<div class="msep"></div>'; return; }
+      const [ic,lab,sc,cls]=it;
+      html+=`<div class="mi ${cls||''}"><span class="ic">${ic}</span>${lab}<span class="sc">${sc||''}</span></div>`;
+    });
+    menu.innerHTML=html;
+  }
+  function openMenu(cx,cy,id,kindOverride){
+    const r=byId[id]; const kind = kindOverride || (r?r.kind:'empty');
+    buildMenu(kind, r); menu.hidden=false;
+    const mw=menu.offsetWidth||200, mh=menu.offsetHeight||200;
+    let x=cx, y=cy;
+    if(x+mw>window.innerWidth-8) x=window.innerWidth-mw-8;
+    if(y+mh>window.innerHeight-8) y=window.innerHeight-mh-8;
+    menu.style.left=x+'px'; menu.style.top=y+'px';
+  }
+  function closeMenu(){ menu.hidden=true; }
+  // right-click routing
+  canvas.addEventListener('contextmenu',(e)=>{
+    const el=e.target.closest('.bar,.node'); e.preventDefault();
+    if(el){ select(el.dataset.id); openMenu(e.clientX,e.clientY,el.dataset.id); }
+    else { selected=null; render(); openMenu(e.clientX,e.clientY,null,'empty'); }
+  });
+  document.addEventListener('click',(e)=>{ if(!menu.contains(e.target)) closeMenu(); });
+  window.addEventListener('resize',()=>{ closeMenu(); buildMinimap(); });
+
+  // initial (at-rest) context menu: demonstrate it, parked over the empty cool-down area
+  function positionMenuInitial(){
+    if(positionMenuInitial._done) return; positionMenuInitial._done=true;
+    requestAnimationFrame(()=>{
+      const r=byId['chp']; buildMenu('dur', r); menu.hidden=false;
+      const cvRect=canvas.getBoundingClientRect();
+      // park near off-air, below the chirp row, within the viewport
+      let x=cvRect.left + offAirX() + 8, y=cvRect.top + rowY(3) + 20;
+      const mw=menu.offsetWidth||200;
+      if(x+mw>window.innerWidth-8) x=window.innerWidth-mw-8;
+      menu.style.left=x+'px'; menu.style.top=y+'px';
+    });
+  }
+
+  // tooltip on hover of a duration/ramp bar
+  const tip=document.getElementById('tip');
+  canvas.addEventListener('mouseover',(e)=>{
+    const b=e.target.closest('.bar'); if(!b) return; const r=byId[b.dataset.id];
+    const start = r.t0, end = r.t1==='off'?null:r.t0+(r.dur||0);
+    const rr=b.getBoundingClientRect();
+    tip.innerHTML=`<div class="tt">${r.name}</div><div class="tr">start ${fmt(start)} · `+
+      (end!=null?`end ${fmt(end)} · dur ${fmt(r.dur)}`:'ends at off-air')+`</div>`;
+    tip.style.left=(rr.left+rr.width/2)+'px'; tip.style.top=(rr.top-8)+'px'; tip.style.opacity='1';
+  });
+  canvas.addEventListener('mouseout',(e)=>{ if(e.target.closest('.bar')) tip.style.opacity='0'; });
+
+  // zoom / fit
+  function setZoom(z){ zoom=Math.max(.5,Math.min(3,z)); document.getElementById('zl').textContent=Math.round(zoom*100)+'%';
+    positionMenuInitial._done=false; menu.hidden=true; render(); }
+  document.getElementById('zi').onclick=()=>setZoom(zoom+.15);
+  document.getElementById('zo').onclick=()=>setZoom(zoom-.15);
+  document.getElementById('fit').onclick=()=>{ const sc=document.getElementById('scroll');
+    setZoom(Math.max(.5,Math.min(1.4,(sc.clientWidth-4)/(totalW()/zoom)))); };
+  document.getElementById('scroll').addEventListener('scroll',buildMinimap);
+
+  buildHeader(); render();
+})();
+</script>
