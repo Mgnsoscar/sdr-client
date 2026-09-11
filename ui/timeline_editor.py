@@ -80,6 +80,7 @@ HOLD_HIT = 9                # px each side of the Hold divider that grabs it
 RUN_MIN_W = 120             # minimum run-pill width
 RUN_MAX_W = 260
 RAMP_MIN_W = 44             # minimum ramp-bar width (so a short/zero-span ramp is clickable)
+RAMP_CAP_W = 40             # ramp trend end-cap width (holds the rising/falling slope mark)
 CARET_W = 20                # (legacy) inline-panel caret zone — panels dropped in the redesign
 TICK_S = 30                 # base tick interval (seconds); adapts with zoom
 DRAG_THRESHOLD = 4          # px of movement before a press counts as a drag
@@ -835,46 +836,91 @@ class _TimelineCanvas(QWidget):
         self._paint_edge_dot(p, px, cy, base, self._edge_linked(it, "end"))
 
     def _paint_ramp(self, p, it):
-        """A ramp draws as a capsule between its two anchored ends, with a diagonal slope
-        cue (rising/falling), the parent-task badge and its duration."""
+        """A ramp draws as a capsule between its two anchored ends. Text (parent-task
+        badge · from→to range · duration) sits flush-left; a dedicated right END-CAP
+        holds the rising/falling slope mark, so the direction cue and the text can
+        never overlap (docs/ramp-pill-mockup.html · option B)."""
         g = self._geom[it.uid]
         y, sx, px = g["y"], g["start_x"], g["stop_x"]
         base, edge, fa, fb, ink = self._item_colors(it)
         left = min(sx, px); w = max(RAMP_MIN_W, abs(px - sx))
         rect = QRectF(left, y, w, LANE_H)
         self._capsule(p, rect, base, edge, fa, fb)
-        # slope motif
         r = dict(getattr(it, "ramp", None) or {})
         a, b = r.get("start"), r.get("stop")
         rising = (a is not None and b is not None and b >= a)
-        guide = QColor(base); guide.setAlpha(150)
-        p.setPen(QPen(guide, 1.8))
-        y0, y1 = ((rect.bottom() - 8, rect.top() + 8) if rising
-                  else (rect.top() + 8, rect.bottom() - 8))
-        p.drawLine(int(rect.left() + 9), int(y0), int(rect.right() - 9), int(y1))
-        # parent-task badge (left) — colour already says which task; the badge names it
+
+        # ── right end-cap: a faint tinted zone (divider + slope mark) ─────────────
+        cap_w = RAMP_CAP_W if w > RAMP_CAP_W + 22 else 0.0
+        if cap_w:
+            clip = QPainterPath(); clip.addRoundedRect(rect, BAR_R, BAR_R)
+            p.save(); p.setClipPath(clip)
+            cap = QRectF(rect.right() - cap_w, rect.top(), cap_w, rect.height())
+            fill = QColor(base); fill.setAlpha(26)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(fill); p.drawRect(cap)
+            div = QColor(base); div.setAlpha(75)
+            p.setPen(QPen(div, 1))
+            p.drawLine(QPointF(cap.left(), rect.top() + 1.0),
+                       QPointF(cap.left(), rect.bottom() - 1.0))
+            p.restore()
+            self._paint_slope(p, cap.center().x(), rect.center().y(), rising, base)
+        else:
+            # too narrow for a cap — a compact slope glyph tucked at the right edge
+            self._paint_slope(p, rect.right() - 12, rect.center().y(), rising, base, span=7.0)
+
+        # ── flush-left text: badge · range · duration (right of the badge) ────────
+        text_r = rect.right() - (cap_w or 6.0) - 8.0
         bx = left + 10
-        if w > 78:
+        if w > 66:
             badge = it.task_name or ""
             f = self._f(9, True); p.setFont(f); fm = QFontMetrics(f)
-            bw = fm.horizontalAdvance(badge) + 12
+            bw = min(fm.horizontalAdvance(badge) + 12, max(20.0, text_r - bx))
             br = QRectF(bx, y + (LANE_H - 15) / 2, bw, 15)
             p.setPen(Qt.PenStyle.NoPen); p.setBrush(fa); p.drawRoundedRect(br, 4, 4)
-            p.setPen(ink); p.drawText(br, int(Qt.AlignmentFlag.AlignCenter), badge)
-        # duration chip (right)
+            p.setPen(ink)
+            p.drawText(br, int(Qt.AlignmentFlag.AlignCenter),
+                       fm.elidedText(badge, Qt.TextElideMode.ElideRight, int(bw) - 8))
+            bx += bw + 8
+        # duration, right-aligned just left of the cap divider
         try:
             dur = tlm._ramp_duration(r)
         except Exception:  # noqa: BLE001
             dur = 0.0
-        if dur and w > 100:
+        dw = 0.0
+        if dur and text_r - bx > 88:
             f = mono_font(10); p.setFont(f); fm = QFontMetrics(f)
             dt = self._mmss(dur); dw = fm.horizontalAdvance(dt)
             p.setPen(ink)
-            p.drawText(QRectF(rect.right() - dw - 12, y, dw, LANE_H),
-                       int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), dt)
+            p.drawText(QRectF(text_r - dw, y, dw, LANE_H),
+                       int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight), dt)
+            dw += 10.0
+        # from→to range, between the badge and the duration, when there's room
+        if a is not None and b is not None:
+            f = mono_font(10); p.setFont(f); fm = QFontMetrics(f)
+            rng = f"{fmt_value(a)} → {fmt_value(b)}"
+            avail = int(text_r - dw - bx)
+            if avail > 30:
+                p.setPen(ink)
+                p.drawText(QRectF(bx, y, avail, LANE_H),
+                           int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                           fm.elidedText(rng, Qt.TextElideMode.ElideRight, avail))
+
         cy = y + LANE_H / 2
         self._paint_edge_dot(p, sx, cy, base, self._edge_linked(it, "start"))
         self._paint_edge_dot(p, px, cy, base, self._edge_linked(it, "end"))
+
+    def _paint_slope(self, p, mx, my, rising, base, span=9.0):
+        """The rising/falling trend mark: a left→right stroke ending in a filled dot
+        at the destination level (up = ends high-right, down = ends low-right)."""
+        h = 6.0
+        x0, x1 = mx - span, mx + span
+        y_left = my + (h if rising else -h)
+        y_right = my - (h if rising else -h)
+        p.setPen(QPen(base, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(x0, y_left), QPointF(x1, y_right))
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(base)
+        p.drawEllipse(QPointF(x1, y_right), 2.4, 2.4)
 
     def _paint_pin(self, p, it):
         """A tune / one-shot is an INSTANT: a filled pin at the exact time + a borderless
