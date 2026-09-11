@@ -50,7 +50,7 @@ from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QIcon, QLinearGrad
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QToolTip, QVBoxLayout, QWidget,
 )
 
 from api import models as m
@@ -295,7 +295,11 @@ class _TimelineCanvas(QWidget):
         self._connect: Optional[dict] = None    # active drag-to-anchor: {src, edge, cursor, target, moved}
         self._rmchip: Optional[QRectF] = None   # hit rect of the painted "Remove anchor" chip
         self._rmchip_pos: Optional[tuple] = None  # (cx, cy) where the chip paints, set each paint
+        self._hover_uid: Optional[int] = None   # item currently under the cursor (tooltip throttle)
+        self._undo: List[list] = []             # past item snapshots (deepcopies) for Ctrl+Z
+        self._redo: List[list] = []             # undone snapshots for Ctrl+Y / Ctrl+Shift+Z
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)   # so the canvas receives key shortcuts
         self.grabGesture(Qt.GestureType.PinchGesture)   # touchpad pinch (where routed as a gesture)
         self.relayout()
 
@@ -324,18 +328,23 @@ class _TimelineCanvas(QWidget):
         return list(self._items)
 
     def set_items(self, items: List) -> None:
+        # Loading a fresh sequence is the new baseline — start undo history over.
         self._items = list(items)
         self._selected = None
         self._connect = None
+        self._undo = []
+        self._redo = []
         self.relayout()
         self.changed.emit()
 
     def add_item(self, item) -> None:
+        self._record()
         self._items.append(item)
         self.relayout()
         self.changed.emit()
 
     def replace_item(self, uid: int, item) -> None:
+        self._record()
         for i, it in enumerate(self._items):
             if it.uid == uid:
                 self._items[i] = item
@@ -343,7 +352,9 @@ class _TimelineCanvas(QWidget):
         self.relayout()
         self.changed.emit()
 
-    def remove_item(self, uid: int) -> None:
+    def remove_item(self, uid: int, record: bool = True) -> None:
+        if record:
+            self._record()
         self._items = [it for it in self._items if it.uid != uid]
         self._collapsed.discard(uid)
         if self._selected == uid:
@@ -352,12 +363,50 @@ class _TimelineCanvas(QWidget):
         self.changed.emit()
 
     def clear(self) -> None:
+        self._record()
         self._items = []
         self._collapsed.clear()
         self._selected = None
         self._connect = None
         self.relayout()
         self.changed.emit()
+
+    # ── Undo / redo (item-list snapshots) ─────────────────────────────────────
+    def _snapshot(self) -> list:
+        return [copy.deepcopy(it) for it in self._items]
+
+    def _record(self) -> None:
+        """Push the CURRENT state onto the undo stack before a mutation, and drop any redo
+        history (a fresh edit forks the timeline). Capped so history can't grow unbounded."""
+        self._undo.append(self._snapshot())
+        del self._undo[:-100]
+        self._redo.clear()
+
+    def _restore(self, snap: list) -> None:
+        self._items = snap
+        if self._selected is not None and all(it.uid != self._selected for it in self._items):
+            self._selected = None
+        self._connect = None
+        self.relayout()
+        self.changed.emit()
+
+    def can_undo(self) -> bool:
+        return bool(self._undo)
+
+    def can_redo(self) -> bool:
+        return bool(self._redo)
+
+    def undo(self) -> None:
+        if not self._undo:
+            return
+        self._redo.append(self._snapshot())
+        self._restore(self._undo.pop())
+
+    def redo(self) -> None:
+        if not self._redo:
+            return
+        self._undo.append(self._snapshot())
+        self._restore(self._redo.pop())
 
     def task_known(self, name: str) -> bool:
         tasks = self._editor.available_tasks()
@@ -1320,10 +1369,12 @@ class _TimelineCanvas(QWidget):
             self._drag = None
             return
         self._connect = None
+        self.setFocus()                      # so Ctrl+Z / Delete reach the canvas
         self._drag = {
             "item": it, "part": part, "press_x": pos.x(), "moved": False,
             "start0": getattr(it, "start_offset", 0.0),
             "stop0": getattr(it, "stop_offset", 0.0),
+            "undo0": self._snapshot(),       # pre-drag state, pushed only if the drag commits
         }
 
     def _toggle_collapsed(self, it) -> None:
@@ -1358,6 +1409,7 @@ class _TimelineCanvas(QWidget):
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
             else:
                 self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._update_tooltip(hit[0] if hit else None, e.globalPosition().toPoint())
             return
         if not (e.buttons() & Qt.MouseButton.LeftButton):
             return
@@ -1456,6 +1508,9 @@ class _TimelineCanvas(QWidget):
         drag = self._drag
         self._drag = None
         if drag["moved"]:
+            self._undo.append(drag["undo0"])   # commit the pre-drag snapshot for undo
+            del self._undo[:-100]
+            self._redo.clear()
             self.relayout()
             self.changed.emit()
         # A non-moved press only selects (done in mousePress); double-click opens the editor.
@@ -1466,6 +1521,80 @@ class _TimelineCanvas(QWidget):
         hit = self._hit(e.position().x(), e.position().y())
         if hit is not None and hit[1] != "caret":
             self.edit_item(hit[0])
+
+    def keyPressEvent(self, e):  # noqa: N802
+        mods = e.modifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        key = e.key()
+        if ctrl and key == Qt.Key.Key_Z and not shift:
+            self.undo(); e.accept(); return
+        if (ctrl and key == Qt.Key.Key_Y) or (ctrl and shift and key == Qt.Key.Key_Z):
+            self.redo(); e.accept(); return
+        if ctrl and key == Qt.Key.Key_D and self._selected is not None:
+            it = next((o for o in self._items if o.uid == self._selected), None)
+            if it is not None:
+                self._duplicate_item(it)
+            e.accept(); return
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self._selected is not None:
+            self._delete_with_reanchor(self._selected)
+            e.accept(); return
+        super().keyPressEvent(e)
+
+    # ── Hover tooltip ─────────────────────────────────────────────────────────
+    def _update_tooltip(self, it, global_pt) -> None:
+        uid = getattr(it, "uid", None) if it is not None else None
+        if uid == self._hover_uid:
+            if it is not None:
+                QToolTip.showText(global_pt, self._tooltip_text(it), self)
+            return
+        self._hover_uid = uid
+        if it is None:
+            QToolTip.hideText()
+        else:
+            QToolTip.showText(global_pt, self._tooltip_text(it), self)
+
+    def _tooltip_text(self, it) -> str:
+        """A rich, multi-line description of an item for hover (task, what it does, when it
+        fires, and its anchor if step-anchored)."""
+        if tlm._is_hold(it):
+            return (f"<b>Hold</b><br>pauses the run at on-air "
+                    f"{self._mmss(float(getattr(it, 'offset', 0.0)))}<br>"
+                    f"<i>resume with Proceed</i>")
+        act = getattr(it, "action", "run")
+        lines: List[str] = []
+        if it.kind == "bar":
+            lines.append(f"<b>{it.task_name or '(no task)'}</b> · duration task")
+            side = "hold" if getattr(it, "start_anchor", "start") == "hold" else "start"
+            lines.append("starts " + _timing_text(float(getattr(it, "start_offset", 0.0)), side, True))
+            lines.append("stops " + _timing_text(float(getattr(it, "stop_offset", 0.0)), "stop", True))
+        elif act == "ramp":
+            lines.append(f"<b>{it.task_name or '(no task)'}</b> · ramp")
+            lines.append(_ramp_summary(getattr(it, "ramp", None), getattr(it, "anchor", "start")))
+        elif act == "tune":
+            lines.append(f"<b>{it.task_name or '(no task)'}</b> · tune")
+            overrides = self._editor._pill_power_display(it)
+            changes = ", ".join(f"{k}={overrides.get(k, v)}" for k, v in (it.params or {}).items())
+            if changes:
+                lines.append(changes)
+        else:
+            lines.append(f"<b>{it.task_name or '(no task)'}</b> · one-shot")
+        anc = getattr(it, "anchor", "start")
+        if anc == "step":
+            tgt = next((o for o in self._items
+                        if (getattr(o, "step_id", "") or "") == (getattr(it, "anchor_step_id", "") or "")), None)
+            tname = (getattr(tgt, "task_name", "") or "?") if tgt is not None else "?"
+            lines.append(f"⚓ after {tname}'s {getattr(it, 'anchor_edge', 'end')} "
+                         f"+{self._mmss(float(getattr(it, 'offset', 0.0)))}")
+        elif act != "ramp" and it.kind != "bar":
+            side = "hold" if anc == "hold" else (anc if anc in ("start", "stop") else "start")
+            lines.append("fires " + _timing_text(float(getattr(it, "offset", 0.0)), side, True))
+        return "<br>".join(lines)
+
+    def leaveEvent(self, e):  # noqa: N802
+        self._hover_uid = None
+        QToolTip.hideText()
+        super().leaveEvent(e)
 
     # ── Anchor create / detach (100% UI, no forms) ─────────────────────────────
     def _make_anchor(self, src_uid: int, tgt, edge: str) -> None:
@@ -1479,6 +1608,7 @@ class _TimelineCanvas(QWidget):
         if off is None:
             self.update()
             return
+        self._record()
         sid = tlm.ensure_step_id(tgt)
         if not sid:
             self.update()
@@ -1497,6 +1627,7 @@ class _TimelineCanvas(QWidget):
         it = next((o for o in self._items if o.uid == uid), None)
         if it is None or getattr(it, "anchor", "") != "step":
             return
+        self._record()
         base = self._step_bases.get(uid)
         it.offset = base if base is not None else float(getattr(it, "offset", 0.0))
         it.anchor = "start"
@@ -1530,6 +1661,7 @@ class _TimelineCanvas(QWidget):
         target = next((o for o in self._items if o.uid == uid), None)
         if target is None:
             return
+        self._record()
         sid = getattr(target, "step_id", "") or ""
         if sid:
             for dep in self._items:
@@ -1542,7 +1674,7 @@ class _TimelineCanvas(QWidget):
                 dep.anchor = "start"
                 dep.anchor_step_id = ""
                 dep.anchor_edge = "end"
-        self.remove_item(uid)
+        self.remove_item(uid, record=False)     # one undo entry covers the reanchor + delete
 
     # ── Right-click context menu ──────────────────────────────────────────────
     def contextMenuEvent(self, e):  # noqa: N802
@@ -2675,6 +2807,18 @@ class TimelineEditor(QWidget):
         self._hint = QLabel("Drag a bar to move it · click to select, double-click to edit")
         self._hint.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         bar.addWidget(self._hint)
+        # Undo / redo.
+        self._undo_btn = QPushButton("Undo")
+        self._undo_btn.setToolTip("Undo (Ctrl+Z)")
+        self._redo_btn = QPushButton("Redo")
+        self._redo_btn.setToolTip("Redo (Ctrl+Y / Ctrl+Shift+Z)")
+        self._undo_btn.clicked.connect(lambda: self._canvas.undo())
+        self._redo_btn.clicked.connect(lambda: self._canvas.redo())
+        for b in (self._undo_btn, self._redo_btn):
+            b.setStyleSheet(_chip)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setEnabled(False)
+            bar.addWidget(b)
         # Fit-to-view + zoom readout.
         self._fit_btn = QPushButton("Fit")
         self._fit_btn.setStyleSheet(_chip)
@@ -2734,7 +2878,9 @@ class TimelineEditor(QWidget):
         self._canvas.changed.connect(self._update_mindur)
         self._canvas.changed.connect(self._update_achievability)
         self._canvas.changed.connect(self._sync_hold_button)
+        self._canvas.changed.connect(self._sync_undo_buttons)
         self._sync_hold_button()
+        self._sync_undo_buttons()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)   # canvas stretches to fill a wider window
         scroll.setWidget(self._canvas)
@@ -2791,6 +2937,15 @@ class TimelineEditor(QWidget):
         effect (the plan editor: a plan's Hold is compiled out for the schedule)."""
         self._hold_authoring = bool(enabled)
         self._sync_hold_button()
+
+    def _sync_undo_buttons(self) -> None:
+        cv = getattr(self, "_canvas", None)
+        if cv is None:
+            return
+        if getattr(self, "_undo_btn", None) is not None:
+            self._undo_btn.setEnabled(cv.can_undo())
+        if getattr(self, "_redo_btn", None) is not None:
+            self._redo_btn.setEnabled(cv.can_redo())
 
     def _sync_hold_button(self) -> None:
         # One Hold per sequence: once one exists, disable '+ Hold' (edit/remove the
@@ -2973,8 +3128,8 @@ class TimelineEditor(QWidget):
         if not self._tasks:
             self._hint.setText("no tasks on this unit — define one in the Tasks tab first")
         else:
-            self._hint.setText("Drag handles to set timing · drag an edge dot to another step to "
-                               "anchor · click to select, double-click to edit · right-click for more")
+            self._hint.setText("Drag an edge dot to another step to anchor · click to select, "
+                               "double-click to edit · right-click for more · Ctrl+Z undo")
         self._canvas.relayout()
 
     def available_tasks(self) -> List[str]:

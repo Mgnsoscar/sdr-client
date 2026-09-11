@@ -133,15 +133,25 @@ axis, connectors. Phased build: **visual redesign → drag/drop → connectors (
     removal) — so a dependent stays at the instant it was meant to fire instead of orphaning. Chained
     dependents (anchored to a direct dependent) are unaffected: the direct dependent keeps its `step_id`
     and its position, so they still resolve.
+  - **Undo / redo** — the canvas keeps a stack of item-list snapshots (deepcopies): `_record()` pushes the
+    CURRENT state before each mutation (add/replace/remove/clear/anchor/detach/delete) and clears redo; a
+    move-drag stashes its pre-drag snapshot at press (`_drag["undo0"]`) and commits it on a moved release;
+    `undo()`/`redo()` swap between the stacks via `_restore` (prunes a stale selection). `set_items` (a
+    fresh load) resets both stacks. Keyboard: **Ctrl+Z** undo, **Ctrl+Y** / **Ctrl+Shift+Z** redo,
+    **Ctrl+D** duplicate the selection, **Delete/Backspace** delete it (`keyPressEvent`; the canvas takes
+    focus on press, `StrongFocus`). Toolbar **Undo/Redo** chips (`_sync_undo_buttons` on every `changed`).
+  - **Hover tooltips** — `_update_tooltip`/`_tooltip_text` (via `QToolTip`, throttled on the hovered uid;
+    `leaveEvent` clears) show a rich multi-line description: task + kind, what it does (ramp from→to·dur,
+    tune param changes, bar starts/stops timing), and, if step-anchored, `⚓ after <task>'s <edge> +M:SS`.
   - Pure model: **`timeline_model.step_drop_offset(items, src, tgt, edge, h_off, step_bases)`** (+ helpers
     `_by_uid`/`_item_edge_offset`). Tests: `tests/test_timeline_step_anchor.py` (step_drop_offset keeps in
     place / clamps to 0 / rejects self·bar·cycle) + `tests/test_timeline_step_anchor_ui.py` (canvas
     `_make_anchor`/`_detach_anchor`, the remove chip appears only when anchored, `_edge_at`/`_drop_target`
     eligibility; context-menu spec varies by item, duplicate clones with a fresh uid + no step_id, delete
-    re-anchors dependents to on-air, delete of a plain item just removes it). Suite 904 → 916 offscreen.
-    Drift-guarded files untouched.
-  - **NOT YET DONE** (later phases, per plan): drag ghosts/snapping/marquee/multi-select, undo/redo,
-    hover tooltips, the minimap.
+    re-anchors dependents to on-air, delete of a plain item just removes it; undo/redo of add·anchor·
+    delete-with-reanchor, set_items resets history; tooltip text names the anchor + bar timing). Suite
+    904 → 921 offscreen. Drift-guarded files untouched.
+  - **NOT YET DONE** (later phases, per plan): drag ghosts/snapping/marquee/multi-select, the minimap.
 
 ## Current state — step-to-step anchoring Phase 1 (client authoring + geometry): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo; stacked on `run-task-conflict-guards`)
 Owner ask: anchor a step not only to on-air/off-air/Hold but to ANOTHER step's start/end edge — e.g. a

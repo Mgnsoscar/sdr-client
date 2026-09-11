@@ -265,3 +265,67 @@ def test_canvas_delete_plain_item_just_removes_it():
     n = len(cv._items)
     cv._delete_with_reanchor(later.uid)
     assert len(cv._items) == n - 1 and all(it.uid != later.uid for it in cv._items)
+
+
+# ── Undo / redo ─────────────────────────────────────────────────────────────────
+
+def _down_ramp(ref="up", off=3.0):
+    return tlm.RunItem(task_name="chirp", action="ramp", anchor="step", offset=off,
+                       anchor_step_id=ref, anchor_edge="end",
+                       ramp={"param": "power", "start": -50.0, "stop": -90.0,
+                             "steps": 3, "duration_s": 6.0})
+
+
+def test_undo_redo_add_and_remove():
+    cv = _chirp_editor([_bar()])._canvas
+    t = _tune(20.0)
+    cv.add_item(t)
+    assert any(it.uid == t.uid for it in cv._items)
+    cv.undo()
+    assert all(it.uid != t.uid for it in cv._items)   # add undone
+    cv.redo()
+    assert any(it.uid == t.uid for it in cv._items)    # add redone
+
+
+def test_undo_reverts_a_drag_to_anchor():
+    up = _ramp_item(0.0, sid="up")
+    later = _tune(20.0)
+    cv = _chirp_editor([_bar(), up, later])._canvas
+    cv._make_anchor(later.uid, up, "end")
+    assert next(it for it in cv._items if it.uid == later.uid).anchor == "step"
+    cv.undo()
+    l2 = next(it for it in cv._items if it.uid == later.uid)
+    assert l2.anchor == "start" and not l2.anchor_step_id
+
+
+def test_undo_restores_a_deleted_target_and_its_dependents():
+    up = _ramp_item(0.0, sid="up")
+    down = _down_ramp()
+    cv = _chirp_editor([_bar(), up, down])._canvas
+    cv._delete_with_reanchor(up.uid)
+    assert next(it for it in cv._items if it.uid == down.uid).anchor == "start"
+    cv.undo()
+    assert any(it.uid == up.uid for it in cv._items)   # target restored
+    d2 = next(it for it in cv._items if it.uid == down.uid)
+    assert d2.anchor == "step" and d2.anchor_step_id == "up"   # dependency restored
+
+
+def test_set_items_resets_undo_history():
+    cv = _chirp_editor([_bar()])._canvas
+    cv.add_item(_tune(5.0))
+    assert cv.can_undo()
+    cv.set_items([_bar()])
+    assert not cv.can_undo() and not cv.can_redo()
+
+
+# ── Hover tooltip text ──────────────────────────────────────────────────────────
+
+def test_tooltip_text_describes_anchor_and_bar():
+    up = _ramp_item(0.0, sid="up")
+    down = _down_ramp()
+    cv = _chirp_editor([_bar(), up, down])._canvas
+    txt = cv._tooltip_text(down)
+    assert "after" in txt and "chirp" in txt and "end" in txt       # names its anchor
+    bar = next(it for it in cv._items if it.kind == "bar")
+    btxt = cv._tooltip_text(bar)
+    assert "starts" in btxt and "stops" in btxt
