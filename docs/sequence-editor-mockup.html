@@ -581,7 +581,7 @@ body{
     const c=document.createElement('div'); c.className='gapchip';
     c.style.left=x+'px'; c.style.top=y+'px';
     c.style.setProperty('--gc',h.hue); c.style.setProperty('--gci',h.ink);
-    c.title=title||''; c.innerHTML=`<span class="arw">then</span>${txt}`;
+    c.title=title||''; c.textContent=txt;
     canvas.appendChild(c);
   }
   function addRemoveChip(x,y){
