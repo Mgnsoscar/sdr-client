@@ -24,7 +24,7 @@ import yaml
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout,
+    QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from api import models as m
@@ -69,27 +69,71 @@ class SequenceEditorDialog(QDialog):
         from .dialog_style import editor_qss
         self.setStyleSheet(editor_qss())
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 16, 16, 12)
-        outer.setSpacing(10)
+        outer.setContentsMargins(18, 16, 18, 14)
+        outer.setSpacing(12)
 
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        form.setSpacing(8)
+        # ── Header: SEQUENCE NAME + description · scope · actions · validity pill ──
+        header = QHBoxLayout(); header.setSpacing(14)
+        left = QVBoxLayout(); left.setSpacing(3)
+        cap = QLabel("SEQUENCE NAME")
+        cap.setStyleSheet(f"font-size:10px; font-weight:700; letter-spacing:0.7px; "
+                          f"color:{Palette.TEXT_FAINT};")
+        left.addWidget(cap)
         self._name = QLineEdit()
         self._name.setPlaceholderText("unique sequence name")
+        self._name.setStyleSheet(
+            f"QLineEdit {{ font-size:18px; font-weight:600; color:{Palette.TEXT}; "
+            f"border:1px solid transparent; border-radius:8px; padding:5px 8px; background:transparent; }}"
+            f"QLineEdit:hover {{ background:{Palette.SURFACE_ALT}; }}"
+            f"QLineEdit:focus {{ background:#FFFFFF; border-color:{Palette.ACCENT}; }}")
         self._name.textChanged.connect(lambda _=0: self._revalidate())
-        form.addRow("Name *", self._name)
+        left.addWidget(self._name)
         from .desc_widget import description_editor
         self._desc = description_editor()
-        form.addRow("Description", self._desc)
+        try:
+            self._desc.setMaximumHeight(30)
+        except Exception:  # noqa: BLE001
+            pass
+        left.addWidget(self._desc)
+        header.addLayout(left, stretch=1)
 
-        # Library-only: which unit types this sequence targets. A live unit already
-        # holds only its own sequences, so scope is meaningless there.
+        right = QVBoxLayout(); right.setSpacing(9)
+        self._ready_pill = QLabel("checking…")
+        self._ready_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        right.addWidget(self._ready_pill, alignment=Qt.AlignmentFlag.AlignRight)
+        actions = QHBoxLayout(); actions.setSpacing(8)
+        # Library-only scope selector; on a live unit, a static unit chip instead.
         self._scope: Optional[ScopeSelector] = None
         if self.hostname == LIBRARY_HOST:
             self._scope = ScopeSelector()
-            form.addRow("Applies to", self._scope)
-        outer.addLayout(form)
+            actions.addWidget(self._scope)
+        else:
+            chip = QLabel(f"🛰  {self.hostname}")
+            chip.setStyleSheet(
+                f"background:{Palette.INSET}; border:1px solid {Palette.BORDER}; border-radius:999px; "
+                f"padding:5px 11px; color:{Palette.TEXT_MUTED}; font-size:12px;")
+            actions.addWidget(chip)
+        cancel = QPushButton("Cancel")
+        cancel.setStyleSheet(
+            f"QPushButton {{ background:#FFFFFF; border:1px solid {Palette.BORDER_STRONG}; "
+            f"border-radius:8px; padding:7px 16px; font-weight:600; color:{Palette.TEXT}; }}"
+            f"QPushButton:hover {{ background:{Palette.SURFACE_ALT}; }}")
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel.clicked.connect(self.reject)
+        save = QPushButton("Save sequence")
+        save.setStyleSheet(
+            f"QPushButton {{ background:{Palette.ACCENT}; border:none; border-radius:8px; "
+            f"padding:7px 18px; font-weight:700; color:#FFFFFF; }}"
+            f"QPushButton:hover {{ background:#25597E; }}"
+            f"QPushButton:disabled {{ background:{Palette.BORDER_STRONG}; color:#FFFFFF; }}")
+        save.setCursor(Qt.CursorShape.PointingHandCursor)
+        save.clicked.connect(self._on_save)
+        actions.addWidget(cancel); actions.addWidget(save)
+        self._buttons = QWidget(); self._buttons.setLayout(actions)   # enable/disable as a group
+        right.addWidget(self._buttons, alignment=Qt.AlignmentFlag.AlignRight)
+        header.addLayout(right)
+        outer.addLayout(header)
+        self._set_ready("checking", "checking…")
 
         self._timeline = TimelineEditor()
         self._timeline.changed.connect(self._revalidate)
@@ -103,12 +147,19 @@ class SequenceEditorDialog(QDialog):
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         outer.addWidget(self._status)
 
-        self._buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
-        )
-        self._buttons.accepted.connect(self._on_save)
-        self._buttons.rejected.connect(self.reject)
-        outer.addWidget(self._buttons)
+    def _set_ready(self, kind: str, text: str) -> None:
+        """Style the validity pill: ready (green) / warn (amber) / err (red) / checking (grey)."""
+        colors = {
+            "ready": (Palette.ONLINE, Palette.ONLINE_SOFT),
+            "warn": (Palette.ARMED, Palette.ARMED_SOFT),
+            "err": (Palette.CRASH, Palette.CRASH_SOFT),
+            "checking": (Palette.IDLE, Palette.IDLE_SOFT),
+        }
+        fg, bg = colors.get(kind, colors["checking"])
+        self._ready_pill.setText(text)
+        self._ready_pill.setStyleSheet(
+            f"background:{bg}; color:{fg}; border-radius:999px; padding:4px 12px; "
+            f"font-size:11.5px; font-weight:600;")
 
     # ── Loading ──────────────────────────────────────────────────────────────
 
@@ -161,8 +212,10 @@ class SequenceEditorDialog(QDialog):
         err = self._current_error()
         if err:
             self._set_status(err, warn=True)
+            self._set_ready("warn", "Needs a fix")
         else:
             self._set_status("ready to save")
+            self._set_ready("ready", "Ready")
 
     def _current_error(self) -> str | None:
         if not self._name.text().strip():

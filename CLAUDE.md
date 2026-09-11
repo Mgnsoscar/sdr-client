@@ -92,7 +92,11 @@ axis, connectors. Phased build: **visual redesign → drag/drop → connectors (
   warm-up), the axis rides under the rows, and the editor **auto-fits on open** (`_fit`, `showEvent`).
   New **`_RowHeader`** column ("TASKS & STEPS"): task swatch / indented kin-line for children, name + sub
   + type badge, in the task hue — the parent-task encoding shown three ways (position, colour, badge).
-  Toolbar restyled to pill chips + Fit. Kept the tested surface (`_run_label`, `_place`, `render`,
+  Toolbar restyled to pill chips WITH line icons (`_tool_icon`) + a segmented `− %  +` zoom + Fit, and a
+  task-colour **legend** row (`_Legend`). The hosting **`ui/sequence_editor.py` header** was restyled to
+  match the mockup: a SEQUENCE NAME label + large borderless name field, a unit/scope chip, ghost Cancel +
+  primary Save-sequence buttons, and a **Ready / Needs-a-fix validity pill** (`_set_ready`). Kept the
+  tested surface (`_run_label`, `_place`, `render`,
   `_geom`, `_hit`, `_lane_of`, `_default_hold_offset`, `has_hold`, `set_items`) so the whole suite (904)
   stays green. **NOT YET DONE** (later phases, per plan): interactive drag-to-anchor connectors + handles,
   context menus, drag ghosts/snapping/marquee/multi-select, undo/redo, hover tooltips, the minimap, the

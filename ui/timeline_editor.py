@@ -44,8 +44,8 @@ import shlex
 from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QLinearGradient, QPainter,
-                         QPainterPath, QPen)
+from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QIcon, QLinearGradient, QPainter,
+                         QPainterPath, QPen, QPixmap)
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea,
@@ -206,6 +206,59 @@ def _arg_pairs(args: List[str]) -> List[Tuple[str, Optional[str]]]:
 
 
 # ── The canvas: paints bars + pills and handles all dragging / hit-testing ────
+
+def _tool_icon(kind: str, color: str = None) -> QIcon:
+    """A small line icon for a toolbar chip (Duration/One-shot/Tune/Ramp/Hold)."""
+    pm = QPixmap(18, 18); pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    col = QColor(color or Palette.TEXT_MUTED)
+    pen = QPen(col, 1.6); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+    if kind == "bar":
+        p.drawRoundedRect(QRectF(2, 6, 14, 6), 2.5, 2.5)
+    elif kind == "run":
+        p.drawEllipse(QRectF(4, 4, 10, 10))
+    elif kind == "tune":
+        path = QPainterPath(); path.moveTo(2, 11); path.lineTo(6, 11); path.lineTo(8, 4)
+        path.lineTo(11, 15); path.lineTo(13, 9); path.lineTo(16, 9); p.drawPath(path)
+    elif kind == "ramp":
+        p.drawLine(3, 14, 15, 5); p.drawLine(3, 14, 15, 14)
+    elif kind == "hold":
+        p.setBrush(col)
+        p.drawRoundedRect(QRectF(5, 4, 3, 10), 1, 1); p.drawRoundedRect(QRectF(10, 4, 3, 10), 1, 1)
+    p.end()
+    return QIcon(pm)
+
+
+class _Legend(QWidget):
+    """A compact task-colour key + the 'tunes & ramps inherit their parent' caption."""
+
+    def __init__(self, canvas: "_TimelineCanvas"):
+        super().__init__()
+        self._canvas = canvas
+        self.setFixedHeight(22)
+
+    def paintEvent(self, _e):  # noqa: N802
+        p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPixelSize(11)
+        p.setFont(f); fm = QFontMetrics(f)
+        x = 2
+        for task, hue in (getattr(self._canvas, "_hue", {}) or {}).items():
+            known = self._canvas.task_known(task)
+            base = QColor(hue) if known else QColor(Palette.CRASH)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(base)
+            p.drawRoundedRect(QRectF(x, self.height() / 2 - 5, 10, 10), 3, 3)
+            x += 15
+            p.setPen(QColor(Palette.TEXT_MUTED))
+            p.drawText(x, 0, fm.horizontalAdvance(task) + 4, self.height(),
+                       int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), task)
+            x += fm.horizontalAdvance(task) + 16
+        cap = "Tunes & ramps inherit their parent task's colour"
+        p.setPen(QColor(Palette.TEXT_FAINT))
+        p.drawText(0, 0, self.width() - 2, self.height(),
+                   int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), cap)
+
 
 class _TimelineCanvas(QWidget):
     changed = pyqtSignal()
@@ -2190,9 +2243,11 @@ class TimelineEditor(QWidget):
         self._add_tune.clicked.connect(lambda: self._canvas.add_new("tune"))
         self._add_ramp.clicked.connect(lambda: self._canvas.add_new("ramp"))
         self._add_hold.clicked.connect(lambda: self._canvas.add_new("hold"))
-        for b in (self._add_bar, self._add_run, self._add_tune, self._add_ramp, self._add_hold):
+        for b, kind in ((self._add_bar, "bar"), (self._add_run, "run"), (self._add_tune, "tune"),
+                        (self._add_ramp, "ramp"), (self._add_hold, "hold")):
             b.setStyleSheet(_chip)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setIcon(_tool_icon(kind)); b.setIconSize(QSize(15, 15))
             bar.addWidget(b)
         bar.addStretch(1)
         # Minimum on-air duration the current steps require (ramps at both ends etc).
@@ -2209,15 +2264,28 @@ class TimelineEditor(QWidget):
         self._fit_btn.setToolTip("Fit the whole sequence to the view")
         self._fit_btn.clicked.connect(self._fit)
         bar.addWidget(self._fit_btn)
-        self._zoom_btn = QPushButton("100%")
-        self._zoom_btn.setFixedWidth(52)
-        self._zoom_btn.setFlat(True)
-        self._zoom_btn.setToolTip("Horizontal zoom — Ctrl+scroll or pinch. Click to reset.")
-        self._zoom_btn.setStyleSheet(
-            f"font-size: 11px; color: {Palette.TEXT_MUTED}; border:1px solid {Palette.BORDER}; "
-            f"border-radius:999px; padding:4px 8px;")
-        self._zoom_btn.clicked.connect(lambda: self._canvas.reset_zoom())
-        bar.addWidget(self._zoom_btn)
+        # Segmented zoom control: [ − | 100% | + ].
+        zoomw = QFrame(); zoomw.setObjectName("zoomseg")
+        zoomw.setStyleSheet(
+            f"#zoomseg {{ border:1px solid {Palette.BORDER}; border-radius:999px; "
+            f"background:{Palette.SURFACE}; }} "
+            f"#zoomseg QPushButton {{ border:none; background:transparent; "
+            f"color:{Palette.TEXT_MUTED}; padding:2px 10px; font-size:15px; }} "
+            f"#zoomseg QPushButton:hover {{ color:{Palette.TEXT}; }} "
+            f"#zoomseg QLabel {{ color:{Palette.TEXT_MUTED}; font-size:11px; "
+            f"border-left:1px solid {Palette.BORDER}; border-right:1px solid {Palette.BORDER}; "
+            f"padding:2px 6px; }}")
+        zh = QHBoxLayout(zoomw); zh.setContentsMargins(0, 0, 0, 0); zh.setSpacing(0)
+        zo = QPushButton("−"); zi = QPushButton("+")
+        zo.setCursor(Qt.CursorShape.PointingHandCursor); zi.setCursor(Qt.CursorShape.PointingHandCursor)
+        zo.clicked.connect(lambda: self._canvas._apply_zoom(1 / 1.15, self._canvas._viewport_center_x()))
+        zi.clicked.connect(lambda: self._canvas._apply_zoom(1.15, self._canvas._viewport_center_x()))
+        self._zoom_btn = QLabel("100%")
+        self._zoom_btn.setToolTip("Horizontal zoom — Ctrl+scroll or pinch")
+        self._zoom_btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._zoom_btn.setFixedWidth(44)
+        zh.addWidget(zo); zh.addWidget(self._zoom_btn); zh.addWidget(zi)
+        bar.addWidget(zoomw)
         outer.addLayout(bar)
 
         # Sequence-level POWER ACHIEVABILITY warning (warn, never block): a ramp point that the
@@ -2258,6 +2326,11 @@ class TimelineEditor(QWidget):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet(f"QScrollArea {{ background: {Palette.SURFACE}; border: none; }}")
         self._canvas.set_scroll_area(scroll)
+
+        # Task-colour legend + the parent-inheritance caption (the mockup's row).
+        self._legend = _Legend(self._canvas)
+        self._canvas.changed.connect(self._legend.update)
+        outer.addWidget(self._legend)
 
         # Gantt-style row-header column, left of the canvas; both wrapped in one bordered
         # "stage" frame so they read as a single panel (the mockup layout).
