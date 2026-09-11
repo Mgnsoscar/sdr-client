@@ -2378,6 +2378,12 @@ class TimelineEditor(QWidget):
                 "ramp": (ramp.model_dump() if hasattr(ramp, "model_dump")
                          else dict(ramp)) if ramp else None,
                 "power_view": getattr(s, "power_view", None),
+                # Step-to-step anchoring: carry the stable id + the anchor target/edge so a
+                # step-anchored step survives load (else it reloads anchor="step" with no target
+                # and the editor falls back to the wrong step).
+                "id": getattr(s, "id", "") or "",
+                "anchor_step_id": getattr(s, "anchor_step_id", "") or "",
+                "anchor_edge": getattr(s, "anchor_edge", "end") or "end",
                 # power_hold_dest is deliberately NOT carried onto the canvas item — the injected
                 # --power was just stripped, so the authored item is clean and re-derived on save.
             })
@@ -2407,7 +2413,12 @@ class TimelineEditor(QWidget):
                 params=dict(d.get("params") or {}),
                 ramp=m.RampSpec(**ramp) if ramp else None,
                 power_view=d.get("power_view"),
-                power_hold_dest=d.get("power_hold_dest")))
+                power_hold_dest=d.get("power_hold_dest"),
+                # Step-to-step anchoring: preserve the stable id + target/edge onto the wire step
+                # (items_to_steps emits them only when present, so a plain step stays unchanged).
+                id=d.get("id", "") or "",
+                anchor_step_id=d.get("anchor_step_id", "") or "",
+                anchor_edge=d.get("anchor_edge", "end") or "end"))
         return out
 
     # ── Validation (mirrors the agent's _validate_steps) ─────────────────────

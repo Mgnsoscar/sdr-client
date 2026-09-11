@@ -104,6 +104,32 @@ def test_ramp_editor_hides_after_step_with_a_hold():
     assert dlg._anchor.findData("step") < 0
 
 
+def test_editor_steps_roundtrip_preserves_step_anchor():
+    """TimelineEditor.steps() (deploy) and set_steps() (load) must carry id/anchor_step_id/
+    anchor_edge — the hand-built dict round-trip that dropped them (the arm "needs anchor_step_id"
+    bug + the re-edit wrong-target bug)."""
+    up = tlm.RunItem(task_name="chirp", action="ramp", anchor="start", offset=2.0,
+                     step_id="up", ramp={"param": "power", "start": -90.0, "stop": -50.0,
+                                         "steps": 3, "duration_s": 6.0})
+    down = tlm.RunItem(task_name="chirp", action="ramp", anchor="step", offset=1.0,
+                       anchor_step_id="up", anchor_edge="end",
+                       ramp={"param": "power", "start": -50.0, "stop": -90.0,
+                             "steps": 3, "duration_s": 6.0})
+    ed = _chirp_editor([_bar(), up, down])
+    steps = ed.steps()
+    # the up-ramp carries its id; the down-ramp carries the anchor target + edge (not empty!)
+    assert any(getattr(s, "id", "") == "up" for s in steps)
+    dn = next(s for s in steps if s.anchor == "step")
+    assert dn.anchor_step_id == "up" and dn.anchor_edge == "end"
+    # load them back: the down-ramp item keeps its anchor (re-edit shows the right target)
+    ed.set_steps(steps)
+    items = ed.items()
+    dn_item = next(it for it in items if getattr(it, "anchor", "") == "step")
+    assert dn_item.anchor_step_id == "up" and dn_item.anchor_edge == "end"
+    up_item = next(it for it in items if getattr(it, "step_id", "") == "up")
+    assert up_item is not None
+
+
 def test_ramp_editor_target_rows_show_only_for_step():
     dlg = _ramp_dlg([_bar(), _tune(5.0, sid="tgt")])
     si = dlg._anchor.findData("step")

@@ -99,9 +99,17 @@ offset. **Client Phase 1** (this):
 - **`ui/sequence_editor.py`** (save) + **`ui/sequences_panel.py`** (arm) — a safety gate `step_anchor_
   supported`: block saving/arming a step-anchored sequence to a unit whose agent is < 1.24.0 (the agent
   stays the hard backstop; the library holds only a definition, never blocked).
+**Owner-testing fix (round-trip drop):** `TimelineEditor.steps()` (deploy) and `set_steps()` (load)
+rebuild the wire step dicts BY HAND and were dropping `id`/`anchor_step_id`/`anchor_edge` — so a saved
+step-anchored sequence armed as `anchor="step"` with an EMPTY `anchor_step_id` (agent 400 "needs
+anchor_step_id"), and on re-edit the item reloaded `anchor="step"` with no target → the dialog fell back
+to the first eligible step (the "wrong target" symptom). Both now carry the three fields. The pure
+`items_to_steps`/`steps_to_items` were always correct; the gap was these two hand-built converters — now
+covered by `test_editor_steps_roundtrip_preserves_step_anchor`.
 Tests: `tests/test_timeline_step_anchor.py` (resolver / round-trip / validate / min-duration / eligible
 targets / gate / stable id) + `tests/test_timeline_step_anchor_ui.py` (both dialogs offer the anchor,
-assign the id, hide it with a Hold, refuse a negative offset). Suite 875 → 899 offscreen. Drift-guarded
+assign the id, hide it with a Hold, refuse a negative offset, editor steps()/set_steps() round-trip).
+Suite 875 → 900 offscreen. Drift-guarded
 files untouched. **KNOWN Phase-1 LIMITATIONS**: a step-anchored target is limited to points/ramps (a bar's
 off-air end and the Hold aren't offered as targets — the Hold becomes step-anchorable in Phase 2);
 dragging a step-anchored pill on the canvas doesn't live-track during the drag (it snaps into place on
