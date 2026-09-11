@@ -33,6 +33,7 @@ from .qt_adapter import DataHub
 from .scope_selector import ScopeSelector
 from .theme import Palette
 from .timeline_editor import TimelineEditor, task_signals_from_yaml
+from .timeline_model import step_anchor_supported
 
 
 class SequenceEditorDialog(QDialog):
@@ -168,10 +169,30 @@ class SequenceEditorDialog(QDialog):
             return "sequence name is required"
         return self._timeline.validate()
 
+    def _step_anchor_block(self) -> Optional[str]:
+        """A safety gate (like the Hold/calibration gates): block saving a step-anchored
+        sequence to a UNIT whose agent can't resolve anchor="step" (< 1.24.0) — it would be
+        rejected or mis-fire. The library holds only a definition, so it's never blocked; a
+        unit we can't resolve/check is left to the agent's own validate() backstop."""
+        steps = self._timeline.steps()
+        if not any(getattr(s, "anchor", "") == "step" for s in steps):
+            return None
+        if self.hostname == LIBRARY_HOST:
+            return None
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001 — undiscovered unit → let the agent be the backstop
+            return None
+        if step_anchor_supported(client):
+            return None
+        return ("this sequence anchors a step to another step, which needs a newer agent "
+                "(≥ 1.24.0). Update the unit’s agent, or re-anchor those steps to "
+                "on-air / off-air.")
+
     def _on_save(self) -> None:
         if self._saving:
             return
-        err = self._current_error()
+        err = self._current_error() or self._step_anchor_block()
         if err:
             self._set_status(err, error=True)
             return

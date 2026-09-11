@@ -57,7 +57,7 @@ from .theme import Palette
 from .hold_edit_dialog import HoldEditDialog
 from .timeline_model import (
     SEQUENCE_HOLD_CAPABILITY, SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY,
-    SEQUENCE_LOG_TABLE_CAPABILITY, hold_runtime_supported)
+    SEQUENCE_LOG_TABLE_CAPABILITY, hold_runtime_supported, step_anchor_supported)
 from .widgets import StatusPill, natural_key
 
 _SEQ_FILTER_ALL = "__all__"
@@ -495,6 +495,17 @@ class SequencesPanel(QWidget):
         if hold_off is not None:
             self._arm_hold_aware(seq, hold_off)
             return
+        # Safety gate: a step-to-step anchor needs an agent that can resolve it (≥ 1.24.0);
+        # an older agent would reject or mis-fire the arm. Block with a clear message.
+        if any(getattr(s, "anchor", "") == "step" for s in seq.steps) \
+                and not self._step_anchor_ok():
+            QMessageBox.warning(
+                self, "Step anchoring not supported here",
+                f"“{seq.name or seq.id}” anchors a step to another step, but "
+                f"{self.hostname}'s agent doesn't support it (needs sequence-step-anchor, "
+                f"agent ≥ 1.24.0). Update the unit’s agent, or re-anchor those steps.")
+            self._set_status("arm blocked — step anchoring unsupported")
+            return
         # Guard: don't silently collide with a task already transmitting on this unit (the
         # agent refuses such an arm anyway). Pre-check its tasks; if any are running, offer to
         # stop them and arm. The result routes back through _on_task_done ("seq_precheck").
@@ -694,6 +705,14 @@ class SequencesPanel(QWidget):
         except Exception:  # noqa: BLE001
             return False
         return hold_runtime_supported(client)
+
+    def _step_anchor_ok(self) -> bool:
+        """True iff this unit's agent resolves a step-to-step anchor (sequence-step-anchor + >= 1.24.0)."""
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001
+            return False
+        return step_anchor_supported(client)
 
     def _on_stop(self, seq: m.Sequence) -> None:
         run_ids = [r.id for r in self._runs

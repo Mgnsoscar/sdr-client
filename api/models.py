@@ -305,10 +305,17 @@ class PatchEventRequest(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class SequenceStep(BaseModel):
-    anchor: str = "start"              # "start" | "stop" | "both" (ramp) | "hold" (post-Hold window B)
+    anchor: str = "start"              # "start" | "stop" | "both" (ramp) | "hold" (post-Hold window B) | "step"
     offset_s: float
     # "both"-anchored ramp: off-air-side inset (≤ 0). Fills [on-air+offset_s, off-air+offset_end_s].
     offset_end_s: Optional[float] = None
+    # Step-to-step anchoring (agent ≥ 1.24.0, capability "sequence-step-anchor"). A stable,
+    # client-assigned id lets OTHER steps hang off this one; an anchor="step" step fires at
+    # <target step's anchor_edge> + offset_s (offset >= 0 — a dependent never precedes its target).
+    # Phase 1: tunes/ramps/duration tasks only (not the Hold), and not alongside a Hold.
+    id: str = ""                       # stable id (client-assigned); blank = not referenced
+    anchor_step_id: str = ""           # target step id (when anchor == "step")
+    anchor_edge: str = "end"           # "start" | "end" of the target step's extent
     action: StepAction
     task_name: str
     args: List[str] = []               # CLI args for this step's start/run
