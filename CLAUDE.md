@@ -143,13 +143,17 @@ axis, connectors. Phased build: **visual redesign → drag/drop → connectors (
   - **Hover tooltips** — `_update_tooltip`/`_tooltip_text` (via `QToolTip`, throttled on the hovered uid;
     `leaveEvent` clears) show a rich multi-line description: task + kind, what it does (ramp from→to·dur,
     tune param changes, bar starts/stops timing), and, if step-anchored, `⚓ after <task>'s <edge> +M:SS`.
-  - **Connector reroute (owner-reported)** — `_draw_connector` now drops the line DOWN from the anchor
-    edge (vertical at the anchor x), a rounded elbow, then a horizontal run to the dependent's start; the
-    offset chip rides the DOWN leg near the dependent's row (`oy = y2 − 16·sgn`), so two steps anchored to
-    the SAME edge get chips on their own rows instead of stacking at the shared anchor. A near-zero offset
-    (`dx < 2`, since offset ≥ 0 keeps x2 ≥ x1) draws as a clean straight vertical with a downward
-    arrowhead — no garbled tiny legs. The selected-connector "Remove anchor" chip moved BELOW the line
-    (`y2 + 15`) so it never covers the offset chip.
+  - **Connector reroute (owner-reported)** — connectors now **exit and enter steps HORIZONTALLY**
+    (`_draw_connector` + `_ortho_path`, a rounded-orthogonal path through axis-aligned waypoints). The
+    exit leaves the anchor AWAY from its body along the time axis (`exit_dir`): an END edge / a point
+    exits right, a START edge exits left (so the stub never runs over the target's own bar). Normal
+    route: exit stub → drop to the dependent's row → run in to its start. When a right-exit's offset is
+    too short for that run (`x2 − (x1+STUB) < 8`), it **WRAPS**: exit right, drop below the row, run back
+    left, then up and into the start — the entry stays horizontal (the owner's "wrap down, back, and into
+    the step start"). The offset chip rides the drop leg near the dependent's row (`oy = y2 − 16·sgn`), so
+    two steps anchored to the SAME edge get chips on their own rows instead of stacking at the shared
+    anchor. The selected-connector "Remove anchor" chip sits BELOW the line (`y2 + 15`) so it never
+    covers the offset chip.
   - Pure model: **`timeline_model.step_drop_offset(items, src, tgt, edge, h_off, step_bases)`** (+ helpers
     `_by_uid`/`_item_edge_offset`). Tests: `tests/test_timeline_step_anchor.py` (step_drop_offset keeps in
     place / clamps to 0 / rejects self·bar·cycle) + `tests/test_timeline_step_anchor_ui.py` (canvas
