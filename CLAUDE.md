@@ -71,6 +71,42 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — step-to-step anchoring Phase 1 (client authoring + geometry): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo; stacked on `run-task-conflict-guards`)
+Owner ask: anchor a step not only to on-air/off-air/Hold but to ANOTHER step's start/end edge — e.g. a
+ramp right after another ramp's end — so editing the target moves everything downstream (a DAG).
+Decisions: full DAG (any step → any step's start/end + offset); PHASED (Phase 1 = tunes/ramps; Phase 2
+makes the Hold itself step-anchorable). Plus the owner ordering rule: a dependent may never fire before
+its anchor (offset ≥ 0), and moving an anchor mustn't invalidate a dependent. **Agent side** (1.24.0,
+capability `sequence-step-anchor`; see `sdr-agent/CLAUDE.md`): two-pass topological `_resolve_steps`,
+`_validate_steps` rejects unknown target / self / bad edge / cycle / step-in-a-Hold-sequence / negative
+offset. **Client Phase 1** (this):
+- **`api/models.py`** — `SequenceStep` gains `id` / `anchor_step_id` / `anchor_edge` (additive; a plain
+  sequence's wire is byte-identical — the fields are emitted only when a step is a target or is anchored).
+- **`ui/timeline_model.py`** — `RunItem` carries `step_id`/`anchor_step_id`/`anchor_edge`.
+  **`resolve_step_offsets(items, h_off)`** places every `anchor="step"` item topologically on the on-air
+  clock (a point's start==end==offset; a ramp's end==start+duration; chains resolve; a cycle/unknown/
+  off-air target drops → the item falls back to its own offset, `validate()` blocks it). `effective_
+  anchor_offset`/`ramp_span`/`_carry_order_key` gained an optional `step_bases`; both temporal power walks,
+  `sequence_effective_values`, `compute_anchors`, and `min_on_air_duration` (pre-resolves to start-anchored
+  offsets before delegating to the drift-guarded `api.ramp`) thread it. `validate()` mirrors the agent.
+  `eligible_step_targets(items, source_uid)` (cycle-safe, on-air-resolvable points+ramps only — NOT bars/
+  Hold in Phase 1), `ensure_step_id`, `step_edge_offset`, `step_anchor_supported(client)` (`≥ 1.24.0`).
+- **`ui/timeline_editor.py`** (StepEditorDialog) + **`ui/ramp_editor.py`** — an **"after another step…"**
+  anchor option (shown when an eligible target exists and there's no Hold), with **Anchor to** (target) +
+  **Relative to** (its start/end) pickers; saving assigns the target a stable id and records the anchor;
+  a negative offset is refused. The canvas resolves `step_bases` alongside `_hold_off`, so a dependent
+  draws off its target and moving the target moves it.
+- **`ui/sequence_editor.py`** (save) + **`ui/sequences_panel.py`** (arm) — a safety gate `step_anchor_
+  supported`: block saving/arming a step-anchored sequence to a unit whose agent is < 1.24.0 (the agent
+  stays the hard backstop; the library holds only a definition, never blocked).
+Tests: `tests/test_timeline_step_anchor.py` (resolver / round-trip / validate / min-duration / eligible
+targets / gate / stable id) + `tests/test_timeline_step_anchor_ui.py` (both dialogs offer the anchor,
+assign the id, hide it with a Hold, refuse a negative offset). Suite 875 → 899 offscreen. Drift-guarded
+files untouched. **KNOWN Phase-1 LIMITATIONS**: a step-anchored target is limited to points/ramps (a bar's
+off-air end and the Hold aren't offered as targets — the Hold becomes step-anchorable in Phase 2);
+dragging a step-anchored pill on the canvas doesn't live-track during the drag (it snaps into place on
+drop — the dialog is the precise authoring path). **NEXT — Phase 2**: the Hold itself step-anchorable.
+
 ## Current state — run/task conflict guards (arm-over-running · stop-task-in-run): COMPLETE (branch `claude/run-task-conflict-guards`, client-only)
 Owner ask: (1) arming a sequence/plan whose task is already running should INFORM + offer to stop it;
 (2) stopping a task (Tasks tab) that's part of a running sequence/plan should INFORM + offer to stop
