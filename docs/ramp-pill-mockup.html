@@ -1,0 +1,162 @@
+<title>Ramp Pill Options</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  color-scheme: light;
+  --ground:#EEF0F3; --surface:#FFFFFF; --surface-alt:#FAFBFC; --inset:#F1F4F7;
+  --border:#E2E5EA; --border-strong:#CDD2DA; --hairline:#ECEEF1;
+  --text:#1E2530; --muted:#5C6675; --faint:#8A93A2;
+  --accent:#2C6E9B; --ok:#1D9E75; --warn:#BA7517; --bad:#C23B3B;
+  --teal:#1E8FA3; --teal-ink:#12707F;
+  --violet:#6D5AC4; --violet-ink:#54449B;
+  --sans:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --mono:"IBM Plex Mono","DejaVu Sans Mono",ui-monospace,monospace;
+  --shadow-sm:0 1px 2px rgba(22,32,48,.06), 0 1px 3px rgba(22,32,48,.05);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--text);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;padding:26px 20px 48px}
+.wrap{max-width:940px;margin:0 auto}
+h1{font-size:20px;font-weight:600;letter-spacing:-.2px;margin:0 0 4px}
+.lede{color:var(--muted);font-size:13px;line-height:1.6;margin:0 0 22px;max-width:65ch}
+.lede b{color:var(--text)}
+
+.opt{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+  box-shadow:var(--shadow-sm);padding:16px 18px 18px;margin-bottom:16px}
+.opt.pick{border-color:#BFE0DE;box-shadow:0 0 0 3px rgba(30,143,163,.10), var(--shadow-sm)}
+.ohead{display:flex;align-items:baseline;gap:10px;margin-bottom:3px}
+.otag{font-size:11px;font-weight:700;letter-spacing:.5px;color:#fff;background:var(--faint);
+  border-radius:6px;padding:2px 7px}
+.opt.pick .otag{background:var(--teal)}
+.opt.bad .otag{background:var(--bad)}
+.oname{font-size:14px;font-weight:600}
+.rec{margin-left:auto;font-size:10.5px;font-weight:700;letter-spacing:.4px;color:var(--teal-ink);
+  background:rgba(30,143,163,.12);border-radius:999px;padding:3px 9px}
+.orat{color:var(--muted);font-size:12px;line-height:1.55;margin:4px 0 14px;max-width:66ch}
+.row{display:flex;flex-wrap:wrap;gap:12px 16px;align-items:center}
+.cell{display:flex;flex-direction:column;gap:5px}
+.clab{font-size:10px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--faint)}
+
+/* ── the pill base (matches the editor) ─────────────────────────────── */
+.pill{position:relative;height:32px;border-radius:9px;display:flex;align-items:center;gap:8px;
+  padding:0 10px;overflow:hidden;box-shadow:var(--shadow-sm);
+  --hue:var(--teal);--ink:var(--teal-ink);
+  background:linear-gradient(180deg, color-mix(in srgb, var(--hue) 16%, #fff), color-mix(in srgb, var(--hue) 4%, #fff));
+  border:1px solid color-mix(in srgb, var(--hue) 42%, transparent);}
+.pill.v{--hue:var(--violet);--ink:var(--violet-ink)}
+.pill.w160{width:160px}.pill.w250{width:250px}.pill.w120{width:120px}
+.pill .rail{position:absolute;left:3px;top:6px;bottom:6px;width:3px;border-radius:2px;background:var(--hue)}
+.pill .badge{font-size:9px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;
+  color:var(--ink);background:color-mix(in srgb, var(--hue) 16%, #fff);border-radius:4px;padding:2px 6px;
+  white-space:nowrap;flex:none;z-index:2}
+.pill .dur{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--ink);z-index:2;flex:none}
+.pill .rng{font-family:var(--mono);font-size:10.5px;color:var(--ink);z-index:2;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.dot{fill:var(--hue)}
+.stroke{stroke:var(--hue);stroke-width:2;fill:none;stroke-linecap:round}
+
+/* current: full-width diagonal behind everything (the clash) */
+.slope-bg{position:absolute;inset:0;z-index:1;opacity:.5}
+
+/* A · direction chip */
+.dchip{width:22px;height:22px;border-radius:6px;flex:none;z-index:2;display:grid;place-items:center;
+  background:color-mix(in srgb, var(--hue) 15%, #fff);}
+.dchip svg{width:13px;height:13px}
+
+/* B · trend endcap */
+.endcap{position:absolute;right:0;top:0;bottom:0;width:40px;z-index:2;display:grid;place-items:center;
+  border-left:1px solid color-mix(in srgb, var(--hue) 22%, transparent);
+  background:color-mix(in srgb, var(--hue) 8%, #fff);}
+.endcap svg{width:22px;height:16px}
+
+/* C · bottom trend rail (slope hugs the bottom edge, text sits above) */
+.brail{position:absolute;left:8px;right:8px;bottom:3px;height:8px;z-index:1}
+
+/* D · icon tile on the left */
+.tile{width:26px;height:26px;border-radius:7px;flex:none;z-index:2;display:grid;place-items:center;
+  background:var(--hue);box-shadow:var(--shadow-sm)}
+.tile svg{width:15px;height:15px}
+.tile .stroke{stroke:#fff}.tile .dot{fill:#fff}
+
+footer{color:var(--faint);font-size:12px;margin-top:18px;line-height:1.6}
+</style>
+
+<div class="wrap">
+  <h1>Ramp pill — slope vs. text</h1>
+  <p class="lede">The ramp capsule needs a <b>rising / falling</b> cue plus its <b>task badge</b> and
+  <b>duration</b>. Today the diagonal runs the full width and crosses the text. Below are ways to keep the
+  direction legible without the collision — each shown rising and falling, wide and narrow.</p>
+
+  <div id="opts"></div>
+
+  <footer>Reusing the editor's real styling (IBM Plex, per-task hue, mono numerics). Teal = a GPS C/A
+  ramp; the violet row shows it holds for any task colour. Pick one and I'll wire it into the Qt canvas.</footer>
+</div>
+
+<script>
+const UP = d => d==='up'
+  ? '<path class="stroke" d="M3 13 L13 4"/><circle class="dot" cx="13" cy="4" r="2.2"/>'
+  : '<path class="stroke" d="M3 4 L13 13"/><circle class="dot" cx="13" cy="13" r="2.2"/>';
+const UPWIDE = d => d==='up'
+  ? '<path class="stroke" d="M2 14 L20 3"/><circle class="dot" cx="20" cy="3" r="2.4"/>'
+  : '<path class="stroke" d="M2 3 L20 14"/><circle class="dot" cx="20" cy="14" r="2.4"/>';
+
+function pill(variant, dir, w, hueClass){
+  const badge = `<span class="badge">GPS&nbsp;C/A</span>`;
+  const bviol = `<span class="badge">Chirp</span>`;
+  const b = hueClass==='v'? bviol : badge;
+  const rng = `<span class="rng">${dir==='up'?'−90 → −50':'−50 → −90'}</span>`;
+  const dur = `<span class="dur">2:00</span>`;
+  const cls = `pill ${hueClass||''} w${w}`;
+  const slopeWide = (extra='') => `<svg class="slope-bg ${extra}" viewBox="0 0 200 32" preserveAspectRatio="none">
+      ${dir==='up'
+        ? '<path class="stroke" d="M10 25 L190 8"/><circle class="dot" cx="190" cy="8" r="2.6"/>'
+        : '<path class="stroke" d="M10 8 L190 25"/><circle class="dot" cx="190" cy="25" r="2.6"/>'}</svg>`;
+  if(variant==='current')
+    return `<div class="${cls}"><span class="rail"></span>${slopeWide()}${b}${dur}</div>`;
+  if(variant==='chip')
+    return `<div class="${cls}"><span class="rail"></span>
+      <span class="dchip"><svg viewBox="0 0 16 16">${UP(dir)}</svg></span>${b}${w!=='120'?rng:''}${dur}</div>`;
+  if(variant==='endcap')
+    return `<div class="${cls}" style="padding-right:46px"><span class="rail"></span>${b}${w!=='120'?rng:''}
+      <span class="endcap"><svg viewBox="0 0 22 16">${UPWIDE(dir)}</svg></span>
+      <span class="dur" style="position:absolute;right:46px">2:00</span></div>`;
+  if(variant==='brail')
+    return `<div class="${cls}"><span class="rail"></span>
+      <svg class="brail" viewBox="0 0 180 8" preserveAspectRatio="none">
+        ${dir==='up'?'<path class="stroke" d="M1 7 L179 1"/>':'<path class="stroke" d="M1 1 L179 7"/>'}</svg>
+      ${b}${w!=='120'?rng:''}${dur}</div>`;
+  if(variant==='tile')
+    return `<div class="${cls}"><span class="tile"><svg viewBox="0 0 16 16">${UP(dir)}</svg></span>${b}${w!=='120'?rng:''}${dur}</div>`;
+  return '';
+}
+
+const OPTIONS = [
+  {tag:'NOW', name:'Current — the clash', bad:true, rec:'', variant:'current',
+   rat:"The diagonal spans the whole capsule and sits under the badge + duration, so at a glance the line and the text fight for the same pixels."},
+  {tag:'A', name:'Direction chip', pick:true, rec:'Recommended', variant:'chip',
+   rat:"A tiny ↗ / ↘ chip in the task tint leads the pill, then the badge, range, and duration. The slope owns its own 22 px square — it never touches the text, and it still reads instantly, even at narrow widths."},
+  {tag:'B', name:'Trend end-cap', rec:'', variant:'endcap',
+   rat:"Text stays flush-left; a dedicated right end-cap (faint divider, task tint) holds a larger up/down mark. Feels like a chart, and the two zones can never overlap — costs ~40 px of width."},
+  {tag:'C', name:'Bottom trend rail', rec:'', variant:'brail',
+   rat:"The slope hugs the bottom inner edge as a thin trend line; the badge + duration sit in the upper band. Keeps the full-width sweep feel with zero text collision, but the cue is subtler."},
+  {tag:'D', name:'Icon tile', rec:'', variant:'tile',
+   rat:"A solid task-hue tile with a white slope glyph, like an app icon. Boldest direction cue; slightly heavier and leans on colour, so a second same-hue ramp relies on the row header to tell them apart."},
+];
+
+const host = document.getElementById('opts');
+host.innerHTML = OPTIONS.map(o => `
+  <div class="opt ${o.pick?'pick':''} ${o.bad?'bad':''}">
+    <div class="ohead"><span class="otag">${o.tag}</span><span class="oname">${o.name}</span>
+      ${o.rec?`<span class="rec">${o.rec}</span>`:''}</div>
+    <div class="orat">${o.rat}</div>
+    <div class="row">
+      <div class="cell"><span class="clab">Rising · wide</span>${pill(o.variant,'up','250')}</div>
+      <div class="cell"><span class="clab">Falling · wide</span>${pill(o.variant,'down','250')}</div>
+      <div class="cell"><span class="clab">Rising · narrow</span>${pill(o.variant,'up','120')}</div>
+      <div class="cell"><span class="clab">Falling · violet</span>${pill(o.variant,'down','160','v')}</div>
+    </div>
+  </div>`).join('');
+</script>
