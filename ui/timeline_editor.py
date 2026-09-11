@@ -1048,21 +1048,33 @@ class _TimelineCanvas(QWidget):
             y2 = gi["y"] + LANE_H / 2
             base, _e, _fa, _fb, ink = self._item_colors(it)
             sel = (it.uid == self._selected)
-            xm = self._draw_connector(p, x1, y1, x2, y2, base, ink,
-                                      float(getattr(it, "offset", 0.0)), sel)
-            # a selected connector offers "Remove anchor" on its lower leg (drawn on top,
-            # after the bars) — it never covers the offset chip on the upper leg.
+            self._draw_connector(p, x1, y1, x2, y2, base, ink,
+                                 float(getattr(it, "offset", 0.0)), sel)
+            # A selected connector offers "Remove anchor" BELOW its line, at the dependent's
+            # row — so it never covers the offset chip (which rides above the line).
             if sel:
-                self._rmchip_pos = ((xm + x2) / 2, y2)
+                self._rmchip_pos = ((x1 + x2) / 2.0, y2 + 15.0)
 
     def _draw_connector(self, p, x1, y1, x2, y2, base, ink, offset, selected=False):
-        r = 7.0
-        xm = x1 + max(14.0, (x2 - x1) * 0.45)
-        dy = 1.0 if y2 >= y1 else -1.0
-        path = QPainterPath(); path.moveTo(x1, y1)
-        path.lineTo(xm - r, y1); path.quadTo(xm, y1, xm, y1 + r * dy)
-        path.lineTo(xm, y2 - r * dy); path.quadTo(xm, y2, xm + r, y2); path.lineTo(x2, y2)
+        """Route the connector DOWN from the anchor edge to the dependent's row, then across
+        to the step: a vertical drop at the anchor x, a rounded elbow, and a horizontal run
+        to the dependent's start. The offset chip rides the DOWN leg near the dependent's row,
+        so two steps anchored to the same edge get chips on their own rows instead of stacked
+        at the shared anchor. offset >= 0 keeps x2 >= x1, so the drop never doubles back; a
+        near-zero offset is a clean straight vertical (no garbled tiny legs)."""
+        dx = x2 - x1
+        sgn = 1.0 if y2 >= y1 else -1.0
         stroke = QColor(Palette.ACCENT) if selected else base
+        path = QPainterPath(); path.moveTo(x1, y1)
+        if dx < 2.0:                                   # dependent sits at the edge → pure drop
+            path.lineTo(x1, y2)
+            vertical = True
+        else:
+            r = min(7.0, dx, abs(y2 - y1) / 2.0 or 7.0)
+            path.lineTo(x1, y2 - r * sgn)
+            path.quadTo(x1, y2, x1 + r, y2)
+            path.lineTo(x2, y2)
+            vertical = False
         if selected:                                   # soft under-glow when selected
             halo = QColor(Palette.ACCENT); halo.setAlpha(55)
             gpen = QPen(halo, 7); gpen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -1071,13 +1083,18 @@ class _TimelineCanvas(QWidget):
         pen = QPen(stroke, 2.4 if selected else 2); pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush); p.drawPath(path)
-        # arrowhead into the dependent's start
-        p.drawLine(int(x2 - 6), int(y2 - 4), int(x2), int(y2))
-        p.drawLine(int(x2 - 6), int(y2 + 4), int(x2), int(y2))
-        # offset chip on the upper leg
-        self._chip(p, (x1 + xm) / 2, y1, "+" + self._mmss(offset),
+        # arrowhead into the dependent's start — pointing down for a pure drop, else rightward
+        if vertical:
+            ay = y2 - 6.0 * sgn
+            p.drawLine(int(x2 - 4), int(ay), int(x2), int(y2))
+            p.drawLine(int(x2 + 4), int(ay), int(x2), int(y2))
+        else:
+            p.drawLine(int(x2 - 6), int(y2 - 4), int(x2), int(y2))
+            p.drawLine(int(x2 - 6), int(y2 + 4), int(x2), int(y2))
+        # offset chip on the DOWN leg, near the dependent's row (rows separate the chips)
+        oy = y2 - 16.0 * sgn
+        self._chip(p, x1, oy, "+" + self._mmss(offset),
                    stroke, stroke if selected else ink)
-        return xm
 
     # ── Selection / drag affordances (drawn on top of the items) ──────────────
     def _paint_selection(self, p):
