@@ -45,6 +45,7 @@ from .param_form import fmt_duration
 from .plan_editor import PlanEditorDialog
 from .plan_log_dialog import PlanLogDialog
 from .qt_adapter import DataHub
+from . import run_conflict
 from .theme import Palette
 from .timeline_model import (
     SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY, SEQUENCE_LOG_TABLE_CAPABILITY,
@@ -206,6 +207,25 @@ def _proceed_run(client, run_id: str, resume_laptop: datetime,
     resume_at = resume_laptop + timedelta(seconds=client.clock_offset_s())
     return client.proceed_sequence_run(
         run_id, m.ProceedRequest(proceed_at=resume_at.isoformat(), steps=steps))
+
+
+def _stop_tasks_on_hosts(fleet: Fleet, conflicts: Dict[str, list]) -> List[tuple]:
+    """Stop each conflicting task on its unit; return [(host, task, error_or_None)] so the
+    caller reports per-task failures without aborting the rest. Runs on a worker thread."""
+    out: List[tuple] = []
+    for host, task_names in conflicts.items():
+        try:
+            client = fleet.get(host)
+        except Exception as exc:            # noqa: BLE001 — reported per host, siblings continue
+            out.extend((host, t, exc) for t in task_names)
+            continue
+        for t in task_names:
+            try:
+                client.stop_task(t)
+                out.append((host, t, None))
+            except Exception as exc:        # noqa: BLE001
+                out.append((host, t, exc))
+    return out
 
 
 def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
@@ -695,12 +715,13 @@ class PlansTab(QWidget):
         hostnames = sorted({i.hostname for i in plan.items})
         self.hub.run_async(
             f"plan_preflight:{plan.id}",
-            lambda: (self.fleet.clock_skew(hostnames), self.fleet.sequences_all(hostnames)),
+            lambda: (self.fleet.clock_skew(hostnames), self.fleet.sequences_all(hostnames),
+                     self.fleet.tasks_all(hostnames)),
         )
 
     def _finish_arm_preflight(self, plan: m.Plan, result) -> None:
         try:
-            (systems, max_skew), seqs = result
+            (systems, max_skew), seqs, tasks = result
         except (TypeError, ValueError):
             self._set_status("pre-flight failed", error=True)
             QMessageBox.warning(self, "Pre-flight failed", f"{result}")
@@ -756,6 +777,23 @@ class PlansTab(QWidget):
             self._set_status("arm cancelled", error=True)
             return
 
+        # Guard: don't arm over a task already transmitting on any item's unit (the agent
+        # refuses such an arm). Offer to stop the conflicting tasks and arm.
+        conflicts: Dict[str, list] = {}
+        for idx, steps in resolved.items():
+            host = plan.items[idx].hostname
+            statuses = tasks.get(host) if isinstance(tasks, dict) else None
+            running = run_conflict.running_task_names(
+                statuses if isinstance(statuses, list) else [],
+                run_conflict.sequence_task_names(steps))
+            for t in running:
+                conflicts.setdefault(host, [])
+                if t not in conflicts[host]:
+                    conflicts[host].append(t)
+        if conflicts:
+            self._offer_stop_and_arm_plan(plan, conflicts)
+            return
+
         skew_note = ""
         if max_skew is not None and max_skew > CLOCK_WARN_SKEW_S:
             skew_note = (f"⚠ Unit clocks differ by {max_skew:.1f}s. A shared on-air "
@@ -807,6 +845,37 @@ class PlansTab(QWidget):
         self.hub.run_async(
             f"plan_arm:{plan.id}",
             lambda: _arm_plan(self.fleet, plan, t0, duration_s),
+        )
+
+    def _offer_stop_and_arm_plan(self, plan: m.Plan, conflicts: Dict[str, list]) -> None:
+        """One or more of the plan's tasks are already running on their units — offer to stop
+        them and re-run the arm (which re-does pre-flight, now clear)."""
+        label = {i.hostname: (i.unit_label or i.hostname) for i in plan.items}
+        total = sum(len(ts) for ts in conflicts.values())
+        if len(conflicts) == 1:
+            host, ts = next(iter(conflicts.items()))
+            names = ", ".join(f"“{t}”" for t in ts)
+            text = f"{names} {'is' if total == 1 else 'are'} already running on {label.get(host, host)}."
+        else:
+            text = "Some of this plan's tasks are already running:\n" + "\n".join(
+                f"• {label.get(h, h)}: {', '.join(ts)}" for h, ts in conflicts.items())
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Task already running")
+        box.setText(text)
+        box.setInformativeText(
+            "A plan can't arm over a task that's already transmitting. Stop it and arm the plan?")
+        stop_arm = box.addButton("Stop && arm", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(stop_arm)
+        box.exec()
+        if box.clickedButton() is not stop_arm:
+            self._set_status("arm cancelled")
+            return
+        self._set_status("stopping task(s)…")
+        self.hub.run_async(
+            f"plan_stoptasks:{plan.id}",
+            lambda: _stop_tasks_on_hosts(self.fleet, conflicts),
         )
 
     def _arm_hold_aware_plan(self, plan: m.Plan, item: m.PlanItem, steps: list,
@@ -1066,6 +1135,17 @@ class PlansTab(QWidget):
             elif isinstance(result, Exception):
                 self._set_status(f"stop failed: {result}", error=True)
             self._refresh_runs()
+        elif op == "plan_stoptasks":
+            bad = [(h, t, e) for h, t, e in result if e is not None] \
+                if isinstance(result, list) else []
+            if isinstance(result, Exception) or bad:
+                self._set_status("stop failed", error=True)
+                detail = str(result) if isinstance(result, Exception) else \
+                    "\n".join(f"• {h}/{t}: {e}" for h, t, e in bad)
+                QMessageBox.warning(self, "Could not stop the running task", detail)
+                return
+            if plan is not None:
+                self._on_arm(plan)           # tasks stopped → re-run arm (pre-flight now clear)
 
     def _report_arm(self, result) -> None:
         if isinstance(result, Exception) or not isinstance(result, list):

@@ -71,6 +71,31 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — run/task conflict guards (arm-over-running · stop-task-in-run): COMPLETE (branch `claude/run-task-conflict-guards`, client-only)
+Owner ask: (1) arming a sequence/plan whose task is already running should INFORM + offer to stop it;
+(2) stopping a task (Tasks tab) that's part of a running sequence/plan should INFORM + offer to stop
+just the task OR the whole run. Client-only — no agent change; uses existing endpoints (`list_tasks`,
+`stop_task`, `cancel_sequence_run`, arm), and the agent's existing arm guard ("cannot arm: task(s)
+already running") stays the backstop. Pieces:
+- **`ui/run_conflict.py`** (new, pure/no-Qt) — `sequence_task_names(steps)`, `running_task_names(
+  statuses, wanted)` (∩ RUNNING/STARTING), `active_runs_using_task(runs, task)` (ARMED/RUNNING/HOLDING
+  runs whose steps use the task), `run_label(run)` (`plan “X”`/`sequence “Y”`).
+- **Arm pre-check (Feature 1)** — `sequences_panel._on_start` now fires `seq_precheck` (fetch
+  `list_tasks`, intersect with the sequence's tasks) → `_on_task_done`: clear/none → `_arm_flow` (the
+  old `_on_start` body, extracted: ArmDialog + arm); conflicts → `_offer_stop_and_arm` ("Stop & arm" /
+  Cancel) → `seq_stoptasks` (stop each) → `_arm_flow`. Plans: `_on_arm`'s preflight also fetches
+  `tasks_all`; `_finish_arm_preflight` computes per-unit conflicts across items → `_offer_stop_and_arm_plan`
+  → `plan_stoptasks` (`_stop_tasks_on_hosts`, per-task result) → re-run `_on_arm` (preflight now clear).
+- **Stop-in-run (Feature 2)** — `unit_detail`: `UnitDetail.on_fast_update` feeds `snap.runs` →
+  `_TasksPanel.update_runs`; each `_TaskRow` gets a `runs_provider`. `_TaskRow._on_stop` → if an active
+  run owns the task, `_confirm_stop_owned` (3-way: **Stop task only** / **Stop sequence/plan** /
+  Cancel); "Stop run" aborts the owning run(s) via `cancel_sequence_run` (`task_abortrun` label);
+  else the plain stop. Multiple owning runs → "Stop all".
+No agent/scripts/capability change; drift-guarded files untouched. Tests: `tests/test_run_conflict.py`
+(pure helpers) + `tests/test_run_conflict_ui.py` (row stop routes to the dialog only when a run owns
+the task; panel feeds runs to rows; sequence pre-check arms/offers/stops-then-arms; the plan batch-stop
+helper reports per-task). Suite 870 → 875 offscreen.
+
 ## Current state — spreadsheet run-log export (client): COMPLETE (branch `claude/hold-step-phase-0-wwwxf7-lty0i5`, cross-repo)
 Export a ran sequence/plan's log as an **.xlsx** — one ROW PER STATE CHANGE (a tune that changes
 nothing adds no row), every power quantity + realized SDR gain/attenuation + each live/derived param in

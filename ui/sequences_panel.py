@@ -49,6 +49,7 @@ from config import UNIT_TYPE_LABELS, DEFAULT_UNIT_TYPE
 from .arm_dialog import ArmDialog
 from .param_form import fmt_duration
 from .qt_adapter import DataHub
+from . import run_conflict
 from .scope_selector import scope_chip, confirm_delete
 from .sequence_editor import SequenceEditorDialog
 from .sequence_log_dialog import SequenceLogDialog
@@ -373,6 +374,7 @@ class SequencesPanel(QWidget):
         self._wb_edits: dict = {}
         self._seq_loaded = False
         self._runs_pending = False
+        self._pending_arm: Optional[m.Sequence] = None   # sequence awaiting the running-task pre-check
         self._export_path: Optional[str] = None
         self._build()
         self.hub.task_done.connect(self._on_task_done)
@@ -493,6 +495,20 @@ class SequencesPanel(QWidget):
         if hold_off is not None:
             self._arm_hold_aware(seq, hold_off)
             return
+        # Guard: don't silently collide with a task already transmitting on this unit (the
+        # agent refuses such an arm anyway). Pre-check its tasks; if any are running, offer to
+        # stop them and arm. The result routes back through _on_task_done ("seq_precheck").
+        self._pending_arm = seq
+        self._set_status("checking…")
+        client = self.hub.fleet.get(self.hostname)
+        wanted = run_conflict.sequence_task_names(seq.steps)
+        self.hub.run_async(
+            f"seq_precheck:{self.hostname}:{seq.id}",
+            lambda: run_conflict.running_task_names(client.list_tasks(), wanted),
+        )
+
+    def _arm_flow(self, seq: m.Sequence) -> None:
+        """Pick the on-air time and arm (reached once the running-task pre-check is clear)."""
         # Pick the on-air time (and optional stop) the same way plans are armed.
         min_dur = _ramp.min_on_air_duration(seq.steps)
         default_dur = min_dur if min_dur > 0 else DEFAULT_STOP_DURATION_S
@@ -509,6 +525,32 @@ class SequencesPanel(QWidget):
         self.hub.run_async(
             f"seq_arm:{self.hostname}:{seq.id}",
             lambda: _arm_at(client, seq, t0, duration_s),
+        )
+
+    def _offer_stop_and_arm(self, seq: m.Sequence, conflicts: List[str]) -> None:
+        """One or more of the sequence's tasks are already running — offer to stop them and arm."""
+        names = ", ".join(f"“{t}”" for t in conflicts)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Task already running")
+        box.setText(f"{names} {'is' if len(conflicts) == 1 else 'are'} already running on "
+                    f"{self.hostname}.")
+        box.setInformativeText(
+            "A sequence can't arm over a task that's already transmitting on this unit. "
+            "Stop it and arm the sequence?")
+        stop_arm = box.addButton("Stop && arm", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(stop_arm)
+        box.exec()
+        if box.clickedButton() is not stop_arm:
+            self._set_status("arm cancelled")
+            return
+        self._pending_arm = seq
+        client = self.hub.fleet.get(self.hostname)
+        self._set_status("stopping task(s)…")
+        self.hub.run_async(
+            f"seq_stoptasks:{self.hostname}:{seq.id}",
+            lambda: [client.stop_task(t) for t in conflicts],
         )
 
     def _arm_hold_aware(self, seq: m.Sequence, hold_off: float) -> None:
@@ -841,6 +883,26 @@ class SequencesPanel(QWidget):
             if not isinstance(result, Exception):
                 self._runs = result if isinstance(result, list) else []
                 self._rebuild()
+        elif op == "seq_precheck":
+            seq = self._pending_arm
+            self._pending_arm = None
+            if seq is None:
+                return
+            conflicts = result if isinstance(result, list) else []
+            if isinstance(result, Exception) or not conflicts:
+                self._arm_flow(seq)          # can't check / nothing running → arm (agent backstops)
+            else:
+                self._offer_stop_and_arm(seq, conflicts)
+        elif op == "seq_stoptasks":
+            seq = self._pending_arm
+            self._pending_arm = None
+            if seq is None:
+                return
+            if isinstance(result, Exception):
+                self._set_status("stop failed", error=True)
+                QMessageBox.warning(self, "Could not stop the running task", str(result))
+                return
+            self._arm_flow(seq)              # tasks stopped → proceed to arm
         elif op == "seq_arm":
             if isinstance(result, Exception):
                 self._set_status("arm failed", error=True)
