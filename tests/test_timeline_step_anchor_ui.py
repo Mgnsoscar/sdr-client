@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import QApplication
 
 from ui import timeline_model as tlm
 from ui.ramp_editor import RampEditorDialog
-from ui.timeline_editor import StepEditorDialog, LANE_H
+from ui.timeline_editor import StepEditorDialog, LANE_H, SNAP_PX
 from tests.test_step_editor_carried_bw import _editor as _chirp_editor, _bar
 
 _app = QApplication.instance() or QApplication([])
@@ -330,6 +330,20 @@ def test_connector_points_drop_avoids_an_intervening_obstacle():
     drop_xs = [pts[i][0] for i in range(1, len(pts)) if pts[i][1] != pts[i - 1][1]]
     assert drop_xs and all(not (420.0 <= dx <= 460.0) for dx in drop_xs)   # never drops through it
     assert pts[0] == (100.0, 10.0) and pts[-1] == (500.0, 90.0)            # exit/enter at the ends
+
+
+def test_drag_snap_targets_and_cursor():
+    ramp = _ramp_item(100.0, sid="r")
+    cv = _chirp_editor([_bar(), ramp])._canvas
+    bar = next(it for it in cv._items if it.kind == "bar")
+    gb = cv._geom[bar.uid]; gr = cv._geom[ramp.uid]
+    targets = cv._snap_targets(ramp.uid)          # dragging the ramp
+    assert cv._on in targets and cv._off in targets            # the on-air / off-air anchors
+    assert gb["start_x"] in targets and gb["stop_x"] in targets   # the OTHER item's edges
+    assert gr["start_x"] not in targets and gr["stop_x"] not in targets   # never itself
+    # a cursor a few px from another edge snaps onto it
+    snapped = cv._snap_cursor(gb["stop_x"] + 3.0, ramp.uid)
+    assert snapped is not None and abs(snapped - (gb["stop_x"] + 3.0)) <= SNAP_PX
 
 
 def test_connector_points_wraps_when_offset_is_zero():

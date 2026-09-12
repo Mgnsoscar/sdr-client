@@ -168,7 +168,15 @@ axis, connectors. Phased build: **visual redesign → drag/drop → connectors (
     re-anchors dependents to on-air, delete of a plain item just removes it; undo/redo of add·anchor·
     delete-with-reanchor, set_items resets history; tooltip text names the anchor + bar timing). Suite
     904 → 921 offscreen. Drift-guarded files untouched.
-  - **NOT YET DONE** (later phases, per plan): drag ghosts/snapping/marquee/multi-select, the minimap.
+  - **Drag snapping** — while dragging a bar handle / bar body / pin / Hold, the moved edge snaps
+    (within `SNAP_PX = 7`) to a meaningful x: the on-air / off-air anchors, the Hold divider, every OTHER
+    step's edges (a bar/ramp's start+stop, a pin's centre), and the major axis ticks (`_snap_targets`
+    excludes the dragged item; `_snap_cursor` picks the nearest). A snap sets the offset EXACTLY on the
+    target (else the 1 s grid) and shows a dashed accent **guide line** (`_snap_guide` / `_paint_snap_guide`,
+    cleared on release + hover). Bar-body snaps its START edge. Tests: `_snap_targets` includes other
+    edges + anchors and excludes self; a near-edge cursor snaps within `SNAP_PX`
+    (`tests/test_timeline_step_anchor_ui.py`). Suite 923 → 924.
+  - **NOT YET DONE** (later phases, per plan): drag ghosts + marquee/multi-select, the minimap.
 
 ## Current state — step-to-step anchoring Phase 1 (client authoring + geometry): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo; stacked on `run-task-conflict-guards`)
 Owner ask: anchor a step not only to on-air/off-air/Hold but to ANOTHER step's start/end edge — e.g. a

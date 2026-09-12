@@ -78,6 +78,7 @@ HUE_RAIL = 3               # left hue rail width inside a bar
 HANDLE_W = 10               # drawn width of a bar's grip
 HANDLE_HIT = 11             # px each side of a handle centre that grabs it
 PIN_HIT = 10                # px around a pin / ramp edge dot that starts a drag-to-anchor
+SNAP_PX = 7                 # px a dragged edge snaps to a nearby edge / anchor / tick
 HOLD_HIT = 9                # px each side of the Hold divider that grabs it
 RUN_MIN_W = 120             # minimum run-pill width
 RUN_MAX_W = 260
@@ -296,6 +297,7 @@ class _TimelineCanvas(QWidget):
         self._rmchip: Optional[QRectF] = None   # hit rect of the painted "Remove anchor" chip
         self._rmchip_pos: Optional[tuple] = None  # (cx, cy) where the chip paints, set each paint
         self._hover_uid: Optional[int] = None   # item currently under the cursor (tooltip throttle)
+        self._snap_guide: Optional[float] = None  # x of the active snap guide line during a drag
         self._undo: List[list] = []             # past item snapshots (deepcopies) for Ctrl+Z
         self._redo: List[list] = []             # undone snapshots for Ctrl+Y / Ctrl+Shift+Z
         self.setMouseTracking(True)
@@ -642,6 +644,7 @@ class _TimelineCanvas(QWidget):
         self._paint_selection(p)
         if self._rmchip_pos is not None:
             self._paint_remove_chip(p, *self._rmchip_pos)
+        self._paint_snap_guide(p)
         self._paint_connect_drag(p)
         self._paint_drag_readout(p)
         p.end()
@@ -1225,6 +1228,16 @@ class _TimelineCanvas(QWidget):
             label = "drop on a step edge to anchor"
         self._paint_tag(p, x2, y2 - 16, label, ok)
 
+    def _paint_snap_guide(self, p):
+        """A thin dashed accent line at the x a dragged edge is snapping to."""
+        if self._snap_guide is None:
+            return
+        x = float(self._snap_guide)
+        pen = QPen(QColor(Palette.ACCENT), 1.4)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        p.drawLine(int(x), int(LANES_TOP - 10), int(x), int(self._baseline + 4))
+
     def _paint_drag_readout(self, p):
         """While moving an item, a floating tag shows the time it now fires at."""
         if self._drag is None or not self._drag.get("moved"):
@@ -1465,6 +1478,7 @@ class _TimelineCanvas(QWidget):
             self.update()
             return
         if self._drag is None:
+            self._snap_guide = None
             hit = self._hit(pos.x(), pos.y())
             if hit and hit[1].startswith("edge_"):
                 self.setCursor(Qt.CursorShape.CrossCursor)
@@ -1485,30 +1499,49 @@ class _TimelineCanvas(QWidget):
         self._drag["moved"] = True
         it, part = self._drag["item"], self._drag["part"]
         x = pos.x()
+        eff = self._eff()
+        mid = tlm.midpoint(self._on, self._off)
+        # Snap the dragged edge to a nearby step edge / anchor / tick (exact when snapped, else
+        # the 1 s grid). `sx` is the snap target x (None when nothing is near).
+        sx = self._snap_cursor(x, it.uid)
+        self._snap_guide = None
         if part in ("run_body", "hold_body"):
             # A one-shot (or the Hold marker) keeps its anchor (changed only in the
             # editor); dragging only moves the offset, measured to scale from that fixed
-            # anchor — so the seconds scale with the distance to the anchor and never jump.
-            # A window-B (anchor="hold") one-shot is placed from the Hold's position, so its
-            # offset is measured from the hold divider, not from off-air.
+            # anchor. A window-B (anchor="hold") one-shot is placed from the Hold's position.
             anchor_x = self._anchor_base_x(it)
-            it.offset = self._clamp_tune_offset(it, tlm._snap((x - anchor_x) / self._eff()))
+            if sx is not None:
+                off = (sx - anchor_x) / eff; self._snap_guide = sx
+            else:
+                off = tlm._snap((x - anchor_x) / eff)
+            it.offset = self._clamp_tune_offset(it, off)
             self._live_relayout(it)
             return
-        mid = tlm.midpoint(self._on, self._off)
-        eff = self._eff()
         if part == "bar_start":
             if getattr(it, "start_anchor", "start") == "hold" and self._hold_off is not None:
-                # A window-B bar's start is measured from the Hold divider (resume), never
-                # before it, so it can't be dragged into window A.
+                # A window-B bar's start is measured from the Hold divider (resume), never before it.
                 hold_x = self._on + self._hold_off * eff
-                it.start_offset = max(0.0, tlm._snap((x - hold_x) / eff))
+                if sx is not None and sx >= hold_x - 0.5:
+                    it.start_offset = max(0.0, (sx - hold_x) / eff); self._snap_guide = sx
+                else:
+                    it.start_offset = max(0.0, tlm._snap((x - hold_x) / eff))
+            elif sx is not None and sx <= mid:            # on-air side only
+                it.start_offset = (sx - self._on) / eff; self._snap_guide = sx
             else:
                 it.start_offset = tlm.resolve_bar_start(x, self._on, self._off, self._zoom)
         elif part == "bar_stop":
-            it.stop_offset = tlm.resolve_bar_stop(x, self._on, self._off, self._zoom)
+            if sx is not None and sx >= mid:              # off-air side only
+                it.stop_offset = (sx - self._off) / eff; self._snap_guide = sx
+            else:
+                it.stop_offset = tlm.resolve_bar_stop(x, self._on, self._off, self._zoom)
         elif part == "bar_body":
-            ds = tlm._snap((x - self._drag["press_x"]) / eff)
+            # Snap the START edge as the bar shifts (the STOP follows by the same delta).
+            start0_x = self._on + self._drag["start0"] * eff
+            sbx = self._snap_cursor(start0_x + (x - self._drag["press_x"]), it.uid)
+            if sbx is not None:
+                ds = (sbx - self._on) / eff - self._drag["start0"]; self._snap_guide = sbx
+            else:
+                ds = tlm._snap((x - self._drag["press_x"]) / eff)
             it.start_offset = min(self._drag["start0"] + ds, (mid - self._on) / eff)
             it.stop_offset = max(self._drag["stop0"] + ds, (mid - self._off) / eff)
         self._live_relayout(it)
@@ -1520,6 +1553,45 @@ class _TimelineCanvas(QWidget):
         if getattr(it, "anchor", "start") == "hold" and self._hold_off is not None:
             return self._on + self._hold_off * self._eff()
         return self._on if it.anchor == "start" else self._off
+
+    # ── Drag snapping (to nearby step edges / anchors / ticks) ─────────────────
+    def _snap_targets(self, exclude_uid):
+        """Meaningful x positions a dragged edge can snap to: the on-air / off-air anchors,
+        the Hold divider, every OTHER item's edges (a bar/ramp's start+stop, a pin's centre),
+        and the major axis ticks across the defined region."""
+        xs = [self._on, self._off]
+        for h in self._holds:
+            g = self._geom.get(h.uid)
+            if g:
+                xs.append(g["cx"])
+        for it in self._rows:
+            if it.uid == exclude_uid:
+                continue
+            g = self._geom.get(it.uid)
+            if not g:
+                continue
+            if "start_x" in g:
+                xs.append(g["start_x"]); xs.append(g["stop_x"])
+            elif "cx" in g:
+                xs.append(g["cx"])
+        eff = self._eff(); tick_s = self._tick_interval()
+        if tick_s > 0 and eff > 0:
+            k = 0
+            while self._on + k * tick_s * eff <= self._off + 1.0:
+                xs.append(self._on + k * tick_s * eff); k += 1
+            k = 1
+            while self._on - k * tick_s * eff >= tlm.EDGE_PAD:
+                xs.append(self._on - k * tick_s * eff); k += 1
+        return xs
+
+    def _snap_cursor(self, x, exclude_uid):
+        """The nearest snap target x within SNAP_PX of `x`, or None."""
+        best, best_d = None, SNAP_PX + 1e-6
+        for tx in self._snap_targets(exclude_uid):
+            d = abs(x - tx)
+            if d < best_d:
+                best_d, best = d, tx
+        return best
 
     def _clamp_tune_offset(self, it, offset: float) -> float:
         """Keep a tune point inside the on-air span of the task it acts on: a
@@ -1559,6 +1631,7 @@ class _TimelineCanvas(QWidget):
         if e.button() != Qt.MouseButton.LeftButton:
             return
         self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._snap_guide = None
         if self._connect is not None:
             conn = self._connect
             self._connect = None
