@@ -190,7 +190,15 @@ axis, connectors. Phased build: **visual redesign → drag/drop → connectors (
     **"Delete selected"** for a multi-selection. Live-drag already previews the move, so no separate
     ghost. Tests (`tests/test_timeline_step_anchor_ui.py`): toggle/select-only, delete-selection +
     one-undo, marquee intersect, group move preserves the gap. Suite 924 → 928.
-  - **NOT YET DONE** (later phases, per plan): the minimap.
+  - **Overview minimap** (`_Minimap`, an "OVERVIEW" strip under the stage) — the whole sequence scaled
+    to fit (`scale = track_w / canvas.width()`): on-air (green) / off-air (red) guides, one task-hued
+    segment per row (`_rows`/`_geom`, bars/ramps span start→stop, pins a small mark; tunes/ramps dimmed),
+    and a draggable accent **viewport rectangle** (the scroll area's value + viewport width, scaled).
+    Click/drag the strip → `_scroll_to` centres the canvas there. Repaints on the canvas `changed` and on
+    the horizontal scrollbar's `valueChanged`/`rangeChanged` (covers edits, scroll, and zoom). Smoke
+    test: `_minimap` present, paints, `_scroll_to` safe (`tests/test_timeline_step_anchor_ui.py`).
+    Suite 928 → 929. **The redesign's interactive plan (visual → drag/drop → connectors → context menu →
+    time axis → snapping → multi-select → minimap) is now COMPLETE.**
 
 ## Current state — step-to-step anchoring Phase 1 (client authoring + geometry): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo; stacked on `run-task-conflict-guards`)
 Owner ask: anchor a step not only to on-air/off-air/Hold but to ANOTHER step's start/end edge — e.g. a

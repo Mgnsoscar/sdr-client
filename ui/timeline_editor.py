@@ -3034,6 +3034,92 @@ class _RowHeader(QWidget):
         return w + 12
 
 
+class _Minimap(QWidget):
+    """A compact overview strip under the timeline: the whole sequence scaled to fit, with
+    on-air/off-air guides, a task-hued segment per row, and a viewport rectangle showing the
+    visible slice. Click / drag it to scroll the main canvas."""
+    _PAD = 8.0
+
+    def __init__(self, editor: "TimelineEditor"):
+        super().__init__()
+        self._editor = editor
+        self._canvas = editor._canvas
+        self.setFixedHeight(34)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._dragging = False
+
+    def _track(self) -> QRectF:
+        return QRectF(self._PAD, 5.0, max(1.0, self.width() - 2 * self._PAD), self.height() - 10.0)
+
+    def _scale(self, track):
+        return track.width() / max(1.0, float(self._canvas.width()))
+
+    def paintEvent(self, _e):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        track = self._track()
+        p.setPen(QPen(QColor(Palette.BORDER), 1)); p.setBrush(QColor("#FFFFFF"))
+        p.drawRoundedRect(track, 6, 6)
+        p.save(); p.setClipRect(track)
+        scale = self._scale(track)
+        def X(cx):
+            return track.left() + cx * scale
+        # on-air / off-air guides
+        for cx, col in ((self._canvas._on, Palette.ONLINE), (self._canvas._off, Palette.CRASH)):
+            p.setPen(QPen(QColor(col), 1))
+            p.drawLine(int(X(cx)), int(track.top()), int(X(cx)), int(track.bottom()))
+        # one task-hued segment per row (stacked to fit the strip height)
+        rows = self._canvas._rows
+        step = min(4.0, (track.height() - 6.0) / max(1, len(rows)))
+        for i, it in enumerate(rows):
+            g = self._canvas._geom.get(it.uid)
+            if not g:
+                continue
+            if "start_x" in g:
+                x1, x2 = sorted((g["start_x"], g["stop_x"]))
+            else:
+                cx = g.get("cx", 0.0); x1, x2 = cx - 4.0, cx + 4.0
+            hue = self._canvas._hue_for(it)
+            col = QColor(hue) if (hue and self._canvas.task_known(getattr(it, "task_name", ""))) \
+                else QColor(Palette.CRASH)
+            if getattr(it, "action", "") in ("tune", "ramp"):
+                col.setAlpha(180)
+            y = track.top() + 3.0 + i * step
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(col)
+            p.drawRoundedRect(QRectF(X(x1), y, max(3.0, (x2 - x1) * scale), max(2.0, step - 1.0)),
+                              1.5, 1.5)
+        # viewport rectangle (the slice currently visible in the scroll area)
+        sc = getattr(self._canvas, "_scroll", None)
+        if sc is not None:
+            vx = X(sc.horizontalScrollBar().value())
+            vw = max(6.0, sc.viewport().width() * scale)
+            r = QRectF(vx, track.top() + 1.0, vw, track.height() - 2.0)
+            fill = QColor(Palette.ACCENT); fill.setAlpha(24)
+            p.setPen(QPen(QColor(Palette.ACCENT), 1.5)); p.setBrush(fill)
+            p.drawRoundedRect(r, 5, 5)
+        p.restore(); p.end()
+
+    def _scroll_to(self, x):
+        sc = getattr(self._canvas, "_scroll", None)
+        if sc is None:
+            return
+        track = self._track(); scale = self._scale(track)
+        cx = (x - track.left()) / scale
+        sc.horizontalScrollBar().setValue(int(cx - sc.viewport().width() / 2))
+
+    def mousePressEvent(self, e):  # noqa: N802
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._scroll_to(e.position().x())
+
+    def mouseMoveEvent(self, e):  # noqa: N802
+        if self._dragging:
+            self._scroll_to(e.position().x())
+
+    def mouseReleaseEvent(self, e):  # noqa: N802
+        self._dragging = False
+
+
 # ── Public editor: toolbar + scrollable canvas ────────────────────────────────
 
 class TimelineEditor(QWidget):
@@ -3212,6 +3298,20 @@ class TimelineEditor(QWidget):
         srow.addWidget(self._rowhdr)
         srow.addWidget(scroll, stretch=1)
         outer.addWidget(stage, stretch=1)
+
+        # Overview minimap: the whole sequence scaled to fit + a draggable viewport rectangle.
+        self._minimap = _Minimap(self)
+        self._canvas.changed.connect(self._minimap.update)
+        sb = scroll.horizontalScrollBar()
+        sb.valueChanged.connect(self._minimap.update)
+        sb.rangeChanged.connect(lambda *_: self._minimap.update())
+        mmrow = QHBoxLayout(); mmrow.setContentsMargins(2, 0, 2, 0); mmrow.setSpacing(10)
+        mmcap = QLabel("OVERVIEW")
+        mmcap.setStyleSheet(f"font-size:10px; font-weight:700; letter-spacing:0.7px; "
+                            f"color:{Palette.TEXT_FAINT};")
+        mmrow.addWidget(mmcap)
+        mmrow.addWidget(self._minimap, stretch=1)
+        outer.addLayout(mmrow)
 
     def showEvent(self, e):  # noqa: N802
         super().showEvent(e)

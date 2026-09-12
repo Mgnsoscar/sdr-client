@@ -404,6 +404,14 @@ def test_connector_points_wraps_when_offset_is_zero():
     assert pts[-2][1] == pts[-1][1]
 
 
+def test_minimap_present_and_navigates():
+    ed = _chirp_editor([_bar(), _tune(20.0)])
+    assert hasattr(ed, "_minimap")
+    ed._minimap.resize(400, 34)
+    ed._minimap.grab()                    # paints without error (guides + segments + viewport)
+    ed._minimap._scroll_to(200.0)         # driving scroll is safe even when not scrollable
+
+
 def test_tooltip_text_describes_anchor_and_bar():
     up = _ramp_item(0.0, sid="up")
     down = _down_ramp()
