@@ -143,17 +143,23 @@ axis, connectors. Phased build: **visual redesign → drag/drop → connectors (
   - **Hover tooltips** — `_update_tooltip`/`_tooltip_text` (via `QToolTip`, throttled on the hovered uid;
     `leaveEvent` clears) show a rich multi-line description: task + kind, what it does (ramp from→to·dur,
     tune param changes, bar starts/stops timing), and, if step-anchored, `⚓ after <task>'s <edge> +M:SS`.
-  - **Connector reroute (owner-reported)** — connectors now **exit and enter steps HORIZONTALLY**
-    (`_draw_connector` + `_ortho_path`, a rounded-orthogonal path through axis-aligned waypoints). The
-    exit leaves the anchor AWAY from its body along the time axis (`exit_dir`): an END edge / a point
-    exits right, a START edge exits left (so the stub never runs over the target's own bar). Normal
-    route: exit stub → drop to the dependent's row → run in to its start. When a right-exit's offset is
-    too short for that run (`x2 − (x1+STUB) < 8`), it **WRAPS**: exit right, drop below the row, run back
-    left, then up and into the start — the entry stays horizontal (the owner's "wrap down, back, and into
-    the step start"). The offset chip rides the drop leg near the dependent's row (`oy = y2 − 16·sgn`), so
-    two steps anchored to the SAME edge get chips on their own rows instead of stacking at the shared
-    anchor. The selected-connector "Remove anchor" chip sits BELOW the line (`y2 + 15`) so it never
-    covers the offset chip.
+  - **Connector routing (owner-reported, obstacle-aware)** — connectors always **exit and enter steps
+    HORIZONTALLY** and route AROUND intervening third-party steps, with the offset chip **inline** on the
+    entry run (the line passes through it). `_draw_connector` → `_connector_points` → `_ortho_path`
+    (rounded-orthogonal through axis-aligned waypoints):
+    - **Drop column** is chosen LEFT of the dependent by `chip_w + 24` (room for the inline chip), then
+      pushed LEFT of any **intervening obstacle** it lands in (`_intervening_obstacles(anchor_uid,
+      dep_uid)` = x-intervals of steps whose ROW is strictly between the two) — so a `+3:00` line no
+      longer drops THROUGH a `+0s` step, it runs along the anchor's row and drops clear of it.
+    - **Exit** leaves the anchor AWAY from its body (`exit_dir`): END edge / point exits right, START
+      edge exits left. **Entry** is always a horizontal run into the dependent's start from the left.
+    - **Wrap** when the drop column falls left of the anchor edge (a ~zero offset): exit the stub, run a
+      channel just outside the dependent's row, back to the drop column, drop, and run in — entry stays
+      horizontal (the owner's "wrap down, back, and into the step start").
+    - The offset chip is centred inline on the entry run just left of the step (`chip_cx = x2 − chip_w/2
+      − 10`, at `y2`); the selected-connector "Remove anchor" chip sits directly below it (`y2 + 15`).
+    Tests: `_connector_points` avoids an intervening obstacle's column and wraps at zero offset
+    (`tests/test_timeline_step_anchor_ui.py`).
   - Pure model: **`timeline_model.step_drop_offset(items, src, tgt, edge, h_off, step_bases)`** (+ helpers
     `_by_uid`/`_item_edge_offset`). Tests: `tests/test_timeline_step_anchor.py` (step_drop_offset keeps in
     place / clamps to 0 / rejects self·bar·cycle) + `tests/test_timeline_step_anchor_ui.py` (canvas

@@ -320,6 +320,28 @@ def test_set_items_resets_undo_history():
 
 # ── Hover tooltip text ──────────────────────────────────────────────────────────
 
+# ── Connector routing (obstacle avoidance + horizontal entry) ───────────────────
+
+def test_connector_points_drop_avoids_an_intervening_obstacle():
+    cv = _chirp_editor([_bar()])._canvas
+    # anchor (100,10) → dependent (500,90); an intervening step occupies the naive drop column
+    obstacles = [(420.0, 460.0)]                 # overlaps x2 - chip_run (500 - 60 = 440)
+    pts = cv._connector_points(100.0, 10.0, 500.0, 90.0, 1.0, obstacles, 60.0)
+    drop_xs = [pts[i][0] for i in range(1, len(pts)) if pts[i][1] != pts[i - 1][1]]
+    assert drop_xs and all(not (420.0 <= dx <= 460.0) for dx in drop_xs)   # never drops through it
+    assert pts[0] == (100.0, 10.0) and pts[-1] == (500.0, 90.0)            # exit/enter at the ends
+
+
+def test_connector_points_wraps_when_offset_is_zero():
+    cv = _chirp_editor([_bar()])._canvas
+    # dependent start == anchor x (offset 0) → no room on the right → wrap (6 waypoints)
+    pts = cv._connector_points(300.0, 10.0, 300.0, 90.0, 1.0, [], 60.0)
+    assert len(pts) == 6
+    assert pts[0] == (300.0, 10.0) and pts[-1] == (300.0, 90.0)
+    # the final segment enters horizontally (same y as the dependent)
+    assert pts[-2][1] == pts[-1][1]
+
+
 def test_tooltip_text_describes_anchor_and_bar():
     up = _ramp_item(0.0, sid="up")
     down = _down_ramp()

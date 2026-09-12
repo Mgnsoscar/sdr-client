@@ -1051,14 +1051,33 @@ class _TimelineCanvas(QWidget):
             # left) exits right, a START edge (body to the right) exits left, a point exits right.
             exit_dir = -1.0 if ((tlm._is_ramp(tgt) or getattr(tgt, "kind", "") == "bar")
                                 and edge == "start") else 1.0
+            obstacles = self._intervening_obstacles(tgt.uid, it.uid)
             base, _e, _fa, _fb, ink = self._item_colors(it)
             sel = (it.uid == self._selected)
             self._draw_connector(p, x1, y1, x2, y2, base, ink,
-                                 float(getattr(it, "offset", 0.0)), exit_dir, sel)
-            # A selected connector offers "Remove anchor" BELOW its line, at the dependent's
-            # row — so it never covers the offset chip (which rides above the line).
-            if sel:
-                self._rmchip_pos = ((x1 + x2) / 2.0, y2 + 15.0)
+                                 float(getattr(it, "offset", 0.0)), exit_dir, obstacles, sel)
+
+    def _intervening_obstacles(self, anchor_uid, dep_uid):
+        """x-intervals [(lo,hi)] of the steps whose ROW sits strictly between the anchor's and
+        the dependent's — the third-party steps a connector must route AROUND (not through)."""
+        a = self._lane_of.get(anchor_uid); d = self._lane_of.get(dep_uid)
+        if a is None or d is None:
+            return []
+        lo_row, hi_row = sorted((a, d))
+        out = []
+        for it in self._rows:
+            r = self._lane_of.get(it.uid)
+            if r is None or not (lo_row < r < hi_row):
+                continue
+            g = self._geom.get(it.uid)
+            if not g:
+                continue
+            if "start_x" in g:
+                lo, hi = sorted((g["start_x"], g["stop_x"]))
+            else:
+                cx = g.get("cx", 0.0); lo, hi = cx - 8.0, cx + 8.0
+            out.append((lo, hi))
+        return out
 
     def _ortho_path(self, pts, r: float = 6.0) -> QPainterPath:
         """A rounded orthogonal path through axis-aligned waypoints (each segment is purely
@@ -1078,23 +1097,35 @@ class _TimelineCanvas(QWidget):
         path.lineTo(*pts[-1])
         return path
 
-    def _draw_connector(self, p, x1, y1, x2, y2, base, ink, offset, exit_dir=1.0, selected=False):
-        """Route the connector so it always EXITS the anchor and ENTERS the step HORIZONTALLY.
-        Normally: exit the anchor edge a short stub, drop to the dependent's row, then run in
-        to its start. When the offset is too short to fit that run (a right-exit whose stub
-        would overshoot the step), WRAP: exit right, drop below the row, run back left, then up
-        and into the start — so the entry is still horizontal. The offset chip rides the drop
-        leg near the dependent's row (two steps on the same edge get chips on their own rows)."""
-        STUB = 16.0
+    def _connector_points(self, x1, y1, x2, y2, exit_dir, obstacles, chip_run):
+        """Waypoints for a connector that ENTERS the dependent HORIZONTALLY from the left, with
+        the drop column chosen LEFT of the dependent (room for the inline chip) and clear of any
+        intervening third-party step. When that column falls left of the anchor edge, WRAP via a
+        channel just outside the dependent's row so the entry stays horizontal."""
+        STUB, GAP = 16.0, 14.0
         sgn = 1.0 if y2 >= y1 else -1.0
+        xd = x2 - chip_run                          # leave room for the chip inline on the entry run
+        for _ in range(len(obstacles) + 2):         # push left of any obstacle the drop lands in
+            hit = next(((lo, hi) for (lo, hi) in obstacles if lo - 6.0 <= xd <= hi + 6.0), None)
+            if hit is None:
+                break
+            xd = hit[0] - GAP
+        xd = min(xd, x2 - 20.0)
+        if xd >= x1 - 1.0:
+            if xd <= x1 + 1.0:                      # dependent ~at the anchor x: drop straight, run in
+                return [(x1, y1), (x1, y2), (x2, y2)]
+            return [(x1, y1), (xd, y1), (xd, y2), (x2, y2)]
+        # xd is LEFT of the anchor edge → wrap: exit the stub, run a channel to xd, drop, run in
+        xe = x1 + STUB * exit_dir
+        ch = y2 - (LANE_H / 2.0 + LANE_VGAP / 2.0) * sgn
+        return [(x1, y1), (xe, y1), (xe, ch), (xd, ch), (xd, y2), (x2, y2)]
+
+    def _draw_connector(self, p, x1, y1, x2, y2, base, ink, offset, exit_dir=1.0,
+                        obstacles=(), selected=False):
         stroke = QColor(Palette.ACCENT) if selected else base
-        xr = x1 + STUB * exit_dir
-        if exit_dir > 0 and (x2 - xr) < 8.0:           # too short for a straight down-and-in
-            xl = x2 - STUB
-            ymid = y2 + (LANE_H / 2.0 + 8.0) * sgn
-            pts = [(x1, y1), (xr, y1), (xr, ymid), (xl, ymid), (xl, y2), (x2, y2)]
-        else:
-            pts = [(x1, y1), (xr, y1), (xr, y2), (x2, y2)]
+        text = "+" + self._mmss(offset)
+        chip_w = QFontMetrics(mono_font(10)).horizontalAdvance(text) + 14.0
+        pts = self._connector_points(x1, y1, x2, y2, exit_dir, list(obstacles), chip_w + 24.0)
         path = self._ortho_path(pts, 6.0)
         if selected:                                   # soft under-glow when selected
             halo = QColor(Palette.ACCENT); halo.setAlpha(55)
@@ -1107,9 +1138,11 @@ class _TimelineCanvas(QWidget):
         # arrowhead — the entry is always horizontal from the left into the dependent's start
         p.drawLine(int(x2 - 6), int(y2 - 4), int(x2), int(y2))
         p.drawLine(int(x2 - 6), int(y2 + 4), int(x2), int(y2))
-        # offset chip on the drop leg, near the dependent's row (rows separate the chips)
-        self._chip(p, xr, y2 - 16.0 * sgn, "+" + self._mmss(offset),
-                   stroke, stroke if selected else ink)
+        # offset chip INLINE on the entry run (the line runs through it), just left of the step
+        chip_cx = x2 - chip_w / 2.0 - 10.0
+        self._chip(p, chip_cx, y2, text, stroke, stroke if selected else ink)
+        if selected:                                   # "Remove anchor" sits below the chip
+            self._rmchip_pos = (chip_cx, y2 + 15.0)
 
     # ── Selection / drag affordances (drawn on top of the items) ──────────────
     def _paint_selection(self, p):
