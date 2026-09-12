@@ -1,0 +1,151 @@
+<title>Anchor Direction Invariant</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ground:#EEF0F3; --surface:#FFFFFF; --surface-alt:#FAFBFC; --inset:#F1F4F7;
+  --border:#E2E5EA; --border-strong:#CDD2DA; --hairline:#ECEEF1;
+  --text:#1E2530; --muted:#5C6675; --faint:#8A93A2;
+  --accent:#2C6E9B; --accent-ink:#1F5476; --ok:#1D9E75; --warn:#BA7517; --bad:#C23B3B;
+  --teal:#1E8FA3; --teal-ink:#12707F; --teal-soft:#E4F2F3;
+  --conn:#4E86A6; --band:#F7F9FB;
+  --sans:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --mono:"IBM Plex Mono","DejaVu Sans Mono",ui-monospace,monospace;
+  --shadow-sm:0 1px 2px rgba(22,32,48,.06), 0 1px 3px rgba(22,32,48,.05);
+}
+:root:not([data-theme="light"]){
+  @media (prefers-color-scheme: dark){
+    --ground:#14181E; --surface:#1B2129; --surface-alt:#20272F; --inset:#232B34;
+    --border:#2C353F; --border-strong:#3A4552; --hairline:#262E37;
+    --text:#E7ECF2; --muted:#A2ADBB; --faint:#727E8C;
+    --accent:#5FA8D6; --accent-ink:#9BCBE8; --ok:#3FBE93; --warn:#D69A46; --bad:#E06A6A;
+    --teal:#37B7CC; --teal-ink:#8FE0EC; --teal-soft:#183038; --conn:#6E9BB6; --band:#191F26;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.28);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#14181E; --surface:#1B2129; --surface-alt:#20272F; --inset:#232B34;
+  --border:#2C353F; --border-strong:#3A4552; --hairline:#262E37;
+  --text:#E7ECF2; --muted:#A2ADBB; --faint:#727E8C;
+  --accent:#5FA8D6; --accent-ink:#9BCBE8; --ok:#3FBE93; --warn:#D69A46; --bad:#E06A6A;
+  --teal:#37B7CC; --teal-ink:#8FE0EC; --teal-soft:#183038; --conn:#6E9BB6; --band:#191F26;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.28);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--text);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;padding:30px 20px 48px}
+.wrap{max-width:900px;margin:0 auto}
+h1{font-size:21px;font-weight:600;letter-spacing:-.2px;margin:0 0 5px;text-wrap:balance}
+.lede{color:var(--muted);font-size:13.5px;line-height:1.7;margin:0 0 4px;max-width:72ch}
+.lede b{color:var(--text);font-weight:600}
+.lede code{font-family:var(--mono);font-size:12px;background:var(--inset);padding:1px 5px;border-radius:4px;color:var(--text)}
+
+.rule{display:flex;gap:12px;align-items:flex-start;margin:18px 0 26px;padding:14px 16px;
+  background:var(--teal-soft);border:1px solid color-mix(in srgb,var(--teal) 30%,transparent);
+  border-radius:12px;font-size:13px;line-height:1.65;color:var(--teal-ink)}
+.rule b{color:var(--text)}
+.rule .m{font-family:var(--mono);font-weight:600}
+
+.panels{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:640px){.panels{grid-template-columns:1fr}}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+  box-shadow:var(--shadow-sm);padding:15px 16px 14px}
+.phead{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}
+.ptag{font-size:10.5px;font-weight:700;letter-spacing:.4px;color:#fff;background:var(--faint);border-radius:5px;padding:2px 7px}
+.pname{font-size:14px;font-weight:600}
+.stage{height:150px;background:var(--band);border:1px solid var(--hairline);border-radius:10px;overflow:hidden}
+.stage svg{display:block;width:100%;height:100%}
+.pcap{color:var(--muted);font-size:12px;line-height:1.55;margin-top:9px}
+.pcap b{color:var(--text)} .pcap .m{font-family:var(--mono)}
+
+.take{margin:22px 0 0;padding:14px 16px;background:var(--surface-alt);border:1px solid var(--border);
+  border-radius:12px;font-size:13px;line-height:1.7;color:var(--muted);max-width:78ch}
+.take b{color:var(--text)}
+.take .m{font-family:var(--mono);font-size:12px;background:var(--inset);padding:1px 5px;border-radius:4px;color:var(--text)}
+
+/* svg */
+.wire{stroke:var(--conn);stroke-width:2.2;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.arw{fill:var(--conn)}
+.pinring{fill:var(--band)} .pindot{fill:var(--teal)}
+.axis{stroke:var(--border-strong);stroke-width:1} .tick{stroke:var(--border-strong);stroke-width:1}
+.tlab{fill:var(--faint);font-family:var(--mono);font-size:8.5px}
+.name{fill:var(--text);font-family:var(--mono);font-size:11px;font-weight:500}
+.role{font-family:var(--sans);font-size:8.5px;font-weight:700;letter-spacing:.4px}
+.role.a{fill:var(--teal-ink)} .role.d{fill:var(--muted)}
+.rolebg-a{fill:var(--teal-soft)} .rolebg-d{fill:var(--inset)}
+.offlab{fill:var(--conn);font-family:var(--mono);font-size:9px}
+
+footer{color:var(--faint);font-size:12px;margin-top:22px;line-height:1.6}
+</style>
+
+<div class="wrap">
+  <h1>Why the arrow can't flip on you</h1>
+  <p class="lede">The worry: if you re-anchor so the <b>left</b> step depends on a <b>right</b> step, an
+  arrow would point backward and the roles blur. But that state can't exist — because of the ordering
+  rule, flipping the anchor <b>reorders the steps in time</b>, and the line still flows left → right.</p>
+
+  <div class="rule">
+    <span>⚓</span>
+    <span><b>The invariant:</b> a dependent always fires at <span class="m">anchor_edge + offset</span>,
+    with <span class="m">offset ≥ 0</span> (the drag clamps to it; the agent rejects a negative offset).
+    So the dependent is always at or after its anchor in time — the anchor is always the <b>earlier /
+    left</b> end, the dependent the <b>later / right</b> end. The arrow always points right.</span>
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <div class="phead"><span class="ptag">BEFORE</span><span class="pname">POWER hangs off BW</span></div>
+      <div class="stage" id="before"></div>
+      <div class="pcap"><b>BW</b> is the anchor, <b>POWER</b> the dependent — <span class="m">POWER = BW + 0:30</span>.
+      The line leaves BW and the arrow lands on POWER.</div>
+    </div>
+    <div class="panel">
+      <div class="phead"><span class="ptag">AFTER FLIP</span><span class="pname">BW hangs off POWER</span></div>
+      <div class="stage" id="after"></div>
+      <div class="pcap">Re-anchor BW → POWER and <b>BW must now fire after POWER</b>, so POWER slides
+      <b>earlier (left)</b>. It's the anchor now — still on the left, arrow still pointing right, into BW.</div>
+    </div>
+  </div>
+
+  <div class="take">
+    <b>So "which is which" is never ambiguous:</b> the step a line <b>leaves</b> (its left / earlier end) is
+    the <b>anchor</b>; the step the <b>arrowhead lands on</b> (its right / later end) is the <b>dependent</b>.
+    The faint arrowhead only confirms what the left-to-right flow already tells you. You can never get a
+    right-hand step anchoring a left-hand one — the editor would need a negative offset, which it refuses
+    (<span class="m">offset ≥ 0</span>); it moves the anchor earlier instead.
+  </div>
+
+  <footer>Same 2 steps, same 0:30 gap — only the anchor direction changed, and the layout reordered to keep
+  the flow left → right.</footer>
+</div>
+
+<script>
+// a mini time axis with two pins connected; anchor on the left, dependent on the right
+function scene(leftName, rightName, arrowInto){
+  const y=64, L={x:78,y}, R={x:250,y};
+  const axisY=112;
+  const axis = `<line class="axis" x1="20" y1="${axisY}" x2="330" y2="${axisY}"/>` +
+    [0,1,2,3,4,5].map(i=>{const x=30+i*58;return `<line class="tick" x1="${x}" y1="${axisY}" x2="${x}" y2="${axisY+4}"/>`+
+      `<text class="tlab" x="${x}" y="${axisY+14}" text-anchor="middle">${i}:00</text>`;}).join('');
+  // wire L -> R, arrow into whichever is the dependent
+  const dep = arrowInto==='right' ? R : L;
+  const wire = `<path class="wire" d="M${L.x+8} ${y} L${R.x-8} ${y}"/>`;
+  const arw = arrowInto==='right'
+    ? `<path class="arw" d="M${R.x-16} ${y-5} L${R.x-8} ${y} L${R.x-16} ${y+5} Z"/>`
+    : `<path class="arw" d="M${L.x+16} ${y-5} L${L.x+8} ${y} L${L.x+16} ${y+5} Z"/>`;
+  const off = `<text class="offlab" x="${(L.x+R.x)/2}" y="${y-11}" text-anchor="middle">+0:30</text>`;
+  function pin(pt,label){ return `<circle class="pinring" cx="${pt.x}" cy="${pt.y}" r="8.5"/>`+
+    `<circle class="pindot" cx="${pt.x}" cy="${pt.y}" r="6"/>`+
+    `<text class="name" x="${pt.x}" y="${pt.y-14}" text-anchor="middle">${label}</text>`; }
+  function role(pt, isAnchor){
+    const t=isAnchor?'ANCHOR':'DEPENDENT', w=isAnchor?46:64;
+    return `<rect class="${isAnchor?'rolebg-a':'rolebg-d'}" x="${pt.x-w/2}" y="${pt.y+13}" width="${w}" height="14" rx="7"/>`+
+      `<text class="role ${isAnchor?'a':'d'}" x="${pt.x}" y="${pt.y+23}" text-anchor="middle">${t}</text>`; }
+  const leftIsAnchor = arrowInto==='right';
+  return `<svg viewBox="0 0 350 150" preserveAspectRatio="xMidYMid meet">${axis}${wire}${off}${arw}`+
+    pin(L,leftName)+pin(R,rightName)+role(L,leftIsAnchor)+role(R,!leftIsAnchor)+`</svg>`;
+}
+document.getElementById('before').innerHTML = scene('BW','POWER','right');   // BW anchor (left), arrow into POWER (right)
+document.getElementById('after').innerHTML  = scene('POWER','BW','right');   // POWER slid left, now the anchor; arrow into BW
+</script>
