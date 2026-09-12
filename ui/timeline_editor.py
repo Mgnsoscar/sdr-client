@@ -96,6 +96,9 @@ TCHIP_NV_GAP = 6.0          # param name → value
 TCHIP_VU_GAP = 6.0          # value → unit chip
 TCHIP_SEP = 6.0            # gap between chips
 TUCHIP_PAD = 4.0           # unit-chip / state-pill horizontal padding
+PIN_CAP_GAP = 13.0         # cx → a right-side pin caption's left edge (normal)
+PIN_CAP_GAP2 = 24.0        # …wider for a TWO-SIDED pin, so its exit connector can duck under it
+                           # (docs/tune-pin-both-sides-mockup.html · option C)
 TICK_S = 30                 # base tick interval (seconds); adapts with zoom
 DRAG_THRESHOLD = 4          # px of movement before a press counts as a drag
 
@@ -1062,33 +1065,59 @@ class _TimelineCanvas(QWidget):
             p.drawPath(path)
         else:
             p.drawEllipse(QRectF(cx - 6.5, cy - 6.5, 13, 13))
-        # Caption side: a step-anchor TARGET has its connector exit to the RIGHT (a point exits
-        # right — see _paint_connectors), which would run straight through a right-hand caption. So
-        # when something is anchored to this pin, put the caption on the LEFT; otherwise the right.
-        left = self._is_anchor_target(it)
+        # Caption side (docs/tune-pin-both-sides-mockup.html):
+        #  • TARGET only (a connector exits RIGHT, nothing enters) → caption LEFT, clear of the line.
+        #  • TWO-SIDED (also a dependent: a connector ENTERS from the left too) → no free side, so keep
+        #    the caption on the RIGHT with a wider gap and let the exit connector duck UNDER it
+        #    (option C — the router does the ducking in _connector_points).
+        #  • otherwise (plain / dependent-only) → caption RIGHT as normal.
+        is_target = self._is_anchor_target(it)
+        two_sided = is_target and getattr(it, "anchor", "") == "step"
+        left = is_target and not two_sided
+        gap = PIN_CAP_GAP2 if two_sided else PIN_CAP_GAP
         if one_shot:
             name = it.task_name or "(no task)"
             p.setFont(self._f(12, True)); p.setPen(QColor(Palette.TEXT))
             if left:
                 tw = QFontMetrics(self._f(12, True)).horizontalAdvance(name)
-                p.drawText(QRectF(cx - 13 - tw, y, tw, LANE_H),
+                p.drawText(QRectF(cx - PIN_CAP_GAP - tw, y, tw, LANE_H),
                            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight), name)
             else:
-                p.drawText(QRectF(cx + 13, y, 260, LANE_H),
+                p.drawText(QRectF(cx + gap, y, 260, LANE_H),
                            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), name)
         else:
             defs, total, fonts = self._tune_chip_defs(it)
-            tx = (cx - 13 - total) if left else (cx + 13)
+            tx = (cx - PIN_CAP_GAP - total) if left else (cx + gap)
             self._paint_tune_chips(p, defs, fonts, tx, cy, base)
 
     def _is_anchor_target(self, it) -> bool:
         """True when some other step is anchored TO this item (its connector exits to the RIGHT of
-        the pin) — so the pin's caption belongs on the LEFT to clear that line."""
+        the pin) — so the pin's caption belongs on the LEFT (target-only) or the exit must duck under
+        it (two-sided)."""
         sid = getattr(it, "step_id", "") or ""
         if not sid:
             return False
         return any(getattr(d, "anchor", "") == "step"
                    and (getattr(d, "anchor_step_id", "") or "") == sid for d in self._rows)
+
+    def _pin_right_caption(self, it):
+        """(left_x, width) of a pin's RIGHT-side caption in canvas x, or None when the caption is
+        flipped LEFT (a target-only pin) or the item is not a pin. Used by the connector router to
+        duck a two-sided pin's exit line under its readout (option C)."""
+        g = self._geom.get(it.uid)
+        if not g or getattr(it, "kind", "") == "bar" or tlm._is_ramp(it):
+            return None
+        is_target = self._is_anchor_target(it)
+        two_sided = is_target and getattr(it, "anchor", "") == "step"
+        if is_target and not two_sided:
+            return None                                  # flipped LEFT → the right side is clear
+        cx = g.get("cx", 0.0)
+        gap = PIN_CAP_GAP2 if two_sided else PIN_CAP_GAP
+        if getattr(it, "action", "run") == "run":        # one-shot → task-name text
+            total = QFontMetrics(self._f(12, True)).horizontalAdvance(it.task_name or "(no task)")
+        else:                                            # tune → the readout-chip run
+            total = self._tune_chip_defs(it)[1]
+        return cx + gap, total
 
     def _tune_parts(self, it) -> List[Tuple[str, str, str, bool]]:
         """(name, value, unit, is_flag) per param a tune step changes. The controlled --power is shown
@@ -1213,8 +1242,16 @@ class _TimelineCanvas(QWidget):
             obstacles = self._intervening_obstacles(tgt.uid, it.uid)
             base, _e, _fa, _fb, ink = self._item_colors(it)
             sel = (it.uid == self._selected)
+            # If the anchor is a two-sided pin its readout sits on its RIGHT, in the exit's path;
+            # hand the router that span so the line ducks UNDER it (option C).
+            anchor_cap = None
+            if exit_dir > 0:
+                rc = self._pin_right_caption(tgt)
+                if rc is not None:
+                    tx, total = rc
+                    anchor_cap = (tx, tx + total)
             self._draw_connector(p, x1, y1, x2, y2, base, ink,
-                                 float(getattr(it, "offset", 0.0)), exit_dir, obstacles, sel)
+                                 float(getattr(it, "offset", 0.0)), exit_dir, obstacles, sel, anchor_cap)
 
     def _intervening_obstacles(self, anchor_uid, dep_uid):
         """x-intervals [(lo,hi)] of the steps whose ROW sits strictly between the anchor's and
@@ -1256,13 +1293,26 @@ class _TimelineCanvas(QWidget):
         path.lineTo(*pts[-1])
         return path
 
-    def _connector_points(self, x1, y1, x2, y2, exit_dir, obstacles, chip_run):
+    def _connector_points(self, x1, y1, x2, y2, exit_dir, obstacles, chip_run, anchor_cap=None):
         """Waypoints for a connector that ENTERS the dependent HORIZONTALLY from the left, with
         the drop column chosen LEFT of the dependent (room for the inline chip) and clear of any
         intervening third-party step. When that column falls left of the anchor edge, WRAP via a
-        channel just outside the dependent's row so the entry stays horizontal."""
+        channel just outside the dependent's row so the entry stays horizontal.
+
+        ``anchor_cap`` = (lo, hi) is the x-span of the anchor pin's RIGHT-side readout (a two-sided
+        pin, option C): the exit then leaves HORIZONTALLY, ducks into a channel just past the caption
+        (in the dependent's direction), runs UNDER the readout, and carries on — so the line never
+        runs through the text."""
         STUB, GAP = 16.0, 14.0
         sgn = 1.0 if y2 >= y1 else -1.0
+        pre = []
+        if anchor_cap and exit_dir > 0:
+            cap_lo, cap_hi = anchor_cap
+            if x2 > cap_hi + 10.0:                  # dependent clearly past the readout → duck under it
+                drop = cap_lo - 6.0                 # drop the exit just BEFORE the caption's left edge
+                yd = y1 + sgn * (LANE_H / 2.0 + 6.0)  # a channel just below/above the readout
+                pre = [(x1, y1), (drop, y1), (drop, yd)]
+                x1, y1 = drop, yd                   # resume routing from the under-channel, past the pin
         xd = x2 - chip_run                          # leave room for the chip inline on the entry run
         for _ in range(len(obstacles) + 2):         # push left of any obstacle the drop lands in
             hit = next(((lo, hi) for (lo, hi) in obstacles if lo - 6.0 <= xd <= hi + 6.0), None)
@@ -1272,19 +1322,23 @@ class _TimelineCanvas(QWidget):
         xd = min(xd, x2 - 20.0)
         if xd >= x1 - 1.0:
             if xd <= x1 + 1.0:                      # dependent ~at the anchor x: drop straight, run in
-                return [(x1, y1), (x1, y2), (x2, y2)]
-            return [(x1, y1), (xd, y1), (xd, y2), (x2, y2)]
-        # xd is LEFT of the anchor edge → wrap: exit the stub, run a channel to xd, drop, run in
-        xe = x1 + STUB * exit_dir
-        ch = y2 - (LANE_H / 2.0 + LANE_VGAP / 2.0) * sgn
-        return [(x1, y1), (xe, y1), (xe, ch), (xd, ch), (xd, y2), (x2, y2)]
+                pts = [(x1, y1), (x1, y2), (x2, y2)]
+            else:
+                pts = [(x1, y1), (xd, y1), (xd, y2), (x2, y2)]
+        else:
+            # xd is LEFT of the (resumed) anchor edge → wrap: run a channel to xd, drop, run in
+            xe = x1 + STUB * exit_dir
+            ch = y2 - (LANE_H / 2.0 + LANE_VGAP / 2.0) * sgn
+            pts = [(x1, y1), (xe, y1), (xe, ch), (xd, ch), (xd, y2), (x2, y2)]
+        return pre + pts[1:] if pre else pts        # pts[0] == pre[-1] (the resume point)
 
     def _draw_connector(self, p, x1, y1, x2, y2, base, ink, offset, exit_dir=1.0,
-                        obstacles=(), selected=False):
+                        obstacles=(), selected=False, anchor_cap=None):
         stroke = QColor(Palette.ACCENT) if selected else base
         text = "+" + self._mmss(offset)
         chip_w = QFontMetrics(mono_font(10)).horizontalAdvance(text) + 14.0
-        pts = self._connector_points(x1, y1, x2, y2, exit_dir, list(obstacles), chip_w + 24.0)
+        pts = self._connector_points(x1, y1, x2, y2, exit_dir, list(obstacles), chip_w + 24.0,
+                                     anchor_cap)
         path = self._ortho_path(pts, 6.0)
         if selected:                                   # soft under-glow when selected
             halo = QColor(Palette.ACCENT); halo.setAlpha(55)

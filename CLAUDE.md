@@ -239,6 +239,21 @@ axis, connectors. Phased build: **visual redesign → drag/drop → connectors (
       target and a dependent is rare — it flips left, favouring the more prominent right-exit line.)
       Test: `tests/test_step_editor_carried_bw.py::test_anchor_target_pin_flips_its_caption_to_the_left`.
       Suite 935 → 936.
+    - **Two-sided pins duck the exit UNDER the caption** (owner follow-up; mockup
+      `docs/tune-pin-both-sides-mockup.html`, option C): a pin that is BOTH a target AND a dependent
+      (a chain `A → this → C`) has a connector off both sides, so the left-flip has no free side.
+      `_paint_pin` keeps its caption on the RIGHT with a wider gap (`PIN_CAP_GAP2` = 24 vs
+      `PIN_CAP_GAP` = 13), and the connector router routes that pin's EXIT line horizontally out, then
+      into a channel just below/above the readout (toward the dependent) and UNDER it — so the line
+      never runs through the text (connectors paint under the pins, so a beside caption otherwise reads
+      as line-through-text). `_pin_right_caption(it)` returns the right caption's `(left_x, width)`
+      (None when flipped left); `_paint_connectors` passes it as `anchor_cap` to `_draw_connector` →
+      `_connector_points`, which prepends a duck (`exit stub → drop just before the caption → under-
+      channel`) and resumes the normal drop-to-dependent routing past the caption. Byte-identical for a
+      one-sided pin / bar / ramp anchor (`anchor_cap` None). Tests: `tests/test_step_editor_carried_bw.py`
+      (two-sided pin keeps a right span at the wide gap + target-only stays None; `_connector_points`
+      ducks below y1 and drops before the caption with `anchor_cap`, no duck without). Verified live on
+      an `A → mid → C` tune chain. Suite 936 → 938.
 
 ## Current state — step-to-step anchoring Phase 1 (client authoring + geometry): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo; stacked on `run-task-conflict-guards`)
 Owner ask: anchor a step not only to on-air/off-air/Hold but to ANOTHER step's start/end edge — e.g. a

@@ -321,3 +321,36 @@ def test_unit_chip_colours_differ_by_family_and_pin_paints():
     ed.resize(900, 240)
     _app.processEvents()
     ed.grab()                                                               # paints the chips — no raise
+
+
+def test_two_sided_pin_keeps_caption_right_with_a_wide_gap():
+    # A pin that is BOTH a target and a dependent (A -> mid -> C) has a connector off both sides, so
+    # the left-flip has no free side: its caption stays on the RIGHT with a wider gap (option C).
+    from ui.timeline_editor import PIN_CAP_GAP2
+    ed = _editor([])
+    A = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=20.0,
+                    params={"power": -7.49}, power_view="psd_live", step_id="A")
+    mid = tlm.RunItem(task_name="chirp", action="tune", anchor="step", anchor_step_id="A",
+                      anchor_edge="end", offset=15.0, params={"bw": 20}, step_id="mid")
+    C = tlm.RunItem(task_name="chirp", action="tune", anchor="step", anchor_step_id="mid",
+                    anchor_edge="end", offset=15.0, params={"sidelobes": 5})
+    ed._canvas.set_items([_bar(10), A, mid, C])
+    ed.resize(1100, 320); _app.processEvents(); ed.grab()
+    c = ed._canvas
+    span = c._pin_right_caption(mid)                                         # two-sided → right span
+    assert span is not None
+    assert span[0] == pytest.approx(c._geom[mid.uid]["cx"] + PIN_CAP_GAP2)   # right side, wide gap
+    assert c._pin_right_caption(A) is None                                   # target-only → flips LEFT
+
+
+def test_connector_ducks_under_a_two_sided_pins_caption():
+    # The router routes an exit HORIZONTALLY out of the anchor, then into a channel below the readout
+    # (option C), so the line never runs through the text.
+    ed = _editor([]); ed.grab()
+    c = ed._canvas
+    plain = c._connector_points(100.0, 50.0, 400.0, 92.0, 1.0, [], 40.0)
+    assert all(y in (50.0, 92.0) for _x, y in plain)                        # no duck without a caption
+    ducked = c._connector_points(100.0, 50.0, 400.0, 92.0, 1.0, [], 40.0, anchor_cap=(120.0, 260.0))
+    assert ducked[0] == (100.0, 50.0)                                        # exits the anchor at y1
+    assert any(50.0 < y < 92.0 for _x, y in ducked)                         # ducks into a channel below
+    assert any(abs(x - 114.0) < 1.0 for x, _y in ducked)                    # drops just before the caption
