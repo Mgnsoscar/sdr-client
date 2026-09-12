@@ -176,7 +176,21 @@ axis, connectors. Phased build: **visual redesign → drag/drop → connectors (
     cleared on release + hover). Bar-body snaps its START edge. Tests: `_snap_targets` includes other
     edges + anchors and excludes self; a near-edge cursor snaps within `SNAP_PX`
     (`tests/test_timeline_step_anchor_ui.py`). Suite 923 → 924.
-  - **NOT YET DONE** (later phases, per plan): drag ghosts + marquee/multi-select, the minimap.
+  - **Multi-select + group move** — the canvas holds a `_selection` SET (with `_selected` as the PRIMARY
+    for the connector chip / context menu / tooltip). **Shift/Ctrl-click** toggles an item
+    (`_toggle_select`); a plain click on a member keeps the set (so a body-drag moves the group) and
+    collapses to just it on release-without-move; **Ctrl+A** selects all; an empty-canvas **marquee**
+    drag (`_marquee` / `_apply_marquee`, a translucent accent rect) selects intersecting items
+    (additive with a modifier). `_paint_selection` rings every selected item. **Group move**: dragging
+    any selected item's BODY (`bar_body`/`run_body`) shifts every selected item by one on-air delta
+    (`_group_move` / `_group_bases`), snapping the primary's leading edge (excluding the whole moving
+    group from snap targets); the gap between them is preserved. **Delete/Backspace** deletes the whole
+    selection in one undo step (`_delete_selection`, reusing `_reanchor_deps`, which re-anchors each
+    deleted target's dependents unless they're also being deleted); the right-click menu shows
+    **"Delete selected"** for a multi-selection. Live-drag already previews the move, so no separate
+    ghost. Tests (`tests/test_timeline_step_anchor_ui.py`): toggle/select-only, delete-selection +
+    one-undo, marquee intersect, group move preserves the gap. Suite 924 → 928.
+  - **NOT YET DONE** (later phases, per plan): the minimap.
 
 ## Current state — step-to-step anchoring Phase 1 (client authoring + geometry): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo; stacked on `run-task-conflict-guards`)
 Owner ask: anchor a step not only to on-air/off-air/Hold but to ANOTHER step's start/end edge — e.g. a

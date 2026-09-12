@@ -337,13 +337,61 @@ def test_drag_snap_targets_and_cursor():
     cv = _chirp_editor([_bar(), ramp])._canvas
     bar = next(it for it in cv._items if it.kind == "bar")
     gb = cv._geom[bar.uid]; gr = cv._geom[ramp.uid]
-    targets = cv._snap_targets(ramp.uid)          # dragging the ramp
+    targets = cv._snap_targets({ramp.uid})        # dragging the ramp (exclude set)
     assert cv._on in targets and cv._off in targets            # the on-air / off-air anchors
     assert gb["start_x"] in targets and gb["stop_x"] in targets   # the OTHER item's edges
     assert gr["start_x"] not in targets and gr["stop_x"] not in targets   # never itself
     # a cursor a few px from another edge snaps onto it
     snapped = cv._snap_cursor(gb["stop_x"] + 3.0, ramp.uid)
     assert snapped is not None and abs(snapped - (gb["stop_x"] + 3.0)) <= SNAP_PX
+
+
+# ── Multi-select / marquee / group move ─────────────────────────────────────────
+
+def test_multi_select_toggle_and_select_only():
+    a = _tune(10.0); b = _tune(20.0)
+    cv = _chirp_editor([_bar(), a, b])._canvas
+    cv._select_only(a.uid)
+    assert cv._selection == {a.uid} and cv._selected == a.uid
+    cv._toggle_select(b.uid)
+    assert cv._selection == {a.uid, b.uid} and cv._selected == b.uid
+    cv._toggle_select(a.uid)
+    assert cv._selection == {b.uid}
+    cv._clear_selection()
+    assert not cv._selection and cv._selected is None
+
+
+def test_delete_selection_removes_all_in_one_undo():
+    a = _tune(10.0); b = _tune(20.0)
+    cv = _chirp_editor([_bar(), a, b])._canvas
+    cv._selection = {a.uid, b.uid}; cv._selected = a.uid
+    cv._delete_selection()
+    assert all(it.uid not in (a.uid, b.uid) for it in cv._items)
+    cv.undo()                                    # one undo restores both
+    assert any(it.uid == a.uid for it in cv._items) and any(it.uid == b.uid for it in cv._items)
+
+
+def test_apply_marquee_selects_only_intersecting_items():
+    a = _tune(10.0); b = _tune(400.0)
+    cv = _chirp_editor([_bar(), a, b])._canvas
+    ga = cv._geom[a.uid]
+    cv._marquee = {"x0": ga["cx"] - 5, "y0": ga["y"] - 2, "x1": ga["cx"] + 5,
+                   "y1": ga["y"] + LANE_H + 2, "additive": False, "base": set(), "moved": True}
+    cv._apply_marquee()
+    assert a.uid in cv._selection and b.uid not in cv._selection
+
+
+def test_group_move_shifts_all_selected_by_one_delta():
+    a = _tune(10.0); b = _tune(30.0)
+    cv = _chirp_editor([_bar(), a, b])._canvas
+    cv._selection = {a.uid, b.uid}; cv._selected = a.uid
+    eff = cv._eff(); mid = tlm.midpoint(cv._on, cv._off)
+    cv._drag = {"item": a, "part": "run_body", "press_x": cv._geom[a.uid]["cx"], "moved": True,
+                "start0": 0.0, "stop0": 0.0, "undo0": [], "collapse": a.uid,
+                "group": {a.uid, b.uid}, "group0": cv._group_bases({a.uid, b.uid})}
+    cv._group_move(cv._geom[a.uid]["cx"] + 40.0 * eff, eff, mid)
+    assert abs((b.offset - a.offset) - 20.0) < 1e-6      # the gap is preserved exactly
+    assert 34.0 <= a.offset <= 54.0                       # both shifted ~+40 s (snapping tolerant)
 
 
 def test_connector_points_wraps_when_offset_is_zero():

@@ -292,7 +292,9 @@ class _TimelineCanvas(QWidget):
         self._baseline = self._content_h - BASELINE_FROM_BOTTOM
         self._zoom = 1.0                 # horizontal (time-axis) zoom factor
         self._scroll = None              # host QScrollArea, for zoom-to-cursor
-        self._selected: Optional[int] = None    # uid of the selected item (highlight + chip)
+        self._selected: Optional[int] = None    # PRIMARY selected uid (connector chip / context menu)
+        self._selection: set = set()            # ALL selected uids (multi-select); includes _selected
+        self._marquee: Optional[dict] = None    # active rubber-band rectangle {x0,y0,x1,y1}
         self._connect: Optional[dict] = None    # active drag-to-anchor: {src, edge, cursor, target, moved}
         self._rmchip: Optional[QRectF] = None   # hit rect of the painted "Remove anchor" chip
         self._rmchip_pos: Optional[tuple] = None  # (cx, cy) where the chip paints, set each paint
@@ -332,12 +334,36 @@ class _TimelineCanvas(QWidget):
     def set_items(self, items: List) -> None:
         # Loading a fresh sequence is the new baseline — start undo history over.
         self._items = list(items)
-        self._selected = None
+        self._clear_selection()
         self._connect = None
         self._undo = []
         self._redo = []
         self.relayout()
         self.changed.emit()
+
+    # ── Selection (a primary uid + a multi-select set) ────────────────────────
+    def _select_only(self, uid) -> None:
+        self._selection = {uid} if uid is not None else set()
+        self._selected = uid
+
+    def _toggle_select(self, uid) -> None:
+        if uid in self._selection:
+            self._selection.discard(uid)
+            if self._selected == uid:
+                self._selected = next(iter(self._selection), None)
+        else:
+            self._selection.add(uid)
+            self._selected = uid
+
+    def _clear_selection(self) -> None:
+        self._selection = set()
+        self._selected = None
+
+    def _prune_selection(self) -> None:
+        live = {it.uid for it in self._items}
+        self._selection &= live
+        if self._selected is not None and self._selected not in live:
+            self._selected = next(iter(self._selection), None)
 
     def add_item(self, item) -> None:
         self._record()
@@ -359,8 +385,7 @@ class _TimelineCanvas(QWidget):
             self._record()
         self._items = [it for it in self._items if it.uid != uid]
         self._collapsed.discard(uid)
-        if self._selected == uid:
-            self._selected = None
+        self._prune_selection()
         self.relayout()
         self.changed.emit()
 
@@ -368,7 +393,7 @@ class _TimelineCanvas(QWidget):
         self._record()
         self._items = []
         self._collapsed.clear()
-        self._selected = None
+        self._clear_selection()
         self._connect = None
         self.relayout()
         self.changed.emit()
@@ -386,8 +411,7 @@ class _TimelineCanvas(QWidget):
 
     def _restore(self, snap: list) -> None:
         self._items = snap
-        if self._selected is not None and all(it.uid != self._selected for it in self._items):
-            self._selected = None
+        self._prune_selection()
         self._connect = None
         self.relayout()
         self.changed.emit()
@@ -644,6 +668,7 @@ class _TimelineCanvas(QWidget):
         self._paint_selection(p)
         if self._rmchip_pos is not None:
             self._paint_remove_chip(p, *self._rmchip_pos)
+        self._paint_marquee(p)
         self._paint_snap_guide(p)
         self._paint_connect_drag(p)
         self._paint_drag_readout(p)
@@ -1149,27 +1174,36 @@ class _TimelineCanvas(QWidget):
 
     # ── Selection / drag affordances (drawn on top of the items) ──────────────
     def _paint_selection(self, p):
-        """An accent ring around the selected item (bar / ramp capsule or a pin dot)."""
-        if self._selected is None:
-            return
-        it = next((o for o in self._rows if o.uid == self._selected), None)
-        g = self._geom.get(self._selected) if it is not None else None
-        if not g:
-            return
+        """An accent ring around every selected item (bar / ramp capsule or a pin dot)."""
         accent = QColor(Palette.ACCENT)
         halo = QColor(Palette.ACCENT); halo.setAlpha(45)
-        y = g["y"]
         p.setBrush(Qt.BrushStyle.NoBrush)
-        if it.kind == "bar" or tlm._is_ramp(it):
-            sx, px = g.get("start_x", 0.0), g.get("stop_x", 0.0)
-            wmin = HANDLE_W * 2.0 if it.kind == "bar" else RAMP_MIN_W
-            rect = QRectF(min(sx, px) - 2.5, y - 2.5, max(wmin, abs(px - sx)) + 5, LANE_H + 5)
-            p.setPen(QPen(halo, 6)); p.drawRoundedRect(rect, BAR_R + 2, BAR_R + 2)
-            p.setPen(QPen(accent, 2)); p.drawRoundedRect(rect, BAR_R + 2, BAR_R + 2)
-        else:
-            cx, cy = g.get("cx", 0.0), y + LANE_H / 2
-            p.setPen(QPen(halo, 6)); p.drawEllipse(QPointF(cx, cy), 11.0, 11.0)
-            p.setPen(QPen(accent, 2)); p.drawEllipse(QPointF(cx, cy), 11.0, 11.0)
+        for it in self._rows:
+            if it.uid not in self._selection:
+                continue
+            g = self._geom.get(it.uid)
+            if not g:
+                continue
+            y = g["y"]
+            if it.kind == "bar" or tlm._is_ramp(it):
+                sx, px = g.get("start_x", 0.0), g.get("stop_x", 0.0)
+                wmin = HANDLE_W * 2.0 if it.kind == "bar" else RAMP_MIN_W
+                rect = QRectF(min(sx, px) - 2.5, y - 2.5, max(wmin, abs(px - sx)) + 5, LANE_H + 5)
+                p.setPen(QPen(halo, 6)); p.drawRoundedRect(rect, BAR_R + 2, BAR_R + 2)
+                p.setPen(QPen(accent, 2)); p.drawRoundedRect(rect, BAR_R + 2, BAR_R + 2)
+            else:
+                cx, cy = g.get("cx", 0.0), y + LANE_H / 2
+                p.setPen(QPen(halo, 6)); p.drawEllipse(QPointF(cx, cy), 11.0, 11.0)
+                p.setPen(QPen(accent, 2)); p.drawEllipse(QPointF(cx, cy), 11.0, 11.0)
+
+    def _paint_marquee(self, p):
+        if self._marquee is None:
+            return
+        mq = self._marquee
+        r = QRectF(QPointF(mq["x0"], mq["y0"]), QPointF(mq["x1"], mq["y1"])).normalized()
+        fill = QColor(Palette.ACCENT); fill.setAlpha(28)
+        p.setPen(QPen(QColor(Palette.ACCENT), 1)); p.setBrush(fill)
+        p.drawRect(r)
 
     def _paint_remove_chip(self, p, cx, cy):
         """The clickable '✕ Remove anchor' pill on a selected connector. Records its hit
@@ -1420,39 +1454,52 @@ class _TimelineCanvas(QWidget):
         if e.button() != Qt.MouseButton.LeftButton:
             return
         pos = e.position()
+        additive = bool(e.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                         | Qt.KeyboardModifier.ShiftModifier))
         # "Remove anchor" chip on the selected connector wins over everything under it.
         if self._rmchip is not None and self._rmchip.contains(pos):
             self._detach_anchor(self._selected)
             return
+        self.setFocus()                      # so Ctrl+Z / Delete reach the canvas
         hit = self._hit(pos.x(), pos.y())
         if hit is None:
-            self._drag = None
-            if self._selected is not None:      # click on empty canvas → deselect
-                self._selected = None
-                self.update()
+            # Empty press → drag a marquee to select a region (additive keeps the current set).
+            self._drag = None; self._connect = None
+            self._marquee = {"x0": pos.x(), "y0": pos.y(), "x1": pos.x(), "y1": pos.y(),
+                             "additive": additive, "base": set(self._selection), "moved": False}
             return
         it, part = hit
         if part == "caret":
             self._drag = None
             self._toggle_collapsed(it)
             return
-        # Selecting on press highlights the item and reveals its "Remove anchor" chip.
-        if self._selected != it.uid:
-            self._selected = it.uid
+        if additive:                         # ctrl / shift click toggles this item's membership
+            self._toggle_select(it.uid)
+            self._drag = None; self._connect = None
             self.update()
-        # A press on a connection handle of an anchorable item starts a drag-to-anchor.
+            return
+        # A press on a connection handle of an anchorable item starts a drag-to-anchor (single).
         if part.startswith("edge_") and part == "edge_start" and self._is_anchor_source(it):
+            self._select_only(it.uid); self.update()
             self._connect = {"src": it.uid, "cursor": pos, "target": None,
                              "moved": False, "press_x": pos.x()}
             self._drag = None
             return
+        # Plain click: select just this item, UNLESS it's already part of a multi-selection
+        # (then keep the set so the drag moves the whole group; collapse on release-if-not-moved).
+        if it.uid not in self._selection:
+            self._select_only(it.uid); self.update()
         self._connect = None
-        self.setFocus()                      # so Ctrl+Z / Delete reach the canvas
+        group = (set(self._selection) if part in ("bar_body", "run_body")
+                 and len(self._selection) > 1 and it.uid in self._selection else None)
         self._drag = {
             "item": it, "part": part, "press_x": pos.x(), "moved": False,
             "start0": getattr(it, "start_offset", 0.0),
             "stop0": getattr(it, "stop_offset", 0.0),
             "undo0": self._snapshot(),       # pre-drag state, pushed only if the drag commits
+            "collapse": it.uid if len(self._selection) > 1 else None,
+            "group": group,
+            "group0": self._group_bases(group) if group else {},
         }
 
     def _toggle_collapsed(self, it) -> None:
@@ -1464,6 +1511,15 @@ class _TimelineCanvas(QWidget):
 
     def mouseMoveEvent(self, e):  # noqa: N802
         pos = e.position()
+        # A marquee (rubber-band) selection from an empty-canvas press.
+        if self._marquee is not None:
+            if not (e.buttons() & Qt.MouseButton.LeftButton):
+                return
+            self._marquee["x1"] = pos.x(); self._marquee["y1"] = pos.y()
+            self._marquee["moved"] = True
+            self._apply_marquee()
+            self.update()
+            return
         # A live drag-to-anchor: rubber-band from the source handle to the cursor, snapping
         # onto an eligible target edge under the pointer.
         if self._connect is not None:
@@ -1501,10 +1557,15 @@ class _TimelineCanvas(QWidget):
         x = pos.x()
         eff = self._eff()
         mid = tlm.midpoint(self._on, self._off)
+        self._snap_guide = None
+        # Group move: dragging any selected item's body shifts every selected item by the same
+        # on-air delta (snapping the primary's leading edge).
+        if self._drag.get("group"):
+            self._group_move(x, eff, mid)
+            return
         # Snap the dragged edge to a nearby step edge / anchor / tick (exact when snapped, else
         # the 1 s grid). `sx` is the snap target x (None when nothing is near).
         sx = self._snap_cursor(x, it.uid)
-        self._snap_guide = None
         if part in ("run_body", "hold_body"):
             # A one-shot (or the Hold marker) keeps its anchor (changed only in the
             # editor); dragging only moves the offset, measured to scale from that fixed
@@ -1555,17 +1616,17 @@ class _TimelineCanvas(QWidget):
         return self._on if it.anchor == "start" else self._off
 
     # ── Drag snapping (to nearby step edges / anchors / ticks) ─────────────────
-    def _snap_targets(self, exclude_uid):
+    def _snap_targets(self, exclude):
         """Meaningful x positions a dragged edge can snap to: the on-air / off-air anchors,
         the Hold divider, every OTHER item's edges (a bar/ramp's start+stop, a pin's centre),
-        and the major axis ticks across the defined region."""
+        and the major axis ticks. `exclude` is a set of uids to skip (the moving item(s))."""
         xs = [self._on, self._off]
         for h in self._holds:
             g = self._geom.get(h.uid)
             if g:
                 xs.append(g["cx"])
         for it in self._rows:
-            if it.uid == exclude_uid:
+            if it.uid in exclude:
                 continue
             g = self._geom.get(it.uid)
             if not g:
@@ -1584,14 +1645,70 @@ class _TimelineCanvas(QWidget):
                 xs.append(self._on - k * tick_s * eff); k += 1
         return xs
 
-    def _snap_cursor(self, x, exclude_uid):
-        """The nearest snap target x within SNAP_PX of `x`, or None."""
+    def _snap_cursor(self, x, exclude):
+        """The nearest snap target x within SNAP_PX of `x`, or None. `exclude` is a uid or a
+        set of uids (the moving item(s)) whose own edges are not snap targets."""
+        excl = exclude if isinstance(exclude, (set, frozenset)) else {exclude}
         best, best_d = None, SNAP_PX + 1e-6
-        for tx in self._snap_targets(exclude_uid):
+        for tx in self._snap_targets(excl):
             d = abs(x - tx)
             if d < best_d:
                 best_d, best = d, tx
         return best
+
+    def _group_bases(self, uids):
+        """{uid: (kind, start0, stop0, offset0)} — starting offsets for a group move."""
+        out = {}
+        for u in uids or ():
+            itu = next((o for o in self._items if o.uid == u), None)
+            if itu is None:
+                continue
+            out[u] = (getattr(itu, "kind", ""), float(getattr(itu, "start_offset", 0.0)),
+                      float(getattr(itu, "stop_offset", 0.0)), float(getattr(itu, "offset", 0.0)))
+        return out
+
+    def _group_move(self, x, eff, mid):
+        """Shift every item in the drag's group by one on-air delta (snapping the primary's
+        leading edge to a nearby anchor/edge/tick that is NOT part of the moving group)."""
+        drag = self._drag; it0 = drag["item"]; group = drag["group"]
+        if it0.kind == "bar":
+            ref0_x = self._on + drag["start0"] * eff
+        else:
+            ref0_x = self._anchor_base_x(it0) + drag["group0"].get(it0.uid, ("", 0, 0, 0))[3] * eff
+        sbx = self._snap_cursor(ref0_x + (x - drag["press_x"]), group)
+        if sbx is not None:
+            ds = (sbx - ref0_x) / eff; self._snap_guide = sbx
+        else:
+            ds = tlm._snap((x - drag["press_x"]) / eff)
+        for u, (kind, s0, e0, o0) in drag["group0"].items():
+            itu = next((o for o in self._items if o.uid == u), None)
+            if itu is None:
+                continue
+            if kind == "bar":
+                itu.start_offset = min(s0 + ds, (mid - self._on) / eff)
+                itu.stop_offset = max(e0 + ds, (mid - self._off) / eff)
+            else:
+                itu.offset = self._clamp_tune_offset(itu, o0 + ds)
+            self._live_relayout(itu)
+
+    def _apply_marquee(self):
+        """Set the selection to the items intersecting the marquee rect (added to the base set
+        when the drag started additively)."""
+        mq = self._marquee
+        r = QRectF(QPointF(mq["x0"], mq["y0"]), QPointF(mq["x1"], mq["y1"])).normalized()
+        hit = set()
+        for it in self._rows:
+            g = self._geom.get(it.uid)
+            if not g:
+                continue
+            if it.kind == "bar" or tlm._is_ramp(it):
+                ix0, ix1 = sorted((g.get("start_x", 0.0), g.get("stop_x", 0.0)))
+            else:
+                cx = g.get("cx", 0.0); ix0, ix1 = cx - 7.0, cx + 7.0
+            if r.intersects(QRectF(ix0, g["y"], max(1.0, ix1 - ix0), LANE_H)):
+                hit.add(it.uid)
+        self._selection = (mq["base"] | hit) if mq["additive"] else set(hit)
+        self._selected = next(iter(self._selection), None)
 
     def _clamp_tune_offset(self, it, offset: float) -> float:
         """Keep a tune point inside the on-air span of the task it acts on: a
@@ -1632,6 +1749,13 @@ class _TimelineCanvas(QWidget):
             return
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self._snap_guide = None
+        if self._marquee is not None:
+            mq = self._marquee
+            self._marquee = None
+            if not mq["moved"] and not mq["additive"]:   # a plain empty click clears the selection
+                self._clear_selection()
+            self.update()
+            return
         if self._connect is not None:
             conn = self._connect
             self._connect = None
@@ -1651,7 +1775,10 @@ class _TimelineCanvas(QWidget):
             self._redo.clear()
             self.relayout()
             self.changed.emit()
-        # A non-moved press only selects (done in mousePress); double-click opens the editor.
+        elif drag.get("collapse") is not None:  # click (no drag) on a multi-selection → keep just it
+            self._select_only(drag["collapse"])
+            self.update()
+        # A non-moved press only selects; double-click opens the editor.
 
     def mouseDoubleClickEvent(self, e):  # noqa: N802
         if e.button() != Qt.MouseButton.LeftButton:
@@ -1669,13 +1796,17 @@ class _TimelineCanvas(QWidget):
             self.undo(); e.accept(); return
         if (ctrl and key == Qt.Key.Key_Y) or (ctrl and shift and key == Qt.Key.Key_Z):
             self.redo(); e.accept(); return
+        if ctrl and key == Qt.Key.Key_A and self._rows:      # select all
+            self._selection = {it.uid for it in self._rows}
+            self._selected = next(iter(self._selection), None)
+            self.update(); e.accept(); return
         if ctrl and key == Qt.Key.Key_D and self._selected is not None:
             it = next((o for o in self._items if o.uid == self._selected), None)
             if it is not None:
                 self._duplicate_item(it)
             e.accept(); return
-        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self._selected is not None:
-            self._delete_with_reanchor(self._selected)
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self._selection:
+            self._delete_selection()
             e.accept(); return
         super().keyPressEvent(e)
 
@@ -1755,7 +1886,7 @@ class _TimelineCanvas(QWidget):
         src.anchor_step_id = sid
         src.anchor_edge = edge
         src.offset = off
-        self._selected = src_uid
+        self._select_only(src_uid)
         self.relayout()
         self.changed.emit()
 
@@ -1789,30 +1920,53 @@ class _TimelineCanvas(QWidget):
         else:
             clone.offset = float(getattr(clone, "offset", 0.0)) + nudge
         self.add_item(clone)
-        self._selected = clone.uid
+        self._select_only(clone.uid)
         self.update()
 
+    def _reanchor_deps(self, target, skip=()):
+        """Re-anchor every step anchored to `target` to a plain on-air `start` at the time it
+        currently resolves to (so it stays put), skipping deps whose uid is in `skip` (also
+        being deleted)."""
+        sid = getattr(target, "step_id", "") or ""
+        if not sid:
+            return
+        for dep in self._items:
+            if dep is target or getattr(dep, "anchor", "") != "step":
+                continue
+            if (getattr(dep, "anchor_step_id", "") or "") != sid or dep.uid in skip:
+                continue
+            base = self._step_bases.get(dep.uid)
+            dep.offset = base if base is not None else float(getattr(dep, "offset", 0.0))
+            dep.anchor = "start"
+            dep.anchor_step_id = ""
+            dep.anchor_edge = "end"
+
     def _delete_with_reanchor(self, uid: Optional[int]) -> None:
-        """Delete an item. If OTHER steps anchor to it, re-anchor each dependent to a plain
-        on-air `start` at the time it currently resolves to — so a dependent stays at the
-        instant it was meant to fire instead of orphaning when its anchor disappears."""
+        """Delete an item, re-anchoring any dependents so they stay at their fire time."""
         target = next((o for o in self._items if o.uid == uid), None)
         if target is None:
             return
         self._record()
-        sid = getattr(target, "step_id", "") or ""
-        if sid:
-            for dep in self._items:
-                if dep is target or getattr(dep, "anchor", "") != "step":
-                    continue
-                if (getattr(dep, "anchor_step_id", "") or "") != sid:
-                    continue
-                base = self._step_bases.get(dep.uid)
-                dep.offset = base if base is not None else float(getattr(dep, "offset", 0.0))
-                dep.anchor = "start"
-                dep.anchor_step_id = ""
-                dep.anchor_edge = "end"
+        self._reanchor_deps(target)
         self.remove_item(uid, record=False)     # one undo entry covers the reanchor + delete
+
+    def _delete_selection(self) -> None:
+        """Delete every selected item (dependents re-anchored to their fire time) in one undo
+        step; a dependent that is itself being deleted is not re-anchored."""
+        uids = set(self._selection)
+        if not uids:
+            return
+        self._record()
+        for u in list(uids):
+            target = next((o for o in self._items if o.uid == u), None)
+            if target is not None:
+                self._reanchor_deps(target, skip=uids)
+        self._items = [o for o in self._items if o.uid not in uids]
+        for u in uids:
+            self._collapsed.discard(u)
+        self._clear_selection()
+        self.relayout()
+        self.changed.emit()
 
     # ── Right-click context menu ──────────────────────────────────────────────
     def contextMenuEvent(self, e):  # noqa: N802
@@ -1821,13 +1975,17 @@ class _TimelineCanvas(QWidget):
             e.ignore()
             return
         it = hit[0]
-        self._selected = it.uid
+        if it.uid not in self._selection:      # right-click outside the selection re-selects it
+            self._select_only(it.uid)
         self.update()
         self._open_context_menu(it, e.globalPos())
         e.accept()
 
     def _context_menu_spec(self, it) -> List[str]:
         """Labels for the right-click menu on `it`, in order ('—' = a separator)."""
+        multi = len(self._selection) > 1
+        if multi:                              # a multi-selection menu acts on the whole set
+            return ["Delete selected"]
         spec = ["Edit…"]
         if not tlm._is_hold(it):
             spec.append("Duplicate")
@@ -1845,6 +2003,8 @@ class _TimelineCanvas(QWidget):
             self._detach_anchor(it.uid)
         elif label == "Delete":
             self._delete_with_reanchor(it.uid)
+        elif label == "Delete selected":
+            self._delete_selection()
 
     def _open_context_menu(self, it, global_pos) -> None:
         menu = QMenu(self)
@@ -1960,7 +2120,7 @@ class _TimelineCanvas(QWidget):
         r = dlg.exec()
         if r == QDialog.DialogCode.Accepted and dlg.result_item is not None:
             self.add_item(dlg.result_item)
-            self._selected = dlg.result_item.uid
+            self._select_only(dlg.result_item.uid)
             self.update()
 
     def _default_hold_offset(self) -> float:
@@ -3266,8 +3426,8 @@ class TimelineEditor(QWidget):
         if not self._tasks:
             self._hint.setText("no tasks on this unit — define one in the Tasks tab first")
         else:
-            self._hint.setText("Drag an edge dot to another step to anchor · click to select, "
-                               "double-click to edit · right-click for more · Ctrl+Z undo")
+            self._hint.setText("Drag an edge dot to anchor · click / shift-click / drag a box to "
+                               "select · double-click to edit · right-click for more · Ctrl+Z undo")
         self._canvas.relayout()
 
     def available_tasks(self) -> List[str]:
