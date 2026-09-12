@@ -251,3 +251,46 @@ def test_row_header_shows_the_controlled_power_for_a_ramp_and_a_tune():
     sub = sub.replace("−", "-")
     assert typ == "Tune" and "dBm/MHz" in sub
     assert "-10.5" in sub and "-7.49" not in sub
+
+
+# ── canvas tune-step readout chips (docs/tune-pin-mockup.html · option B) ──────
+def test_tune_chip_parts_split_power_view_and_flags():
+    # A tune's chips split into (name, value, unit, is_flag): the controlled --power shows its view
+    # value + unit; a bool becomes an on/off flag; a plain number is formatted, no unit.
+    ed = _editor([])
+    dens = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=10.0,
+                       params={"power": -7.49}, power_view="psd_live")
+    ed._canvas.set_items([_bar(10), _set_bw(20, 5.0), dens])
+    _app.processEvents()
+    assert ed._canvas._tune_parts(dens) == [("power", "-10.50", "dBm/MHz", False)]
+    rf = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=12.0,
+                     params={"rf": True, "bw": 20})
+    ed._canvas.set_items([_bar(10), rf])
+    _app.processEvents()
+    assert ed._canvas._tune_parts(rf) == [("rf", "on", "", True), ("bw", "20", "", False)]
+
+
+def test_tune_chip_defs_one_chip_per_param_with_widths():
+    from ui.timeline_editor import TCHIP_SEP
+    ed = _editor([])
+    two = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=10.0,
+                      params={"bw": 20, "power": -12.74}, power_view="fbw_power")
+    ed._canvas.set_items([_bar(10), two])
+    _app.processEvents()
+    defs, total, _fonts = ed._canvas._tune_chip_defs(two)
+    assert len(defs) == 2 and all(d["w"] > 0 for d in defs)
+    assert total == pytest.approx(defs[0]["w"] + defs[1]["w"] + TCHIP_SEP)   # one separator
+    assert defs[1]["unit"] == "dBm"                                          # total power → dBm chip
+
+
+def test_unit_chip_colours_differ_by_family_and_pin_paints():
+    ed = _editor([])
+    dens_bg = ed._canvas._unit_chip_colors("dBm/MHz")[1]
+    abs_bg = ed._canvas._unit_chip_colors("dBm")[1]
+    assert dens_bg != abs_bg                                                 # teal density / slate dBm
+    t = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=10.0,
+                    params={"power": -7.49, "rf": True}, power_view="psd_live")
+    ed._canvas.set_items([_bar(10), _set_bw(20, 5.0), t])
+    ed.resize(900, 240)
+    _app.processEvents()
+    ed.grab()                                                               # paints the chips — no raise

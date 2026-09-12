@@ -85,6 +85,17 @@ RUN_MAX_W = 260
 RAMP_MIN_W = 44             # minimum ramp-bar width (so a short/zero-span ramp is clickable)
 RAMP_CAP_W = 40             # ramp trend end-cap width (holds the rising/falling slope mark)
 CARET_W = 20                # (legacy) inline-panel caret zone — panels dropped in the redesign
+# Tune readout chip (docs/tune-pin-mockup.html · option B): one recessed inset chip per changed
+# param — a hue rail on the left, an uppercase param label, the mono value, and a family-tinted
+# unit chip — replacing the old task-name badge + raw "key=value" text.
+TCHIP_H = 20.0              # chip height (centred in the lane)
+TCHIP_R = 6.0              # chip corner radius
+TCHIP_RAIL_INSET = 11.0     # left padding past the hue rail to the first glyph
+TCHIP_PAD_R = 9.0          # right padding inside a chip
+TCHIP_NV_GAP = 6.0          # param name → value
+TCHIP_VU_GAP = 6.0          # value → unit chip
+TCHIP_SEP = 6.0            # gap between chips
+TUCHIP_PAD = 4.0           # unit-chip / state-pill horizontal padding
 TICK_S = 30                 # base tick interval (seconds); adapts with zoom
 DRAG_THRESHOLD = 4          # px of movement before a press counts as a drag
 
@@ -441,6 +452,12 @@ class _TimelineCanvas(QWidget):
     # ── Layout ────────────────────────────────────────────────────────────────
 
     def _run_width(self, item) -> int:
+        if getattr(item, "action", "run") == "tune":
+            # A tune's caption is the recessed readout chips (option B); its footprint is the pin dot
+            # plus the measured chip run, so hit-testing/caret track the real drawn width.
+            _defs, total = self._tune_chip_defs(item)[:2]
+            w = 13 + 9 + total + 8
+            return int(max(RUN_MIN_W, min(RUN_MAX_W, w)))
         fm = QFontMetrics(self._label_font)
         w = fm.horizontalAdvance(self._run_label(item)) + 34
         if item.args:
@@ -1028,8 +1045,10 @@ class _TimelineCanvas(QWidget):
         p.drawEllipse(QPointF(x1, y_right), 2.4, 2.4)
 
     def _paint_pin(self, p, it):
-        """A tune / one-shot is an INSTANT: a filled pin at the exact time + a borderless
-        caption (never a capsule, so it never reads as having a duration)."""
+        """A tune / one-shot is an INSTANT: a filled pin at the exact time. A tune's caption is a row
+        of recessed readout chips (docs/tune-pin-mockup.html · option B) — one per changed param, in
+        the task hue; the task name is dropped (the pin colour + row header already carry it). A
+        one-shot keeps its task name as the caption (the name IS its identity)."""
         g = self._geom[it.uid]
         y, cx = g["y"], g["cx"]
         base, edge, fa, fb, ink = self._item_colors(it)
@@ -1043,23 +1062,106 @@ class _TimelineCanvas(QWidget):
             p.drawPath(path)
         else:
             p.drawEllipse(QRectF(cx - 6.5, cy - 6.5, 13, 13))
-        # caption: parent badge (tune) + text, borderless
         tx = cx + 13
-        if not one_shot:
-            badge = it.task_name or ""
-            f = self._f(9, True); p.setFont(f); fm = QFontMetrics(f)
-            bw = fm.horizontalAdvance(badge) + 12
-            br = QRectF(tx, cy - 7.5, bw, 15)
-            p.setPen(Qt.PenStyle.NoPen); p.setBrush(fa); p.drawRoundedRect(br, 4, 4)
-            p.setPen(ink); p.drawText(br, int(Qt.AlignmentFlag.AlignCenter), badge)
-            tx += bw + 6
-            overrides = self._editor._pill_power_display(it)
-            text = ", ".join(f"{k}={overrides.get(k, v)}" for k, v in (it.params or {}).items())
+        if one_shot:
+            p.setFont(self._f(12, True)); p.setPen(QColor(Palette.TEXT))
+            p.drawText(QRectF(tx, y, 260, LANE_H),
+                       int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                       it.task_name or "(no task)")
         else:
-            text = it.task_name or "(no task)"
-        p.setFont(self._f(12, True)); p.setPen(QColor(Palette.TEXT))
-        p.drawText(QRectF(tx, y, 260, LANE_H),
-                   int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), text)
+            self._paint_tune_chips(p, it, tx, cy, base)
+
+    def _tune_parts(self, it) -> List[Tuple[str, str, str, bool]]:
+        """(name, value, unit, is_flag) per param a tune step changes. The controlled --power is shown
+        in its view quantity + unit (split from _pill_power_display); an on/off param becomes a flag;
+        every other value is formatted plainly. Unit is '' when there's none to show."""
+        overrides = self._editor._pill_power_display(it)
+        out: List[Tuple[str, str, str, bool]] = []
+        for k, v in (it.params or {}).items():
+            ov = overrides.get(k)
+            if ov is not None:                       # controlled --power: "value unit" (or value only)
+                val, _sp, unit = str(ov).partition(" ")
+                out.append((k, val, unit.strip(), False))
+            elif isinstance(v, bool):
+                out.append((k, "on" if v else "off", "", True))
+            elif isinstance(v, (int, float)):
+                out.append((k, fmt_value(v), "", False))
+            else:
+                out.append((k, str(v), "", False))
+        return out
+
+    def _tune_chip_defs(self, it):
+        """(defs, total_w, fonts) for a tune step's readout chips — measured once and shared by
+        _paint_tune_chips (draw) and _run_width (footprint) so they never drift. Each def carries the
+        pre-measured widths the paint needs."""
+        fnm = self._f(8, True)               # small uppercase param label
+        fval = mono_font(11)
+        funit = mono_font(9, 600)
+        fm_nm, fm_v, fm_u = QFontMetrics(fnm), QFontMetrics(fval), QFontMetrics(funit)
+        defs = []
+        for name, val, unit, is_flag in self._tune_parts(it):
+            nm = name.upper()
+            nmw = fm_nm.horizontalAdvance(nm)
+            vw = fm_v.horizontalAdvance(val)
+            if is_flag:                              # value drawn as a small state pill
+                valw = vw + 2 * TUCHIP_PAD
+                uw = 0.0
+                inner = nmw + TCHIP_NV_GAP + valw
+            elif unit:
+                uw = fm_u.horizontalAdvance(unit) + 2 * TUCHIP_PAD
+                inner = nmw + TCHIP_NV_GAP + vw + TCHIP_VU_GAP + uw
+            else:
+                uw = 0.0
+                inner = nmw + TCHIP_NV_GAP + vw
+            w = TCHIP_RAIL_INSET + inner + TCHIP_PAD_R
+            defs.append({"nm": nm, "val": val, "unit": unit, "flag": is_flag,
+                         "nmw": nmw, "vw": vw, "uw": uw, "w": w})
+        total = sum(d["w"] for d in defs) + TCHIP_SEP * max(0, len(defs) - 1)
+        return defs, total, (fnm, fval, funit)
+
+    @staticmethod
+    def _unit_chip_colors(unit: str):
+        """(fg, bg, border) for a unit chip, coloured by power-unit family — teal for a spectral
+        density (dBm/…), slate for an absolute dBm — matching param_form._family_chip."""
+        if (unit or "").strip().startswith("dBm/"):
+            return "#0D6B57", Palette.ONLINE_SOFT, "#C3E7DB"
+        return "#3B4A5C", "#EEF2F6", "#DFE6EE"
+
+    def _paint_tune_chips(self, p, it, tx, cy, base):
+        """Draw a tune step's recessed readout chips left-to-right from tx (option B)."""
+        defs, _total, (fnm, fval, funit) = self._tune_chip_defs(it)
+        x = tx
+        for d in defs:
+            r = QRectF(x, cy - TCHIP_H / 2, d["w"], TCHIP_H)
+            p.setPen(QPen(QColor(Palette.BORDER), 1)); p.setBrush(QColor(Palette.INSET))
+            p.drawRoundedRect(r, TCHIP_R, TCHIP_R)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(base)   # hue rail
+            p.drawRoundedRect(QRectF(r.left() + 3, r.top() + 5, 2.5, TCHIP_H - 10), 1.2, 1.2)
+            gx = r.left() + TCHIP_RAIL_INSET
+            p.setFont(fnm); p.setPen(QColor(Palette.TEXT_FAINT))
+            p.drawText(QRectF(gx, r.top(), d["nmw"] + 2, TCHIP_H),
+                       int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), d["nm"])
+            gx += d["nmw"] + TCHIP_NV_GAP
+            if d["flag"]:
+                on = d["val"] == "on"
+                fg = QColor("#0D6B57" if on else Palette.TEXT_MUTED)
+                bg = QColor(Palette.ONLINE_SOFT if on else Palette.INSET)
+                pr = QRectF(gx, cy - 8, d["vw"] + 2 * TUCHIP_PAD, 16)
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(bg); p.drawRoundedRect(pr, 4, 4)
+                p.setFont(fval); p.setPen(fg)
+                p.drawText(pr, int(Qt.AlignmentFlag.AlignCenter), d["val"])
+            else:
+                p.setFont(fval); p.setPen(QColor(Palette.TEXT))
+                p.drawText(QRectF(gx, r.top(), d["vw"] + 2, TCHIP_H),
+                           int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), d["val"])
+                if d["unit"]:
+                    fg, bg, bd = self._unit_chip_colors(d["unit"])
+                    ur = QRectF(gx + d["vw"] + TCHIP_VU_GAP, cy - 8, d["uw"], 16)
+                    p.setPen(QPen(QColor(bd), 1)); p.setBrush(QColor(bg))
+                    p.drawRoundedRect(ur, 4, 4)
+                    p.setFont(funit); p.setPen(QColor(fg))
+                    p.drawText(ur, int(Qt.AlignmentFlag.AlignCenter), d["unit"])
+            x += d["w"] + TCHIP_SEP
 
     # ── Connectors (step-to-step anchors, rendered under the bars) ────────────
     def _edge_x(self, tgt, edge: str) -> float:

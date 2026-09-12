@@ -215,6 +215,20 @@ axis, connectors. Phased build: **visual redesign → drag/drop → connectors (
     `tests/test_step_editor_carried_bw.py` (`_ramp_power_display` shows density at carried bw / None
     without a view / None for a `--bw` ramp; the row header shows the controlled quantity for a ramp AND
     a tune). Suite 929 → 932.
+  - **Tune-step readout chips on the canvas — option B** (owner ask: the pin caption looked "cheap" +
+    the task-name badge was redundant with the pin colour). Mockup `docs/tune-pin-mockup.html` (published
+    Artifact); owner picked **B (recessed readout chip)**. `_paint_pin`'s tune branch now drops the
+    task-name badge (the pin hue + row header already name the task) and renders **one recessed inset
+    chip per changed param** (`_paint_tune_chips`): a hue rail in the task colour, an UPPERCASE param
+    label (`TEXT_FAINT`), the mono value, and a **family-tinted unit chip** (teal density / slate dBm,
+    colours from `param_form._family_chip` via `_unit_chip_colors`); an on/off param renders a small
+    green "on" / muted "off" state pill. The controlled `--power` shows its view quantity + unit
+    (split from `_pill_power_display`). Layout is measured once in `_tune_chip_defs` and shared by
+    `_paint_tune_chips` + `_run_width` (footprint/hit stay in sync); `_tune_parts` splits each param
+    into `(name, value, unit, is_flag)`. A ONE-SHOT keeps its task-name caption (the name is its
+    identity). Chip metrics: `TCHIP_*`/`TUCHIP_PAD` constants. Client-only; drift-guarded files
+    untouched. Tests: `tests/test_step_editor_carried_bw.py` (`_tune_parts` split + flags; one chip per
+    param with widths + separator; family colours differ + the pin paints). Suite 932 → 935.
 
 ## Current state — step-to-step anchoring Phase 1 (client authoring + geometry): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo; stacked on `run-task-conflict-guards`)
 Owner ask: anchor a step not only to on-air/off-air/Hold but to ANOTHER step's start/end edge — e.g. a
