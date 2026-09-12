@@ -150,20 +150,20 @@ const ABOVE = () =>            // caption lifted above the pin; both lines stay 
 const BELOW = () =>            // caption dropped below the pin
   svg(entry() + exitStraight() + pin() + cap(84, 66), true);
 
-const ROUTE = () =>            // caption stays beside-right at cy; the exit line dips UNDER it
+const ROUTE = () =>            // caption stays beside-right at cy; the exit EXITS HORIZONTALLY, then dips under
   svg(entry() +
-      `<path class="conn" d="M${CX+R} ${CY} q10 0 10 12 L296 58 q10 0 10 12 L316 82"/>` +
-      pin() + cap(158, 35));
+      `<path class="conn" d="M${CX+R} ${CY} L169 ${CY} Q173 ${CY} 173 50 L173 60 Q173 64 177 64 L308 64 Q314 64 314 72 L314 94"/>` +
+      pin() + cap(178, 35));
 
 const OPTIONS = [
   {tag:'NOW', name:'The collision', now:true, build:NOW,
    note:'The exit line runs straight through the readout on the pin’s right — the same problem the left-flip solved for one-sided pins, now on the only remaining side.'},
-  {tag:'A', name:'Caption above the pin', pick:true, rec:'Recommended', build:ABOVE,
-   note:'The chip lifts above the dot; both connectors stay horizontal at the pin’s row, fully clear. The row grows a little for a two-sided pin.'},
+  {tag:'A', name:'Caption above the pin', build:ABOVE,
+   note:'The chip lifts above the dot; both connectors stay horizontal at the pin’s row, fully clear. The row grows a little for a two-sided pin. (Alternative — the owner chose C.)'},
   {tag:'B', name:'Caption below the pin', build:BELOW,
    note:'Same idea, dropped below. Pick above vs below by which neighbour row has more room; the code can choose whichever side is clearer.'},
-  {tag:'C', name:'Route the line under a beside caption', build:ROUTE,
-   note:'Keep the compact single-row height and the chip beside the pin; the one crossing line makes a small detour beneath it. No extra height, slightly busier line.'},
+  {tag:'C', name:'Route the line under a beside caption', pick:true, rec:'Chosen', build:ROUTE,
+   note:'Keep the compact single-row height and the chip beside the pin. The crossing connector EXITS the pin horizontally (a normal stub at the row line), then rounds down and runs horizontally UNDER the caption before continuing — clean orthogonal corners, no vertical drop out of the text. No extra row height.'},
 ];
 
 document.getElementById('opts').innerHTML = OPTIONS.map(o => `
