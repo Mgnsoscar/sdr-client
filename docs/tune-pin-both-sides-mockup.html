@@ -1,0 +1,178 @@
+<title>Two-Sided Tune Pins</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ground:#EEF0F3; --surface:#FFFFFF; --surface-alt:#FAFBFC; --inset:#F1F4F7;
+  --border:#E2E5EA; --border-strong:#CDD2DA; --hairline:#ECEEF1;
+  --text:#1E2530; --muted:#5C6675; --faint:#8A93A2;
+  --accent:#2C6E9B; --accent-ink:#1F5476; --ok:#1D9E75; --warn:#BA7517; --bad:#C23B3B;
+  --teal:#1E8FA3; --teal-ink:#12707F; --teal-soft:#E4F2F3;
+  --conn:#5C8AA6;                       /* connector line (illustrative) */
+  --band:#F7F9FB;                       /* the faint canvas row a pin sits on */
+  --sans:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --mono:"IBM Plex Mono","DejaVu Sans Mono",ui-monospace,monospace;
+  --shadow-sm:0 1px 2px rgba(22,32,48,.06), 0 1px 3px rgba(22,32,48,.05);
+}
+:root:not([data-theme="light"]){
+  @media (prefers-color-scheme: dark){
+    --ground:#14181E; --surface:#1B2129; --surface-alt:#20272F; --inset:#232B34;
+    --border:#2C353F; --border-strong:#3A4552; --hairline:#262E37;
+    --text:#E7ECF2; --muted:#A2ADBB; --faint:#727E8C;
+    --accent:#5FA8D6; --accent-ink:#9BCBE8; --ok:#3FBE93; --warn:#D69A46; --bad:#E06A6A;
+    --teal:#37B7CC; --teal-ink:#8FE0EC; --teal-soft:#183038;
+    --conn:#6E96AF; --band:#191F26;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.28);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#14181E; --surface:#1B2129; --surface-alt:#20272F; --inset:#232B34;
+  --border:#2C353F; --border-strong:#3A4552; --hairline:#262E37;
+  --text:#E7ECF2; --muted:#A2ADBB; --faint:#727E8C;
+  --accent:#5FA8D6; --accent-ink:#9BCBE8; --ok:#3FBE93; --warn:#D69A46; --bad:#E06A6A;
+  --teal:#37B7CC; --teal-ink:#8FE0EC; --teal-soft:#183038;
+  --conn:#6E96AF; --band:#191F26;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.28);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--text);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;padding:30px 20px 56px}
+.wrap{max-width:960px;margin:0 auto}
+h1{font-size:21px;font-weight:600;letter-spacing:-.2px;margin:0 0 5px;text-wrap:balance}
+.lede{color:var(--muted);font-size:13px;line-height:1.65;margin:0 0 22px;max-width:72ch}
+.lede b{color:var(--text);font-weight:600}
+.lede code{font-family:var(--mono);font-size:11.5px;background:var(--inset);padding:1px 5px;border-radius:4px;color:var(--text)}
+
+.opt{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+  box-shadow:var(--shadow-sm);padding:16px 18px 18px;margin-bottom:15px}
+.opt.pick{border-color:color-mix(in srgb,var(--teal) 55%,var(--border));
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--teal) 16%,transparent), var(--shadow-sm)}
+.opt.now{border-color:color-mix(in srgb,var(--bad) 40%,var(--border))}
+.ohead{display:flex;align-items:baseline;gap:10px;margin-bottom:3px;flex-wrap:wrap}
+.otag{font-size:11px;font-weight:700;letter-spacing:.5px;color:#fff;background:var(--faint);
+  border-radius:6px;padding:2px 8px}
+.opt.pick .otag{background:var(--teal)}
+.opt.now .otag{background:var(--bad)}
+.oname{font-size:15px;font-weight:600}
+.rec{margin-left:auto;font-size:10.5px;font-weight:700;letter-spacing:.4px;color:var(--teal-ink);
+  background:color-mix(in srgb,var(--teal) 15%,transparent);border-radius:999px;padding:3px 10px}
+.orat{color:var(--muted);font-size:12.5px;line-height:1.6;margin:5px 0 14px;max-width:74ch}
+.orat b{color:var(--text)}
+
+.stagewrap{display:flex;flex-wrap:wrap;gap:14px 22px;align-items:center}
+.stage{position:relative;width:320px;max-width:100%;height:96px;background:var(--band);
+  border:1px solid var(--hairline);border-radius:10px;overflow:hidden}
+.stage.tall{height:112px}
+.stage svg{display:block;width:100%;height:100%}
+.note{color:var(--faint);font-size:11.5px;line-height:1.5;max-width:30ch}
+
+/* SVG element styling (themeable) */
+.lane{stroke:var(--hairline);stroke-width:1;stroke-dasharray:2 4}
+.conn{stroke:var(--conn);stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.conn.bad{stroke:var(--bad)}
+.pinring{fill:var(--band)}
+.pindot{fill:var(--teal)}
+.lchip-bg{fill:var(--surface);stroke:var(--border);stroke-width:1}
+.lchip-tx{fill:var(--muted);font-family:var(--mono);font-size:9px;font-weight:500}
+.cap-bg{fill:var(--inset);stroke:var(--border);stroke-width:1}
+.cap-rail{fill:var(--teal)}
+.cap-name{fill:var(--faint);font-family:var(--sans);font-size:8px;font-weight:600;letter-spacing:.5px}
+.cap-val{fill:var(--text);font-family:var(--mono);font-size:11px;font-weight:500}
+.uchip-bg{fill:var(--teal-soft)}
+.uchip-tx{fill:var(--teal-ink);font-family:var(--mono);font-size:8.5px;font-weight:500}
+
+footer{color:var(--faint);font-size:12px;margin-top:22px;line-height:1.65;max-width:76ch}
+footer b{color:var(--muted)}
+footer code{font-family:var(--mono);font-size:11px}
+</style>
+
+<div class="wrap">
+  <h1>Two-sided tune pins</h1>
+  <p class="lede">A tune point can be a step-anchor <b>target</b> (a connector exits it) AND a
+  <b>dependent</b> (a connector enters it) at once — a chain like <code>A → this → C</code>. Then a line
+  runs off <b>both</b> sides at the pin's row, so neither left nor right is free for the readout chip: the
+  earlier "flip to the empty side" trick has no empty side. Below: the collision, then ways to keep the
+  line off the text. (One hue shown; it holds for any task colour. The blue lines are connectors; the
+  <code>+0:30</code> tag is a connector's own offset chip, which must stay clear too.)</p>
+
+  <div id="opts"></div>
+
+  <footer>Reuses the editor's styling — IBM Plex, the recessed option-B chip, the per-task hue. Only the
+  rare <b>two-sided</b> pin changes; a one-sided pin keeps today's behaviour (chip on the free side). Pick
+  one and I'll wire it into <code>_paint_pin</code> + the connector router.</footer>
+</div>
+
+<script>
+// ── SVG builders (viewBox 0 0 320 96, centre row cy, pin cx) ──────────────
+const CX = 150, CY = 46, R = 7;
+const lane = () => `<line class="lane" x1="6" y1="${CY}" x2="314" y2="${CY}"/>`;
+const pin = () =>
+  `<circle class="pinring" cx="${CX}" cy="${CY}" r="${R+2.2}"/>` +
+  `<circle class="pindot" cx="${CX}" cy="${CY}" r="${R}"/>`;
+
+function lchip(cx, cy, text){        // a connector's inline +M:SS chip (occludes the line)
+  const w = 38, h = 15;
+  return `<rect class="lchip-bg" x="${cx-w/2}" y="${cy-h/2}" width="${w}" height="${h}" rx="4"/>` +
+         `<text class="lchip-tx" x="${cx}" y="${cy+3}" text-anchor="middle">${text}</text>`;
+}
+
+// the option-B readout chip (fixed layout for "POWER -10.50 dBm/MHz")
+function cap(x, y){
+  const w = 132, h = 22;
+  return `<g>
+    <rect class="cap-bg" x="${x}" y="${y}" width="${w}" height="${h}" rx="6"/>
+    <rect class="cap-rail" x="${x+3}" y="${y+5}" width="2.5" height="${h-10}" rx="1.2"/>
+    <text class="cap-name" x="${x+11}" y="${y+15}">POWER</text>
+    <text class="cap-val" x="${x+49}" y="${y+15.5}">−10.50</text>
+    <rect class="uchip-bg" x="${x+90}" y="${y+3}" width="38" height="16" rx="4"/>
+    <text class="uchip-tx" x="${x+109}" y="${y+14}" text-anchor="middle">dBm/MHz</text>
+  </g>`;
+}
+
+// entry line comes in from the upper-left row; exit goes out to the lower-right row.
+const entry = () => `<path class="conn" d="M6 16 Q6 ${CY} 40 ${CY} L${CX-R} ${CY}"/>` + lchip(78, CY, '+0:30');
+const exitStraight = () => `<path class="conn" d="M${CX+R} ${CY} L280 ${CY} Q314 ${CY} 314 76"/>`;
+
+// SVG per option
+function svg(inner, tall){
+  return `<svg viewBox="0 0 320 ${tall?112:96}" preserveAspectRatio="xMidYMid meet">${lane()}${inner}</svg>`;
+}
+
+const NOW = () =>
+  // exit line drawn AFTER the cap and in warning colour → it visibly crosses the text
+  svg(entry() + pin() + cap(158, 35) +
+      `<path class="conn bad" d="M${CX+R} ${CY} L280 ${CY} Q314 ${CY} 314 76"/>`);
+
+const ABOVE = () =>            // caption lifted above the pin; both lines stay horizontal at cy
+  svg(entry() + exitStraight() + pin() + cap(84, 10), true);
+
+const BELOW = () =>            // caption dropped below the pin
+  svg(entry() + exitStraight() + pin() + cap(84, 66), true);
+
+const ROUTE = () =>            // caption stays beside-right at cy; the exit line dips UNDER it
+  svg(entry() +
+      `<path class="conn" d="M${CX+R} ${CY} q10 0 10 12 L296 58 q10 0 10 12 L316 82"/>` +
+      pin() + cap(158, 35));
+
+const OPTIONS = [
+  {tag:'NOW', name:'The collision', now:true, build:NOW,
+   note:'The exit line runs straight through the readout on the pin’s right — the same problem the left-flip solved for one-sided pins, now on the only remaining side.'},
+  {tag:'A', name:'Caption above the pin', pick:true, rec:'Recommended', build:ABOVE,
+   note:'The chip lifts above the dot; both connectors stay horizontal at the pin’s row, fully clear. The row grows a little for a two-sided pin.'},
+  {tag:'B', name:'Caption below the pin', build:BELOW,
+   note:'Same idea, dropped below. Pick above vs below by which neighbour row has more room; the code can choose whichever side is clearer.'},
+  {tag:'C', name:'Route the line under a beside caption', build:ROUTE,
+   note:'Keep the compact single-row height and the chip beside the pin; the one crossing line makes a small detour beneath it. No extra height, slightly busier line.'},
+];
+
+document.getElementById('opts').innerHTML = OPTIONS.map(o => `
+  <div class="opt ${o.pick?'pick':''} ${o.now?'now':''}">
+    <div class="ohead"><span class="otag">${o.tag}</span><span class="oname">${o.name}</span>
+      ${o.rec?`<span class="rec">${o.rec}</span>`:''}</div>
+    <div class="orat">${o.note}</div>
+    <div class="stagewrap">
+      <div class="stage ${o.build===ABOVE||o.build===BELOW?'tall':''}">${o.build()}</div>
+    </div>
+  </div>`).join('');
+</script>
