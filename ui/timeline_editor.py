@@ -777,6 +777,19 @@ class _TimelineCanvas(QWidget):
         p.setPen(QColor(Palette.TEXT_FAINT))
         p.drawText(int(off_x) - 30, baseline + 9, 60, 12,
                    int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop), "arm")
+        # Cool-down ticks right of off-air (relative to the arm instant, so a '+' prefix) —
+        # mirrors the warm-up so the axis reads balanced on both sides of the on-air window.
+        right_edge = self.width() - tlm.EDGE_PAD
+        t = tick_s
+        while off_x + t * eff <= right_edge:
+            x = off_x + t * eff
+            p.setPen(QPen(QColor(Palette.TEXT_FAINT), 1))
+            p.drawLine(int(x), baseline, int(x), baseline + 7)
+            p.setPen(QColor(Palette.TEXT_MUTED))
+            p.drawText(int(x) - 30, baseline + 9, 60, 12,
+                       int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
+                       "+" + self._mmss(t))
+            t += tick_s
 
     def _paint_rel_badge(self, p, cx, cy):
         f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPointSize(8); f.setBold(True)
