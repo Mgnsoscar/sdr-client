@@ -773,11 +773,12 @@ class _TimelineCanvas(QWidget):
         while on_x - t * eff >= 0:
             tick(on_x - t * eff, self._mmss(-t), True)
             t += tick_s
-        # 'arm' at off-air (its absolute time is chosen at arm).
+        # Off-air anchor labelled '0' — the cool-down ticks read relative to it (its absolute
+        # time is chosen at arm; warm-up/cool-down ticks are ±M:SS around this zero).
         if 30 <= off_x <= w - 30:
-            p.setPen(QColor(Palette.TEXT_FAINT))
-            p.drawText(int(off_x) - 30, baseline + 9, 60, 12, center, "arm")
-        # Cool-down ticks all the way to the RIGHT edge (relative to the arm instant, '+' prefix) —
+            p.setPen(QColor(Palette.TEXT_MUTED))
+            p.drawText(int(off_x) - 30, baseline + 9, 60, 12, center, "0")
+        # Cool-down ticks all the way to the RIGHT edge (relative to the off-air instant, '+' prefix) —
         # mirrors the warm-up so the axis fills and reads balanced at any zoom.
         t = tick_s
         while off_x + t * eff <= w:
