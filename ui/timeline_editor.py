@@ -748,47 +748,40 @@ class _TimelineCanvas(QWidget):
     def _paint_axis(self, p, baseline, on_x, def_x, off_x):
         eff = self._eff(); tick_s = self._tick_interval()
         f = QFont(Fonts.MONO.split(",")[0].strip('"')); f.setPointSize(8); p.setFont(f)
+        w = self.width()                    # ticks fill the whole canvas, edge to edge
+        center = int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
 
-        def tick(x, t, major):
+        def tick(x, label, major):
             col = QColor(Palette.TEXT_FAINT if major else Palette.BORDER_STRONG)
             p.setPen(QPen(col, 1))
             p.drawLine(int(x), baseline, int(x), baseline + (7 if major else 4))
-            if major:
+            if major and label is not None and 30 <= x <= w - 30:   # skip labels that would clip
                 p.setPen(QColor(Palette.TEXT_MUTED))
-                p.drawText(int(x) - 30, baseline + 9, 60, 12,
-                           int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
-                           "0" if t == 0 else self._mmss(t))
+                p.drawText(int(x) - 30, baseline + 9, 60, 12, center, label)
 
-        # Real-time ticks across the defined region.
+        # Real-time ticks across the defined (on-air) region — with minor half-ticks.
         t = 0
         while on_x + t * eff <= def_x + 1:
-            tick(on_x + t * eff, t, True)
+            tick(on_x + t * eff, "0" if t == 0 else self._mmss(t), True)
             if tick_s >= 2:
                 mid = on_x + (t + tick_s / 2) * eff
                 if mid <= def_x + 1:
-                    tick(mid, t, False)
+                    tick(mid, None, False)
             t += tick_s
-        # Warm-up (negative) ticks to the visible left edge.
+        # Warm-up (negative) ticks all the way to the LEFT edge (relative to on-air).
         t = tick_s
-        while on_x - t * eff >= tlm.EDGE_PAD:
-            tick(on_x - t * eff, -t, True)
+        while on_x - t * eff >= 0:
+            tick(on_x - t * eff, self._mmss(-t), True)
             t += tick_s
-        # The off-air instant's absolute time is unknown (chosen at arm).
-        p.setPen(QColor(Palette.TEXT_FAINT))
-        p.drawText(int(off_x) - 30, baseline + 9, 60, 12,
-                   int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop), "arm")
-        # Cool-down ticks right of off-air (relative to the arm instant, so a '+' prefix) —
-        # mirrors the warm-up so the axis reads balanced on both sides of the on-air window.
-        right_edge = self.width() - tlm.EDGE_PAD
+        # 'arm' at off-air (its absolute time is chosen at arm).
+        if 30 <= off_x <= w - 30:
+            p.setPen(QColor(Palette.TEXT_FAINT))
+            p.drawText(int(off_x) - 30, baseline + 9, 60, 12, center, "arm")
+        # Cool-down ticks all the way to the RIGHT edge (relative to the arm instant, '+' prefix) —
+        # mirrors the warm-up so the axis fills and reads balanced at any zoom.
         t = tick_s
-        while off_x + t * eff <= right_edge:
-            x = off_x + t * eff
-            p.setPen(QPen(QColor(Palette.TEXT_FAINT), 1))
-            p.drawLine(int(x), baseline, int(x), baseline + 7)
-            p.setPen(QColor(Palette.TEXT_MUTED))
-            p.drawText(int(x) - 30, baseline + 9, 60, 12,
-                       int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
-                       "+" + self._mmss(t))
+        while off_x + t * eff <= w:
+            tick(off_x + t * eff, "+" + self._mmss(t), True)
             t += tick_s
 
     def _paint_rel_badge(self, p, cx, cy):
