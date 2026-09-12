@@ -202,3 +202,52 @@ def test_the_base_quantity_stays_bandwidth_invariant():
     assert not fold.param_dependent
     assert fold.bounds_at(1575.42e6, {"bw": 10})["max_power_dbm"] == pytest.approx(-7.38, abs=1e-6)
     assert fold.bounds_at(1575.42e6, {"bw": 20})["max_power_dbm"] == pytest.approx(-7.38, abs=1e-6)
+
+
+def _ramp_item(offset=10.0, view="psd_live", param="power", start=-30.0, stop=-12.0):
+    return tlm.RunItem(task_name="chirp", action="ramp", anchor="start", offset=offset,
+                       ramp={"param": param, "start": start, "stop": stop, "step": 1.0, "hold_s": 5.0},
+                       power_view=view)
+
+
+def test_ramp_power_display_shows_the_controlled_density_not_the_base():
+    # Owner report: a ramp swept in a chirp's live spectral density showed its from→to in the raw base
+    # --power. With a control view its endpoints now read in that quantity, at the carried bandwidth
+    # (view_delta(20) = −10·log10(2) ≈ −3.01, so −30 → −33.01 and −12 → −15.01 dBm/MHz).
+    ramp = _ramp_item()
+    ed = _editor([_bar(10), _set_bw(20, 5.0), ramp])
+    _app.processEvents()
+    disp = ed._ramp_power_display(ramp)
+    assert disp is not None
+    frm, to = (s.replace("−", "-") for s in disp)
+    assert "dBm/MHz" in frm and "dBm/MHz" in to
+    assert "-33.01" in frm and "-15.01" in to
+    assert "-30" not in frm and "-12" not in to     # not the raw base
+
+
+def test_ramp_power_display_is_none_without_a_view_or_for_a_non_power_ramp():
+    ed = _editor([_bar(10)])
+    _app.processEvents()
+    assert ed._ramp_power_display(_ramp_item(view=None)) is None          # no control view → raw
+    assert ed._ramp_power_display(_ramp_item(param="bw")) is None         # a --bw ramp keeps raw
+
+
+def test_row_header_shows_the_controlled_power_for_a_ramp_and_a_tune():
+    # The LEFT-side row header (TASKS & STEPS) sub-line reads the controlled quantity too, matching the
+    # canvas — both a --power ramp's from→to and a --power tune step's value show the density SET, not
+    # the raw base sent on the wire.
+    ramp = _ramp_item()
+    tune = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=20.0,
+                       params={"power": -7.49}, power_view="psd_live")
+    ed = _editor([_bar(10), _set_bw(20, 5.0), ramp, tune])
+    _app.processEvents()
+
+    _name, sub, typ = ed._rowhdr._meta(ramp)
+    sub = sub.replace("−", "-")
+    assert typ == "Ramp" and "dBm/MHz" in sub
+    assert "-33.01" in sub and "-15.01" in sub
+
+    _name, sub, typ = ed._rowhdr._meta(tune)
+    sub = sub.replace("−", "-")
+    assert typ == "Tune" and "dBm/MHz" in sub
+    assert "-10.5" in sub and "-7.49" not in sub

@@ -199,6 +199,22 @@ axis, connectors. Phased build: **visual redesign → drag/drop → connectors (
     test: `_minimap` present, paints, `_scroll_to` safe (`tests/test_timeline_step_anchor_ui.py`).
     Suite 928 → 929. **The redesign's interactive plan (visual → drag/drop → connectors → context menu →
     time axis → snapping → multi-select → minimap) is now COMPLETE.**
+  - **Axis off-air anchor labelled "0"** — `_paint_axis` labels the off-air anchor **0** (was "arm",
+    owner found it confusing); warm-up/cool-down ticks already read ±M:SS around it, so it reads
+    balanced. Muted tick-label colour. Paint-only. Suite still 929.
+  - **Ramp / tune power shows the CONTROLLED quantity in the row header + canvas** (owner ask) — the
+    left-side `_RowHeader` sub-line showed a calibrated `--power` in the raw BASE quantity for both a
+    ramp's from→to and a tune step's value. Now both read the quantity the operator SET (a chirp's live
+    density, `power_view`) — the tune canvas pill already did this via `_pill_power_display`; extended to
+    the ramp canvas pill (`_paint_ramp`) and the row header for both. `_pill_power_display`'s view-delta
+    math was extracted into **`_view_delta_for(item, info, pv)`** (bw-keyed view → delta at the CARRIED
+    bw via `sequence_effective_values`; constant-offset view → the law's rep delta) and reused by a new
+    **`_ramp_power_display(item)`** → `(from_str, to_str)` in the view's unit (None for a non-power ramp
+    or no view → raw base). `_RowHeader._meta` routes tune→`_pill_power_display`, ramp→`_ramp_power_display`.
+    Best-effort (any gap falls back to raw base). Client-only; drift-guarded files untouched. Tests:
+    `tests/test_step_editor_carried_bw.py` (`_ramp_power_display` shows density at carried bw / None
+    without a view / None for a `--bw` ramp; the row header shows the controlled quantity for a ramp AND
+    a tune). Suite 929 → 932.
 
 ## Current state — step-to-step anchoring Phase 1 (client authoring + geometry): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo; stacked on `run-task-conflict-guards`)
 Owner ask: anchor a step not only to on-air/off-air/Hold but to ANOTHER step's start/end edge — e.g. a

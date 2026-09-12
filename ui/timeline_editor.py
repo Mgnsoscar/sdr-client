@@ -997,10 +997,12 @@ class _TimelineCanvas(QWidget):
             p.drawText(QRectF(text_r - dw, y, dw, LANE_H),
                        int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight), dt)
             dw += 10.0
-        # from→to range, between the badge and the duration, when there's room
+        # from→to range, between the badge and the duration, when there's room. A --power ramp
+        # controlled in a view (a chirp's live density) reads its endpoints in THAT quantity.
         if a is not None and b is not None:
             f = mono_font(10); p.setFont(f); fm = QFontMetrics(f)
-            rng = f"{fmt_value(a)} → {fmt_value(b)}"
+            view = self._editor._ramp_power_display(it)
+            rng = f"{view[0]} → {view[1]}" if view else f"{fmt_value(a)} → {fmt_value(b)}"
             avail = int(text_r - dw - bx)
             if avail > 30:
                 p.setPen(ink)
@@ -2962,10 +2964,17 @@ class _RowHeader(QWidget):
         if act == "ramp":
             r = dict(getattr(it, "ramp", None) or {})
             a, b = r.get("start"), r.get("stop")
-            rng = f"{fmt_value(a)} → {fmt_value(b)}" if a is not None and b is not None else ""
+            # A --power ramp controlled in a view shows its from→to in THAT quantity (not the base).
+            view = self._canvas._editor._ramp_power_display(it)
+            if view:
+                rng = f"{view[0]} → {view[1]}"
+            else:
+                rng = f"{fmt_value(a)} → {fmt_value(b)}" if a is not None and b is not None else ""
             return f"{r.get('param') or 'param'} ramp", rng, "Ramp"
         if act == "tune":
-            summ = ", ".join(f"{k}={v}" for k, v in (it.params or {}).items())
+            # A calibrated --power set in a view (a chirp's live density) shows THAT quantity, not base.
+            overrides = self._canvas._editor._pill_power_display(it)
+            summ = ", ".join(f"{k}={overrides.get(k, v)}" for k, v in (it.params or {}).items())
             return f"{it.task_name} tune", summ, "Tune"
         return it.task_name or "(no task)", "one-shot", "One-shot"
 
@@ -3612,14 +3621,41 @@ class TimelineEditor(QWidget):
                 return spec
         return None
 
+    def _view_delta_for(self, item, info, pv) -> Optional[Tuple[float, str]]:
+        """(view_delta_db, unit) for a step whose --power is controlled in the ``pv`` view — the offset
+        added to the base --power to read the operator's SET quantity, with the view's unit. A bw-KEYED
+        view (a chirp's live density) folds its delta through the params CARRIED to this item's fire
+        position; a CONSTANT-offset view (full-bandwidth total power) has no bridge param and uses the
+        law's own representative delta. None when there's no such view law. The (best-effort) callers
+        wrap this, so it may raise — they fall back to the raw base."""
+        spec = (info.get("view_laws") or {}).get(pv)
+        law = tlm._view_law_of(spec)
+        if law is None:
+            return None
+        if law.params():
+            specs = info.get("specs") or []
+            _items = self._canvas.items()
+            _hoff = tlm.hold_offset(_items)
+            carried = tlm.sequence_effective_values(
+                _items, getattr(item, "task_name", None), info.get("base_args") or [], specs,
+                getattr(item, "uid", None),
+                target_key=tlm._carry_order_key(
+                    item, _hoff, tlm.resolve_step_offsets(_items, _hoff)))
+            from state.power_fold import resolve_keyed_values
+            keyed = resolve_keyed_values(specs, carried, law.params())
+            delta = law.delta_db(keyed) if keyed else law.rep_delta_db()
+        else:
+            delta = law.rep_delta_db()
+        return delta, str(spec.get("unit") or "").strip()
+
     def _pill_power_display(self, item) -> Dict[str, str]:
-        """Override text for a tune step's canvas pill: when the step controls --power in a non-base
-        view, the pill shows the quantity the operator SET (base + view_delta) with its unit — not the
-        raw base it is sent in. Covers a bw-KEYED view (a chirp's live density → base + view_delta at
-        the carried bw) AND a CONSTANT-offset view (full-bandwidth total power → base + a fixed delta,
-        no bridge param). Returns ``{power_dest: 'value unit'}`` to replace that param's pill value, or
-        ``{}`` to show the raw params. Best-effort — any gap (no view, params not cached, unresolvable
-        carried bw) falls back to the raw base, so the label helper never breaks the canvas."""
+        """Override text for a tune step's canvas pill / row header: when the step controls --power in
+        a non-base view, it shows the quantity the operator SET (base + view_delta) with its unit — not
+        the raw base it is sent in. Covers a bw-KEYED view (a chirp's live density → base + view_delta
+        at the carried bw) AND a CONSTANT-offset view (full-bandwidth total power → base + a fixed
+        delta, no bridge param). Returns ``{power_dest: 'value unit'}`` to replace that param's value,
+        or ``{}`` to show the raw params. Best-effort — any gap (no view, params not cached,
+        unresolvable carried bw) falls back to the raw base, so the label helper never breaks."""
         pv = getattr(item, "power_view", None)
         params = getattr(item, "params", None) or {}
         task = getattr(item, "task_name", None)
@@ -3634,31 +3670,48 @@ class TimelineEditor(QWidget):
             base = params.get(power_dest)
             if not isinstance(base, (int, float)) or isinstance(base, bool):
                 return {}
-            spec = (info.get("view_laws") or {}).get(pv)
-            law = tlm._view_law_of(spec)
-            if law is None:
+            dv = self._view_delta_for(item, info, pv)
+            if dv is None:
                 return {}
-            # A bw-keyed view (density) folds its delta through the carried bridge params; a
-            # constant-offset view (total power) has none and uses the law's own (representative)
-            # delta — either way the pill shows what the operator set, not the base.
-            if law.params():
-                specs = info.get("specs") or []
-                _items = self._canvas.items()
-                _hoff = tlm.hold_offset(_items)
-                carried = tlm.sequence_effective_values(
-                    self._canvas.items(), task, info.get("base_args") or [], specs,
-                    getattr(item, "uid", None),
-                    target_key=tlm._carry_order_key(
-                        item, _hoff, tlm.resolve_step_offsets(_items, _hoff)))
-                from state.power_fold import resolve_keyed_values
-                keyed = resolve_keyed_values(specs, carried, law.params())
-                delta = law.delta_db(keyed) if keyed else law.rep_delta_db()
-            else:
-                delta = law.rep_delta_db()
-            unit = str(spec.get("unit") or "").strip()
+            delta, unit = dv
             return {power_dest: f"{base + delta:.2f}{(' ' + unit) if unit else ''}"}
         except Exception:                          # noqa: BLE001 — a label helper must never break
             return {}
+
+    def _ramp_power_display(self, item) -> Optional[Tuple[str, str]]:
+        """(from_str, to_str) for a --power ramp shown in the view quantity the operator SET — each
+        base endpoint + the view_delta at the carried bw, with the view's unit — or None to show the
+        raw base. The ramp analogue of ``_pill_power_display``: a ramp swept in a chirp's live density
+        reads its from→to in dBm/MHz, not the raw base it is sent in. A ramp on any OTHER parameter, or
+        with no control view, returns None (raw range). Best-effort — any gap falls back to raw."""
+        pv = getattr(item, "power_view", None)
+        task = getattr(item, "task_name", None)
+        r = dict(getattr(item, "ramp", None) or {})
+        a, b = r.get("start"), r.get("stop")
+        if not pv or not task or a is None or b is None:
+            return None
+        try:
+            resolve = self._achievability_resolver()
+            info = resolve(task) if resolve else None
+            if not info:
+                return None
+            # The ramp records the param it sweeps by its display name-or-dest (ramp_editor._pname);
+            # accept either so a power spec with a distinct name still matches.
+            power_dest = info.get("power_dest")
+            pspec = next((s for s in (info.get("specs") or []) if s.get("dest") == power_dest), None)
+            if (r.get("param") or "") not in {power_dest, (pspec or {}).get("name")}:
+                return None                        # a non-power ramp keeps its raw range
+            if isinstance(a, bool) or isinstance(b, bool) \
+                    or not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+                return None
+            dv = self._view_delta_for(item, info, pv)
+            if dv is None:
+                return None
+            delta, unit = dv
+            u = (" " + unit) if unit else ""
+            return f"{a + delta:.2f}{u}", f"{b + delta:.2f}{u}"
+        except Exception:                          # noqa: BLE001 — a label helper must never break
+            return None
 
     def _update_achievability(self) -> None:
         """Refresh the sequence-level power-achievability warning. Best-effort: a task whose params
