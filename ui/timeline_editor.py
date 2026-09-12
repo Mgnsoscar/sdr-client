@@ -1062,14 +1062,33 @@ class _TimelineCanvas(QWidget):
             p.drawPath(path)
         else:
             p.drawEllipse(QRectF(cx - 6.5, cy - 6.5, 13, 13))
-        tx = cx + 13
+        # Caption side: a step-anchor TARGET has its connector exit to the RIGHT (a point exits
+        # right — see _paint_connectors), which would run straight through a right-hand caption. So
+        # when something is anchored to this pin, put the caption on the LEFT; otherwise the right.
+        left = self._is_anchor_target(it)
         if one_shot:
+            name = it.task_name or "(no task)"
             p.setFont(self._f(12, True)); p.setPen(QColor(Palette.TEXT))
-            p.drawText(QRectF(tx, y, 260, LANE_H),
-                       int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-                       it.task_name or "(no task)")
+            if left:
+                tw = QFontMetrics(self._f(12, True)).horizontalAdvance(name)
+                p.drawText(QRectF(cx - 13 - tw, y, tw, LANE_H),
+                           int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight), name)
+            else:
+                p.drawText(QRectF(cx + 13, y, 260, LANE_H),
+                           int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), name)
         else:
-            self._paint_tune_chips(p, it, tx, cy, base)
+            defs, total, fonts = self._tune_chip_defs(it)
+            tx = (cx - 13 - total) if left else (cx + 13)
+            self._paint_tune_chips(p, defs, fonts, tx, cy, base)
+
+    def _is_anchor_target(self, it) -> bool:
+        """True when some other step is anchored TO this item (its connector exits to the RIGHT of
+        the pin) — so the pin's caption belongs on the LEFT to clear that line."""
+        sid = getattr(it, "step_id", "") or ""
+        if not sid:
+            return False
+        return any(getattr(d, "anchor", "") == "step"
+                   and (getattr(d, "anchor_step_id", "") or "") == sid for d in self._rows)
 
     def _tune_parts(self, it) -> List[Tuple[str, str, str, bool]]:
         """(name, value, unit, is_flag) per param a tune step changes. The controlled --power is shown
@@ -1127,9 +1146,10 @@ class _TimelineCanvas(QWidget):
             return "#0D6B57", Palette.ONLINE_SOFT, "#C3E7DB"
         return "#3B4A5C", "#EEF2F6", "#DFE6EE"
 
-    def _paint_tune_chips(self, p, it, tx, cy, base):
-        """Draw a tune step's recessed readout chips left-to-right from tx (option B)."""
-        defs, _total, (fnm, fval, funit) = self._tune_chip_defs(it)
+    def _paint_tune_chips(self, p, defs, fonts, tx, cy, base):
+        """Draw a tune step's recessed readout chips left-to-right from tx (option B). ``defs`` and
+        ``fonts`` come pre-measured from _tune_chip_defs so the caller can left- or right-place them."""
+        fnm, fval, funit = fonts
         x = tx
         for d in defs:
             r = QRectF(x, cy - TCHIP_H / 2, d["w"], TCHIP_H)

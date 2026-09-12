@@ -229,6 +229,16 @@ axis, connectors. Phased build: **visual redesign → drag/drop → connectors (
     identity). Chip metrics: `TCHIP_*`/`TUCHIP_PAD` constants. Client-only; drift-guarded files
     untouched. Tests: `tests/test_step_editor_carried_bw.py` (`_tune_parts` split + flags; one chip per
     param with widths + separator; family colours differ + the pin paints). Suite 932 → 935.
+    - **Anchor-target pins caption LEFT** (owner follow-up): a pin that some step is anchored TO has its
+      connector exit to the RIGHT (`_paint_connectors`: a point exits right), which would run straight
+      through a right-hand caption. `_paint_pin` now checks `_is_anchor_target(it)` (any row with
+      `anchor=="step"` referencing this item's `step_id`) and, when true, places the caption on the LEFT
+      of the pin (chips right-aligned ending at `cx − 13`; one-shot name right-aligned) so it clears the
+      line; a plain pin keeps the right side. `_paint_tune_chips` now takes pre-measured `(defs, fonts)`
+      + a start x so the caller can left- or right-anchor without resolving twice. (A pin that is BOTH a
+      target and a dependent is rare — it flips left, favouring the more prominent right-exit line.)
+      Test: `tests/test_step_editor_carried_bw.py::test_anchor_target_pin_flips_its_caption_to_the_left`.
+      Suite 935 → 936.
 
 ## Current state — step-to-step anchoring Phase 1 (client authoring + geometry): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo; stacked on `run-task-conflict-guards`)
 Owner ask: anchor a step not only to on-air/off-air/Hold but to ANOTHER step's start/end edge — e.g. a

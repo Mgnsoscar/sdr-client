@@ -283,6 +283,33 @@ def test_tune_chip_defs_one_chip_per_param_with_widths():
     assert defs[1]["unit"] == "dBm"                                          # total power → dBm chip
 
 
+def test_anchor_target_pin_flips_its_caption_to_the_left():
+    # A tune step some other step is anchored TO has its connector exit to the RIGHT (a point exits
+    # right); its caption must move LEFT so it doesn't collide with that line. A plain pin (no
+    # dependents) keeps its caption on the right.
+    ed = _editor([])
+    target = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=60.0,
+                         params={"power": -7.49}, power_view="psd_live", step_id="tgt1")
+    dep = tlm.RunItem(task_name="chirp", action="ramp", anchor="step", offset=90.0,
+                      anchor_step_id="tgt1", anchor_edge="start",
+                      ramp={"param": "power", "start": -30.0, "stop": -12.0,
+                            "step": 1.0, "hold_s": 5.0})
+    plain = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=140.0,
+                        params={"bw": 20})
+    ed._canvas.set_items([_bar(10), target, dep, plain])
+    ed.resize(1000, 300)
+    _app.processEvents()
+    ed.grab()                                        # force a layout/paint → _rows populated
+    assert ed._canvas._is_anchor_target(target) is True
+    assert ed._canvas._is_anchor_target(plain) is False
+    # a pin with a step_id that nobody references is NOT a target
+    orphan = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=10.0,
+                         params={"bw": 20}, step_id="unref")
+    ed._canvas.set_items([_bar(10), orphan])
+    _app.processEvents(); ed.grab()
+    assert ed._canvas._is_anchor_target(orphan) is False
+
+
 def test_unit_chip_colours_differ_by_family_and_pin_paints():
     ed = _editor([])
     dens_bg = ed._canvas._unit_chip_colors("dBm/MHz")[1]
