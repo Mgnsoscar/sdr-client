@@ -71,7 +71,7 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
-## Current state — sequence-editor owner-testing fixes, round 1 (6 of 10): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+## Current state — sequence-editor owner-testing fixes (8 of 10 done + bar-anchoring groundwork): IN PROGRESS (branch `claude/step-to-step-anchoring`, client-only)
 Owner testing surfaced 10 issues (Word doc). Six shipped, all client-only; drift-guarded files
 untouched. Suite 976 → 992 offscreen.
 - **#2 Ramps drag to MOVE (never resize).** A ramp body is now a `ramp_body` drag part that shifts the
@@ -95,14 +95,28 @@ untouched. Suite 976 → 992 offscreen.
   `_make_root_anchor` sets that anchor keeping the item in place. A SELECTED root-anchored step draws a
   discreet dashed tie to its anchor line + an "on-air/off-air/resume +M:SS" chip
   (`_paint_root_anchor_hint`, selected-only so the default view stays uncluttered).
+- **#9 A two-sided target's connector exits AWAY from its body.** `_connector_points` gained a
+  `two_sided` flag: for a ramp/bar target whose dependent sits on the BODY side (an end edge with the
+  dependent to its left, a start edge with it to the right — between the two sides), it exits a stub the
+  other way first (end→right, start→left), drops to the dependent's row, and runs in — never behind the
+  bar. Entry stays horizontal (arrow/chip placement unchanged).
+- **#11 A tune/one-shot pin drags by DELTA, not to the cursor.** `run_body` is now delta-based like the
+  bar/ramp body (grabbing the caption beside the dot no longer jumps the dot under the mouse).
 Tests: `tests/test_timeline_step_anchor_ui.py` (ramp body moves without resizing; `_live_move`
-repositions a dependent + a chain; the ramp-end notice; root drop targets + `_make_root_anchor` +
-selected hint), `tests/test_timeline_step_anchor.py` (#4 before-on-air block).
-**REMAINING (4 of 10)** — the larger, cross-cutting pieces: **#1/#7** anchor a step TO a duration
-task's start/stop edge (needs the bar's two wire steps to carry distinct ids + the item↔wire round-trip
-translation), **#6** anchor a duration task (bar) FROM another step (bar's start hangs off a target,
-stop stays off-air), and **#9** connector wiring hiccups when a dependent sits between a two-sided
-step's two sides (needs a repro).
+repositions a dependent + a chain; the ramp-end notice; root drop targets + `_make_root_anchor` + selected
+hint; #9 two-sided exit; #11 delta drag), `tests/test_timeline_step_anchor.py` (#4 before-on-air block).
+Suite → 1000 offscreen.
+**Bar-anchoring MODEL groundwork landed** (`tests/test_timeline_step_anchor.py`): `BarItem` gains
+`step_id` + `start_anchor="step"`/`start_anchor_step_id`/`start_anchor_edge`; a bar flattens to two wire
+steps with distinct ids (start = the bar id, stop = id + `BAR_STOP_SUFFIX`) so a dependent can anchor to
+either edge; `items_to_steps`/`steps_to_items` encode/decode (`_encode_anchor_ref`/`_decode_anchor_ref`),
+`resolve_step_offsets`/`_item_edge_offset`/`step_edge_offset`/`bar_start_placement`/`compute_anchors` resolve
+a bar as source + target. Inert/backward-compatible (no UI yet).
+**REMAINING (one coherent anchoring-expansion feature)** — the CANVAS/dialog wiring to create bar anchors
+(**#1/#6/#7**: bar start/stop edges as drag targets, a bar's start as a drag source), plus **#12** off-air
+steps as eligible targets (draw an off-air-rooted dependent relative to off-air, resolved at arm) and
+**#13** drag-anchoring from a ramp's END side — all share the need to resolve/draw OFF-AIR-rooted anchor
+chains on the off-air clock, so they're best built together.
 
 ## Current state — Hold step rendered as a WINDOW + a forward-from-resume post-hold axis: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
 Owner ask (mockup `docs/sequence-hold-step-mockup.html`, published Artifact): present the Hold not as a
