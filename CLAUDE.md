@@ -71,6 +71,42 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — sequence editor `/code-review` round 2 (6 findings): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+A second `/code-review` of the full sequence-editor branch surfaced 6 findings; all fixed client-only
+(no agent/scripts/capability change; drift-guarded files untouched). Suite 949 → 954 offscreen.
+- **#1 (correctness) — dragging a step-anchored pin's BODY corrupted its offset.** `_anchor_base_x`
+  returned off-air (`self._off`) for `anchor="step"` (it only handled start/stop/hold), so a body-drag
+  set `it.offset = (x − off_air)/eff` — a large wrong value that then armed/saved. Fixed: for a
+  step-anchored item `_anchor_base_x` returns its TARGET's referenced edge x (via `tlm.step_edge_offset`,
+  resolved independently of the item's live offset so it's stable across the drag), so the offset is
+  measured from the target edge and the pin lands where dropped.
+- **#2 (correctness) — group-move double-shifted a step-anchored dependent.** When a selection held
+  BOTH a target and a dependent anchored to it, `_group_move` shifted the dependent's offset by `ds`
+  while the target edge also moved `ds` → the dependent moved 2·ds (gap grew). Fixed: a step-anchored
+  member whose target is also in the moving group is skipped (it follows the target); fix #1 also
+  corrects `ref0_x` when the dragged primary is step-anchored.
+- **#3 (display) — a negative step offset read "+−M:SS".** The connect-drag readout and the hover
+  tooltip prepended a literal "+" to `_mmss` (which already prints "−" for negatives). Both now use
+  `_offset_chip_text` (the same helper the connector chip uses).
+- **#4 (UX gate) — the plan / scheduled arm bypassed the step-anchor capability gate.** Library
+  save/arm gate step anchoring, but `plans_tab._finish_arm_preflight` and `timeline_tab._finish_preflight`
+  didn't, so arming a step-anchored plan/scheduled sequence to a < 1.24.0 (or a negative offset to a
+  < 1.25.0) agent hit a raw 400. New shared `plans_tab._step_anchor_block_lines(items_steps, fleet)`
+  (mirrors the Library gate) is now called by both interactive arm paths, blocking with a clear message.
+- **#5 (perf) — `_step_anchor_block` ran the full `steps()` fold on every keystroke.** `_revalidate`
+  called it on each name/canvas change and it called `steps()` (folding calibration per task) BEFORE the
+  LIBRARY_HOST / any-step-anchor short-circuits. Now it short-circuits on LIBRARY_HOST and checks the
+  raw `items()` for a step anchor (its `offset` == the `offset_s` that would be sent) before ever
+  folding — no `steps()` for a plain sequence.
+- **#6 (hit-testing) — a tune pin's hit region was a symmetric band while its chips draw to one side.**
+  `_hit` used `abs(x − cx) ≤ w/2`, so far chips were unclickable and the empty space on the dot's other
+  side was a false hit. New `_pin_footprint(it, g)` returns the real drawn extent (dot + chips/caption on
+  the `_pin_caption_side`), and `_hit` uses it.
+Tests: `tests/test_timeline_step_anchor_ui.py` (`_anchor_base_x` uses the target edge; group-move doesn't
+double-shift; negative offset has no doubled sign; `_pin_footprint` matches the chips; the plan gate
+`_step_anchor_block_lines` blocks an old agent). Files: `ui/timeline_editor.py`, `ui/sequence_editor.py`,
+`ui/plans_tab.py`, `ui/timeline_tab.py`.
+
 ## Current state — window-filling ("both") ramp holds its LAST level before off-air: COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo, drift-guarded)
 Owner ask: a dual-anchor ("both") ramp filling the on-air window reached its top exactly AT off-air with
 0 hold. Now it holds the last level one dwell before off-air (like a single-anchor / "stop" ramp). Fix

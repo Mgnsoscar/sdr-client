@@ -49,7 +49,7 @@ from . import run_conflict
 from .theme import Palette
 from .timeline_model import (
     SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY, SEQUENCE_LOG_TABLE_CAPABILITY,
-    hold_runtime_supported)
+    hold_runtime_supported, step_anchor_supported, step_anchor_negative_supported)
 from .widgets import StatusPill, natural_key
 
 ARM_MARGIN_S = 5.0
@@ -143,6 +143,29 @@ def _plan_has_hold(plan: m.Plan, seqs_by_host: Optional[dict] = None) -> bool:
             if stored is not None and m.has_hold(stored.steps):
                 return True
     return False
+
+
+def _step_anchor_block_lines(items_steps, fleet) -> List[str]:
+    """Block lines (empty = OK) for arming steps that use step-to-step anchoring on a unit whose
+    agent can't resolve it — needs ≥ 1.24.0 (a negative step offset ≥ 1.25.0). Mirrors the Library
+    save/arm gate so a plan / scheduled arm blocks with a clear message instead of a raw agent 400.
+    ``items_steps`` is an iterable of (hostname, label, steps); an undiscovered unit is skipped (the
+    agent stays the backstop)."""
+    out: List[str] = []
+    for host, label, steps in items_steps:
+        step_steps = [s for s in steps if getattr(s, "anchor", "") == "step"]
+        if not step_steps:
+            continue
+        try:
+            client = fleet.get(host)
+        except Exception:  # noqa: BLE001 — undiscovered unit → the agent is the backstop
+            continue
+        if not step_anchor_supported(client):
+            out.append(f"• {label}: needs agent ≥ 1.24.0 (step-to-step anchoring)")
+        elif (any(float(getattr(s, "offset_s", 0.0)) < 0 for s in step_steps)
+              and not step_anchor_negative_supported(client)):
+            out.append(f"• {label}: needs agent ≥ 1.25.0 (a negative step offset)")
+    return out
 
 
 def _hold_aware_plan_item(plan: m.Plan, resolved: Dict[int, list],
@@ -775,6 +798,21 @@ class PlansTab(QWidget):
                 self, "Cannot arm plan",
                 "These units no longer have the plan's sequence:\n" + ", ".join(missing_seq))
             self._set_status("arm cancelled", error=True)
+            return
+
+        # Safety gate (mirrors the Library save/arm gate): a step-to-step anchor needs an agent
+        # that can resolve it (≥ 1.24.0; a negative step offset ≥ 1.25.0). Block with a clear
+        # message rather than letting the agent reject the arm with a raw 400.
+        sa_block = _step_anchor_block_lines(
+            ((plan.items[idx].hostname, plan.items[idx].unit_label or plan.items[idx].hostname,
+              steps) for idx, steps in resolved.items()), self.fleet)
+        if sa_block:
+            QMessageBox.warning(
+                self, "Cannot arm plan",
+                "A step in this plan is anchored to another step, which these units’ agents "
+                "can’t resolve yet:\n" + "\n".join(sa_block) + "\n\nUpdate the units’ agents, or "
+                "re-anchor those steps to on-air / off-air.")
+            self._set_status("arm blocked — step anchoring unsupported", error=True)
             return
 
         # Guard: don't arm over a task already transmitting on any item's unit (the agent

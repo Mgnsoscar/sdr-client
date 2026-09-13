@@ -229,10 +229,14 @@ class SequenceEditorDialog(QDialog):
         sequence to a UNIT whose agent can't resolve anchor="step" (< 1.24.0) — it would be
         rejected or mis-fire. The library holds only a definition, so it's never blocked; a
         unit we can't resolve/check is left to the agent's own validate() backstop."""
-        steps = self._timeline.steps()
-        if not any(getattr(s, "anchor", "") == "step" for s in steps):
-            return None
+        # Short-circuit the cheap cases BEFORE the timeline fold: the Library holds only a
+        # definition (never blocked), and a step-anchored item is visible on the raw items
+        # (its offset == the offset_s that would be sent), so we avoid running steps() —
+        # which folds calibration per task — on every keystroke of a plain sequence.
         if self.hostname == LIBRARY_HOST:
+            return None
+        step_items = [it for it in self._timeline.items() if getattr(it, "anchor", "") == "step"]
+        if not step_items:
             return None
         try:
             client = self.hub.fleet.get(self.hostname)
@@ -242,8 +246,8 @@ class SequenceEditorDialog(QDialog):
             return ("this sequence anchors a step to another step, which needs a newer agent "
                     "(≥ 1.24.0). Update the unit’s agent, or re-anchor those steps to "
                     "on-air / off-air.")
-        if any(getattr(s, "anchor", "") == "step" and float(getattr(s, "offset_s", 0.0)) < 0
-               for s in steps) and not step_anchor_negative_supported(client):
+        if any(float(getattr(it, "offset", 0.0)) < 0 for it in step_items) \
+                and not step_anchor_negative_supported(client):
             return ("a step here is anchored to fire BEFORE another step (a negative offset), which "
                     "needs a newer agent (≥ 1.25.0). Update the unit’s agent, or set those offsets "
                     "to 0 or more.")

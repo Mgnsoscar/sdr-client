@@ -1582,7 +1582,7 @@ class _TimelineCanvas(QWidget):
         if ok:
             off = tlm.step_drop_offset(self._items, self._connect["src"], t.uid, edge,
                                        self._hold_off, self._step_bases)
-            label = f"+{self._mmss(off or 0.0)} after {t.task_name or '?'} · {edge}"
+            label = f"{self._offset_chip_text(off or 0.0)} after {t.task_name or '?'} · {edge}"
         else:
             label = "drop on a step edge to anchor"
         self._paint_tag(p, x2, y2 - 16, label, ok)
@@ -1687,6 +1687,25 @@ class _TimelineCanvas(QWidget):
             return right - HANDLE_W - CARET_W / 2 - 2
         return g["cx"] + g["w"] / 2 - CARET_W / 2 - 6
 
+    def _pin_footprint(self, it, g) -> Tuple[float, float]:
+        """The drawn x-extent (x_lo, x_hi) of a tune/one-shot pin — the dot PLUS its caption/chips
+        on whichever side `_paint_pin` places them — so hit-testing matches what's drawn (the whole
+        readout is clickable, and the empty space on the dot's other side is not a false hit)."""
+        cx = g["cx"]
+        lo, hi = cx - 7.5, cx + 7.5                     # the dot / diamond
+        side = self._pin_caption_side(it)
+        gap = PIN_CAP_GAP2 if side == "two_sided" else PIN_CAP_GAP
+        if getattr(it, "action", "run") == "run":       # one-shot: task-name caption
+            tw = QFontMetrics(self._f(12, True)).horizontalAdvance(it.task_name or "(no task)")
+            span = tw
+        else:                                           # tune: measured chip run
+            span = self._tune_chip_defs(it)[1]
+        if side == "left":
+            lo = min(lo, cx - PIN_CAP_GAP - span)
+        else:
+            hi = max(hi, cx + gap + span)
+        return lo, hi
+
     def _hit(self, x: float, y: float) -> Optional[Tuple[object, str]]:
         # The Hold divider spans the whole band, so a wide bar body overlaps its x —
         # test holds first so a click on the divider grabs it, not the bar underneath.
@@ -1722,8 +1741,10 @@ class _TimelineCanvas(QWidget):
                     lo, hi = sorted((g["start_x"], g["stop_x"]))
                     if lo - RAMP_MIN_W / 2 <= x <= hi + RAMP_MIN_W / 2:
                         return it, "ramp_body"
-                elif abs(x - g["cx"]) <= g["w"] / 2:
-                    return it, "run_body"
+                else:
+                    lo, hi = self._pin_footprint(it, g)
+                    if lo <= x <= hi:
+                        return it, "run_body"
             # Caption + inline-panel rows below: a click there opens the editor.
             if top + LANE_H < y <= top + g.get("foot_h", LANE_H) + 2:
                 if "panel" in g:
@@ -1934,11 +1955,19 @@ class _TimelineCanvas(QWidget):
 
     def _anchor_base_x(self, it) -> float:
         """The x a one-shot's offset is measured from while dragging: on-air for a start
-        anchor, off-air for a stop anchor, and the Hold divider for a window-B (anchor='hold')
-        one-shot (placed at hold_offset + its offset)."""
-        if getattr(it, "anchor", "start") == "hold" and self._hold_off is not None:
+        anchor, off-air for a stop anchor, the Hold divider for a window-B (anchor='hold')
+        one-shot, and — for a step-anchored (anchor='step') item — its TARGET's referenced
+        edge (so a body-drag adjusts the offset relative to the target, not off-air; the
+        target edge is resolved independently of this item's live offset so it's stable
+        across the drag)."""
+        anchor = getattr(it, "anchor", "start")
+        if anchor == "step":
+            e = tlm.step_edge_offset(self._items, getattr(it, "anchor_step_id", "") or "",
+                                     getattr(it, "anchor_edge", "end") or "end", self._hold_off)
+            return self._on + (e * self._eff() if e is not None else 0.0)
+        if anchor == "hold" and self._hold_off is not None:
             return self._on + self._hold_off * self._eff()
-        return self._on if it.anchor == "start" else self._off
+        return self._on if anchor == "start" else self._off
 
     # ── Drag snapping (to nearby step edges / anchors / ticks) ─────────────────
     def _snap_targets(self, exclude):
@@ -2005,6 +2034,11 @@ class _TimelineCanvas(QWidget):
             ds = (sbx - ref0_x) / eff; self._snap_guide = sbx
         else:
             ds = tlm._snap((x - drag["press_x"]) / eff)
+        # A step-anchored item whose TARGET is also moving in this group already follows the
+        # target (its offset is relative to the target's edge), so shifting its offset by ds too
+        # would double-move it — leave those offsets alone; everything else shifts by ds.
+        by_sid = {getattr(o, "step_id", "") or "": o.uid
+                  for o in self._items if getattr(o, "step_id", "")}
         for u, (kind, s0, e0, o0) in drag["group0"].items():
             itu = next((o for o in self._items if o.uid == u), None)
             if itu is None:
@@ -2012,6 +2046,9 @@ class _TimelineCanvas(QWidget):
             if kind == "bar":
                 itu.start_offset = min(s0 + ds, (mid - self._on) / eff)
                 itu.stop_offset = max(e0 + ds, (mid - self._off) / eff)
+            elif (getattr(itu, "anchor", "start") == "step"
+                  and by_sid.get(getattr(itu, "anchor_step_id", "") or "") in group):
+                pass                               # follows its (also-moving) target — don't shift
             else:
                 itu.offset = self._clamp_tune_offset(itu, o0 + ds)
             self._live_relayout(itu)
@@ -2179,7 +2216,7 @@ class _TimelineCanvas(QWidget):
                         if (getattr(o, "step_id", "") or "") == (getattr(it, "anchor_step_id", "") or "")), None)
             tname = (getattr(tgt, "task_name", "") or "?") if tgt is not None else "?"
             lines.append(f"⚓ after {tname}'s {getattr(it, 'anchor_edge', 'end')} "
-                         f"+{self._mmss(float(getattr(it, 'offset', 0.0)))}")
+                         f"{self._offset_chip_text(float(getattr(it, 'offset', 0.0)))}")
         elif act != "ramp" and it.kind != "bar":
             side = "hold" if anc == "hold" else (anc if anc in ("start", "stop") else "start")
             lines.append("fires " + _timing_text(float(getattr(it, "offset", 0.0)), side, True))

@@ -468,3 +468,98 @@ def test_tooltip_text_describes_anchor_and_bar():
     bar = next(it for it in cv._items if it.kind == "bar")
     btxt = cv._tooltip_text(bar)
     assert "starts" in btxt and "stops" in btxt
+
+
+# ── /code-review fixes: drag / hit-test / display / gate ─────────────────────────
+
+def test_anchor_base_x_uses_the_target_edge_for_a_step_anchor():
+    """Fix #1: a step-anchored item's body-drag measures its offset from the TARGET's edge,
+    not off-air — so dragging it no longer corrupts the anchor offset."""
+    target = _tune(10.0, sid="tgt")                       # a point at on-air+10 (start==end)
+    dep = _tune(3.0)                                      # will anchor to tgt
+    dep.anchor = "step"; dep.anchor_step_id = "tgt"; dep.anchor_edge = "end"
+    cv = _chirp_editor([_bar(), target, dep])._canvas
+    eff = cv._eff()
+    base_x = cv._anchor_base_x(dep)
+    assert abs(base_x - (cv._on + 10.0 * eff)) < 0.5      # the target's edge, not off-air
+    assert abs(base_x - cv._off) > 1.0                    # NOT the off-air anchor (the old bug)
+    # a plain start / stop anchor is unchanged
+    assert abs(cv._anchor_base_x(target) - cv._on) < 0.5
+
+
+def test_group_move_does_not_double_shift_a_step_anchored_dependent():
+    """Fix #2: moving a group that contains BOTH a target and its step-anchored dependent shifts
+    the dependent via its target only (its offset is left alone), so the gap is preserved."""
+    target = _tune(10.0, sid="tgt")
+    dep = _tune(5.0)
+    dep.anchor = "step"; dep.anchor_step_id = "tgt"; dep.anchor_edge = "end"
+    cv = _chirp_editor([_bar(), target, dep])._canvas
+    eff = cv._eff(); mid = tlm.midpoint(cv._on, cv._off)
+    cv._selection = {target.uid, dep.uid}
+    press_x = cv._geom[target.uid]["cx"]
+    cv._drag = {"item": target, "part": "run_body", "press_x": press_x, "moved": True,
+                "group": {target.uid, dep.uid}, "group0": cv._group_bases({target.uid, dep.uid})}
+    cv._group_move(press_x + 45.0, eff, mid)
+    assert dep.offset == 5.0                              # unchanged — it follows its target
+    assert target.offset != 10.0                          # the target actually moved
+    # the resolved gap between them is preserved (still the dependent's own offset)
+    bases = tlm.resolve_step_offsets(cv._items, None)
+    tgt_edge = bases_edge = target.offset                 # a point's end == its offset
+    assert round(bases[dep.uid] - tgt_edge, 6) == 5.0
+
+
+def test_negative_step_offset_reads_without_a_double_sign():
+    """Fix #3: a negative step offset shows as '−M:SS' (not '+−M:SS') in the tooltip."""
+    up = _ramp_item(0.0, sid="up")
+    early = _tune(0.0)
+    early.anchor = "step"; early.anchor_step_id = "up"; early.anchor_edge = "start"; early.offset = -30.0
+    cv = _chirp_editor([_bar(), up, early])._canvas
+    txt = cv._tooltip_text(early)
+    assert "+−" not in txt and "+-" not in txt       # never a doubled sign
+    assert "−" in txt and "⚓" in txt            # the − and the ⚓ anchor glyph
+
+
+def test_pin_footprint_matches_the_drawn_chips_not_a_symmetric_band():
+    """Fix #6: a tune pin's hit footprint spans the dot + its chips on the caption side, so the
+    far chips are clickable and the empty space on the other side of the dot is not a false hit."""
+    t = _tune(20.0)
+    t.params = {"bw": 12, "sidelobes": 5, "rf": "on"}     # several chips → a wide run
+    cv = _chirp_editor([_bar(), t])._canvas
+    g = cv._geom[t.uid]; cx = g["cx"]
+    lo, hi = cv._pin_footprint(t, g)
+    total = cv._tune_chip_defs(t)[1]
+    assert hi >= cx + total - 1.0                         # reaches the far edge of the chips
+    assert abs(lo - (cx - 7.5)) < 0.6                     # tight to the dot on the empty side
+    assert lo <= cx <= hi and (cx + total * 0.9) <= hi    # a far-chip x is inside the hit region
+    assert (cx - total / 2 - 10) < lo                     # the old symmetric band's left is excluded
+
+
+def test_plan_step_anchor_gate_blocks_an_old_agent():
+    """Fix #4: the plan/schedule arm gate blocks a step-anchored sequence on a unit whose agent
+    can't resolve it, instead of letting the agent 400 the arm."""
+    from types import SimpleNamespace
+    from ui.plans_tab import _step_anchor_block_lines
+
+    def _client(caps, ver):
+        return SimpleNamespace(_c=set(caps), agent_version=ver,
+                               supports=lambda c, _s=set(caps): c in _s)
+    old = _client([], "1.23.0")
+    new = _client(["sequence-step-anchor", "sequence-step-anchor-negative"], "1.25.0")
+    old_neg = _client(["sequence-step-anchor"], "1.24.0")
+    step = SimpleNamespace(anchor="step", offset_s=5.0)
+    neg = SimpleNamespace(anchor="step", offset_s=-5.0)
+    plain = SimpleNamespace(anchor="start", offset_s=0.0)
+
+    def fleet(mapping):
+        return SimpleNamespace(get=lambda h: mapping[h])
+
+    # old agent, step anchor → blocked (≥1.24.0)
+    lines = _step_anchor_block_lines([("u", "Unit A", [step])], fleet({"u": old}))
+    assert lines and "1.24.0" in lines[0]
+    # capable agent → no block
+    assert _step_anchor_block_lines([("u", "Unit A", [step])], fleet({"u": new})) == []
+    # negative offset on a 1.24 agent → blocked (needs 1.25.0)
+    lines = _step_anchor_block_lines([("u", "Unit A", [neg])], fleet({"u": old_neg}))
+    assert lines and "1.25.0" in lines[0]
+    # no step anchor → never blocked (agent never consulted)
+    assert _step_anchor_block_lines([("u", "Unit A", [plain])], fleet({"u": old})) == []
