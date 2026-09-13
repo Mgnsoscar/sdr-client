@@ -27,7 +27,7 @@ body{
 .wrap{max-width:1160px; margin:0 auto; padding-inline:20px}
 .lede{margin:0 0 16px}
 .lede h1{font-size:19px; font-weight:600; letter-spacing:.2px; margin:0 0 5px; text-wrap:balance}
-.lede p{margin:0; color:var(--muted); font-size:13.5px; line-height:1.5; max-width:74ch}
+.lede p{margin:0; color:var(--muted); font-size:13.5px; line-height:1.5; max-width:76ch}
 
 .app{background:var(--surface); border:1px solid var(--border); border-radius:var(--r); box-shadow:var(--shadow-md); overflow:hidden}
 .title{display:flex; align-items:center; gap:12px; padding:11px 16px; border-bottom:1px solid var(--hairline); background:linear-gradient(180deg,#FFFFFF,#FCFDFE)}
@@ -55,7 +55,7 @@ svg{display:block; width:100%; height:auto}
 .switch input{position:absolute; opacity:0; width:0; height:0}
 .switch .track{width:34px; height:19px; border-radius:999px; background:var(--border-strong); position:relative; transition:background .15s}
 .switch .track::after{content:""; position:absolute; top:2px; left:2px; width:15px; height:15px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(22,32,48,.28); transition:transform .15s}
-.switch input:checked + .track{background:var(--online)}
+.switch input:checked + .track{background:var(--teal)}
 .switch input.red:checked + .track{background:var(--crash)}
 .switch input:checked + .track::after{transform:translateX(15px)}
 .switch input:focus-visible + .track{outline:2px solid var(--accent); outline-offset:2px}
@@ -67,8 +67,8 @@ svg{display:block; width:100%; height:auto}
 .rule code{font-family:var(--mono); font-size:11.5px; background:var(--inset); padding:1px 5px; border-radius:4px; color:var(--accent-ink)}
 .swatch{width:13px;height:13px;border-radius:4px;flex:none}
 .sw-merge{background:linear-gradient(90deg,var(--armed) 0 50%,var(--crash) 50% 100%)}
-.sw-green{background:var(--online-soft); border:1px solid var(--online)}
 .sw-red{background:var(--crash-soft); border:1px solid var(--crash)}
+.sw-held{background:linear-gradient(90deg,rgba(30,143,163,.25) 0 38%,rgba(186,117,23,.32) 38% 64%,rgba(30,143,163,.25) 64% 100%); border:1px solid var(--teal)}
 .foot{margin-top:14px; font-size:12px; color:var(--faint); line-height:1.5}
 .kbd{font-family:var(--mono); font-size:11px; color:var(--muted); background:var(--inset); border:1px solid var(--border); border-radius:4px; padding:1px 5px}
 
@@ -79,11 +79,12 @@ svg{display:block; width:100%; height:auto}
   <div class="lede">
     <h1>Hold step, as a window</h1>
     <p>With a Hold, the end can’t be scheduled — off-air <b>floats</b> to Proceed, so the Hold becomes the
-      one variable-length section (it replaces the relative band). After it sit up to two <b>absolute</b>
-      windows — a green <i>resume</i> window then a red <i>off-air</i> window — each present only when a
-      step is anchored in it. With nothing anchored after the Hold, its <i>resume</i> edge <b>is</b>
-      off-air; the two markers merge into one. And a step anchored to an off-air step lands in the red
-      window at its own resolved time.</p>
+      one variable-length section (it replaces the relative band). Everything after it is one <b>absolute
+      off-air window</b> — tinted red, <code>0</code> at off-air and counting back — holding whatever is
+      anchored to the Hold’s <i>resume</i> edge or to off-air. With nothing anchored after the Hold, its
+      resume edge <b>is</b> off-air and the two markers merge into one. A step anchored to an off-air step
+      resolves through it and lands at its <b>own</b> off-air time. Tasks that run through the Hold stay
+      <b>visible</b> — the bar is drawn over the window, its held stretch faintly shaded.</p>
   </div>
 
   <div class="app">
@@ -118,15 +119,15 @@ svg{display:block; width:100%; height:auto}
 
   <div class="rules">
     <div class="rule">
-      <h3><span class="swatch sw-green"></span>Resume window</h3>
-      <p>Steps anchored to <b>resume</b> live in a green absolute window right of the Hold — <code>0</code>
-        at resume, counting forward. Present only when something is anchored there.</p>
+      <h3><span class="swatch sw-red"></span>One off-air window</h3>
+      <p>Everything after the Hold sits in a single absolute window in the <b>off-air style</b> — red-tinted,
+        <code>0</code> at off-air, counting back. Present whenever a step is anchored to <i>resume</i> or to
+        off-air.</p>
     </div>
     <div class="rule">
-      <h3><span class="swatch sw-red"></span>Off-air window &amp; chains</h3>
-      <p>Steps anchored to <b>off-air</b> (or to a step that is) live in a red absolute window —
-        <code>0</code> at off-air, counting back. A chained step resolves through its target and lands
-        at its <b>own</b> off-air time in the same window.</p>
+      <h3><span class="swatch sw-held"></span>Held task stays visible</h3>
+      <p>A duration task that runs through the Hold isn’t hidden — its bar is painted <b>over</b> the window,
+        with the held stretch faintly amber-shaded and the Hold’s dashed edges crossing it.</p>
     </div>
     <div class="rule">
       <h3><span class="swatch sw-merge"></span>Nothing after? They merge</h3>
@@ -135,17 +136,17 @@ svg{display:block; width:100%; height:auto}
     </div>
   </div>
 
-  <p class="foot">Turn both switches off to collapse the resume/off-air windows and watch the Hold’s end become off-air
-    (the merged marker). The red switch also shows a step anchored to the off-air step — it lands at its own resolved time.</p>
+  <p class="foot">Turn both switches off to collapse the off-air window and watch the Hold’s end become off-air
+    (the merged marker). The off-air switch also shows a step anchored to the off-air step — it lands at its own resolved time.</p>
 </div>
 
 <script>
 const S={ anchor:"onair", green:true, red:true };
 
 const VW=1120, VH=404;
-const headerW=170, on_x=182, eff=3.2, holdW=58, GREEN_S=60, RED_S=48;
+const headerW=170, on_x=182, eff=3.2, holdW=58, RES_S=60, OFF_S=48;
 const laneTop=70, pitch=40, rowH=28, axisY=316, bandTop=58;
-const rowY=i=>laneTop+i*pitch;                            // 0 bar,1 pre,2 res-tune,3 res-ramp,4 offair,5 chain
+const rowY=i=>laneTop+i*pitch;                            // 0 bar,1 pre-hold,2 res-tune,3 res-ramp,4 off-air,5 chain
 const C={ text:"#1E2530",muted:"#5C6675",faint:"#8A93A2",border:"#E2E5EA",bstrong:"#CDD2DA",
   accent:"#2C6E9B",accentInk:"#1F5476",online:"#1D9E75",crash:"#C23B3B",armed:"#BA7517",
   teal:"#1E8FA3",tealInk:"#12707F" };
@@ -154,12 +155,12 @@ const fmt=s=>{ const neg=s<0; s=Math.abs(Math.round(s)); const m=(s/60|0), ss=s%
   return (neg?"−":"+")+(m?`${m}:${String(ss).padStart(2,"0")}`:`${ss}s`); };
 
 function geom(){
-  const ex = S.anchor==="onair" ? on_x+120*eff : on_x+140*eff;
-  const rx = ex+holdW;
-  const green_end = S.green ? rx+GREEN_S*eff : rx;
-  const off_x = green_end + (S.red?RED_S*eff:0);          // merges with rx when nothing is anchored after
+  const ex = S.anchor==="onair" ? on_x+120*eff : on_x+140*eff;   // hold enter
+  const rx = ex+holdW;                                           // hold resume edge
+  const res_end = S.green ? rx+RES_S*eff : rx;
+  const off_x = res_end + (S.red?OFF_S*eff:0);                   // off-air; merges with rx when nothing follows
   const merged = off_x <= rx + 0.5;
-  return {ex,rx,green_end,off_x,merged};
+  return {ex,rx,res_end,off_x,merged};
 }
 
 const A=o=>Object.entries(o).map(([k,v])=>`${k}="${v}"`).join(" ");
@@ -194,7 +195,7 @@ function ticks(s,x0,dir,fromS,toS,step){
 }
 
 function render(){
-  const {ex,rx,green_end,off_x,merged}=geom();
+  const {ex,rx,res_end,off_x,merged}=geom();
   const s={g:""};
   const rowLbl=["gps_ca","tune · RF off","tune · RF on","ramp · −50→−90","tune · RF off","tune · sidelobes"];
   const rowSub=["duration","before hold","on resume","on resume","before off-air","anchored to ↑"];
@@ -218,18 +219,22 @@ function render(){
     s.g+=txt(32,y-1,rowLbl[i]+(dim?"  ·  off":""),{"font-family":"var(--sans)","font-size":12,"font-weight":isTask?600:500,fill:dim?C.faint:C.text});
     s.g+=txt(32,y+11,rowSub[i],{"font-family":"var(--sans)","font-size":9.5,fill:C.faint}); }
 
-  // absolute windows — on-air green, resume green, off-air red (NO relative band; the Hold is it)
-  s.g+=rect(on_x,bandTop+2,ex-on_x,axisY-(bandTop+2),{fill:C.online,opacity:.055});
-  if(S.green) s.g+=rect(rx,bandTop+2,green_end-rx,axisY-(bandTop+2),{fill:C.online,opacity:.075});
-  if(S.red)   s.g+=rect(green_end,bandTop+2,off_x-green_end,axisY-(bandTop+2),{fill:C.crash,opacity:.05});
-  s.g+=line(headerW,axisY,VW,axisY,{stroke:C.border});
-  ticks(s,on_x,1,0,Math.floor((ex-on_x)/eff)-15,30);
-  if(S.green) ticks(s,rx,1,0,GREEN_S,30);
-  if(S.red)   ticks(s,off_x,-1,0,RED_S-18,30);
+  // ── window bands (drawn FIRST, behind everything) ──
+  const bh=axisY-(bandTop+2);
+  s.g+=rect(on_x,bandTop+2,ex-on_x,bh,{fill:C.online,opacity:.055});                     // on-air (green)
+  s.g+=rect(ex,bandTop+2,rx-ex,bh,{fill:"url(#hatch)"})+rect(ex,bandTop+2,rx-ex,bh,{fill:C.armed,opacity:.10}); // hold
+  if(!merged) s.g+=rect(rx,bandTop+2,off_x-rx,bh,{fill:C.crash,opacity:.05});             // post-hold (off-air red)
 
-  // task bar
+  // axis line + ticks (gridlines sit behind the bar)
+  s.g+=line(headerW,axisY,VW,axisY,{stroke:C.border});
+  ticks(s,on_x,1,0,Math.floor((ex-on_x)/eff)-6,30);                       // on-air, forward
+  if(!merged) ticks(s,off_x,-1,0,Math.floor((off_x-rx)/eff),30);          // off-air, backward — fills the red window
+
+  // ── task bar (OPAQUE, over the bands, so it stays visible through the Hold) ──
   const by=rowY(0);
-  s.g+=rect(on_x,by,off_x-on_x,rowH,{rx:8,fill:C.teal,opacity:.1,stroke:C.teal,"stroke-width":1,"stroke-opacity":.5});
+  s.g+=rect(on_x,by,off_x-on_x,rowH,{rx:8,fill:"#FFFFFF"});                                   // opaque base
+  s.g+=rect(on_x,by,off_x-on_x,rowH,{rx:8,fill:C.teal,opacity:.12,stroke:C.teal,"stroke-width":1,"stroke-opacity":.5});
+  s.g+=rect(ex,by,rx-ex,rowH,{fill:C.armed,opacity:.13});                                     // held stretch (faint amber)
   s.g+=rect(on_x+3,by+5,3,rowH-10,{rx:1.5,fill:C.teal});
   s.g+=txt(on_x+14,by+18,"gps_ca",{"font-family":"var(--sans)","font-size":12,"font-weight":600,fill:C.tealInk});
   s.g+=circ(on_x,by+rowH/2,4.5,{fill:"#FFFFFF",stroke:C.teal,"stroke-width":2})+circ(off_x,by+rowH/2,4.5,{fill:"#FFFFFF",stroke:C.teal,"stroke-width":2});
@@ -237,8 +242,7 @@ function render(){
     s.g+=rect(r0,by+4,r1-r0,rowH-8,{rx:6,fill:C.teal,opacity:.22,stroke:C.teal,"stroke-width":1,"stroke-opacity":.6});
     s.g+=line(r0+7,by+rowH-8,r1-7,by+8,{stroke:C.tealInk,"stroke-width":1.6,"stroke-linecap":"round"})+circ(r1-7,by+8,2.4,{fill:C.tealInk}); }
 
-  // HOLD window — enter line amber; resume line amber (or RED when it IS off-air, i.e. merged)
-  s.g+=rect(ex,bandTop+2,rx-ex,axisY-(bandTop+2),{fill:"url(#hatch)"})+rect(ex,bandTop+2,rx-ex,axisY-(bandTop+2),{fill:C.armed,opacity:.10});
+  // ── Hold dashed edges (ON TOP of the bar) ──
   s.g+=line(ex,bandTop,ex,axisY+4,{stroke:C.armed,"stroke-width":2,"stroke-dasharray":"5 4"});
   s.g+=line(rx,bandTop,rx,axisY+4,{stroke:merged?C.crash:C.armed,"stroke-width":2,"stroke-dasharray":merged?"2 3":"5 4"});
 
@@ -247,15 +251,15 @@ function render(){
   if(S.anchor==="onair"){ s.g+=line(on_x,bandTop-2,on_x,yA,{stroke:C.armed,"stroke-width":1.5,opacity:.5})+line(on_x,yA,ex,yA,{stroke:C.armed,"stroke-width":1.5,"marker-end":"url(#arw)"})+chipAt((on_x+ex)/2,yA,"+2:00",C.armed); }
   else { const re=ex-10*eff; s.g+=line(re,by-2,re,yA,{stroke:C.armed,"stroke-width":1.5,opacity:.5})+line(re,yA,ex,yA,{stroke:C.armed,"stroke-width":1.5,"marker-end":"url(#arw)"})+chipAt((re+ex)/2,yA,"+0:10 · after ramp end",C.armed); }
 
-  // steps — at true time in their window
+  // steps — at true time in their window (resume-anchored forward from rx, off-air-anchored back from off_x)
   s.g+=pin(ex-30*eff, rowY(1)+rowH/2, C.teal, "−0:30 · before hold", "l");
   if(S.green){
-    s.g+=pin(rx, rowY(2)+rowH/2, C.teal, "+0:00 · RF on", "r");
-    const rs=rx+15*eff, re2=rx+60*eff, ry=rowY(3);
+    s.g+=pin(rx, rowY(2)+rowH/2, C.teal, "resume +0:00 · RF on", "r");
+    const rs=rx+12*eff, re2=rx+50*eff, ry=rowY(3);
     s.g+=rect(rs,ry+4,re2-rs,rowH-8,{rx:6,fill:C.teal,opacity:.2,stroke:C.teal,"stroke-width":1,"stroke-opacity":.6});
     s.g+=txt(rs+8,ry+17,"−50→−90",{"font-family":"var(--mono)","font-size":10,"font-weight":600,fill:C.tealInk});
     s.g+=line(rs+9,ry+rowH-7,re2-9,ry+7,{stroke:C.tealInk,"stroke-width":1.6,"stroke-linecap":"round"})+circ(re2-9,ry+7,2.4,{fill:C.tealInk});
-    s.g+=chipSide(rs, ry+rowH/2, "+0:15", C.tealInk, "l");
+    s.g+=chipSide(rs, ry+rowH/2, "resume +0:12", C.tealInk, "l");
   }
   if(S.red){
     const s1x=off_x-30*eff, s1y=rowY(4)+rowH/2;
@@ -263,11 +267,11 @@ function render(){
     // connector: from the off-air step down-left into the chained step (arrow points at the chain)
     s.g+=line(s1x,s1y+6,s1x,s2y,{stroke:C.crash,"stroke-width":1.3,opacity:.55})+line(s1x,s2y,s2x,s2y,{stroke:C.crash,"stroke-width":1.3,opacity:.55,"marker-end":"url(#arwR)"});
     s.g+=chipAt((s1x+s2x)/2, s2y-13, "−0:10", C.crash);
-    s.g+=pin(s1x, s1y, C.crash, "−0:30 · before off-air", "l");
+    s.g+=pin(s1x, s1y, C.crash, "off-air −0:30", "l");
     s.g+=pin(s2x, s2y, C.crash, "−0:40 · resolved", "l", "diamond");
   }
 
-  // on-air line + pill; off-air marker (merged combined pill, or separate)
+  // on-air line + pill; Hold tab; off-air marker (merged combined pill, or separate)
   s.g+=line(on_x,bandTop-2,on_x,axisY+4,{stroke:C.online,"stroke-width":2})+pill(on_x,bandTop-14,"ON-AIR",C.online);
   const ftY=bandTop-19;
   if(merged){
@@ -281,7 +285,7 @@ function render(){
   }
 
   document.getElementById("canvas").innerHTML =
-    `<svg viewBox="0 0 ${VW} ${VH}" role="img" aria-label="Timeline: a Hold window, a green resume window and a red off-air window, merging when nothing follows the hold">${s.g}</svg>`;
+    `<svg viewBox="0 0 ${VW} ${VH}" role="img" aria-label="Timeline: an on-air window, a Hold window, and one absolute off-air window after the Hold, merging when nothing follows the hold">${s.g}</svg>`;
 }
 
 document.getElementById("segAnchor").addEventListener("click",e=>{ const b=e.target.closest("button"); if(!b) return;
