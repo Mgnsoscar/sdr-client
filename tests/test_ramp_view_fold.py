@@ -201,6 +201,37 @@ def test_saving_in_a_switched_view_stores_base_and_records_that_view():
     assert dlg.result_item.ramp["stop"] == pytest.approx(-18.0 - off, abs=0.06)
 
 
+def test_ramp_editor_accepts_a_negative_step_offset():
+    # A ramp anchored to another step may start BEFORE that step's edge (a negative offset —
+    # a warm-up lead-in, as start/stop anchors already allow); _accept no longer refuses it.
+    tgt = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=40.0,
+                      params={"bw": 12}, step_id="tgt")
+    ed = _chirp_editor([_bar(10), tgt])
+    src = tlm.RunItem(task_name="chirp", action="ramp", anchor="start", offset=10.0, ramp={})
+    ed._canvas.set_items([_bar(10), tgt, src])
+    dlg = RampEditorDialog(src, ed, new=True)
+    dlg._param.setCurrentText("power")
+    _app.processEvents()
+    si = dlg._anchor.findData("step")
+    assert si >= 0
+    dlg._anchor.setCurrentIndex(si)
+    _app.processEvents()
+    ti = dlg._anchor_target.findData(tgt.uid)
+    assert ti >= 0
+    dlg._anchor_target.setCurrentIndex(ti)
+    dlg._anchor_edge.setCurrentIndex(dlg._anchor_edge.findData("end"))
+    dlg._mode.setCurrentIndex(dlg._mode.findData("step_hold"))
+    dlg._step.setText("1"); dlg._hold.setText("10")
+    dlg._start_field.setValue(-25.0); dlg._stop_field.setValue(-18.0)
+    dlg._offset.setValue(-5.0)
+    _app.processEvents()
+    dlg._accept()
+    assert dlg.result_item is not None
+    assert dlg.result_item.anchor == "step"
+    assert dlg.result_item.anchor_step_id == "tgt"
+    assert dlg.result_item.offset == pytest.approx(-5.0)
+
+
 def test_step_listing_shares_the_form_scroll_and_expands():
     # The per-step listing must live in the SAME scroll as the rest of the form — not its own tiny
     # fixed-height box with an inner scrollbar (where you see ~one line at a time). It is a QLabel

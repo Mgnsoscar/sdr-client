@@ -343,6 +343,26 @@ def test_two_sided_pin_keeps_caption_right_with_a_wide_gap():
     assert c._pin_right_caption(A) is None                                   # target-only → flips LEFT
 
 
+def test_negative_dependent_that_is_also_a_target_flips_its_caption_left():
+    # The owner's case: a pin anchored to a LATER step (a negative offset → its incoming line enters
+    # from the RIGHT) that is ALSO an anchor for steps to its right (exits RIGHT) has BOTH connectors
+    # on the right, so its readout flips to the clear LEFT side — not the two-sided right-duck.
+    ed = _editor([])
+    s1 = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=180.0,
+                     params={"bw": 12}, step_id="s1")
+    s2 = tlm.RunItem(task_name="chirp", action="tune", anchor="step", anchor_step_id="s1",
+                     anchor_edge="start", offset=-180.0, params={"bw": 12}, step_id="s2")
+    s3 = tlm.RunItem(task_name="chirp", action="tune", anchor="step", anchor_step_id="s2",
+                     anchor_edge="start", offset=90.0, params={"bw": 12})
+    ed._canvas.set_items([_bar(10), s1, s2, s3])
+    ed.resize(1200, 320); _app.processEvents(); ed.grab()
+    c = ed._canvas
+    assert c._pin_conn_sides(s2) == (True, False)     # both connectors on the RIGHT
+    assert c._pin_caption_side(s2) == "left"          # → flip the caption to the clear LEFT side
+    assert c._pin_right_caption(s2) is None           # …so the right side is free for the arrow
+    assert c._pin_caption_side(s3) == "right"         # a positive dependent enters from the left
+
+
 def test_connector_ducks_under_a_two_sided_pins_caption():
     # The router routes an exit HORIZONTALLY out of the anchor, then into a channel below the readout
     # (option C), so the line never runs through the text.

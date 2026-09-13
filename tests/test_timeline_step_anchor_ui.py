@@ -2,8 +2,10 @@
 
 The StepEditorDialog (tune/run) and RampEditorDialog offer an "after another step…" anchor
 when an eligible target exists (and no Hold — they're mutually exclusive in Phase 1); saving
-sets anchor="step" + anchor_step_id (assigning the target a stable id) + anchor_edge, and a
-negative offset is refused.
+sets anchor="step" + anchor_step_id (assigning the target a stable id) + anchor_edge. A NEGATIVE
+offset (fire before the target's edge, like a start/stop anchor's warm-up lead-in) is allowed —
+the dialogs accept it, the canvas routes such a dependent entered from the RIGHT (arrow points
+left), and the save/arm gate enforces the sequence-step-anchor-negative capability.
 """
 import os
 
@@ -74,13 +76,16 @@ def test_step_editor_resolve_step_anchor_assigns_target_id():
     assert sa["anchor_step_id"] and target.step_id == sa["anchor_step_id"]  # id assigned in place
 
 
-def test_step_editor_refuses_negative_offset():
+def test_step_editor_accepts_negative_offset():
+    # A negative step offset is allowed now (fire BEFORE the target's edge, like a start/stop
+    # anchor's warm-up lead-in); the dialog resolves the anchor instead of refusing it.
     target = _tune(5.0, sid="tgt")
     src = _tune(20.0)
     dlg = StepEditorDialog(src, _chirp_editor([_bar(), target, src]), new=True)
     _app.processEvents()
     dlg._anchor_target.setCurrentIndex(0)
-    assert dlg._resolve_step_anchor("step", -2.0) is False
+    sa = dlg._resolve_step_anchor("step", -2.0)
+    assert sa and sa["anchor_step_id"] == "tgt"           # negative offset accepted
     assert dlg._resolve_step_anchor("start", 0.0) == {}   # non-step anchors pass through
 
 
@@ -402,6 +407,48 @@ def test_connector_points_wraps_when_offset_is_zero():
     assert pts[0] == (300.0, 10.0) and pts[-1] == (300.0, 90.0)
     # the final segment enters horizontally (same y as the dependent)
     assert pts[-2][1] == pts[-1][1]
+
+
+def test_connector_points_enters_from_the_right_for_a_negative_offset():
+    cv = _chirp_editor([_bar()])._canvas
+    # dependent (x2=120) sits LEFT of the anchor edge (x1=400): a negative step offset → the line
+    # enters from the RIGHT (arrow points left), so the final horizontal run comes from higher x.
+    pts = cv._connector_points(400.0, 10.0, 120.0, 90.0, 1.0, [], 60.0, entry_from_right=True)
+    assert pts[0] == (400.0, 10.0) and pts[-1] == (120.0, 90.0)
+    assert pts[-2][1] == pts[-1][1]                       # enters horizontally
+    assert pts[-2][0] > pts[-1][0]                        # …from the right (higher x → x2)
+
+
+def test_offset_chip_text_signs_the_offset():
+    cv = _chirp_editor([_bar()])._canvas
+    assert cv._offset_chip_text(90.0).startswith("+")     # a forward offset gets a leading +
+    neg = cv._offset_chip_text(-90.0)
+    assert neg.startswith("−") and "+" not in neg         # a negative keeps its − (no +−)
+
+
+def test_span_clear_detects_a_crossing_line():
+    cv = _chirp_editor([_bar()])._canvas
+    other = [(200.0, 50.0), (200.0, 90.0)]                # a vertical segment at x=200
+    assert not cv._span_clear(200.0, 70.0, 5.0, [other])  # right on it → not clear
+    assert cv._span_clear(300.0, 70.0, 5.0, [other])      # well away → clear
+
+
+def _dep(off, ref, edge="start", sid=""):
+    return tlm.RunItem(task_name="chirp", action="tune", anchor="step", offset=off,
+                       params={"bw": 12}, anchor_step_id=ref, anchor_edge=edge, step_id=sid)
+
+
+def test_negative_offset_dependent_paints_without_error():
+    # A four-step layout in the owner's shape: a dependent BEFORE its anchor + two after it. The
+    # canvas must lay out + paint (connectors routed, arrows placed) without raising.
+    s1 = _tune(30.0, sid="s1")                             # fires at 0:30
+    s2 = _dep(-30.0, "s1", "start", sid="s2")             # anchored to s1, fires 30 s BEFORE → 0:00
+    s3 = _dep(30.0, "s2", "start")                        # anchored to s2, +30 s → 0:30
+    s4 = _dep(30.0, "s2", "start")                        # anchored to s2, +30 s → 0:30
+    ed = _chirp_editor([_bar(), s1, s2, s3, s4])
+    assert tlm.validate(ed._canvas._items, ["chirp"]) is None
+    ed._canvas.resize(900, 400)
+    ed._canvas.grab()                                     # paints (paths + backed-off arrows) OK
 
 
 def test_minimap_present_and_navigates():

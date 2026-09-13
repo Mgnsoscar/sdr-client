@@ -33,7 +33,7 @@ from .qt_adapter import DataHub
 from .scope_selector import ScopeSelector
 from .theme import Palette
 from .timeline_editor import TimelineEditor, task_signals_from_yaml
-from .timeline_model import step_anchor_supported
+from .timeline_model import step_anchor_supported, step_anchor_negative_supported
 
 
 class SequenceEditorDialog(QDialog):
@@ -236,11 +236,16 @@ class SequenceEditorDialog(QDialog):
             client = self.hub.fleet.get(self.hostname)
         except Exception:  # noqa: BLE001 — undiscovered unit → let the agent be the backstop
             return None
-        if step_anchor_supported(client):
-            return None
-        return ("this sequence anchors a step to another step, which needs a newer agent "
-                "(≥ 1.24.0). Update the unit’s agent, or re-anchor those steps to "
-                "on-air / off-air.")
+        if not step_anchor_supported(client):
+            return ("this sequence anchors a step to another step, which needs a newer agent "
+                    "(≥ 1.24.0). Update the unit’s agent, or re-anchor those steps to "
+                    "on-air / off-air.")
+        if any(getattr(s, "anchor", "") == "step" and float(getattr(s, "offset_s", 0.0)) < 0
+               for s in steps) and not step_anchor_negative_supported(client):
+            return ("a step here is anchored to fire BEFORE another step (a negative offset), which "
+                    "needs a newer agent (≥ 1.25.0). Update the unit’s agent, or set those offsets "
+                    "to 0 or more.")
+        return None
 
     def _on_save(self) -> None:
         if self._saving:

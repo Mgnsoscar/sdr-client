@@ -823,7 +823,9 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         elif anchor == "hold":
             self._off_lbl.setText("Offset from Hold (resume)")
         elif anchor == "step":
-            self._off_lbl.setText("Offset after the step")
+            # Direction-neutral: the offset runs from the step's edge and may be negative
+            # (the ramp starts before it), like a start/stop-anchored warm-up lead-in.
+            self._off_lbl.setText("Offset from the step")
         else:
             self._off_lbl.setText("Offset from anchor")
         self._offend_row.setVisible(both)
@@ -1636,12 +1638,11 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         offset_end = round(self._offset_end.value(), 1) if anchor == "both" else 0.0
 
         # A step-anchored ramp runs forward from its target's edge; resolve the target (and
-        # assign it a stable id) + validate the non-negative offset here.
+        # assign it a stable id) here. A NEGATIVE offset is allowed (the ramp starts before its
+        # target's edge, like a start/stop-anchored warm-up lead-in); the save/arm gate enforces
+        # the sequence-step-anchor-negative capability.
         step_fields: dict = {}
         if anchor == "step":
-            if offset < 0:
-                return self._set_preview("offset must be ≥ 0 — a ramp can't start before the "
-                                         "step it anchors to", error=True)
             tgt_uid = self._anchor_target.currentData()
             items_getter = getattr(self._editor, "items", None)
             target = None

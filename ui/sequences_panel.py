@@ -57,7 +57,8 @@ from .theme import Palette
 from .hold_edit_dialog import HoldEditDialog
 from .timeline_model import (
     SEQUENCE_HOLD_CAPABILITY, SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY,
-    SEQUENCE_LOG_TABLE_CAPABILITY, hold_runtime_supported, step_anchor_supported)
+    SEQUENCE_LOG_TABLE_CAPABILITY, hold_runtime_supported, step_anchor_supported,
+    step_anchor_negative_supported)
 from .widgets import StatusPill, natural_key
 
 _SEQ_FILTER_ALL = "__all__"
@@ -506,6 +507,17 @@ class SequencesPanel(QWidget):
                 f"agent ≥ 1.24.0). Update the unit’s agent, or re-anchor those steps.")
             self._set_status("arm blocked — step anchoring unsupported")
             return
+        # A NEGATIVE step offset (fire before the target) needs agent ≥ 1.25.0 on top of that.
+        if any(getattr(s, "anchor", "") == "step" and float(getattr(s, "offset_s", 0.0)) < 0
+               for s in seq.steps) and not self._step_anchor_negative_ok():
+            QMessageBox.warning(
+                self, "Negative step offset not supported here",
+                f"“{seq.name or seq.id}” anchors a step to fire BEFORE another step (a negative "
+                f"offset), but {self.hostname}'s agent doesn't support it (needs "
+                f"sequence-step-anchor-negative, agent ≥ 1.25.0). Update the unit’s agent, or set "
+                f"those offsets to 0 or more.")
+            self._set_status("arm blocked — negative step offset unsupported")
+            return
         # Guard: don't silently collide with a task already transmitting on this unit (the
         # agent refuses such an arm anyway). Pre-check its tasks; if any are running, offer to
         # stop them and arm. The result routes back through _on_task_done ("seq_precheck").
@@ -713,6 +725,15 @@ class SequencesPanel(QWidget):
         except Exception:  # noqa: BLE001
             return False
         return step_anchor_supported(client)
+
+    def _step_anchor_negative_ok(self) -> bool:
+        """True iff this unit's agent accepts a NEGATIVE step offset (sequence-step-anchor-negative
+        + >= 1.25.0) — a step anchored to fire before its target."""
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001
+            return False
+        return step_anchor_negative_supported(client)
 
     def _on_stop(self, seq: m.Sequence) -> None:
         run_ids = [r.id for r in self._runs

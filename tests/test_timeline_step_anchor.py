@@ -67,12 +67,14 @@ def test_step_drop_offset_keeps_the_source_in_place():
     assert tlm.step_drop_offset(items, later.uid, r.uid, "start", None, bases) == 18.0
 
 
-def test_step_drop_offset_clamps_a_source_before_the_edge_to_zero():
+def test_step_drop_offset_keeps_a_source_before_the_edge_negative():
+    # A source dropped BEFORE its target's edge keeps its place with a NEGATIVE offset (it fires
+    # before the edge, like a start/stop anchor's warm-up lead-in) — no longer clamped to 0.
     r = _ramp(off=10.0, sid="rmp")                       # end 16
     early = _tune(off=3.0)                               # before the edge
     items = [_bar(), r, early]
     off = tlm.step_drop_offset(items, early.uid, r.uid, "end", None, None)
-    assert off == 0.0                                    # never precedes its anchor
+    assert off == -13.0                                  # 3 - 16 → stays put, before its anchor
 
 
 def test_step_drop_offset_rejects_ineligible_targets():
@@ -148,10 +150,15 @@ def test_missing_target_rejected():
     assert "needs a target" in (tlm.validate(_valid_with([b]), ["tx"]) or "")
 
 
-def test_negative_offset_rejected():
+def test_negative_offset_is_accepted_and_resolves_before_the_edge():
+    # A negative step offset is allowed now (fire BEFORE the target's edge, like a start/stop
+    # anchor's warm-up lead-in); validate() passes and it resolves 1 s before its anchor.
     a = _tune(off=4.0, sid="a")
     b = _tune(off=-1.0, anchor="step", ref="a", edge="end")
-    assert "offset ≥ 0" in (tlm.validate(_valid_with([a, b]), ["tx"]) or "")
+    items = _valid_with([a, b])
+    assert tlm.validate(items, ["tx"]) is None
+    bases = tlm.resolve_step_offsets(items, None)
+    assert bases[b.uid] == 3.0                          # a at 4 − 1 = 3, before its anchor
 
 
 def test_self_anchor_rejected():
@@ -227,6 +234,16 @@ def test_step_anchor_supported_gate():
     assert not tlm.step_anchor_supported(_Client(set(), "1.24.0"))
     # capability present, version unknown → authoritative (never blocks a real capable unit)
     assert tlm.step_anchor_supported(_Client({"sequence-step-anchor"}, ""))
+
+
+def test_step_anchor_negative_supported_gate():
+    caps = {"sequence-step-anchor", "sequence-step-anchor-negative"}
+    assert tlm.step_anchor_negative_supported(_Client(caps, "1.25.0"))
+    assert not tlm.step_anchor_negative_supported(_Client(caps, "1.24.0"))         # too old
+    assert not tlm.step_anchor_negative_supported(                                 # cap missing
+        _Client({"sequence-step-anchor"}, "1.25.0"))
+    # capability present, version unknown → authoritative
+    assert tlm.step_anchor_negative_supported(_Client(caps, ""))
 
 
 def test_ensure_step_id_is_stable():

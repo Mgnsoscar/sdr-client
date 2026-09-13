@@ -48,6 +48,11 @@ SEQUENCE_LOG_TABLE_CAPABILITY = "sequence-log-table"
 # the anchor (it would mis-fire), so this is a safety gate, not just a feature flag.
 SEQUENCE_STEP_ANCHOR_CAPABILITY = "sequence-step-anchor"
 SEQUENCE_STEP_ANCHOR_MIN_VERSION = (1, 24, 0)
+# Agent >= 1.25.0 accepts a NEGATIVE offset on a step anchor (a step-anchored step firing BEFORE the
+# edge it hangs off, like a start/stop anchor's lead-in). A ≤1.24 agent 400s on it, so the client
+# gates saving/arming a sequence that uses a negative step offset on this string (a safety gate).
+SEQUENCE_STEP_ANCHOR_NEG_CAPABILITY = "sequence-step-anchor-negative"
+SEQUENCE_STEP_ANCHOR_NEG_MIN_VERSION = (1, 25, 0)
 
 # The `sequence-hold` capability is advertised from agent 1.16.0, but 1.16.0 shipped the Hold
 # DATA MODEL ONLY — a hold-aware arm was refused (the Phase-0 guard). The HOLDING RUNTIME (park →
@@ -103,6 +108,22 @@ def step_anchor_supported(client) -> bool:
         return True
     ver = ver + (0,) * (len(SEQUENCE_STEP_ANCHOR_MIN_VERSION) - len(ver))
     return ver >= SEQUENCE_STEP_ANCHOR_MIN_VERSION
+
+
+def step_anchor_negative_supported(client) -> bool:
+    """True iff the unit's agent accepts a NEGATIVE offset on a step anchor (advertises
+    `sequence-step-anchor-negative` AND runs agent >= 1.25.0). Same belt-and-suspenders shape as
+    `step_anchor_supported`; an unknown/blank version with the capability present is capable."""
+    try:
+        if not client.supports(SEQUENCE_STEP_ANCHOR_NEG_CAPABILITY):
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    ver = _agent_version_tuple(getattr(client, "agent_version", "") or "")
+    if not ver:
+        return True
+    ver = ver + (0,) * (len(SEQUENCE_STEP_ANCHOR_NEG_MIN_VERSION) - len(ver))
+    return ver >= SEQUENCE_STEP_ANCHOR_NEG_MIN_VERSION
 
 # ── Geometry constants ───────────────────────────────────────────────────────
 SCALE = 3.0            # px per second in the warm-up / cool-down zones
@@ -501,10 +522,11 @@ def _item_edge_offset(items, it, edge: str, h_off: Optional[float],
 def step_drop_offset(items, source_uid, target_uid, edge: str,
                      h_off: Optional[float],
                      step_bases: Optional[Dict[int, float]] = None) -> Optional[float]:
-    """The forward offset (>= 0) that anchors `source_uid`'s start to `target_uid`'s
-    `edge` while keeping the source visually where it already sits — i.e. the gap between
-    the source's current start and the target edge, snapped and clamped at 0 (the ordering
-    invariant: a dependent never precedes its anchor). None when the drop is invalid: the
+    """The offset that anchors `source_uid`'s start to `target_uid`'s `edge` while keeping the
+    source visually where it already sits — i.e. the gap between the source's current start and
+    the target edge, snapped. The offset may be NEGATIVE (the source sits before the edge — like
+    a start/stop anchor's lead-in); the agent accepts that from 1.25.0, and the save/arm gate on
+    `sequence-step-anchor-negative` keeps it off an older unit. None when the drop is invalid: the
     target isn't an eligible (cycle-safe, on-air) target for the source, or its edge isn't
     on the on-air clock. Pure — the caller assigns the ids and records the anchor."""
     src = _by_uid(items, source_uid)
@@ -519,7 +541,7 @@ def step_drop_offset(items, source_uid, target_uid, edge: str,
     src_base = _item_edge_offset(items, src, "start", h_off, step_bases)
     if src_base is None:                      # a stop/both-anchored source snaps to the edge
         return 0.0
-    return max(0.0, _snap(src_base - tgt_edge))
+    return _snap(src_base - tgt_edge)         # may be negative — the source keeps its place
 
 
 def bar_start_placement(item, h_off: Optional[float]) -> Tuple[str, float]:
@@ -848,9 +870,9 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
                 return f"a step anchored to another step needs a target (on '{it.task_name}')"
             if getattr(it, "anchor_edge", "end") not in ("start", "end"):
                 return "a step anchor's edge must be ‘start’ or ‘end’"
-            if float(getattr(it, "offset", 0.0)) < 0:
-                return ("a step anchored to another step must fire at or after that step "
-                        "(offset ≥ 0)")
+            # A negative offset is allowed (fire BEFORE the target's edge — like a start/stop anchor's
+            # lead-in); the agent accepts it from 1.25.0. Saving/arming with a negative step offset is
+            # gated on `sequence-step-anchor-negative` in sequence_editor/sequences_panel, not here.
             if tgt_id == (getattr(it, "step_id", "") or ""):
                 return f"a step can't anchor to itself (on '{it.task_name}')"
             if tgt_id not in by_sid:

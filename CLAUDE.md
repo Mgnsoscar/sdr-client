@@ -71,6 +71,46 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — step anchors accept a NEGATIVE offset + arrow-placement / caption-flip: COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo)
+Owner ask (a 4-step sketch): a step anchored to another step should be able to fire BEFORE its target's
+edge (a negative offset — the warm-up lead-in the owner already uses with on-/off-air anchors), and the
+connector ARROWS should point at the dependent (the "anchorer"), placed as close to it as possible
+WITHOUT colliding with other lines so at a junction it's unambiguous which line an arrow belongs to.
+**Agent side** (`sdr-agent` 1.25.0, capability `sequence-step-anchor-negative`): the `offset_s < 0`
+rejection is removed; the graph must still be acyclic. **Client side** (this):
+- **Negatives end-to-end** — `timeline_model.validate()` no longer blocks a negative step offset;
+  `step_drop_offset` returns the (possibly negative) gap unclamped so a drag-to-anchor drop keeps a
+  source that sits BEFORE the edge in place; the StepEditor (`_resolve_step_anchor`) and ramp editor
+  (`_accept`) accept a negative offset (offset spinboxes already ranged ±100000); the offset-row labels
+  are direction-neutral ("Offset — from the step"). New gate `step_anchor_negative_supported(client)`
+  (cap + agent ≥ 1.25.0); the **save gate** (`sequence_editor._step_anchor_block`) and **arm gate**
+  (`sequences_panel._on_start` + `_step_anchor_negative_ok`) block a negative-offset sequence on a
+  < 1.25.0 unit (the library holds only a definition, never blocked; the agent stays the backstop).
+- **Arrow placement** (`ui/timeline_editor.py`) — `_paint_connectors` is now two-pass: compute every
+  connector's waypoints + draw all PATHS first (lines under everything), then draw each arrowhead + offset
+  chip via `_draw_connector_head`, backed off along its own entry run to the spot CLOSEST to the dependent
+  that keeps the whole annotation clear of the OTHER connectors' polylines (`_span_clear`/`_pt_seg_dist`)
+  — so at a junction each arrow (and its label) unambiguously belongs to its line, and the arrow is no
+  longer hidden under the pin. The arrowhead is an open V whose point sits TOWARD the dependent.
+- **Right-entry routing** — a dependent placed LEFT of its anchor (a negative offset) is entered from the
+  RIGHT (arrow points left): `_connector_points` gained `entry_from_right` (drop column just right of the
+  dependent, clear of obstacles); byte-identical for the common x2 ≥ x1 case (the wrap/duck/obstacle tests
+  unchanged). Offset chip text is signed (`_offset_chip_text`: `+` for ≥ 0, the `−` that `_mmss` already
+  prints for negatives, never `+−`).
+- **Caption side from geometry** (`_pin_caption_side`/`_pin_conn_sides`) — a pin's readout flips to the
+  side its connectors DON'T occupy: a connector on the RIGHT with a clear LEFT (an anchor target whose
+  dependents are to the right, OR a negative-offset dependent entered from the right) → caption LEFT;
+  both sides busy → the two-sided right-duck (option C, unchanged); else RIGHT. This fixes the owner's
+  case (a pin that is BOTH a negative dependent AND a target — connectors on both right-sides — flips its
+  caption to the clear left, so the incoming left-pointing arrow + `−M:SS` chip are visible).
+Client-only beyond the agent gate; drift-guarded files untouched. Tests: `tests/test_timeline_step_anchor.py`
+(negative resolves before the edge; `step_drop_offset` keeps a source negative; `step_anchor_negative_supported`
+gate), `tests/test_timeline_step_anchor_ui.py` (dialog accepts a negative; right-entry routing; signed
+chip; `_span_clear`; a 4-step negative layout paints), `tests/test_ramp_view_fold.py` (ramp `_accept`
+takes a negative step offset), `tests/test_step_editor_carried_bw.py` (the two-sided negative dependent
+flips its caption left). Suite 900 → 945 offscreen. **Verified LIVE cross-repo** on the owner's exact
+4-step layout (Step1@0:30, Step2 −0:30→0:00, Step3&4 +0:30→0:30): resolves and paints exactly as sketched.
+
 ## Current state — sequence editor REDESIGN, Phase 1 (visual + Gantt layout): IN PROGRESS (branch `claude/step-to-step-anchoring`, client-only)
 Owner ask: redesign the sequence timeline editor to look **exactly** like the approved mockup
 (`docs/sequence-editor-mockup.html`, published Artifact) — compact/modern, per-task colour, real-time
