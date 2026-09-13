@@ -678,8 +678,6 @@ class _TimelineCanvas(QWidget):
         self._paint_anchor(p, on_x, top, baseline, "ON-AIR", Palette.ONLINE)
         self._paint_anchor(p, off_x, top, baseline, "OFF-AIR", Palette.CRASH)
         self._paint_axis(p, baseline, on_x, def_x, off_x, off_def_x)
-        if off_def_x - def_x > 22:
-            self._paint_rel_spring(p, def_x, off_def_x, (top + baseline) // 2)
 
         self._paint_connectors(p)
         for it in self._rows:
@@ -891,38 +889,6 @@ class _TimelineCanvas(QWidget):
                 if mid >= off_def_x - 1:
                     tick(mid, None, False)
             t += tick_s
-
-    def _paint_rel_spring(self, p, x0, x1, cy):
-        """A horizontal SPRING drawn across the relative band — reads instantly as an
-        elastic / variable-length section (its length is only set at arm), so no text is
-        needed. A coiled zigzag between the two dashed boundaries, capped with a dot at each
-        end so it clearly spans (not measures) the gap."""
-        w = x1 - x0
-        if w < 22:
-            return                      # too narrow for a legible spring; the hatch alone reads
-        p.save()
-        pen = QPen(QColor(Palette.TEXT_FAINT), 1.4)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
-        pad = 7.0
-        a = 4.5                                             # coil amplitude
-        span = w - 2 * pad
-        n = max(3, int(span / 13))                          # number of coils
-        seg = span / (2 * n)
-        path = QPainterPath()
-        x = x0 + pad
-        path.moveTo(x, cy)
-        up = True
-        for _ in range(2 * n):
-            x += seg
-            path.lineTo(x, cy - a if up else cy + a)
-            up = not up
-        path.lineTo(x1 - pad, cy)
-        p.drawPath(path)
-        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(Palette.TEXT_FAINT))
-        for ex in (x0 + pad, x1 - pad):
-            p.drawEllipse(QRectF(ex - 1.8, cy - 1.8, 3.6, 3.6))
-        p.restore()
 
     def _tick_interval(self) -> int:
         """Seconds between ticks — the smallest 'nice' value whose on-screen
