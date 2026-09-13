@@ -205,14 +205,17 @@ def test_canvas_selection_records_the_remove_chip_only_when_anchored():
     assert cv._rmchip is None
 
 
-def test_paint_gridlines_cover_on_air_and_off_air_clocks():
-    # Vertical gridlines align to the axis's major ticks on BOTH clocks: on-air-relative across
-    # the defined region, AND off-air-relative reaching LEFT from off-air into the relative band
-    # (so a stop-anchored step aligns to a line there too). The elastic gap stays in the middle.
-    cv = _chirp_editor([_bar(), _tune(45.0)])._canvas
-    cv.grab()                                            # lay out geometry (eff / ticks / def_x)
+def test_paint_gridlines_cover_both_windows_not_the_relative_band():
+    # Three regions: an on-air ABSOLUTE window (gridlines), a truly-relative middle band (CLEAR),
+    # and an off-air ABSOLUTE window opened by a stop-anchored step (gridlines). A stop-anchored
+    # tune at −60 s opens the off-air window; the tune at 45 s pins the on-air window's right edge.
+    stop = tlm.RunItem(task_name="chirp", action="tune", anchor="stop", offset=-60.0,
+                       params={"bw": 12})
+    cv = _chirp_editor([_bar(), _tune(45.0), stop])._canvas
+    cv.grab()                                            # lay out geometry
     on_x, off_x = int(cv._on), int(cv._off)
-    def_x = int(cv._def_x())
+    def_x = int(cv._def_x()); off_def_x = int(cv._off_def_x())
+    assert def_x < off_def_x < off_x                     # a real relative band sits between them
 
     class _StubPainter:
         def __init__(self): self.xs = []
@@ -225,12 +228,12 @@ def test_paint_gridlines_cover_on_air_and_off_air_clocks():
             self.xs.append(x0)
 
     sp = _StubPainter()
-    cv._paint_gridlines(sp, 10, 500, on_x, def_x, off_x)
-    assert sp.xs                                         # drew some gridlines
-    # a defined-region tune at 45 s pins def_x past on-air, so an on-air major sits there
-    assert any(on_x < x <= def_x + 1 for x in sp.xs)
-    # off-air-relative gridlines reach back into the band (right of the defined region)
-    assert any(def_x + 1 < x < off_x for x in sp.xs)
+    cv._paint_gridlines(sp, 10, 500, on_x, def_x, off_x, off_def_x)
+    assert sp.xs
+    assert any(on_x < x <= def_x + 1 for x in sp.xs)           # on-air window has gridlines
+    assert any(off_def_x - 1 <= x < off_x for x in sp.xs)      # off-air window has gridlines
+    # the truly-relative middle band (def_x .. off_def_x) is left clear
+    assert not any(def_x + 2 < x < off_def_x - 2 for x in sp.xs)
 
 
 def test_canvas_edge_at_finds_handles_and_drop_target_respects_eligibility():

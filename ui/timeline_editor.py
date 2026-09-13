@@ -659,23 +659,27 @@ class _TimelineCanvas(QWidget):
         on_x, off_x = int(self._on), int(self._off)
         top = LANES_TOP - 8
         def_x = int(self._def_x())
+        off_def_x = max(def_x, int(self._off_def_x()))   # left edge of the off-air window
 
-        # Defined on-air region — a whisper of the on-air (green) tint.
-        tint = QColor(Palette.ONLINE); tint.setAlpha(11)
-        p.fillRect(QRectF(on_x, top, max(0, def_x - on_x), baseline - top), tint)
-        # Undefined ("relative") region — diagonal hatch; the window length is only set at arm.
-        self._paint_hatch(p, def_x, off_x, top, baseline)
-        if off_x - def_x > 6:
+        # Defined ABSOLUTE windows — a whisper of tint: on-air green (left), off-air red (right).
+        gtint = QColor(Palette.ONLINE); gtint.setAlpha(11)
+        p.fillRect(QRectF(on_x, top, max(0, def_x - on_x), baseline - top), gtint)
+        rtint = QColor(Palette.CRASH); rtint.setAlpha(11)
+        p.fillRect(QRectF(off_def_x, top, max(0, off_x - off_def_x), baseline - top), rtint)
+        # Only the middle is truly RELATIVE (its length is set at arm) — diagonal hatch, no ticks.
+        self._paint_hatch(p, def_x, off_def_x, top, baseline)
+        if off_def_x - def_x > 6:
             pen = QPen(QColor(Palette.BORDER_STRONG), 1)
             pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
-            p.drawLine(def_x, top, def_x, baseline + 4)
+            p.drawLine(def_x, top, def_x, baseline + 4)             # green | hatch boundary
+            p.drawLine(off_def_x, top, off_def_x, baseline + 4)     # hatch | red boundary
 
-        self._paint_gridlines(p, top, baseline, on_x, def_x, off_x)
+        self._paint_gridlines(p, top, baseline, on_x, def_x, off_x, off_def_x)
         self._paint_anchor(p, on_x, top, baseline, "ON-AIR", Palette.ONLINE)
         self._paint_anchor(p, off_x, top, baseline, "OFF-AIR", Palette.CRASH)
-        self._paint_axis(p, baseline, on_x, def_x, off_x)
-        if off_x - def_x > 82:
-            self._paint_rel_badge(p, (def_x + off_x) // 2, (top + baseline) // 2)
+        self._paint_axis(p, baseline, on_x, def_x, off_x, off_def_x)
+        if off_def_x - def_x > 82:
+            self._paint_rel_badge(p, (def_x + off_def_x) // 2, (top + baseline) // 2)
 
         self._paint_connectors(p)
         for it in self._rows:
@@ -720,6 +724,24 @@ class _TimelineCanvas(QWidget):
                 a, _o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases)
                 if a == "start":
                     x = max(x, g.get("cx", x))
+        return x
+
+    def _off_def_x(self) -> float:
+        """Leftmost off-air x pinned by a STOP-anchored step (one that fires BEFORE off-air with
+        a negative offset) — the LEFT edge of the DEFINED off-air region (red-tinted, ticked).
+        Off_x when nothing is off-air-anchored, so there is no off-air window then. A bar's own
+        stop IS off-air (offset 0), not content, so bars are ignored."""
+        x = float(self._off)
+        for it in self._rows:
+            g = self._geom.get(it.uid)
+            if not g or getattr(it, "kind", None) == "bar":
+                continue
+            if getattr(it, "anchor", "start") != "stop":
+                continue
+            if tlm._is_ramp(it):
+                x = min(x, g.get("start_x", x))       # the ramp's earliest edge (offset − dur)
+            else:
+                x = min(x, g.get("cx", x))
         return x
 
     def _hues(self, hexstr: str):
@@ -767,12 +789,15 @@ class _TimelineCanvas(QWidget):
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(col); p.drawRoundedRect(r, 5, 5)
         p.setPen(QColor("#FFFFFF")); p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), label)
 
-    def _paint_gridlines(self, p, top, baseline, on_x, def_x, off_x):
+    def _paint_gridlines(self, p, top, baseline, on_x, def_x, off_x, off_def_x=None):
         """Discreet vertical gridlines behind the rows, aligned to the axis's MAJOR ticks
-        (plus fainter half-ticks in the defined region), so a step's x reads off a time.
-        Drawn only where time is REAL — the warm-up, the defined on-air region, and the
-        cool-down; the hatched 'relative' band (length set at arm) is left clear. The
-        on-air/off-air instants get their own strong anchor lines, so they're skipped here."""
+        (plus fainter half-ticks), so a step's x reads off a time. Drawn only where time is
+        ABSOLUTE — the warm-up, the defined on-air region, the defined off-air window
+        (off_def_x..off_x), and the cool-down; the truly-relative middle band (def_x..off_def_x,
+        length set at arm) is left clear. The on-air/off-air instants get their own strong
+        anchor lines, so they're skipped here."""
+        if off_def_x is None:
+            off_def_x = off_x
         eff = self._eff(); tick_s = self._tick_interval()
         # BORDER_STRONG (not the lighter BORDER) so the lines keep enough contrast over the
         # green on-air tint too; a clear major/minor alpha split keeps the minors readable.
@@ -802,19 +827,21 @@ class _TimelineCanvas(QWidget):
         t = tick_s
         while off_x + t * eff <= self.width():
             vline(off_x + t * eff, major); t += tick_s
-        # Off-air-relative gridlines reaching LEFT into the relative band, matching the axis's
-        # off-air ticks so a stop-anchored step aligns to a line too; kept right of the defined
-        # region (the elastic gap in the middle stays clear).
+        # Off-air-relative gridlines across the DEFINED off-air window (off_def_x..off_x), matching
+        # the axis's off-air ticks so a stop-anchored step aligns to a line too; they stop at
+        # off_def_x so the truly-relative middle band stays clear.
         t = tick_s
-        while off_x - t * eff > def_x + 2:
+        while off_x - t * eff >= off_def_x - 1:
             vline(off_x - t * eff, major); t += tick_s
         if tick_s >= 2:
             t = tick_s / 2.0
-            while off_x - t * eff > def_x + 2:
+            while off_x - t * eff >= off_def_x - 1:
                 vline(off_x - t * eff, minor); t += tick_s
         p.restore()
 
-    def _paint_axis(self, p, baseline, on_x, def_x, off_x):
+    def _paint_axis(self, p, baseline, on_x, def_x, off_x, off_def_x=None):
+        if off_def_x is None:
+            off_def_x = off_x
         eff = self._eff(); tick_s = self._tick_interval()
         f = QFont(Fonts.MONO.split(",")[0].strip('"')); f.setPointSize(8); p.setFont(f)
         w = self.width()                    # ticks fill the whole canvas, edge to edge
@@ -853,16 +880,15 @@ class _TimelineCanvas(QWidget):
         while off_x + t * eff <= w:
             tick(off_x + t * eff, "+" + self._mmss(t), True)
             t += tick_s
-        # Off-air-relative ticks going LEFT into the relative band ('−M:SS'): a stop-anchored step
-        # fires at a fixed offset BEFORE off-air, so its time IS known even though the band's LENGTH
-        # isn't. Kept to the right of the defined region so they never collide with the on-air ticks —
-        # the elastic gap between the two clocks stays in the middle (where the 'relative' badge sits).
+        # Off-air-relative ticks going LEFT across the DEFINED off-air window ('−M:SS'): a
+        # stop-anchored step fires at a fixed offset before off-air, so its time is absolute. They
+        # stop at off_def_x (the window's left edge) — the truly-relative middle band gets no ticks.
         t = tick_s
-        while off_x - t * eff > def_x + 2:
+        while off_x - t * eff >= off_def_x - 1:
             tick(off_x - t * eff, self._mmss(-t), True)
             if tick_s >= 2:
                 mid = off_x - (t - tick_s / 2) * eff
-                if mid > def_x + 2:
+                if mid >= off_def_x - 1:
                     tick(mid, None, False)
             t += tick_s
 

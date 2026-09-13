@@ -71,19 +71,31 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
-## Current state — timeline axis: off-air-relative ticks in the relative band: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
-Owner ask: a STOP-anchored (off-air) step with a negative offset sat in the hatched "relative" band
-(`def_x..off_x`), which had NO axis ticks — no absolute time there. But a stop-anchored step fires at a
-FIXED offset before off-air, so its time IS known even though the band's LENGTH (set at arm) isn't. Fix
-(`ui/timeline_editor.py`, paint-only): `_paint_axis` now draws off-air-relative MAJOR ticks (+ half-tick
-minors) going LEFT from the off-air "0" anchor into the band, labelled `−M:SS` (via `_mmss(-t)`), bounded
-to `off_x - t·eff > def_x + 2` so they never invade the on-air ticks — the axis is now DUAL-CLOCK
-(on-air-relative from the left, off-air-relative from the right, the elastic unknown-length gap staying
-in the middle under the "relative — length set at arm" badge). `_paint_gridlines` mirrors it: off-air-
-relative majors + minors reach left from `off_x` to `def_x + 2`, so a stop-anchored step aligns to a
-gridline there too. No geometry/model/serialisation change; drift-guarded files untouched. Tests:
-`tests/test_timeline_step_anchor_ui.py::test_paint_gridlines_cover_on_air_and_off_air_clocks` (gridlines
-appear on BOTH the on-air side and the off-air-relative band; all vertical). Suite still 976 offscreen.
+## Current state — timeline axis: separate on-air / relative / off-air windows: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Owner ask: the RELATIVE band should be ONLY where time is actually relative. A STOP-anchored (off-air)
+step with a negative offset fires at a FIXED offset before off-air (its time IS absolute), so it belongs
+in an ABSOLUTE off-air window — tinted RED (mirroring the green on-air window) with real ticks — and the
+hatched relative band (length set at arm) should carry NO ticks. Fix (`ui/timeline_editor.py`, paint-only),
+splitting the canvas into THREE regions:
+- **`_off_def_x()`** (new, mirrors `_def_x()`): the LEFTMOST off-air x pinned by a stop-anchored step
+  (a point's `cx`, a ramp's `start_x` = its `offset − dur`); `off_x` when nothing is off-air-anchored (a
+  bar's own stop is off-air itself, not content — bars ignored). `paintEvent` computes
+  `off_def_x = max(def_x, _off_def_x())`.
+- **Three windows** in `paintEvent`: on-air ABSOLUTE `on_x..def_x` (green tint, `Palette.ONLINE` α11),
+  the truly-RELATIVE middle `def_x..off_def_x` (diagonal hatch, dashed boundary at BOTH edges, the
+  "relative — length set at arm" badge centred on it), and off-air ABSOLUTE `off_def_x..off_x` (red tint,
+  `Palette.CRASH` α11).
+- **`_paint_axis`** (gained `off_def_x`): the off-air-relative `−M:SS` ticks now stop at `off_def_x`
+  (`off_x - t·eff >= off_def_x - 1`) — they fill the red window, NOT the relative band. On-air ticks/
+  warm-up/cool-down unchanged.
+- **`_paint_gridlines`** (gained `off_def_x`): off-air-relative gridlines likewise bounded to
+  `off_def_x`, so the relative middle stays clear.
+Backward-compatible: with no stop-anchored step `off_def_x == off_x`, so the red window vanishes and the
+hatch runs `def_x..off_x` exactly as before (no off-air ticks). No geometry/model/serialisation change;
+drift-guarded files untouched. Tests: `tests/test_timeline_step_anchor_ui.py::
+test_paint_gridlines_cover_both_windows_not_the_relative_band` (a stop-anchored −60 s tune opens the
+off-air window; gridlines fill both absolute windows, the relative middle stays clear, all vertical).
+Suite still 976 offscreen.
 
 ## Current state — timeline canvas: discreet vertical gridlines: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
 Owner ask: discreet but informative gridlines. New **`_TimelineCanvas._paint_gridlines`** (`ui/timeline_editor.py`),
