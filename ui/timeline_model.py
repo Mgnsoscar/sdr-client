@@ -40,6 +40,13 @@ SEQUENCE_HOLD_NOW_CAPABILITY = "sequence-hold-now"
 # window B from the operator's edited sequence. The client gates its window-B edit UI on it (a
 # ≤1.18 agent would silently ignore the edit and run the stored window B).
 SEQUENCE_HOLD_EDIT_CAPABILITY = "sequence-hold-edit"
+# Agent >= 1.26.0 resolves anchor="enter" — a step measured from the Hold's ENTER instant (the
+# pause's start; a ramp tied by its END so it finishes as the pause begins). Window A, known at arm.
+# The client gates saving / hold-aware arming of such a sequence on it (a safety gate: an older agent
+# rejects the anchor value). The schedule/plan path compiles the Hold out (collapse_hold), so it
+# never sends the anchor.
+SEQUENCE_HOLD_ENTER_CAPABILITY = "sequence-hold-enter"
+SEQUENCE_HOLD_ENTER_MIN_VERSION = (1, 26, 0)
 # Agent >= 1.21.0 serves GET /sequence-runs/{id}/log-table (the run's spreadsheet-shaped log). The
 # client gates its "Export log…" button on it — an older agent has no such endpoint to export from.
 SEQUENCE_LOG_TABLE_CAPABILITY = "sequence-log-table"
@@ -91,6 +98,28 @@ def hold_runtime_supported(client) -> bool:
         return True
     ver = ver + (0,) * (len(SEQUENCE_HOLD_RUNTIME_MIN_VERSION) - len(ver))   # pad "1.17" → (1,17,0)
     return ver >= SEQUENCE_HOLD_RUNTIME_MIN_VERSION
+
+
+def hold_enter_supported(client) -> bool:
+    """True iff the unit's agent resolves a step anchored to the Hold's START (anchor="enter":
+    advertises `sequence-hold-enter` AND runs agent >= 1.26.0). Same shape as
+    `hold_runtime_supported`: an unknown/blank version with the capability present is treated as
+    capable, so this never blocks a real capable unit."""
+    try:
+        if not client.supports(SEQUENCE_HOLD_ENTER_CAPABILITY):
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    ver = _agent_version_tuple(getattr(client, "agent_version", "") or "")
+    if not ver:
+        return True
+    ver = ver + (0,) * (len(SEQUENCE_HOLD_ENTER_MIN_VERSION) - len(ver))
+    return ver >= SEQUENCE_HOLD_ENTER_MIN_VERSION
+
+
+def uses_hold_enter(items) -> bool:
+    """True when any item is anchored to the Hold's START (anchor="enter")."""
+    return any(getattr(it, "anchor", "") == "enter" for it in items or [])
 
 
 def step_anchor_supported(client) -> bool:
@@ -257,6 +286,12 @@ def ramp_span(it, h_off: Optional[float] = None, step_bases: Optional[Dict[int, 
     if it.anchor == "hold" and h_off is not None:
         base = h_off + float(it.offset)
         return (("start", base), ("start", base + dur))
+    if it.anchor == "enter" and h_off is not None:
+        # Tied by its END to the Hold's ENTER instant (the pause's start): `offset` is the end's
+        # offset from the pause (≤ 0 — like a stop-anchored ramp's offset from off-air), the ramp
+        # runs backward from it, in window A on the on-air clock.
+        end = h_off + float(it.offset)
+        return (("start", end - dur), ("start", end))
     if it.anchor == "step":
         uid = getattr(it, "uid", None)
         base = (step_bases or {}).get(uid)
@@ -440,7 +475,10 @@ def effective_anchor_offset(item, h_off: Optional[float],
     An ORPHANED anchor is placed start-side at its own offset, so it draws sanely on-air."""
     anchor = getattr(item, "anchor", "start")
     off = float(getattr(item, "offset", 0.0))
-    if anchor == "hold":
+    if anchor in ("hold", "enter"):
+        # "hold" = forward from the Hold's RESUME instant (window B); "enter" = measured from
+        # the Hold's ENTER instant (the pause's start, window A). Both live at h_off + offset on
+        # the on-air axis for geometry (the canvas inserts the hold band for "hold" only).
         return "start", (h_off or 0.0) + off
     if anchor == "step":
         uid = getattr(item, "uid", None)
@@ -454,7 +492,7 @@ def effective_anchor_offset(item, h_off: Optional[float],
     return anchor, off
 
 
-_ANCHOR_ON_AIR = ("start", "hold", "step")   # anchors whose edges live in on-air-offset space
+_ANCHOR_ON_AIR = ("start", "hold", "enter", "step")   # anchors whose edges live in on-air-offset space
 
 
 def _resolve_step_clocked(items, h_off: Optional[float]) -> Dict[int, Tuple[str, float]]:
@@ -1279,6 +1317,13 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
     # geometry/walk mis-place (mirrors the agent's _validate_steps).
     if not has_hold(items) and any(s["anchor"] == "hold" for s in steps):
         return "a post-hold (‘hold’-anchored) step needs a Hold — add one or re-anchor the step"
+    # A step anchored to the Hold's START (anchor="enter" — it ends/fires at or before the pause)
+    # likewise needs the Hold, and can't reach INTO the pause (the run is holding then).
+    if not has_hold(items) and any(s["anchor"] == "enter" for s in steps):
+        return "a step anchored to the Hold's start needs a Hold — add one or re-anchor the step"
+    if any(s["anchor"] == "enter" and float(s["offset_s"]) > 1e-9 for s in steps):
+        return ("a step anchored to the Hold's start must end at or before the pause (its "
+                "offset can't be positive)")
     # ── Step-to-step anchoring (mirrors the agent's _validate_steps) ──────────────────────
     step_items = [it for it in items if is_step_source(it)]
     if step_items:
@@ -1415,6 +1460,8 @@ def carry_order_key(anchor: str, offset: float, h_off: Optional[float]) -> Tuple
     with stop-anchored steps still after start ones)."""
     if anchor == "hold" and h_off is not None:
         return (1, h_off + offset)
+    if anchor == "enter" and h_off is not None:     # before the pause: window A, on-air clock
+        return (0, h_off + offset)
     if anchor == "stop":
         return (2, offset)
     return (0, offset)

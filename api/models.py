@@ -306,6 +306,8 @@ class PatchEventRequest(BaseModel):
 
 class SequenceStep(BaseModel):
     anchor: str = "start"              # "start" | "stop" | "both" (ramp) | "hold" (post-Hold window B) | "step"
+                                       #   | "enter" (from the Hold's ENTER instant — the pause's start,
+                                       #     window A; a ramp tied by its END, offset_s ≤ 0; agent ≥ 1.26.0)
     offset_s: float
     # "both"-anchored ramp: off-air-side inset (≤ 0). Fills [on-air+offset_s, off-air+offset_end_s].
     offset_end_s: Optional[float] = None
@@ -486,6 +488,22 @@ def collapse_hold(steps: List["SequenceStep"]) -> List["SequenceStep"]:
         if getattr(s, "anchor", None) == "hold":
             out.append(s.model_copy(update={
                 "anchor": "start", "offset_s": hold_off + float(s.offset_s)}))
+        elif getattr(s, "anchor", None) == "enter":
+            # Measured from the pause's START, which with the Hold compiled out is just the on-air
+            # instant hold_off: a point fires at hold_off + offset; a ramp (offset = its END's, like
+            # a stop anchor) is re-expressed by its START so the agent's start layout runs it forward.
+            off = hold_off + float(s.offset_s)
+            if _step_action(s) == StepAction.RAMP.value and s.ramp is not None:
+                from . import ramp as _ramp
+                try:
+                    r = s.ramp
+                    off -= _ramp.resolve_ramp(r.start, r.stop, steps=r.steps, step=r.step,
+                                              hold_s=r.hold_s, duration_s=r.duration_s,
+                                              include_first=r.include_first,
+                                              include_last=r.include_last).duration_s
+                except (ValueError, TypeError):
+                    pass
+            out.append(s.model_copy(update={"anchor": "start", "offset_s": off}))
         else:
             out.append(s)
     return out

@@ -302,6 +302,10 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         src_anchor = getattr(self._src, "anchor", "start")
         if getattr(self._editor, "has_hold", lambda: False)() or src_anchor == "hold":
             self._anchor.addItem("Hold (after Hold)", "hold")
+        # Tied by its END to the pause's START: the ramp finishes as the Hold begins (window A,
+        # timed at arm) — the down-ramp-before-the-pause case. Offset ≤ 0 = the end's from the pause.
+        if getattr(self._editor, "has_hold", lambda: False)() or src_anchor == "enter":
+            self._anchor.addItem("Hold start (ends at the pause)", "enter")
         # Step-to-step anchoring (agent ≥ 1.24.0): run this ramp forward from ANOTHER step's
         # start/end edge — e.g. a down-ramp right after an up-ramp's end. Offered when there's
         # an eligible target (no cycle) or the ramp already uses it; saving to an agent that
@@ -833,6 +837,8 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
             self._off_lbl.setText("Start offset from on-air")
         elif anchor == "hold":
             self._off_lbl.setText("Offset from Hold (resume)")
+        elif anchor == "enter":
+            self._off_lbl.setText("End offset from the pause (≤ 0)")
         elif anchor == "step":
             # Direction-neutral: the offset runs from the step's edge and may be negative
             # (the tied edge sits before it), like a start/stop-anchored warm-up lead-in.
@@ -1318,6 +1324,9 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         if anchor == "hold":
             # Window B: the ramp runs forward from the resume instant to its end.
             return (self._time_sub("on-resume", off), "ramp end")
+        if anchor == "enter":
+            # Tied by its END to the pause's start: the TO level is reached at/before the pause.
+            return ("ramp start", self._time_sub("the pause", off))
         if anchor == "step":
             # Tied to another step's edge by its start (runs forward from there) or by its END
             # (the TO level is reached at that point; the ramp runs backward from it).
@@ -1683,11 +1692,12 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
             if ferr:
                 return self._set_preview(ferr, error=True)
             args = self._form.build_args()
-        elif anchor not in ("hold", "step"):
-            # A window-B (Hold-anchored) ramp is timed from the resume instant, not against
-            # the on-air window, so the on-air-fit check doesn't apply (its target task still
-            # needs a duration step — enforced by the sequence-level validate()). Mirrors the
-            # step editor skipping the window-fit check for a hold-anchored tune.
+        elif anchor not in ("hold", "step", "enter"):
+            # A window-B (Hold-anchored) ramp is timed from the resume instant — and a
+            # pause-anchored one from the pause — not against the on-air window, so the
+            # on-air-fit check doesn't apply (its target task still needs a duration step —
+            # enforced by the sequence-level validate()). Mirrors the step editor skipping the
+            # window-fit check for a hold-anchored tune.
             spans_getter = getattr(self._editor, "task_spans", None)
             if spans_getter is not None:
                 span_err = tlm.step_within_task_error(spans_getter(task), anchor, offset,

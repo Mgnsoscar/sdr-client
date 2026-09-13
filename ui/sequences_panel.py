@@ -58,8 +58,8 @@ from .hold_edit_dialog import HoldEditDialog
 from . import timeline_model as tlm
 from .timeline_model import (
     SEQUENCE_HOLD_CAPABILITY, SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY,
-    SEQUENCE_LOG_TABLE_CAPABILITY, hold_runtime_supported, step_anchor_supported,
-    step_anchor_negative_supported)
+    SEQUENCE_LOG_TABLE_CAPABILITY, hold_runtime_supported, hold_enter_supported,
+    step_anchor_supported, step_anchor_negative_supported)
 from .widgets import StatusPill, natural_key
 
 _SEQ_FILTER_ALL = "__all__"
@@ -609,6 +609,17 @@ class SequencesPanel(QWidget):
                 f"capability, agent 1.17+). Update the unit's agent, or remove the Hold.")
             self._set_status("arm blocked — agent lacks sequence-hold", error=True)
             return
+        # A step anchored to the Hold's START (anchor="enter") needs agent ≥ 1.26.0 (a safety
+        # gate: an older agent rejects the anchor value). The schedule/plan path compiles the
+        # Hold out and never sends it.
+        if any(getattr(s, "anchor", "") == "enter" for s in seq.steps) and not self._hold_enter_ok():
+            QMessageBox.warning(
+                self, "Hold-start anchor not supported here",
+                f"“{seq.name or seq.id}” anchors a step to the Hold's start (before the pause), "
+                f"but {self.hostname}'s agent doesn't support it (needs sequence-hold-enter, "
+                f"agent ≥ 1.26.0). Update the unit's agent, or anchor that step to on-air.")
+            self._set_status("arm blocked — agent lacks sequence-hold-enter", error=True)
+            return
         wa = fmt_duration(round(max(0.0, hold_off + _lead_in(seq))))
         dlg = ArmDialog(
             f"Arm sequence “{seq.name or seq.id}”",
@@ -735,6 +746,15 @@ class SequencesPanel(QWidget):
         except Exception:  # noqa: BLE001
             return False
         return hold_runtime_supported(client)
+
+    def _hold_enter_ok(self) -> bool:
+        """True iff this unit's agent resolves a step anchored to the Hold's START
+        (sequence-hold-enter + >= 1.26.0)."""
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001
+            return False
+        return hold_enter_supported(client)
 
     def _step_anchor_ok(self) -> bool:
         """True iff this unit's agent resolves a step-to-step anchor (sequence-step-anchor + >= 1.24.0)."""

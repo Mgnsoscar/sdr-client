@@ -309,15 +309,16 @@ def test_canvas_edge_at_finds_handles_and_drop_target_respects_eligibility():
 
 
 def test_drop_target_finds_a_bar_start_and_stop_edge():
-    """A duration task's (bar's) start/stop dots are resize handles, so they stay out of
-    `_edge_at`; but `_drop_edge_at`/`_drop_target` still offer them as drop targets (#1/#7)."""
+    """A duration task's (bar's) START dot is an anchor handle (v3 #5) while its STOP dot stays a
+    resize handle; `_drop_edge_at`/`_drop_target` offer BOTH as drop targets (#1/#7)."""
     later = _tune(20.0)
     cv = _chirp_editor([_bar(), later])._canvas
     bar = next(it for it in cv._items if it.kind == "bar")
     bg = cv._geom[bar.uid]; cy = bg["y"] + LANE_H / 2
-    # _edge_at ignores the bar (its dots resize) …
-    assert cv._edge_at(bg["start_x"], cy) is None
-    # … but a connect-drag from `later` can drop on either bar edge
+    # the bar's START dot begins a connect-drag; its STOP dot does not (off-air is its own anchor)
+    assert cv._edge_at(bg["start_x"], cy) == (bar, "start")
+    assert cv._edge_at(bg["stop_x"], cy) is None
+    # … and a connect-drag from `later` can drop on either bar edge
     assert cv._drop_target(bg["start_x"], cy, later.uid) == (bar, "start")
     assert cv._drop_target(bg["stop_x"], cy, later.uid) == (bar, "end")
 
@@ -580,10 +581,14 @@ def test_tooltip_text_describes_anchor_and_bar():
     down = _down_ramp()
     cv = _chirp_editor([_bar(), up, down])._canvas
     txt = cv._tooltip_text(down)
-    assert "after" in txt and "chirp" in txt and "end" in txt       # names its anchor
+    # v3 #2/#3: "X after the anchor's end" — the anchor is visible on the canvas, so the tooltip
+    # names the EDGE + offset, never the task; and an absolute on-air line follows.
+    assert "⚓ 3 s after the anchor's end" in txt
+    assert "chirp" not in txt                                       # no task name for a ramp
+    assert "starts 9 s after on-air" in txt                         # the absolute line
     bar = next(it for it in cv._items if it.kind == "bar")
     btxt = cv._tooltip_text(bar)
-    assert "starts" in btxt and "stops" in btxt
+    assert "starts" in btxt and "stops" in btxt and "chirp" in btxt   # a bar keeps its task
 
 
 # ── /code-review fixes: drag / hit-test / display / gate ─────────────────────────
@@ -632,7 +637,9 @@ def test_negative_step_offset_reads_without_a_double_sign():
     cv = _chirp_editor([_bar(), up, early])._canvas
     txt = cv._tooltip_text(early)
     assert "+−" not in txt and "+-" not in txt       # never a doubled sign
-    assert "−" in txt and "⚓" in txt            # the − and the ⚓ anchor glyph
+    # v3 #2: a negative offset reads as "X before the anchor's <edge>" (no sign glyph at all)
+    assert "⚓ 30 s before the anchor's start" in txt
+    assert "fires 30 s before on-air" in txt         # the absolute line
 
 
 def test_pin_footprint_matches_the_drawn_chips_not_a_symmetric_band():

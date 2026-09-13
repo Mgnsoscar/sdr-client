@@ -49,7 +49,8 @@ from . import run_conflict
 from .theme import Palette
 from .timeline_model import (
     SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY, SEQUENCE_LOG_TABLE_CAPABILITY,
-    hold_runtime_supported, step_anchor_supported, step_anchor_negative_supported)
+    hold_runtime_supported, hold_enter_supported, step_anchor_supported,
+    step_anchor_negative_supported)
 from .widgets import StatusPill, natural_key
 
 ARM_MARGIN_S = 5.0
@@ -924,8 +925,23 @@ class PlansTab(QWidget):
         (docs/sequence-hold-step.md §6.2)."""
         hold_off = next((s.offset_s for s in steps
                          if m._step_action(s) == m.StepAction.HOLD.value), 0.0)
-        wa = fmt_duration(round(max(0.0, hold_off + _lead_in(steps))))
         label = item.unit_label or item.hostname
+        # A step anchored to the Hold's START (anchor="enter") needs agent ≥ 1.26.0 on the unit
+        # (a safety gate; the collapse path compiles the Hold out and never sends it).
+        if any(getattr(s, "anchor", "") == "enter" for s in steps):
+            try:
+                ok = hold_enter_supported(self.fleet.get(item.hostname))
+            except Exception:  # noqa: BLE001
+                ok = False
+            if not ok:
+                QMessageBox.warning(
+                    self, "Hold-start anchor not supported here",
+                    f"“{plan.name or plan.id}” anchors a step to the Hold's start (before the "
+                    f"pause), but {label}'s agent doesn't support it (needs sequence-hold-enter, "
+                    f"agent ≥ 1.26.0). Update the unit's agent, or anchor that step to on-air.")
+                self._set_status("arm blocked — agent lacks sequence-hold-enter")
+                return
+        wa = fmt_duration(round(max(0.0, hold_off + _lead_in(steps))))
         dlg = ArmDialog(
             f"Arm plan “{plan.name or plan.id}” (holds at the Hold)",
             safety_lead_s + ARM_MARGIN_S, DEFAULT_STOP_DURATION_S, 0.0, skew_note, parent=self,

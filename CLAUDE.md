@@ -71,6 +71,69 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — owner-testing round 3 (readouts · tooltips · task-name-free rows · Hold-START anchor · bar anchor handle · RF auto-gating · drag clamps · live band): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo)
+A third Word doc (`Issues_and_wishes_v3`, 9 items). Suite 1019 → 1046 offscreen; agent 485 → 491 (`1.26.0`).
+- **#1/#6 Drag readout = the OFFSET only.** `_paint_drag_readout` shows just `±M:SS` (via `_fmt_offset`) for
+  every part (pin / ramp body / bar start·stop / Hold) — the canvas already shows WHAT it's measured from
+  (the anchor line, the Hold edge, the connector), so no `· on-air` suffix and never "on-air" for a
+  step-anchored pin. `_paint_root_anchor_hint` (the selected tie chip `on-air +0:35`) skips its chip while
+  a drag is in progress, so the two never double up.
+- **#2 Tooltip.** `_tooltip_text` header names the STEP (`<b>Ramp</b> · power −50→−90 · 6 s`, `<b>Tune</b> ·
+  bw=12`; a duration task / one-shot keeps its task), a step-anchored item reads `⚓ [its end ]X after|before|
+  at the anchor's start|end` (the anchor is visible, so it's not named), then `_absolute_timing_lines`:
+  `fires/starts/ends X after on-air` (or `after resume` past a Hold) / `before off-air` / `before the pause`
+  — and past a Hold BOTH `after resume` and `before off-air` (off-air floats to `fwd + bwd` s after resume,
+  the canvas's post-hold window without its pixel pad; an off-air-anchored step reads both too).
+- **#3 No task names on tune/ramp rows.** `_RowHeader._meta` → `bw tune` / `power ramp` (the indent + hue
+  say the task); `_paint_ramp` dropped the parent-task badge.
+- **#4 The Hold's START edge — `anchor="enter"`** (cross-repo; agent `1.26.0`, capability
+  `sequence-hold-enter`). A ramp's END (never a start / a tune) may tie to the LEFT edge of the Hold window
+  (the pause's start); a start / a tune ties to the resume edge as before. `offset` is the END's offset from
+  the pause (≤ 0 — nothing may reach INTO the pause; `validate()` + `_clamp_tune_offset` enforce it), the
+  ramp runs backward from it (`ramp_span` → `("start", h_off+off−dur)..("start", h_off+off)`), window A
+  on the on-air clock (`effective_anchor_offset`, `carry_order_key` (0, …), `_ANCHOR_ON_AIR`). Canvas:
+  `_root_anchor_at(x, for_end)` returns `"enter"` only for a drag from a ramp's END over the enter edge
+  (`"hold"` only for a start over the resume edge); `_make_root_anchor("enter")` ties the END; `_root_x`,
+  `_anchor_base_x`, `_def_x`, `_end_tied`, `_paint_root_anchor_hint` (`pause −0:10`), the connect-drag label
+  (`the pause`), `_timing_text(side="enter")` → `at pause` / `X · before pause`, `_ramp_end_side_off`.
+  Dialogs: StepEditor "hold start (before the pause)" + ramp editor "Hold start (ends at the pause)"
+  (offered with a Hold; window-fit check skipped; `_ft_sublabels` "the pause"). Wire: `SequenceStep.anchor`
+  accepts `"enter"`; `collapse_hold` compiles it out to `start` at `hold_off + offset` (a ramp by its START:
+  minus its resolved duration via `api.ramp`), so the schedule/plan path never sends the anchor. Gates:
+  `hold_enter_supported(client)` (cap + agent ≥ 1.26.0) / `uses_hold_enter(items)`; `sequence_editor.
+  _hold_enter_block` (save + Ready pill), `sequences_panel._hold_enter_ok` (hold-aware arm), `plans_tab.
+  _arm_hold_aware_plan` (direct plan arm).
+- **#5 A duration task's START dot is its ANCHOR handle** (`_edge_at` → `(bar, "start")` within
+  `BAR_DOT_HIT` = 6 px; `_is_anchor_source` True for bars; `_make_anchor` sets `start_anchor="step"` +
+  `start_anchor_step_id/edge` + `start_offset` = the pixel gap; `_make_root_anchor` re-roots a bar on-air /
+  at resume). The RESIZE grips sit just inside the capsule (`_hit`: `bar_start` from −HANDLE_HIT to
+  HANDLE_W+8 inside; the stop dot stays a resize grip) and are painted as two hairlines at each end
+  (`_paint_bar`) so the two are visually distinct.
+- **#7 RF auto-gating** (`ui/rf_gate.py`, the client mirror of `paramkit/rf.py` + `gate_tokens` /
+  `gate_flag` / `gate_arg_state` / `set_gate_arg`). On a bar drag's RELEASE (`mouseReleaseEvent` →
+  `_auto_rf_gate`, in the same undo step): a task whose script declares an RF gate (`is_rf` marker or the
+  `--rf` on/off convention, via `TimelineEditor.task_param_specs`) dragged to START BEFORE on-air gets its
+  launch args set to the gate's OFF token + a tune turning it ON at on-air `0`; dragged back the tune goes
+  and the launch gate is restored ON. STOP PAST off-air adds a gate-OFF tune at off-air `0`; back, it goes.
+  The auto tunes are recognised by SHAPE (gate-only tune at the anchor instant) — no marker field, a
+  reloaded sequence behaves the same. No gate → no-op.
+- **#8 Drag clamps.** `_task_range(it)` bounds a start-/stop-anchored tune or ramp to its task's DRAWN
+  span on both ends (a ramp keeps its whole extent inside); `_clamp_tune_offset` applies it (an `enter`
+  step is capped at 0). `_clamp_for_dependents(target, offset)` narrows a TARGET's drag so every tune/ramp
+  hanging off it (transitively, `_dependents_of`) stays inside ITS task (the dependent's fixed distance
+  translates its range onto the target). Wired into the `run_body` / `ramp_body` drags.
+- **#9 Live band expansion.** `relayout` split into `_recompute_band` (Hold + step bases + `compute_anchors`
+  + the floating Hold band) and placement; `_live_expand()` (called by `_live_move` / `_group_move` on
+  every drag move) re-measures the band from the live offsets with ON-AIR PINNED (`_on` kept, `_off =
+  _on + band`, the canvas min-width only GROWS), then `_set_hold_edges` + `_rebuild_geom` — so the on-air /
+  off-air / Hold windows expand AS you drag. On release `relayout(keep_on=True)` holds on-air where it was
+  (`_place(keep_on)` clamps the shift to the range that keeps every item on-canvas) and keeps the grown
+  width; `resizeEvent` pins on-air mid-drag too.
+Tests: `tests/test_owner_v3.py` (all nine, 27 tests) + `tests/test_timeline_step_anchor_ui.py` (three
+expectations updated: the bar start dot is a handle; tooltip wording); agent `tests/test_sequence_hold_enter.py`.
+Verified by a headless render (`scratchpad/v3_issues.py`): muted launch + auto RF tunes, an END-tied
+pause ramp with its `pause −10s` tie, task-name-free rows/ramps, grip hairlines on the bar.
+
 ## Current state — owner-testing round 2 (connector exit sides · END-tied ramps · delete cascade · bar-source connectors): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo)
 A second Word doc (3 issues + the bar-source gap from #6). Suite 1006 → 1019 offscreen; agent 483 → 485.
 - **Connector exit side / ramp entry (owner images).** A ramp anchored to a TUNE at +0 s had the tune's

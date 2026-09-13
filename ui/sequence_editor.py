@@ -210,9 +210,9 @@ class SequenceEditorDialog(QDialog):
     # ── Validation / save ────────────────────────────────────────────────────
 
     def _revalidate(self) -> None:
-        # Include the capability gate (_step_anchor_block) so the Ready/Needs-correction pill
-        # can't say "Ready" while _on_save would refuse the save on the same condition.
-        err = self._current_error() or self._step_anchor_block()
+        # Include the capability gates (_step_anchor_block / _hold_enter_block) so the Ready/
+        # Needs-correction pill can't say "Ready" while _on_save would refuse the save.
+        err = self._current_error() or self._step_anchor_block() or self._hold_enter_block()
         if err:
             self._set_status(err, warn=True)
             self._set_ready("warn", "Needs correction")
@@ -257,10 +257,26 @@ class SequenceEditorDialog(QDialog):
                     "to 0 or more.")
         return None
 
+    def _hold_enter_block(self) -> Optional[str]:
+        """A safety gate: block saving a sequence with a step anchored to the Hold's START
+        (anchor="enter") to a UNIT whose agent doesn't resolve it (< 1.26.0 — it rejects the
+        anchor value). The library holds only a definition, so it's never blocked."""
+        if self.hostname == LIBRARY_HOST or not tlm.uses_hold_enter(self._timeline.items()):
+            return None
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001 — undiscovered unit → let the agent be the backstop
+            return None
+        if not tlm.hold_enter_supported(client):
+            return ("this sequence anchors a step to the Hold's start (before the pause), which "
+                    "needs a newer agent (≥ 1.26.0). Update the unit’s agent, or anchor it to "
+                    "on-air instead.")
+        return None
+
     def _on_save(self) -> None:
         if self._saving:
             return
-        err = self._current_error() or self._step_anchor_block()
+        err = self._current_error() or self._step_anchor_block() or self._hold_enter_block()
         if err:
             self._set_status(err, error=True)
             return

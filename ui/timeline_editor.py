@@ -79,6 +79,8 @@ HUE_RAIL = 3               # left hue rail width inside a bar
 HANDLE_W = 10               # drawn width of a bar's grip
 HANDLE_HIT = 11             # px each side of a handle centre that grabs it
 PIN_HIT = 10                # px around a pin / ramp edge dot that starts a drag-to-anchor
+BAR_DOT_HIT = 6             # px around a bar's START dot that starts a drag-to-anchor (the dot
+                            # itself; the resize grip sits just inside the capsule)
 SNAP_PX = 7                 # px a dragged edge snaps to a nearby edge / anchor / tick
 HOLD_HIT = 9                # px each side of the Hold band edge that grabs it
 ROOT_SNAP = 13              # px around a root anchor line (on-air/off-air/resume) a drop locks onto
@@ -180,6 +182,11 @@ def _timing_text(offset_s: float, side: str, with_side: bool) -> str:
             return "on-resume"
         label = "pre-hold" if offset_s < 0 else "on-resume"
         return f"{_fmt_offset(offset_s)} · {label}" if with_side else _fmt_offset(offset_s)
+    if side == "enter":                          # measured from the pause's START
+        if offset_s == 0:
+            return "at pause"
+        label = "before pause" if offset_s < 0 else "into pause"
+        return f"{_fmt_offset(offset_s)} · {label}" if with_side else _fmt_offset(offset_s)
     label = "on-air" if side == "start" else "off-air"
     if offset_s == 0:
         return label
@@ -191,9 +198,10 @@ def _ramp_end_side_off(item_anchor: str, end_anchor: str, end_off: float,
     """(side, offset) for a ramp END's timing chip. A Hold-anchored ramp's ends are stored
     on the START axis (h_off + its offset) for geometry (see ramp_span); its chips must read
     hold-relative ('on-resume'/'pre-hold'), so map them back to side='hold' at (end - h_off).
-    Every other ramp keeps its geometry anchor/offset."""
-    if item_anchor == "hold":
-        return "hold", end_off - (h_off or 0.0)
+    A pause-anchored ramp (anchor='enter') likewise reads from the pause ('at pause' / 'before
+    pause'). Every other ramp keeps its geometry anchor/offset."""
+    if item_anchor in ("hold", "enter"):
+        return item_anchor, end_off - (h_off or 0.0)
     return end_anchor, end_off
 
 
@@ -624,12 +632,10 @@ class _TimelineCanvas(QWidget):
         self._hue = tlm.task_hue_map(self._items)
         return {it.uid: i for i, it in enumerate(self._rows)}
 
-    def relayout(self) -> None:
-        """Recompute content metrics (depend only on the items), then place.
-
-        Each lane's height is the tallest footprint of the items in it (an expanded
-        task is taller), and lanes stack with cumulative y so an expanded panel or
-        an offset caption never overlaps the task below it."""
+    def _recompute_band(self) -> None:
+        """The item-measuring half of relayout: resolve the Hold + step anchors, then the
+        un-centred content anchors (_c_on / _c_off / _content_w) — the on-air/off-air band, the
+        Hold window and the canvas width. Shared by relayout and the mid-drag _live_expand."""
         # The Hold marker's position (window A's end) governs where window-B items sit,
         # so resolve it before geometry (compute_anchors reads it too).
         self._hold_off = tlm.hold_offset(self._items)
@@ -649,6 +655,18 @@ class _TimelineCanvas(QWidget):
             span = (fwd + bwd) * eff + POST_HOLD_PAD if (fwd > 0 or bwd > 0) else 0.0
             self._c_off = resume + span
             self._content_w = max(self._content_w, int(self._c_off + tlm.EDGE_PAD))
+
+    def relayout(self, keep_on: bool = False) -> None:
+        """Recompute content metrics (depend only on the items), then place.
+
+        Each lane's height is the tallest footprint of the items in it (an expanded
+        task is taller), and lanes stack with cumulative y so an expanded panel or
+        an offset caption never overlaps the task below it.
+
+        `keep_on` keeps ON-AIR where it is on screen (used after a drag, so the band the
+        operator just watched expand doesn't recentre and jump on release)."""
+        prev_on = getattr(self, "_on", None) if keep_on else None
+        self._recompute_band()
         self._on, self._off = self._c_on, self._c_off   # for shift-invariant lane packing
         self._lane_of = self._assign_lanes()
         n_lanes = (max(self._lane_of.values()) + 1) if self._lane_of else 1
@@ -666,26 +684,36 @@ class _TimelineCanvas(QWidget):
         # The host QScrollArea is widget-resizable: minimums let the canvas STRETCH
         # to fill a bigger viewport (never shrinking below the content), and only
         # scroll when the content is larger.
-        self.setMinimumWidth(self._content_w)
+        min_w = self._content_w
+        if prev_on is not None:
+            # After a drag, keep the width that shows every item with on-air held where it is (the
+            # drag may have grown the canvas to the right of a pinned on-air) — shrinking it would
+            # re-place the band on the following resize and undo the keep.
+            min_w = max(min_w, int(prev_on - self._c_on + self._content_w))
+        self.setMinimumWidth(min_w)
         self.setMinimumHeight(self._content_h)
         self.updateGeometry()
-        self._place()
+        self._place(keep_on=prev_on)
 
     def resizeEvent(self, e):  # noqa: N802
-        # Re-place on every resize so the on-air band re-centres in the new width.
-        self._place()
+        # Re-place on every resize so the on-air band re-centres in the new width — except
+        # mid-drag, where a resize is the canvas GROWING under a pinned on-air (_live_expand):
+        # keep on-air put so the item under the cursor doesn't jump.
+        dragging = self._drag is not None and self._drag.get("moved")
+        self._place(keep_on=self._on if (dragging and hasattr(self, "_on")) else None)
         super().resizeEvent(e)
 
-    def _place(self) -> None:
+    def _place(self, keep_on: Optional[float] = None) -> None:
         """Position anchors + items for the current widget size: centre the on-air
         band horizontally, keep the tasks top-anchored, and pin the time axis to
-        the bottom (extra height opens a gap in the middle)."""
+        the bottom (extra height opens a gap in the middle). With `keep_on` (a previous
+        on-air x) the band is shifted to keep on-air THERE instead (clamped to the canvas)."""
         avail_w = max(self.width(), self._content_w)
         if self._content_w <= avail_w:
             # Content fits: centre the band in the viewport (as before).
             mid0 = (self._c_on + self._c_off) / 2.0
-            shift = avail_w / 2.0 - mid0
-            shift = max(0.0, min(shift, max(0.0, avail_w - self._content_w)))
+            lo_shift, hi_shift = 0.0, max(0.0, avail_w - self._content_w)
+            fit_shift = max(lo_shift, min(avail_w / 2.0 - mid0, hi_shift))
         else:
             # Content is wider than the viewport: LEFT-anchor it so on-air sits near the
             # left edge with only a small pre-roll gutter (no dead warm-up whitespace).
@@ -700,12 +728,24 @@ class _TimelineCanvas(QWidget):
                         offs.append(o)
             preroll = max(0.0, -min(offs)) if offs else 0.0
             target_on = tlm.EDGE_PAD + min(self._c_on - tlm.EDGE_PAD, (preroll + 16) * eff)
-            shift = target_on - self._c_on          # <= 0: pull left, trimming empty warm-up
+            fit_shift = target_on - self._c_on      # <= 0: pull left, trimming empty warm-up
+            lo_shift, hi_shift = min(fit_shift, 0.0), 0.0
+        if keep_on is not None:
+            # Hold ON-AIR where it was (after a drag), within the range that keeps every item on
+            # the canvas — no tighter to the left than the left-anchored fit, no further right
+            # than the centred fit — so the band the operator just watched expand doesn't jump.
+            shift = max(lo_shift, min(hi_shift, keep_on - self._c_on))
+        else:
+            shift = fit_shift
         self._on = self._c_on + shift
         self._off = self._c_off + shift
         # The axis rides directly under the last row (Gantt-style), not the widget bottom.
         self._baseline = getattr(self, "_rows_bottom", LANES_TOP) + AXIS_GAP
-        # Hold WINDOW edges + the merged flag (off-air floats to the resume edge when empty).
+        self._set_hold_edges()
+        self._rebuild_geom()
+
+    def _set_hold_edges(self) -> None:
+        """Hold WINDOW edges + the merged flag (off-air floats to the resume edge when empty)."""
         if self._hold_present:
             self._enter_x = self._on + (self._hold_off or 0.0) * self._eff()
             self._resume_x = self._enter_x + HOLD_BAND_PX
@@ -714,6 +754,24 @@ class _TimelineCanvas(QWidget):
             self._enter_x = self._resume_x = None
             self._hold_merged = False
 
+    def _live_expand(self) -> None:
+        """Mid-drag relayout with ON-AIR PINNED (owner v3 #9): the band / Hold window / off-air
+        re-measure from the live offsets — so an absolute window grows AS an item is dragged into
+        it, not on release — and every item re-places (dependents follow), while the rows stay put
+        and on-air doesn't move under the cursor. The canvas only ever grows during a drag."""
+        on0 = self._on
+        self._recompute_band()
+        self._on = on0
+        self._off = on0 + (self._c_off - self._c_on)
+        need_w = int(on0 - self._c_on + self._content_w)
+        if need_w > self.minimumWidth():
+            self.setMinimumWidth(need_w)
+            self.updateGeometry()
+        self._set_hold_edges()
+        self._rebuild_geom()
+
+    def _rebuild_geom(self) -> None:
+        """Place every item from the current anchors (_on / _off / the Hold edges)."""
         self._geom = {}
         for it in self._items:
             y = self._lane_y.get(self._lane_of.get(it.uid, 0), LANES_TOP)
@@ -813,7 +871,7 @@ class _TimelineCanvas(QWidget):
             if it.kind == "bar":
                 x = max(x, g.get("start_x", x))            # start is on-air; stop is off-air
             elif tlm._is_ramp(it):
-                if getattr(it, "anchor", "start") in ("start", "step"):
+                if getattr(it, "anchor", "start") in ("start", "step", "enter"):
                     x = max(x, g.get("stop_x", x))         # the ramp's end
             else:
                 a, _o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases, self._step_off_bases)
@@ -1304,6 +1362,13 @@ class _TimelineCanvas(QWidget):
         p.drawText(QRectF(left + 12, y, w - 22, LANE_H),
                    int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), label)
         cy = y + LANE_H / 2
+        # Resize GRIPS just inside each end (two hairlines) — distinct from the edge DOTS: the
+        # start dot is the bar's anchor handle (drag it onto a step / anchor line to hang the task
+        # off it), the grip resizes (owner v3 #5).
+        if w > 4 * HANDLE_W:
+            gpen = QPen(QColor(edge), 1.2); p.setPen(gpen)
+            for gx in (left + 10.0, left + 13.0, left + w - 10.0, left + w - 13.0):
+                p.drawLine(QPointF(gx, y + 8.0), QPointF(gx, y + LANE_H - 8.0))
         self._paint_edge_dot(p, sx, cy, base, self._edge_linked(it, "start"))
         self._paint_edge_dot(p, px, cy, base, self._edge_linked(it, "end"))
 
@@ -1340,19 +1405,10 @@ class _TimelineCanvas(QWidget):
             # too narrow for a cap — a compact slope glyph tucked at the right edge
             self._paint_slope(p, rect.right() - 12, rect.center().y(), rising, base, span=7.0)
 
-        # ── flush-left text: badge · range · duration (right of the badge) ────────
+        # ── flush-left text: range · duration (no task badge — the row's hue/indent name the
+        #    parent task, owner v3 #3) ─────────────────────────────────────────────────────────
         text_r = rect.right() - (cap_w or 6.0) - 8.0
         bx = left + 10
-        if w > 66:
-            badge = it.task_name or ""
-            f = self._f(9, True); p.setFont(f); fm = QFontMetrics(f)
-            bw = min(fm.horizontalAdvance(badge) + 12, max(20.0, text_r - bx))
-            br = QRectF(bx, y + (LANE_H - 15) / 2, bw, 15)
-            p.setPen(Qt.PenStyle.NoPen); p.setBrush(fa); p.drawRoundedRect(br, 4, 4)
-            p.setPen(ink)
-            p.drawText(br, int(Qt.AlignmentFlag.AlignCenter),
-                       fm.elidedText(badge, Qt.TextElideMode.ElideRight, int(bw) - 8))
-            bx += bw + 8
         # duration, right-aligned just left of the cap divider
         try:
             dur = tlm._ramp_duration(r)
@@ -1627,12 +1683,15 @@ class _TimelineCanvas(QWidget):
         if it is None or g is None or tlm._is_hold(it) or tlm.is_step_source(it):
             return                                  # step anchors (runs AND bars) have a connector
         anchor = getattr(it, "anchor", "start")
-        if anchor not in ("start", "stop", "hold"):
+        if anchor not in ("start", "stop", "hold", "enter"):
             return
-        if anchor == "hold" and self._resume_x is None:
+        if anchor in ("hold", "enter") and self._resume_x is None:
             return
         base_x = self._root_x(anchor)
-        item_x = g.get("cx", g.get("start_x"))
+        if tlm._is_ramp(it):                     # the tied edge: the end for a stop/enter ramp
+            item_x = g.get("stop_x") if anchor in ("stop", "enter") else g.get("start_x")
+        else:
+            item_x = g.get("cx", g.get("start_x"))
         if item_x is None:
             return
         y = int(g["y"] + LANE_H / 2)
@@ -1642,7 +1701,9 @@ class _TimelineCanvas(QWidget):
         p.drawLine(int(base_x), y, int(item_x), y)
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(Palette.ACCENT))
         p.drawEllipse(QPointF(float(base_x), float(y)), 3.4, 3.4)     # a dot on the anchor line
-        root_name = {"start": "on-air", "stop": "off-air", "hold": "resume"}[anchor]
+        if self._drag is not None and self._drag.get("moved"):
+            return                              # the drag readout shows the offset — no second chip
+        root_name = {"start": "on-air", "stop": "off-air", "hold": "resume", "enter": "pause"}[anchor]
         chip = f"{root_name} {self._offset_chip_text(float(getattr(it, 'offset', 0.0)))}"
         self._paint_tag(p, (base_x + item_x) / 2.0, y - 15, chip, True)
 
@@ -2001,7 +2062,8 @@ class _TimelineCanvas(QWidget):
         p.setPen(QPen(QColor("#FFFFFF"), 2)); p.setBrush(col)
         p.drawEllipse(QPointF(x1, y1), 5.5, 5.5)
         if is_root:
-            root_name = {"start": "on-air", "stop": "off-air", "hold": "resume"}[tgt[1]]
+            root_name = {"start": "on-air", "stop": "off-air", "hold": "resume",
+                         "enter": "the pause"}[tgt[1]]
             label = f"anchor to {root_name}"
         elif ok:
             t, edge = tgt
@@ -2025,8 +2087,20 @@ class _TimelineCanvas(QWidget):
         p.setPen(pen)
         p.drawLine(int(x), int(LANES_TOP - 10), int(x), int(self._baseline + 4))
 
+    @staticmethod
+    def _end_tied(it) -> bool:
+        """A ramp positioned by its END: stop-/enter-anchored, or step-anchored by its end."""
+        if not tlm._is_ramp(it):
+            return False
+        anc = getattr(it, "anchor", "start")
+        return anc in ("stop", "enter") or (
+            anc == "step" and (getattr(it, "anchor_own_edge", "start") or "start") == "end")
+
     def _paint_drag_readout(self, p):
-        """While moving an item, a floating tag shows the time it now fires at."""
+        """While moving an item, a floating tag shows its new OFFSET — the time only. The canvas
+        already shows WHAT it is measured from (the anchor line, the Hold edge, or the connector
+        to its target), so the tag never doubles the root-anchor hint nor mislabels a step-anchored
+        offset as 'on-air' (owner v3 #1/#6)."""
         if self._drag is None or not self._drag.get("moved"):
             return
         it, part = self._drag["item"], self._drag["part"]
@@ -2035,19 +2109,19 @@ class _TimelineCanvas(QWidget):
             return
         y = g["y"]
         if part == "bar_stop":
-            label = _timing_text(float(getattr(it, "stop_offset", 0.0)), "stop", True)
+            label = _fmt_offset(float(getattr(it, "stop_offset", 0.0)))
             x = g.get("stop_x", 0.0)
         elif part in ("bar_start", "bar_body"):
-            side = "hold" if getattr(it, "start_anchor", "start") == "hold" else "start"
-            label = _timing_text(float(getattr(it, "start_offset", 0.0)), side, True)
+            label = _fmt_offset(float(getattr(it, "start_offset", 0.0)))
             x = g.get("start_x", 0.0)
         elif part == "hold_body":
-            label = "Hold · " + _timing_text(float(getattr(it, "offset", 0.0)), "start", True)
+            label = "Hold · " + _fmt_offset(float(getattr(it, "offset", 0.0)))
             x = g.get("cx", 0.0)
+        elif part == "ramp_body":
+            label = _fmt_offset(float(getattr(it, "offset", 0.0)))
+            x = g.get("stop_x", 0.0) if self._end_tied(it) else g.get("start_x", 0.0)
         else:                                   # run_body (a tune / one-shot pin)
-            anc = getattr(it, "anchor", "start")
-            side = anc if anc in ("start", "stop", "hold") else "start"
-            label = _timing_text(float(getattr(it, "offset", 0.0)), side, True)
+            label = _fmt_offset(float(getattr(it, "offset", 0.0)))
             x = g.get("cx", 0.0)
         self._paint_tag(p, x, y - 13, label, True)
 
@@ -2189,9 +2263,11 @@ class _TimelineCanvas(QWidget):
                 if it.args and abs(x - self._caret_center(it, g)) <= CARET_W / 2:
                     return it, "caret"
                 if g["kind"] == "bar":
-                    if abs(x - g["start_x"]) <= HANDLE_HIT:
+                    # Resize GRIPS: from just outside each edge to the grip glyph inside the capsule
+                    # (the start DOT itself is the anchor handle — taken by _edge_at above).
+                    if -HANDLE_HIT <= x - g["start_x"] <= HANDLE_W + 8:
                         return it, "bar_start"
-                    if abs(x - g["stop_x"]) <= HANDLE_HIT:
+                    if -(HANDLE_W + 8) <= x - g["stop_x"] <= HANDLE_HIT:
                         return it, "bar_stop"
                     if min(g["start_x"], g["stop_x"]) <= x <= max(g["start_x"], g["stop_x"]):
                         return it, "bar_body"
@@ -2214,8 +2290,8 @@ class _TimelineCanvas(QWidget):
     # ── Drag-to-anchor (connection handles) ───────────────────────────────────
     def _edge_at(self, x: float, y: float) -> Optional[Tuple[object, str]]:
         """The (item, edge) of a connection handle under (x, y): a ramp's start/end edge
-        dot, or a pin's dot. Bars and the Hold are not Phase-1 anchor participants, so they
-        carry no connect handle. Returns None away from every dot."""
+        dot, a pin's dot, or a duration task's START dot (its stop is off-air's — a resize grip
+        only). The Hold carries no connect handle. Returns None away from every dot."""
         for it in self._rows:
             g = self._geom.get(it.uid)
             if not g:
@@ -2228,22 +2304,30 @@ class _TimelineCanvas(QWidget):
                     return it, "start"
                 if abs(x - g.get("stop_x", -1e9)) <= PIN_HIT:
                     return it, "end"
-            elif it.kind != "bar" and not tlm._is_hold(it):
+            elif it.kind == "bar":
+                # The bar's START dot is its anchor handle (only the start anchors — the stop stays
+                # off-air); the resize grips sit just inside the capsule (see _hit / _paint_bar).
+                if abs(x - g.get("start_x", -1e9)) <= BAR_DOT_HIT:
+                    return it, "start"
+            elif not tlm._is_hold(it):
                 if abs(x - g.get("cx", -1e9)) <= PIN_HIT:
                     return it, "start"
         return None
 
     def _is_anchor_source(self, it) -> bool:
         """An item that can be a step-anchor DEPENDENT (dragged onto a target): a point
-        (tune / one-shot) or a ramp. Bars and the Hold cannot (Phase 1)."""
-        return (not tlm._is_hold(it) and getattr(it, "kind", None) != "bar"
-                and getattr(it, "action", "run") in ("run", "tune", "ramp"))
+        (tune / one-shot), a ramp, or a duration task by its START dot. The Hold cannot."""
+        if tlm._is_hold(it):
+            return False
+        if getattr(it, "kind", None) == "bar":
+            return True
+        return getattr(it, "action", "run") in ("run", "tune", "ramp")
 
     def _drop_edge_at(self, x: float, y: float) -> Optional[Tuple[object, str]]:
-        """Like `_edge_at`, but ALSO offers a duration task's (bar's) start/stop dot as a DROP
-        target. A bar can't BEGIN an anchor (its dots are resize handles, so it stays out of
-        `_edge_at`, which wins in `_hit`), but another step may anchor TO its on-air start or its
-        off-air stop edge. Used only while resolving a connect-drag's target, never for a press."""
+        """Like `_edge_at`, but ALSO offers a duration task's (bar's) STOP dot (and its start dot
+        over the wider grip reach) as a DROP target: a bar can begin an anchor only by its start
+        (`_edge_at`), but another step may anchor TO its on-air start OR its off-air stop edge.
+        Used only while resolving a connect-drag's target, never for a press."""
         hit = self._edge_at(x, y)
         if hit is not None:
             return hit
@@ -2273,28 +2357,41 @@ class _TimelineCanvas(QWidget):
             if (getattr(tgt, "uid", None) != src_uid
                     and tgt in tlm.eligible_step_targets(self._items, src_uid)):
                 return tgt, edge
-        root = self._root_anchor_at(x)
+        src = next((o for o in self._items if o.uid == src_uid), None)
+        for_end = (src is not None and tlm._is_ramp(src)
+                   and (self._connect or {}).get("from_edge") == "end")
+        root = self._root_anchor_at(x, for_end=for_end)
         if root is not None:
             return "__root__", root
         return None
 
-    def _root_anchor_at(self, x: float) -> Optional[str]:
-        """Which root anchor line (if any) x is over: 'start' (on-air), 'stop' (off-air), or
-        'hold' (the Hold resume edge). None away from all of them."""
-        if abs(x - self._on) <= ROOT_SNAP:
+    def _root_anchor_at(self, x: float, for_end: bool = False) -> Optional[str]:
+        """Which root anchor line (if any) x is over: 'start' (on-air), 'stop' (off-air), 'hold'
+        (the Hold's RESUME edge) or 'enter' (the Hold's ENTER edge — the pause's start). A drag
+        from a ramp's END (`for_end`) may land on the pause's start or off-air (the ramp then
+        FINISHES there); a start / a tune lands on on-air, the resume edge or off-air (owner v3
+        #4). None away from all of them."""
+        if not for_end and abs(x - self._on) <= ROOT_SNAP:
             return "start"
         if abs(x - self._off) <= ROOT_SNAP:
             return "stop"
-        if self._resume_x is not None and abs(x - self._resume_x) <= ROOT_SNAP:
-            return "hold"
+        if self._resume_x is not None:
+            if for_end:
+                if self._enter_x is not None and abs(x - self._enter_x) <= ROOT_SNAP:
+                    return "enter"
+            elif abs(x - self._resume_x) <= ROOT_SNAP:
+                return "hold"
         return None
 
     def _root_x(self, kind: str) -> float:
-        """The x of a root anchor line ('start'→on-air, 'stop'→off-air, 'hold'→resume edge)."""
+        """The x of a root anchor line ('start'→on-air, 'stop'→off-air, 'hold'→resume edge,
+        'enter'→the Hold's enter edge)."""
         if kind == "stop":
             return float(self._off)
         if kind == "hold" and self._resume_x is not None:
             return float(self._resume_x)
+        if kind == "enter" and self._enter_x is not None:
+            return float(self._enter_x)
         return float(self._on)
 
     # ── Mouse ─────────────────────────────────────────────────────────────────
@@ -2442,7 +2539,7 @@ class _TimelineCanvas(QWidget):
                 off = (sbx - anchor_x) / eff; self._snap_guide = sbx
             else:
                 off = tlm._snap(self._drag["off0"] + (x - self._drag["press_x"]) / eff)
-            it.offset = self._clamp_tune_offset(it, off)
+            it.offset = self._clamp_for_dependents(it, self._clamp_tune_offset(it, off))
             self._live_move(it)
             return
         if part == "ramp_body":
@@ -2455,9 +2552,10 @@ class _TimelineCanvas(QWidget):
             ref0_x = base_x + self._drag["off0"] * eff        # the ramp's anchored edge at press
             sbx = self._snap_cursor(ref0_x + (x - self._drag["press_x"]), it.uid)
             if sbx is not None:
-                it.offset = (sbx - base_x) / eff; self._snap_guide = sbx
+                off = (sbx - base_x) / eff; self._snap_guide = sbx
             else:
-                it.offset = tlm._snap(self._drag["off0"] + (x - self._drag["press_x"]) / eff)
+                off = tlm._snap(self._drag["off0"] + (x - self._drag["press_x"]) / eff)
+            it.offset = self._clamp_for_dependents(it, self._clamp_tune_offset(it, off))
             self._live_move(it)
             return
         if part == "bar_start":
@@ -2521,6 +2619,8 @@ class _TimelineCanvas(QWidget):
             return x
         if anchor == "hold" and self._hold_off is not None:
             return self._on + self._hold_off * eff + HOLD_BAND_PX     # the RESUME edge
+        if anchor == "enter" and self._hold_off is not None:
+            return self._on + self._hold_off * eff                    # the ENTER edge (the pause)
         return self._on if anchor == "start" else self._off
 
     # ── Drag snapping (to nearby step edges / anchors / ticks) ─────────────────
@@ -2611,13 +2711,7 @@ class _TimelineCanvas(QWidget):
                 itu.offset = self._clamp_tune_offset(itu, o0 + ds)
         # Re-place the moved group AND every step-anchored dependent from the live offsets, so a
         # dependent of a moving target follows it in real time (not only on release).
-        self._step_bases = tlm.resolve_step_offsets(self._items, self._hold_off)
-        self._step_off_bases = tlm.resolve_step_offsets_off(self._items, self._hold_off)
-        for itu in (o for o in self._items if o.uid in group):
-            self._live_relayout(itu)
-        for dep in self._rows:
-            if dep.uid not in group and tlm.is_step_source(dep):
-                self._live_relayout(dep)
+        self._live_expand()
 
     def _apply_marquee(self):
         """Set the selection to the items intersecting the marquee rect (added to the base set
@@ -2638,21 +2732,84 @@ class _TimelineCanvas(QWidget):
         self._selection = (mq["base"] | hit) if mq["additive"] else set(hit)
         self._selected = next(iter(self._selection), None)
 
-    def _clamp_tune_offset(self, it, offset: float) -> float:
-        """Keep a tune point inside the on-air span of the task it acts on: a
-        start-anchored tune can't be dragged before the task's on-air start, a
-        stop-anchored one can't pass its off-air stop. One-shots (not tunes), and window-B
-        (anchor='hold') tunes — timed at proceed, not against the on-air window — act on
-        their own task, so they're free to sit anywhere."""
-        if getattr(it, "action", "run") != "tune" or it.anchor not in ("start", "stop"):
-            return offset
-        spans = [(b.start_offset, b.stop_offset) for b in self._items
-                 if getattr(b, "kind", None) == "bar" and b.task_name == it.task_name]
-        if not spans:
-            return offset
+    def _task_range(self, it):
+        """The offset range [lo, hi] (on the item's own anchor clock) that keeps a tune / ramp
+        inside the on-air span of the task it acts on — BOTH ends (owner v3 #8): a
+        start-anchored step can't precede the task's on-air start nor pass its drawn end (the
+        stop edge is off-air-relative, so the end is read from the current geometry); a
+        stop-anchored one can't pass the stop nor precede the drawn start. A ramp keeps its
+        whole extent inside (a start-tied ramp by its start, a stop-tied one by its end). None
+        when the item isn't range-bound (a one-shot, a window-B / step / pause-anchored step —
+        timed against another point — or a task without a duration bar)."""
+        act = getattr(it, "action", "run")
+        if act not in ("tune", "ramp") or it.anchor not in ("start", "stop"):
+            return None
+        bar = next((b for b in self._items if getattr(b, "kind", None) == "bar"
+                    and b.task_name == it.task_name), None)
+        g = self._geom.get(bar.uid) if bar is not None else None
+        if not g:
+            return None
+        eff = self._eff()
+        dur = tlm._ramp_duration(dict(getattr(it, "ramp", None) or {})) if act == "ramp" else 0.0
+        sx, px = g["start_x"], g["stop_x"]
         if it.anchor == "start":
-            return max(offset, min(s for s, _ in spans))
-        return min(offset, max(e for _, e in spans))
+            lo, hi = (sx - self._on) / eff, (px - self._on) / eff - dur
+        else:
+            lo, hi = (sx - self._off) / eff + dur, (px - self._off) / eff
+        return (lo, hi) if lo <= hi else (lo, lo)
+
+    def _clamp_tune_offset(self, it, offset: float) -> float:
+        """Keep a tune / ramp inside its task's on-air span (see _task_range) — both ends. A
+        pause-anchored (anchor='enter') step can't reach INTO the pause. Everything else is free."""
+        if getattr(it, "anchor", "start") == "enter":
+            return min(offset, 0.0)
+        rng = self._task_range(it)
+        if rng is None:
+            return offset
+        lo, hi = rng
+        return min(max(offset, lo), hi)
+
+    def _dependents_of(self, uid: int):
+        """Every item hanging off `uid` (anchor='step'), transitively."""
+        out, frontier = [], [next((o for o in self._items if o.uid == uid), None)]
+        seen = {uid}
+        while frontier:
+            tgt = frontier.pop()
+            sid = getattr(tgt, "step_id", "") or "" if tgt is not None else ""
+            if not sid:
+                continue
+            for o in self._items:
+                if o.uid in seen or not tlm.is_step_source(o) or tlm.step_source_ref(o)[0] != sid:
+                    continue
+                seen.add(o.uid); out.append(o); frontier.append(o)
+        return out
+
+    def _clamp_for_dependents(self, it, offset: float) -> float:
+        """Narrow a TARGET's drag so every tune / ramp hanging off it (transitively) stays inside
+        ITS task too (owner v3 #8): a dependent moves rigidly with its target, so its own range
+        translates into a range for the target's offset. Uses the bases resolved at the current
+        (pre-move) offset to find each dependent's fixed distance from the target."""
+        deps = [d for d in self._dependents_of(it.uid)
+                if getattr(d, "kind", None) != "bar" and getattr(d, "action", "run") in ("tune", "ramp")]
+        if not deps:
+            return offset
+        cur = float(getattr(it, "offset", getattr(it, "start_offset", 0.0)))
+        lo, hi = -float("inf"), float("inf")
+        for d in deps:
+            base = self._step_bases.get(d.uid)
+            bar = next((b for b in self._items if getattr(b, "kind", None) == "bar"
+                        and b.task_name == d.task_name), None)
+            g = self._geom.get(bar.uid) if bar is not None else None
+            if base is None or not g:
+                continue
+            eff = self._eff()
+            dur = tlm._ramp_duration(dict(getattr(d, "ramp", None) or {})) if tlm._is_ramp(d) else 0.0
+            dlo, dhi = (g["start_x"] - self._on) / eff, (g["stop_x"] - self._on) / eff - dur
+            const = base - cur                      # the dependent's START sits const after the target
+            lo, hi = max(lo, dlo - const), min(hi, dhi - const)
+        if lo > hi:
+            return offset
+        return min(max(offset, lo), hi)
 
     def _live_relayout(self, it) -> None:
         """Update just this item's geometry without resizing the canvas (keeps anchors fixed
@@ -2678,16 +2835,11 @@ class _TimelineCanvas(QWidget):
         self.update()
 
     def _live_move(self, it) -> None:
-        """Re-place the dragged item AND every step-anchored dependent in REAL TIME. Recomputes
-        `_step_bases` from the live offsets first, so dragging a TARGET moves its dependents (and
-        their chains) as it moves — and a dragged dependent itself tracks the cursor — instead of
-        snapping into place only on release."""
-        self._step_bases = tlm.resolve_step_offsets(self._items, self._hold_off)
-        self._step_off_bases = tlm.resolve_step_offsets_off(self._items, self._hold_off)
-        self._live_relayout(it)
-        for dep in self._rows:
-            if dep.uid != it.uid and tlm.is_step_source(dep):
-                self._live_relayout(dep)
+        """Re-place the dragged item AND every step-anchored dependent in REAL TIME, with the band
+        re-measured (on-air pinned) so the windows expand as the drag goes — dragging a TARGET moves
+        its dependents (and their chains) as it moves, and a dragged dependent itself tracks the
+        cursor — instead of snapping into place only on release."""
+        self._live_expand()
 
     def mouseReleaseEvent(self, e):  # noqa: N802
         if e.button() != Qt.MouseButton.LeftButton:
@@ -2721,7 +2873,9 @@ class _TimelineCanvas(QWidget):
             self._undo.append(drag["undo0"])   # commit the pre-drag snapshot for undo
             del self._undo[:-100]
             self._redo.clear()
-            self.relayout()
+            if drag["part"] in ("bar_start", "bar_stop", "bar_body"):
+                self._auto_rf_gate(drag["item"])   # part of the same undo entry as the drag
+            self.relayout(keep_on=True)
             self.changed.emit()
         elif drag.get("collapse") is not None:  # click (no drag) on a multi-selection → keep just it
             self._select_only(drag["collapse"])
@@ -2780,36 +2934,85 @@ class _TimelineCanvas(QWidget):
                     f"<i>resume with Proceed</i>")
         act = getattr(it, "action", "run")
         lines: List[str] = []
+        # A tune/ramp's parent task is obvious from its row (indent, hue), so the header names the
+        # STEP, not the task (owner v3 #3); a duration task / one-shot IS its task.
         if it.kind == "bar":
             lines.append(f"<b>{it.task_name or '(no task)'}</b> · duration task")
-            if not tlm.is_step_source(it):          # a step-anchored start is described by ⚓ below
-                side = "hold" if getattr(it, "start_anchor", "start") == "hold" else "start"
-                lines.append("starts " + _timing_text(float(getattr(it, "start_offset", 0.0)), side, True))
-            lines.append("stops " + _timing_text(float(getattr(it, "stop_offset", 0.0)), "stop", True))
         elif act == "ramp":
-            lines.append(f"<b>{it.task_name or '(no task)'}</b> · ramp")
-            lines.append(_ramp_summary(getattr(it, "ramp", None), getattr(it, "anchor", "start")))
+            lines.append("<b>Ramp</b> · " + _ramp_summary(getattr(it, "ramp", None),
+                                                         getattr(it, "anchor", "start")))
         elif act == "tune":
-            lines.append(f"<b>{it.task_name or '(no task)'}</b> · tune")
             overrides = self._editor._pill_power_display(it)
             changes = ", ".join(f"{k}={overrides.get(k, v)}" for k, v in (it.params or {}).items())
-            if changes:
-                lines.append(changes)
+            lines.append("<b>Tune</b>" + (f" · {changes}" if changes else ""))
         else:
             lines.append(f"<b>{it.task_name or '(no task)'}</b> · one-shot")
-        anc = getattr(it, "anchor", "start")
         if tlm.is_step_source(it):
-            ref, aedge = tlm.step_source_ref(it)
-            tgt = next((o for o in self._items if (getattr(o, "step_id", "") or "") == ref), None)
-            tname = (getattr(tgt, "task_name", "") or "?") if tgt is not None else "?"
+            # "X before/after the anchor's edge" — the anchor itself is visible (the connector), so
+            # its name is left out (owner v3 #2).
+            _ref, aedge = tlm.step_source_ref(it)
+            off = self._dep_offset(it)
             end_tied = tlm._is_ramp(it) and (getattr(it, "anchor_own_edge", "start") or "start") == "end"
             what = "its end " if end_tied else ("its start " if it.kind == "bar" else "")
-            lines.append(f"⚓ {what}after {tname}'s {aedge} "
-                         f"{self._offset_chip_text(self._dep_offset(it))}")
-        elif act != "ramp" and it.kind != "bar":
-            side = "hold" if anc == "hold" else (anc if anc in ("start", "stop") else "start")
-            lines.append("fires " + _timing_text(float(getattr(it, "offset", 0.0)), side, True))
+            rel = ("at" if abs(off) < 1e-9
+                   else f"{fmt_duration(abs(off))} {'after' if off > 0 else 'before'}")
+            lines.append(f"⚓ {what}{rel} the anchor's {aedge}")
+        lines.extend(self._absolute_timing_lines(it))
         return "<br>".join(lines)
+
+    def _absolute_timing_lines(self, it) -> List[str]:
+        """Where the item sits in ABSOLUTE terms, resolved through its anchor chain: after on-air
+        (or after RESUME, past a Hold), before off-air, or before the pause. With a Hold the
+        post-hold window is fully characterised (off-air floats to its content), so a post-hold
+        item reads BOTH its time after resume AND its time before off-air (owner v3 #2)."""
+        def rel(t: float, base: str) -> str:
+            if abs(t) < 1e-9:
+                return f"at {base}"
+            return f"{fmt_duration(abs(t))} {'after' if t > 0 else 'before'} {base}"
+
+        h = self._hold_off
+        out: List[str] = []
+        if it.kind == "bar":
+            a, o = tlm.bar_start_placement(it, h, self._step_bases, self._step_off_bases)
+            if a == "start":
+                out.append("starts " + (rel(o - h, "resume") if (h is not None and o > h + 1e-6)
+                                        else rel(o, "on-air")))
+            else:
+                out.append("starts " + rel(o, "off-air"))
+            out.append("stops " + rel(float(getattr(it, "stop_offset", 0.0)), "off-air"))
+            return out
+        ramp = tlm._is_ramp(it)
+        end_tied = self._end_tied(it)
+        verb = "ends" if end_tied else ("starts" if ramp else "fires")
+        if ramp:
+            (la, lo), (ra, ro) = tlm.ramp_span(it, h, self._step_bases, self._step_off_bases)
+            a, o = (ra, ro) if end_tied else (la, lo)
+        else:
+            a, o = tlm.effective_anchor_offset(it, h, self._step_bases, self._step_off_bases)
+        anchor = getattr(it, "anchor", "start")
+        if anchor == "both":
+            return ["fills the on-air window"]
+        if anchor == "enter" and h is not None:
+            out.append(f"{verb} " + rel(o - h, "the pause"))
+            out.append(f"{verb} " + rel(o, "on-air"))
+            return out
+        if a == "start":
+            out.append(f"{verb} " + (rel(o - h, "resume") if (h is not None and o > h + 1e-6)
+                                     else rel(o, "on-air")))
+        else:
+            out.append(f"{verb} " + rel(o, "off-air"))
+        # Past a Hold, off-air floats to just past the post-hold content (the resume-forward group
+        # then the off-air-backward group — the canvas's window, WITHOUT its pixel breathing pad),
+        # so BOTH distances are fixed: read them in time, not off the drawn geometry.
+        if h is not None and self._hold_present:
+            fwd, bwd = self._post_hold_extents()
+            t_off = fwd + bwd                       # off-air, in seconds after resume
+            if (fwd > 0 or bwd > 0):
+                if a == "start" and o > h + 1e-6:
+                    out.append(f"{verb} " + rel((o - h) - t_off, "off-air"))
+                elif a == "stop":
+                    out.append(f"{verb} " + rel(t_off + o, "resume"))
+        return out
 
     def leaveEvent(self, e):  # noqa: N802
         self._hover_uid = None
@@ -2847,11 +3050,17 @@ class _TimelineCanvas(QWidget):
             src_x = tgt_x
         off = tlm._snap((src_x - tgt_x) / eff)   # keep the tied edge's pixel position, any clock
         self._record()          # snapshot AFTER the early-returns, so no dead no-op undo entry
-        src.anchor = "step"
-        src.anchor_step_id = sid
-        src.anchor_edge = edge
-        src.anchor_own_edge = "end" if end_tied else "start"
-        src.offset = off
+        if getattr(src, "kind", None) == "bar":  # a duration task hangs its START off the step
+            src.start_anchor = "step"
+            src.start_anchor_step_id = sid
+            src.start_anchor_edge = edge
+            src.start_offset = off
+        else:
+            src.anchor = "step"
+            src.anchor_step_id = sid
+            src.anchor_edge = edge
+            src.anchor_own_edge = "end" if end_tied else "start"
+            src.offset = off
         self._select_only(src_uid)
         self.relayout()
         self.changed.emit()
@@ -2861,16 +3070,34 @@ class _TimelineCanvas(QWidget):
         by a drag-to-anchor drop onto that line — keeping the source visually in place (its offset
         becomes the current gap from that line). Replaces any step anchor it had."""
         src = next((it for it in self._items if it.uid == src_uid), None)
-        if src is None or tlm._is_hold(src) or getattr(src, "kind", None) == "bar":
+        if src is None or tlm._is_hold(src):
             self.update()
             return
-        if kind == "hold" and self._resume_x is None:
+        if kind in ("hold", "enter") and self._resume_x is None:
             self.update()
             return
         eff = self._eff(); base_x = self._root_x(kind)
         g = self._geom.get(src_uid) or {}
+        if getattr(src, "kind", None) == "bar":
+            # A duration task's START re-roots on-air or at the Hold's resume edge (its stop is
+            # always off-air, so off-air / the pause are not start anchors).
+            if kind not in ("start", "hold"):
+                self.update()
+                return
+            cur_x = g.get("start_x", base_x)
+            off = (cur_x - base_x) / eff
+            self._record()
+            src.start_anchor = kind
+            src.start_anchor_step_id = ""
+            src.start_anchor_edge = "end"
+            src.start_offset = max(0.0, off) if kind == "hold" else off
+            self._select_only(src_uid)
+            self.relayout()
+            self.changed.emit()
+            return
         if tlm._is_ramp(src):
-            cur_x = g.get("stop_x", g.get("start_x")) if kind == "stop" else g.get("start_x")
+            # off-air and the pause tie a ramp by its END; on-air / resume by its start
+            cur_x = g.get("stop_x", g.get("start_x")) if kind in ("stop", "enter") else g.get("start_x")
         else:
             cur_x = g.get("cx")
         if cur_x is None:
@@ -2923,6 +3150,60 @@ class _TimelineCanvas(QWidget):
         self._revert_to_root(it)
         self.relayout()
         self.changed.emit()
+
+    # ── RF auto-gating on a duration-task drag (owner v3 #7) ────────────────────
+    def _auto_rf_gate(self, bar) -> bool:
+        """A duration task whose script declares an RF gate (`ui.rf_gate`), dragged to START
+        BEFORE on-air, launches MUTED (its args set the gate OFF) and gets a tune turning the gate
+        ON at on-air; dragged back to on-air or later, that tune goes away and the launch gate is
+        restored ON. Dragged to STOP PAST off-air, it gets a tune turning the gate OFF at off-air;
+        back, it goes. The auto tunes are ordinary tunes recognised by their SHAPE (gate-only, at
+        the anchor instant), so nothing needs a marker and a reloaded sequence behaves the same.
+        Returns True when anything changed."""
+        from . import rf_gate
+        try:
+            params = self._editor.task_param_specs(bar.task_name)
+        except Exception:  # noqa: BLE001 — no spec → nothing to gate
+            return False
+        gp = rf_gate.gate(params)
+        if gp is None:
+            return False
+        dest = gp.get("dest") or gp.get("name")
+        on_tok, off_tok = rf_gate.gate_tokens(gp)
+
+        def find(anchor: str, on: bool):
+            for o in self._items:
+                if (getattr(o, "kind", None) != "bar" and getattr(o, "action", "run") == "tune"
+                        and o.task_name == bar.task_name and getattr(o, "anchor", "") == anchor
+                        and abs(float(getattr(o, "offset", 0.0))) < 1e-9
+                        and set((o.params or {}).keys()) == {dest}
+                        and rf_gate.is_on(o.params.get(dest)) == on):
+                    return o
+            return None
+
+        changed = False
+        before = (getattr(bar, "start_anchor", "start") == "start"
+                  and float(getattr(bar, "start_offset", 0.0)) < 0)
+        rf_on = find("start", True)
+        if before:
+            if rf_gate.gate_arg_state(bar.args, gp) is not False:
+                bar.args = rf_gate.set_gate_arg(list(bar.args or []), gp, False); changed = True
+            if rf_on is None:
+                self._items.append(tlm.RunItem(task_name=bar.task_name, action="tune", anchor="start",
+                                               offset=0.0, params={dest: on_tok}))
+                changed = True
+        elif rf_on is not None:
+            self._items.remove(rf_on)
+            bar.args = rf_gate.set_gate_arg(list(bar.args or []), gp, True); changed = True
+        after = float(getattr(bar, "stop_offset", 0.0)) > 0
+        rf_off = find("stop", False)
+        if after and rf_off is None:
+            self._items.append(tlm.RunItem(task_name=bar.task_name, action="tune", anchor="stop",
+                                           offset=0.0, params={dest: off_tok}))
+            changed = True
+        elif not after and rf_off is not None:
+            self._items.remove(rf_off); changed = True
+        return changed
 
     def _duplicate_item(self, it) -> None:
         """Clone an item (a fresh uid + no step_id — the copy is not a reference target),
@@ -3310,6 +3591,8 @@ class StepEditorDialog(QDialog):
         self._anchor.addItem("off-air", "stop")
         if self._editor.has_hold() or getattr(item, "anchor", "") == "hold":
             self._anchor.addItem("hold (after Hold)", "hold")
+        if self._editor.has_hold() or getattr(item, "anchor", "") == "enter":
+            self._anchor.addItem("hold start (before the pause)", "enter")
         # Step-to-step anchoring (agent ≥ 1.24.0): fire this step relative to ANOTHER step's
         # start/end edge, so editing that step moves this one. Offered when there's an eligible
         # target (no cycle), or when the step already uses it; saving to an agent that can't
@@ -3486,7 +3769,12 @@ class StepEditorDialog(QDialog):
         if lbl is not None:
             # Direction-neutral: the offset runs from the referenced edge and may be negative
             # (fire before it), like a start/stop-anchored warm-up lead-in.
-            lbl.setText("Offset — from the step" if is_step else "Offset — from anchor")
+            if is_step:
+                lbl.setText("Offset — from the step")
+            elif self._anchor.currentData() == "enter":
+                lbl.setText("Offset — before the pause (≤ 0)")
+            else:
+                lbl.setText("Offset — from anchor")
 
     def _is_tune(self) -> bool:
         return self._type.currentData() == "tune"
@@ -3883,10 +4171,10 @@ class StepEditorDialog(QDialog):
             if sa is False:
                 return
             spans_getter = getattr(self._editor, "task_spans", None)
-            # A window-B (Hold-anchored) tune OR a step-anchored tune is timed relative to
-            # another event (resume / the target step), not a fixed on-air offset — so its
-            # fixed-window fit can't be checked here.
-            if spans_getter is not None and anchor not in ("hold", "step"):
+            # A window-B (Hold-anchored) tune, a pause-anchored one, OR a step-anchored tune is
+            # timed relative to another event (resume / the pause / the target step), not a fixed
+            # on-air offset — so its fixed-window fit can't be checked here.
+            if spans_getter is not None and anchor not in ("hold", "step", "enter"):
                 err = tlm.step_within_task_error(spans_getter(task), anchor, offset, kind="tune")
                 if err:
                     self._set_status(err, error=True)
@@ -4058,9 +4346,11 @@ class _RowHeader(QWidget):
             return f"{r.get('param') or 'param'} ramp", rng, "Ramp"
         if act == "tune":
             # A calibrated --power set in a view (a chirp's live density) shows THAT quantity, not base.
+            # Named by WHAT it tunes, not its task (the row's indent + hue already say that).
             overrides = self._canvas._editor._pill_power_display(it)
             summ = ", ".join(f"{k}={overrides.get(k, v)}" for k, v in (it.params or {}).items())
-            return f"{it.task_name} tune", summ, "Tune"
+            what = ", ".join(str(k) for k in (it.params or {})) or "param"
+            return f"{what} tune", summ, "Tune"
         return it.task_name or "(no task)", "one-shot", "One-shot"
 
     def paintEvent(self, _e):  # noqa: N802
@@ -4606,6 +4896,12 @@ class TimelineEditor(QWidget):
 
     def param_cache(self) -> Dict[str, list]:
         return self._param_specs
+
+    def task_param_specs(self, task: str) -> list:
+        """The cached argspec parameter dicts of `task`'s script ([] when unknown / not yet
+        fetched) — e.g. for recognising the script's RF gate."""
+        script, _args = self.script_for_task(task)
+        return list(self._param_specs.get(script) or []) if script else []
 
     def cache_script_meta(self, script: str, result) -> None:
         """Populate ALL per-script caches from one get_script_params result, so whichever dialog
