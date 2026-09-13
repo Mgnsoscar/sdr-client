@@ -71,6 +71,20 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — timeline canvas: discreet vertical gridlines: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Owner ask: discreet but informative gridlines. New **`_TimelineCanvas._paint_gridlines`** (`ui/timeline_editor.py`),
+called from `paintEvent` right after the on-air tint + hatch and BEFORE the anchors/axis/rows (so it
+sits behind everything). Faint vertical lines (`Palette.BORDER`, alpha 150 major / 70 minor) span the
+row band `top..baseline`, aligned to the axis's MAJOR ticks (`_paint_axis`'s own loops: defined region,
+warm-up, cool-down) with fainter half-tick minors in the defined region only. Drawn only where time is
+REAL — the on-air anchor (t=0) and off-air get their own strong lines and are skipped, and the hatched
+"relative" band (`def_x..off_x`, length set at arm) is left clear. Antialiasing off for crisp 1-px
+hairlines (save/restore around it). Paint-only; no geometry/model/serialisation change; drift-guarded
+files untouched. Tests: `tests/test_timeline_step_anchor_ui.py::
+test_paint_gridlines_are_vertical_and_skip_the_hatch_band` (a stub painter records the drawn x's: every
+line vertical, none inside the hatch band, a defined-region tune pins a major there). Suite 975 → 976
+offscreen.
+
 ## Current state — Gantt rows: ramps above tunes; one-shots stand alone at the bottom: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
 Two owner asks about `timeline_model.display_order` row grouping/ordering:
 - **Ramps above tunes under a task** — the within-group sort keys on a new `_row_kind_rank(it)` FIRST

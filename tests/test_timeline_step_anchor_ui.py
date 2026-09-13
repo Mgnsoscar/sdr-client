@@ -205,6 +205,33 @@ def test_canvas_selection_records_the_remove_chip_only_when_anchored():
     assert cv._rmchip is None
 
 
+def test_paint_gridlines_are_vertical_and_skip_the_hatch_band():
+    # Discreet vertical gridlines align to the axis's major ticks. They must be vertical and
+    # must NOT cross the hatched 'relative' band (def_x .. off_x), where time isn't fixed yet.
+    cv = _chirp_editor([_bar(), _tune(45.0)])._canvas
+    cv.grab()                                            # lay out geometry (eff / ticks / def_x)
+    on_x, off_x = int(cv._on), int(cv._off)
+    def_x = int(cv._def_x())
+
+    class _StubPainter:
+        def __init__(self): self.xs = []
+        def save(self): pass
+        def restore(self): pass
+        def setRenderHint(self, *a): pass
+        def setPen(self, *a): pass
+        def drawLine(self, x0, y0, x1, y1):
+            assert x0 == x1                              # every gridline is vertical
+            self.xs.append(x0)
+
+    sp = _StubPainter()
+    cv._paint_gridlines(sp, 10, 500, on_x, def_x, off_x)
+    assert sp.xs                                         # drew some gridlines
+    # none land strictly inside the hatched relative band
+    assert not any(def_x + 1 < x < off_x - 1 for x in sp.xs)
+    # a defined-region tune at 45 s pins def_x past on-air, so at least one major sits there
+    assert any(on_x < x <= def_x + 1 for x in sp.xs)
+
+
 def test_canvas_edge_at_finds_handles_and_drop_target_respects_eligibility():
     up = _ramp_item(0.0, sid="up")                   # a ramp: start + end handles
     later = _tune(20.0)

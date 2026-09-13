@@ -670,6 +670,7 @@ class _TimelineCanvas(QWidget):
             pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
             p.drawLine(def_x, top, def_x, baseline + 4)
 
+        self._paint_gridlines(p, top, baseline, on_x, def_x, off_x)
         self._paint_anchor(p, on_x, top, baseline, "ON-AIR", Palette.ONLINE)
         self._paint_anchor(p, off_x, top, baseline, "OFF-AIR", Palette.CRASH)
         self._paint_axis(p, baseline, on_x, def_x, off_x)
@@ -765,6 +766,41 @@ class _TimelineCanvas(QWidget):
         r = QRectF(x - tw / 2, top - 11, tw, 15)
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(col); p.drawRoundedRect(r, 5, 5)
         p.setPen(QColor("#FFFFFF")); p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), label)
+
+    def _paint_gridlines(self, p, top, baseline, on_x, def_x, off_x):
+        """Discreet vertical gridlines behind the rows, aligned to the axis's MAJOR ticks
+        (plus fainter half-ticks in the defined region), so a step's x reads off a time.
+        Drawn only where time is REAL — the warm-up, the defined on-air region, and the
+        cool-down; the hatched 'relative' band (length set at arm) is left clear. The
+        on-air/off-air instants get their own strong anchor lines, so they're skipped here."""
+        eff = self._eff(); tick_s = self._tick_interval()
+        major = QColor(Palette.BORDER); major.setAlpha(150)
+        minor = QColor(Palette.BORDER); minor.setAlpha(70)
+        y0, y1 = int(top), int(baseline)
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        def vline(x, col):
+            p.setPen(QPen(col, 1))
+            p.drawLine(int(x), y0, int(x), y1)
+
+        # Defined (on-air) region — majors at each tick (skip t=0, the on-air anchor),
+        # minors at the half-ticks.
+        t = tick_s
+        while on_x + t * eff <= def_x + 1:
+            vline(on_x + t * eff, major); t += tick_s
+        if tick_s >= 2:
+            t = 0
+            while on_x + (t + tick_s / 2) * eff <= def_x + 1:
+                vline(on_x + (t + tick_s / 2) * eff, minor); t += tick_s
+        # Warm-up (left of on-air) and cool-down (right of off-air) — majors only.
+        t = tick_s
+        while on_x - t * eff >= 0:
+            vline(on_x - t * eff, major); t += tick_s
+        t = tick_s
+        while off_x + t * eff <= self.width():
+            vline(off_x + t * eff, major); t += tick_s
+        p.restore()
 
     def _paint_axis(self, p, baseline, on_x, def_x, off_x):
         eff = self._eff(); tick_s = self._tick_interval()
