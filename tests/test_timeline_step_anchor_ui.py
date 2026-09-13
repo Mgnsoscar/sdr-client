@@ -205,9 +205,10 @@ def test_canvas_selection_records_the_remove_chip_only_when_anchored():
     assert cv._rmchip is None
 
 
-def test_paint_gridlines_are_vertical_and_skip_the_hatch_band():
-    # Discreet vertical gridlines align to the axis's major ticks. They must be vertical and
-    # must NOT cross the hatched 'relative' band (def_x .. off_x), where time isn't fixed yet.
+def test_paint_gridlines_cover_on_air_and_off_air_clocks():
+    # Vertical gridlines align to the axis's major ticks on BOTH clocks: on-air-relative across
+    # the defined region, AND off-air-relative reaching LEFT from off-air into the relative band
+    # (so a stop-anchored step aligns to a line there too). The elastic gap stays in the middle.
     cv = _chirp_editor([_bar(), _tune(45.0)])._canvas
     cv.grab()                                            # lay out geometry (eff / ticks / def_x)
     on_x, off_x = int(cv._on), int(cv._off)
@@ -226,10 +227,10 @@ def test_paint_gridlines_are_vertical_and_skip_the_hatch_band():
     sp = _StubPainter()
     cv._paint_gridlines(sp, 10, 500, on_x, def_x, off_x)
     assert sp.xs                                         # drew some gridlines
-    # none land strictly inside the hatched relative band
-    assert not any(def_x + 1 < x < off_x - 1 for x in sp.xs)
-    # a defined-region tune at 45 s pins def_x past on-air, so at least one major sits there
+    # a defined-region tune at 45 s pins def_x past on-air, so an on-air major sits there
     assert any(on_x < x <= def_x + 1 for x in sp.xs)
+    # off-air-relative gridlines reach back into the band (right of the defined region)
+    assert any(def_x + 1 < x < off_x for x in sp.xs)
 
 
 def test_canvas_edge_at_finds_handles_and_drop_target_respects_eligibility():

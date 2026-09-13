@@ -802,6 +802,16 @@ class _TimelineCanvas(QWidget):
         t = tick_s
         while off_x + t * eff <= self.width():
             vline(off_x + t * eff, major); t += tick_s
+        # Off-air-relative gridlines reaching LEFT into the relative band, matching the axis's
+        # off-air ticks so a stop-anchored step aligns to a line too; kept right of the defined
+        # region (the elastic gap in the middle stays clear).
+        t = tick_s
+        while off_x - t * eff > def_x + 2:
+            vline(off_x - t * eff, major); t += tick_s
+        if tick_s >= 2:
+            t = tick_s / 2.0
+            while off_x - t * eff > def_x + 2:
+                vline(off_x - t * eff, minor); t += tick_s
         p.restore()
 
     def _paint_axis(self, p, baseline, on_x, def_x, off_x):
@@ -842,6 +852,18 @@ class _TimelineCanvas(QWidget):
         t = tick_s
         while off_x + t * eff <= w:
             tick(off_x + t * eff, "+" + self._mmss(t), True)
+            t += tick_s
+        # Off-air-relative ticks going LEFT into the relative band ('−M:SS'): a stop-anchored step
+        # fires at a fixed offset BEFORE off-air, so its time IS known even though the band's LENGTH
+        # isn't. Kept to the right of the defined region so they never collide with the on-air ticks —
+        # the elastic gap between the two clocks stays in the middle (where the 'relative' badge sits).
+        t = tick_s
+        while off_x - t * eff > def_x + 2:
+            tick(off_x - t * eff, self._mmss(-t), True)
+            if tick_s >= 2:
+                mid = off_x - (t - tick_s / 2) * eff
+                if mid > def_x + 2:
+                    tick(mid, None, False)
             t += tick_s
 
     def _paint_rel_badge(self, p, cx, cy):

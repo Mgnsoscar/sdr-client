@@ -71,6 +71,20 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — timeline axis: off-air-relative ticks in the relative band: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Owner ask: a STOP-anchored (off-air) step with a negative offset sat in the hatched "relative" band
+(`def_x..off_x`), which had NO axis ticks — no absolute time there. But a stop-anchored step fires at a
+FIXED offset before off-air, so its time IS known even though the band's LENGTH (set at arm) isn't. Fix
+(`ui/timeline_editor.py`, paint-only): `_paint_axis` now draws off-air-relative MAJOR ticks (+ half-tick
+minors) going LEFT from the off-air "0" anchor into the band, labelled `−M:SS` (via `_mmss(-t)`), bounded
+to `off_x - t·eff > def_x + 2` so they never invade the on-air ticks — the axis is now DUAL-CLOCK
+(on-air-relative from the left, off-air-relative from the right, the elastic unknown-length gap staying
+in the middle under the "relative — length set at arm" badge). `_paint_gridlines` mirrors it: off-air-
+relative majors + minors reach left from `off_x` to `def_x + 2`, so a stop-anchored step aligns to a
+gridline there too. No geometry/model/serialisation change; drift-guarded files untouched. Tests:
+`tests/test_timeline_step_anchor_ui.py::test_paint_gridlines_cover_on_air_and_off_air_clocks` (gridlines
+appear on BOTH the on-air side and the off-air-relative band; all vertical). Suite still 976 offscreen.
+
 ## Current state — timeline canvas: discreet vertical gridlines: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
 Owner ask: discreet but informative gridlines. New **`_TimelineCanvas._paint_gridlines`** (`ui/timeline_editor.py`),
 called from `paintEvent` right after the on-air tint + hatch and BEFORE the anchors/axis/rows (so it
