@@ -80,7 +80,11 @@ HANDLE_W = 10               # drawn width of a bar's grip
 HANDLE_HIT = 11             # px each side of a handle centre that grabs it
 PIN_HIT = 10                # px around a pin / ramp edge dot that starts a drag-to-anchor
 SNAP_PX = 7                 # px a dragged edge snaps to a nearby edge / anchor / tick
-HOLD_HIT = 9                # px each side of the Hold divider that grabs it
+HOLD_HIT = 9                # px each side of the Hold band edge that grabs it
+HOLD_BAND_PX = 48           # fixed visual width of the Hold WINDOW (its length is set at Proceed,
+                            # so it draws at a constant width, hatched — like the old relative band)
+POST_HOLD_PAD = 130         # min px between the resume-forward and off-air-backward step groups in
+                            # the post-hold window (mirrors BAND_PAD; 0 content ⇒ resume IS off-air)
 RUN_MIN_W = 120             # minimum run-pill width
 RUN_MAX_W = 260
 RAMP_MIN_W = 44             # minimum ramp-bar width (so a short/zero-span ramp is clickable)
@@ -304,6 +308,14 @@ class _TimelineCanvas(QWidget):
         self._hue: Dict[str, str] = {}   # task_name -> hue hex (task_hue_map)
         self._hold_off: Optional[float] = None       # the Hold marker's on-air offset (None = none)
         self._step_bases: dict = {}                   # uid -> resolved on-air base for step anchors
+        # Hold-window geometry (set in relayout/_place when a Hold is present): the Hold draws as a
+        # fixed-width WINDOW [enter_x, resume_x]; everything after it is one off-air-styled window
+        # [resume_x, off_x] whose axis counts FORWARD from resume; off-air FLOATS to just past the
+        # post-hold content, and MERGES with the resume edge when nothing is anchored after the Hold.
+        self._hold_present: bool = False
+        self._enter_x: Optional[float] = None
+        self._resume_x: Optional[float] = None
+        self._hold_merged: bool = False
         self._baseline = self._content_h - BASELINE_FROM_BOTTOM
         self._zoom = 1.0                 # horizontal (time-axis) zoom factor
         self._scroll = None              # host QScrollArea, for zoom-to-cursor
@@ -331,6 +343,65 @@ class _TimelineCanvas(QWidget):
         may override to change the timeline's extent (e.g. the plan editor shows
         only the on-air window)."""
         return tlm.compute_anchors(self._items, self._zoom)
+
+    # ── Hold-window geometry ──────────────────────────────────────────────────
+    def _post_hold_extents(self) -> Tuple[float, float]:
+        """(forward_s, backward_s): the furthest resume-forward window-B time and the furthest
+        off-air-backward time, in seconds. The off-air anchor floats to just past both groups;
+        0/0 means nothing is anchored after the Hold, so resume IS off-air (the merged case)."""
+        h = self._hold_off or 0.0
+        fwd = bwd = 0.0
+
+        def take(anchor: str, off: float):
+            nonlocal fwd, bwd
+            if anchor == "stop":
+                if off < 0:
+                    bwd = max(bwd, -off)
+            elif off > h + 1e-6:                     # a resume-side (post-hold) start offset
+                fwd = max(fwd, off - h)
+
+        for it in self._items:
+            if tlm._is_hold(it):
+                continue
+            if it.kind == "bar":
+                if getattr(it, "start_anchor", "start") == "hold":
+                    fwd = max(fwd, float(getattr(it, "start_offset", 0.0)))
+                so = float(getattr(it, "stop_offset", 0.0))
+                if so < 0:
+                    bwd = max(bwd, -so)
+            elif tlm._is_ramp(it):
+                (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases)
+                take(la, lo); take(ra, ro)
+            else:
+                a, o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases)
+                take(a, o)
+        return fwd, bwd
+
+    def _resume_shift(self, it) -> float:
+        """HOLD_BAND_PX for a resume-side item (its START hangs off the Hold — a window-B
+        `anchor="hold"` step/ramp, a window-B bar, or a step-anchored item resolved past the
+        hold), else 0. The Hold marker itself and every window-A / off-air item are NOT shifted
+        (off-air content rides `self._off`, which already floats past the band)."""
+        if not self._hold_present or tlm._is_hold(it):
+            return 0.0
+        anc = getattr(it, "anchor", "start")
+        if anc == "hold":
+            return HOLD_BAND_PX
+        if getattr(it, "kind", None) == "bar" and getattr(it, "start_anchor", "start") == "hold":
+            return HOLD_BAND_PX
+        if anc == "step":
+            base = (self._step_bases or {}).get(getattr(it, "uid", None))
+            if base is not None and base > (self._hold_off or 0.0) + 1e-6:
+                return HOLD_BAND_PX
+        return 0.0
+
+    def _place_x(self, it, anchor: str, offset: float) -> float:
+        """offset -> x for item `it`, inserting the fixed Hold band so resume-side content sits
+        to the RIGHT of the window. Byte-identical to `offset_to_x` when no Hold is present."""
+        x = tlm.offset_to_x(anchor, offset, self._on, self._off, self._zoom)
+        if anchor == "start":
+            x += self._resume_shift(it)
+        return x
 
     def set_scroll_area(self, scroll) -> None:
         self._scroll = scroll
@@ -509,14 +580,13 @@ class _TimelineCanvas(QWidget):
         keep on-air-anchored points left of off-air-anchored ones). A window-B
         (anchor="hold") item is placed to scale from the Hold's position."""
         a, o = tlm.effective_anchor_offset(item, self._hold_off, self._step_bases)
-        return tlm.offset_to_x(a, o, self._on, self._off, self._zoom)
+        return self._place_x(item, a, o)
 
     def _item_left(self, item) -> float:
         """Left x the item's name/panel starts at (for panel anchoring/packing)."""
         if item.kind == "bar":
-            sx = tlm.offset_to_x(*tlm.bar_start_placement(item, self._hold_off),
-                                 self._on, self._off, self._zoom)
-            px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off, self._zoom)
+            sx = self._place_x(item, *tlm.bar_start_placement(item, self._hold_off))
+            px = self._place_x(item, "stop", item.stop_offset)
             return min(sx, px)
         return self._run_cx(item) - self._run_width(item) / 2
 
@@ -528,14 +598,13 @@ class _TimelineCanvas(QWidget):
         """Horizontal [left, right] the item occupies (for lane packing) — includes
         the inline argument panel when it's expanded."""
         if item.kind == "bar":
-            sx = tlm.offset_to_x(*tlm.bar_start_placement(item, self._hold_off),
-                                 self._on, self._off, self._zoom)
-            px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off, self._zoom)
+            sx = self._place_x(item, *tlm.bar_start_placement(item, self._hold_off))
+            px = self._place_x(item, "stop", item.stop_offset)
             left, right = sx - HANDLE_W, px + HANDLE_W
         elif tlm._is_ramp(item):
             (la, lo), (ra, ro) = tlm.ramp_span(item, self._hold_off, self._step_bases)
-            sx = tlm.offset_to_x(la, lo, self._on, self._off, self._zoom)
-            px = tlm.offset_to_x(ra, ro, self._on, self._off, self._zoom)
+            sx = self._place_x(item, la, lo)
+            px = self._place_x(item, ra, ro)
             left, right = min(sx, px) - RAMP_MIN_W / 2, max(sx, px) + RAMP_MIN_W / 2
         else:
             cx = self._run_cx(item)
@@ -566,6 +635,17 @@ class _TimelineCanvas(QWidget):
         # Un-centered content anchors + intrinsic content width. Factored into a
         # hook so a subclass (the plan timeline) can supply a window-only geometry.
         self._c_on, self._c_off, self._content_w = self._compute_anchors()
+        # With a Hold present, the end can't be scheduled — off-air FLOATS to Proceed. Insert a
+        # fixed-width Hold WINDOW at the hold and re-place OFF-AIR just past the post-hold content
+        # (or AT the resume edge, merged, when nothing follows), replacing the compute_anchors band.
+        self._hold_present = self._hold_off is not None
+        if self._hold_present:
+            eff = self._eff()
+            resume = self._c_on + self._hold_off * eff + HOLD_BAND_PX
+            fwd, bwd = self._post_hold_extents()
+            span = (fwd + bwd) * eff + POST_HOLD_PAD if (fwd > 0 or bwd > 0) else 0.0
+            self._c_off = resume + span
+            self._content_w = max(self._content_w, int(self._c_off + tlm.EDGE_PAD))
         self._on, self._off = self._c_on, self._c_off   # for shift-invariant lane packing
         self._lane_of = self._assign_lanes()
         n_lanes = (max(self._lane_of.values()) + 1) if self._lane_of else 1
@@ -622,6 +702,14 @@ class _TimelineCanvas(QWidget):
         self._off = self._c_off + shift
         # The axis rides directly under the last row (Gantt-style), not the widget bottom.
         self._baseline = getattr(self, "_rows_bottom", LANES_TOP) + AXIS_GAP
+        # Hold WINDOW edges + the merged flag (off-air floats to the resume edge when empty).
+        if self._hold_present:
+            self._enter_x = self._on + (self._hold_off or 0.0) * self._eff()
+            self._resume_x = self._enter_x + HOLD_BAND_PX
+            self._hold_merged = (self._off - self._resume_x) < 3.0
+        else:
+            self._enter_x = self._resume_x = None
+            self._hold_merged = False
 
         self._geom = {}
         for it in self._items:
@@ -630,16 +718,15 @@ class _TimelineCanvas(QWidget):
             if tlm._is_hold(it):
                 # The Hold marker is a vertical divider spanning the band, not a pill.
                 g["kind"] = "hold"
-                g["cx"] = self._run_cx(it)     # start-anchored at the hold offset
+                g["cx"] = self._run_cx(it)     # start-anchored at the hold offset (the ENTER edge)
             elif it.kind == "bar":
-                g["start_x"] = tlm.offset_to_x(*tlm.bar_start_placement(it, self._hold_off),
-                                               self._on, self._off, self._zoom)
-                g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off, self._zoom)
+                g["start_x"] = self._place_x(it, *tlm.bar_start_placement(it, self._hold_off))
+                g["stop_x"] = self._place_x(it, "stop", it.stop_offset)
             elif tlm._is_ramp(it):
                 # A ramp draws as a duration bar between its two anchored ends.
                 (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases)
-                g["start_x"] = tlm.offset_to_x(la, lo, self._on, self._off, self._zoom)
-                g["stop_x"] = tlm.offset_to_x(ra, ro, self._on, self._off, self._zoom)
+                g["start_x"] = self._place_x(it, la, lo)
+                g["stop_x"] = self._place_x(it, ra, ro)
                 g["ends"] = ((la, lo), (ra, ro))
             else:
                 g["cx"] = self._run_cx(it)
@@ -658,26 +745,32 @@ class _TimelineCanvas(QWidget):
         baseline = int(self._baseline)
         on_x, off_x = int(self._on), int(self._off)
         top = LANES_TOP - 8
-        def_x = int(self._def_x())
-        off_def_x = max(def_x, int(self._off_def_x()))   # left edge of the off-air window
+        if self._hold_present:
+            # A Hold present: the Hold replaces the relative band as the one variable-length
+            # section, and everything after it is one off-air-styled window whose axis counts
+            # forward from resume (off-air floats to Proceed). Painted in its own path.
+            self._paint_hold_windows(p, top, baseline, on_x, off_x)
+        else:
+            def_x = int(self._def_x())
+            off_def_x = max(def_x, int(self._off_def_x()))   # left edge of the off-air window
 
-        # Defined ABSOLUTE windows — a whisper of tint: on-air green (left), off-air red (right).
-        gtint = QColor(Palette.ONLINE); gtint.setAlpha(11)
-        p.fillRect(QRectF(on_x, top, max(0, def_x - on_x), baseline - top), gtint)
-        rtint = QColor(Palette.CRASH); rtint.setAlpha(11)
-        p.fillRect(QRectF(off_def_x, top, max(0, off_x - off_def_x), baseline - top), rtint)
-        # Only the middle is truly RELATIVE (its length is set at arm) — diagonal hatch, no ticks.
-        self._paint_hatch(p, def_x, off_def_x, top, baseline)
-        if off_def_x - def_x > 6:
-            pen = QPen(QColor(Palette.BORDER_STRONG), 1)
-            pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
-            p.drawLine(def_x, top, def_x, baseline + 4)             # green | hatch boundary
-            p.drawLine(off_def_x, top, off_def_x, baseline + 4)     # hatch | red boundary
+            # Defined ABSOLUTE windows — a whisper of tint: on-air green (left), off-air red (right).
+            gtint = QColor(Palette.ONLINE); gtint.setAlpha(11)
+            p.fillRect(QRectF(on_x, top, max(0, def_x - on_x), baseline - top), gtint)
+            rtint = QColor(Palette.CRASH); rtint.setAlpha(11)
+            p.fillRect(QRectF(off_def_x, top, max(0, off_x - off_def_x), baseline - top), rtint)
+            # Only the middle is truly RELATIVE (its length is set at arm) — diagonal hatch, no ticks.
+            self._paint_hatch(p, def_x, off_def_x, top, baseline)
+            if off_def_x - def_x > 6:
+                pen = QPen(QColor(Palette.BORDER_STRONG), 1)
+                pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
+                p.drawLine(def_x, top, def_x, baseline + 4)             # green | hatch boundary
+                p.drawLine(off_def_x, top, off_def_x, baseline + 4)     # hatch | red boundary
 
-        self._paint_gridlines(p, top, baseline, on_x, def_x, off_x, off_def_x)
-        self._paint_anchor(p, on_x, top, baseline, "ON-AIR", Palette.ONLINE)
-        self._paint_anchor(p, off_x, top, baseline, "OFF-AIR", Palette.CRASH)
-        self._paint_axis(p, baseline, on_x, def_x, off_x, off_def_x)
+            self._paint_gridlines(p, top, baseline, on_x, def_x, off_x, off_def_x)
+            self._paint_anchor(p, on_x, top, baseline, "ON-AIR", Palette.ONLINE)
+            self._paint_anchor(p, off_x, top, baseline, "OFF-AIR", Palette.CRASH)
+            self._paint_axis(p, baseline, on_x, def_x, off_x, off_def_x)
 
         self._paint_connectors(p)
         for it in self._rows:
@@ -889,6 +982,124 @@ class _TimelineCanvas(QWidget):
                 if mid >= off_def_x - 1:
                     tick(mid, None, False)
             t += tick_s
+
+    # ── Hold-window painting ──────────────────────────────────────────────────
+    def _paint_hold_windows(self, p, top, baseline, on_x, off_x):
+        """The Hold layout: a green on-air window (on_x..enter), the Hold WINDOW itself
+        (enter..resume — hatched + amber, its length set at Proceed), and one off-air-styled
+        window after it (resume..off_x) whose axis counts FORWARD from resume. Off-air FLOATS
+        (dashed), and MERGES with the resume edge when nothing is anchored after the Hold."""
+        enter_x = int(self._enter_x); resume_x = int(self._resume_x); merged = self._hold_merged
+        # on-air (green) up to the Hold enter
+        gtint = QColor(Palette.ONLINE); gtint.setAlpha(11)
+        p.fillRect(QRectF(on_x, top, max(0, enter_x - on_x), baseline - top), gtint)
+        # the Hold WINDOW — diagonal hatch + a whisper of amber (variable length, like the old band)
+        self._paint_hatch(p, enter_x, resume_x, top, baseline)
+        atint = QColor(Palette.ARMED); atint.setAlpha(22)
+        p.fillRect(QRectF(enter_x, top, max(0, resume_x - enter_x), baseline - top), atint)
+        # the post-hold window (off-air style) — only when a step is actually anchored after the Hold
+        if not merged:
+            rtint = QColor(Palette.CRASH); rtint.setAlpha(11)
+            p.fillRect(QRectF(resume_x, top, max(0, off_x - resume_x), baseline - top), rtint)
+
+        self._paint_hold_gridlines(p, top, baseline, on_x, enter_x, resume_x, off_x, merged)
+        self._paint_anchor(p, on_x, top, baseline, "ON-AIR", Palette.ONLINE)
+        self._paint_hold_axis(p, baseline, on_x, enter_x, resume_x, off_x, merged)
+        if not merged:                       # OFF-AIR floats past the post-hold content
+            self._paint_floating_offair(p, off_x, top, baseline)
+
+    def _paint_hold_axis(self, p, baseline, on_x, enter_x, resume_x, off_x, merged):
+        """On-air ticks forward from on-air (on_x..enter), then post-hold ticks forward from
+        RESUME (resume_x..off_x) — resume is the fixed T0 with a Hold, so the axis reads
+        elapsed-from-resume. The Hold band and (a floating) off-air get no ticks."""
+        eff = self._eff(); tick_s = self._tick_interval()
+        f = QFont(Fonts.MONO.split(",")[0].strip('"')); f.setPointSize(8); p.setFont(f)
+        w = self.width()
+        center = int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+
+        def tick(x, label, major):
+            col = QColor(Palette.TEXT_FAINT if major else Palette.BORDER_STRONG)
+            p.setPen(QPen(col, 1))
+            p.drawLine(int(x), baseline, int(x), baseline + (7 if major else 4))
+            if major and label is not None and 30 <= x <= w - 30:
+                p.setPen(QColor(Palette.TEXT_MUTED))
+                p.drawText(int(x) - 30, baseline + 9, 60, 12, center, label)
+
+        # on-air, forward from on-air, up to the Hold enter
+        t = 0
+        while on_x + t * eff <= enter_x + 1:
+            tick(on_x + t * eff, "0" if t == 0 else self._mmss(t), True)
+            if tick_s >= 2:
+                mid = on_x + (t + tick_s / 2) * eff
+                if mid <= enter_x + 1:
+                    tick(mid, None, False)
+            t += tick_s
+        # warm-up (negative) ticks to the left edge
+        t = tick_s
+        while on_x - t * eff >= 0:
+            tick(on_x - t * eff, self._mmss(-t), True); t += tick_s
+        # post-hold, forward from RESUME, up to off-air (skipped when merged)
+        if not merged:
+            t = 0
+            while resume_x + t * eff <= off_x + 1:
+                tick(resume_x + t * eff, "0" if t == 0 else self._mmss(t), True)
+                if tick_s >= 2:
+                    mid = resume_x + (t + tick_s / 2) * eff
+                    if mid <= off_x + 1:
+                        tick(mid, None, False)
+                t += tick_s
+
+    def _paint_hold_gridlines(self, p, top, baseline, on_x, enter_x, resume_x, off_x, merged):
+        """Gridlines behind the rows aligned to the Hold axis's major ticks — on-air
+        (on_x..enter) and post-hold (resume_x..off_x, forward from resume). The Hold band and
+        the anchor lines (on-air/off-air) are skipped."""
+        eff = self._eff(); tick_s = self._tick_interval()
+        major = QColor(Palette.BORDER_STRONG); major.setAlpha(175)
+        minor = QColor(Palette.BORDER_STRONG); minor.setAlpha(95)
+        y0, y1 = int(top), int(baseline)
+        p.save(); p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        def vline(x, col):
+            p.setPen(QPen(col, 1)); p.drawLine(int(x), y0, int(x), y1)
+
+        # on-air majors (skip t=0, the on-air anchor) + minors
+        t = tick_s
+        while on_x + t * eff <= enter_x + 1:
+            vline(on_x + t * eff, major); t += tick_s
+        if tick_s >= 2:
+            t = tick_s / 2.0
+            while on_x + t * eff <= enter_x + 1:
+                vline(on_x + t * eff, minor); t += tick_s
+        # warm-up majors
+        t = tick_s
+        while on_x - t * eff >= 0:
+            vline(on_x - t * eff, major); t += tick_s
+        # post-hold majors (skip t=0, the resume edge which gets its own dashed line) + minors
+        if not merged:
+            t = tick_s
+            while resume_x + t * eff <= off_x - 1:
+                vline(resume_x + t * eff, major); t += tick_s
+            if tick_s >= 2:
+                t = tick_s / 2.0
+                while resume_x + t * eff <= off_x - 1:
+                    vline(resume_x + t * eff, minor); t += tick_s
+        p.restore()
+
+    def _paint_floating_offair(self, p, off_x, top, baseline):
+        """The OFF-AIR marker when a Hold is present: a DASHED red line + pill + a small
+        'floats' caption (its absolute time isn't known until Proceed)."""
+        col = QColor(Palette.CRASH)
+        pen = QPen(col, 2); pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
+        p.drawLine(off_x, top - 2, off_x, baseline + 4)
+        f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPointSize(8); f.setBold(True)
+        p.setFont(f); fm = QFontMetrics(f); tw = fm.horizontalAdvance("OFF-AIR") + 12
+        r = QRectF(off_x - tw / 2, top - 11, tw, 15)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(col); p.drawRoundedRect(r, 5, 5)
+        p.setPen(QColor("#FFFFFF")); p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), "OFF-AIR")
+        fi = QFont(Fonts.SANS.split(",")[0].strip('"')); fi.setPointSize(7); fi.setItalic(True)
+        p.setFont(fi); p.setPen(QColor(Palette.TEXT_FAINT))
+        p.drawText(QRectF(off_x - 30, top - 24, 60, 11), int(Qt.AlignmentFlag.AlignHCenter),
+                   "floats")
 
     def _tick_interval(self) -> int:
         """Seconds between ticks — the smallest 'nice' value whose on-screen
@@ -1725,34 +1936,59 @@ class _TimelineCanvas(QWidget):
         return out
 
     def _paint_hold(self, p, it):
-        """The Hold marker — a dashed vertical divider across the on-air band at the
-        hold position, with a ⏸ HOLD tab at the top and its offset chip below. It is
-        the third anchor: window-A steps sit to its left, window-B (anchor="hold")
-        steps flow on from it to the right."""
+        """The Hold WINDOW — two dashed edges (enter + resume) with the amber-hatched band
+        between them, a ⏸ HOLD tab centred in the band, and its offset chip below. It is the
+        third anchor: window-A steps sit to its left, window-B (anchor="hold") steps flow on
+        from the resume edge to the right. Drawn AFTER the rows so its edges cross a duration
+        bar that runs through the Hold (the bar stays visible). When nothing is anchored after
+        the Hold, the resume edge IS off-air, so a combined ⏸ HOLD │ OFF-AIR marker is drawn
+        (the two labels would otherwise collide)."""
         g = self._geom[it.uid]
-        cx = int(g["cx"])
+        enter_x = int(g["cx"])
+        resume_x = int(self._resume_x) if self._resume_x is not None else enter_x
+        merged = self._hold_merged
         top = LANES_TOP - 12
         baseline = int(self._baseline)
-        color = QColor(Palette.ARMED)
-        pen = QPen(color, 2)
-        pen.setStyle(Qt.PenStyle.DashLine)
-        p.setPen(pen)
-        p.drawLine(cx, top, cx, baseline + 6)
-        # A small filled tab so the divider reads as an anchor (like ON-AIR/OFF-AIR).
-        f = QFont(); f.setPointSize(8); f.setBold(True)
-        p.setFont(f)
-        fm = QFontMetrics(f)
-        text = "⏸ HOLD"
-        tw = fm.horizontalAdvance(text) + 12
-        r = QRectF(cx - tw / 2, top - 3, tw, 15)
+        amber = QColor(Palette.ARMED)
+        # the two dashed edges: enter (amber) and resume (amber, or red when it IS off-air).
+        pen = QPen(amber, 2); pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
+        p.drawLine(enter_x, top, enter_x, baseline + 6)
+        rpen = QPen(QColor(Palette.CRASH) if merged else amber, 2)
+        rpen.setStyle(Qt.PenStyle.DashLine); p.setPen(rpen)
+        p.drawLine(resume_x, top, resume_x, baseline + 6)
+        if merged:
+            self._paint_merged_marker(p, resume_x, top - 3)
+            fi = QFont(Fonts.SANS.split(",")[0].strip('"')); fi.setPointSize(7); fi.setItalic(True)
+            p.setFont(fi); p.setPen(QColor(Palette.TEXT_FAINT))
+            p.drawText(QRectF(resume_x - 30, top - 15, 60, 11),
+                       int(Qt.AlignmentFlag.AlignHCenter), "floats")
+        else:
+            # A ⏸ HOLD tab centred in the band so it reads as an anchor (like ON-AIR/OFF-AIR).
+            f = QFont(); f.setPointSize(8); f.setBold(True); p.setFont(f)
+            fm = QFontMetrics(f); text = "⏸ HOLD"; tw = fm.horizontalAdvance(text) + 12
+            cxh = (enter_x + resume_x) / 2
+            r = QRectF(cxh - tw / 2, top - 3, tw, 15)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(amber)); p.drawRoundedRect(r, 7, 7)
+            p.setPen(QColor(Palette.SURFACE)); p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
+        # (No below-axis offset chip: the enter edge + the on-air axis already read the Hold's
+        # position, and a chip there would crowd the resume '0' tick / the hold band.)
+
+    def _paint_merged_marker(self, p, seam_x, top_y):
+        """A combined ⏸ HOLD │ OFF-AIR marker straddling one line — used when nothing is
+        anchored after the Hold, so its resume edge and off-air are the same instant."""
+        f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPointSize(8); f.setBold(True)
+        p.setFont(f); fm = QFontMetrics(f)
+        h = 15
+        hw = fm.horizontalAdvance("⏸ HOLD") + 12
+        ow = fm.horizontalAdvance("OFF-AIR") + 12
+        rl = QRectF(seam_x - 1 - hw, top_y, hw, h)
+        rr = QRectF(seam_x + 1, top_y, ow, h)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(color))
-        p.drawRoundedRect(r, 7, 7)
-        p.setPen(QColor(Palette.SURFACE))
-        p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
-        # Offset chip below the band (its position is start-anchored, from on-air).
-        self._paint_timing(p, cx, baseline + 8,
-                           _timing_text(getattr(it, "offset", 0.0), "start", with_side=False))
+        p.setBrush(QColor(Palette.ARMED)); p.drawRoundedRect(rl, 5, 5)
+        p.setBrush(QColor(Palette.CRASH)); p.drawRoundedRect(rr, 5, 5)
+        p.setPen(QColor("#FFFFFF"))
+        p.drawText(rl, int(Qt.AlignmentFlag.AlignCenter), "⏸ HOLD")
+        p.drawText(rr, int(Qt.AlignmentFlag.AlignCenter), "OFF-AIR")
 
     # ── Hit-testing ───────────────────────────────────────────────────────────
 
@@ -1784,13 +2020,18 @@ class _TimelineCanvas(QWidget):
         return lo, hi
 
     def _hit(self, x: float, y: float) -> Optional[Tuple[object, str]]:
-        # The Hold divider spans the whole band, so a wide bar body overlaps its x —
-        # test holds first so a click on the divider grabs it, not the bar underneath.
+        # The Hold WINDOW spans the whole band, so a wide bar body overlaps it — test holds
+        # first so a click anywhere on the band (enter edge → resume edge) grabs it, not the
+        # bar underneath.
         for it in self._items:
             if not tlm._is_hold(it):
                 continue
             g = self._geom.get(it.uid)
-            if g and abs(x - g["cx"]) <= HOLD_HIT and (LANES_TOP - 14) <= y <= self._baseline + 20:
+            if not g or not ((LANES_TOP - 14) <= y <= self._baseline + 20):
+                continue
+            lo = g["cx"] - HOLD_HIT
+            hi = (self._resume_x if self._resume_x is not None else g["cx"]) + HOLD_HIT
+            if lo <= x <= hi:
                 return it, "hold_body"
         # Connection handles (ramp edge dots / a pin's dot) win over the body so a press on
         # a handle starts a drag-to-anchor, not a move/edit.
@@ -2003,8 +2244,8 @@ class _TimelineCanvas(QWidget):
             return
         if part == "bar_start":
             if getattr(it, "start_anchor", "start") == "hold" and self._hold_off is not None:
-                # A window-B bar's start is measured from the Hold divider (resume), never before it.
-                hold_x = self._on + self._hold_off * eff
+                # A window-B bar's start is measured from the Hold RESUME edge, never before it.
+                hold_x = self._on + self._hold_off * eff + HOLD_BAND_PX
                 if sx is not None and sx >= hold_x - 0.5:
                     it.start_offset = max(0.0, (sx - hold_x) / eff); self._snap_guide = sx
                 else:
@@ -2032,18 +2273,23 @@ class _TimelineCanvas(QWidget):
 
     def _anchor_base_x(self, it) -> float:
         """The x a one-shot's offset is measured from while dragging: on-air for a start
-        anchor, off-air for a stop anchor, the Hold divider for a window-B (anchor='hold')
-        one-shot, and — for a step-anchored (anchor='step') item — its TARGET's referenced
-        edge (so a body-drag adjusts the offset relative to the target, not off-air; the
-        target edge is resolved independently of this item's live offset so it's stable
-        across the drag)."""
+        anchor, off-air for a stop anchor, the Hold's RESUME edge for a window-B (anchor='hold')
+        one-shot (its offset is measured forward from resume — where the post-hold axis reads 0),
+        and — for a step-anchored (anchor='step') item — its TARGET's referenced edge (so a
+        body-drag adjusts the offset relative to the target, not off-air; the target edge is
+        resolved independently of this item's live offset so it's stable across the drag)."""
         anchor = getattr(it, "anchor", "start")
+        eff = self._eff()
         if anchor == "step":
             e = tlm.step_edge_offset(self._items, getattr(it, "anchor_step_id", "") or "",
                                      getattr(it, "anchor_edge", "end") or "end", self._hold_off)
-            return self._on + (e * self._eff() if e is not None else 0.0)
+            x = self._on + (e * eff if e is not None else 0.0)
+            # a target resolved past the hold sits in the post-hold window (shifted by the band)
+            if self._hold_present and e is not None and e > (self._hold_off or 0.0) + 1e-6:
+                x += HOLD_BAND_PX
+            return x
         if anchor == "hold" and self._hold_off is not None:
-            return self._on + self._hold_off * self._eff()
+            return self._on + self._hold_off * eff + HOLD_BAND_PX     # the RESUME edge
         return self._on if anchor == "start" else self._off
 
     # ── Drag snapping (to nearby step edges / anchors / ticks) ─────────────────
@@ -2052,6 +2298,8 @@ class _TimelineCanvas(QWidget):
         the Hold divider, every OTHER item's edges (a bar/ramp's start+stop, a pin's centre),
         and the major axis ticks. `exclude` is a set of uids to skip (the moving item(s))."""
         xs = [self._on, self._off]
+        if self._resume_x is not None:
+            xs.append(self._resume_x)        # the Hold resume edge (post-hold content's 0)
         for h in self._holds:
             g = self._geom.get(h.uid)
             if g:
@@ -2172,9 +2420,8 @@ class _TimelineCanvas(QWidget):
         if not g:
             return
         if it.kind == "bar":
-            g["start_x"] = tlm.offset_to_x(*tlm.bar_start_placement(it, self._hold_off),
-                                           self._on, self._off, self._zoom)
-            g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off, self._zoom)
+            g["start_x"] = self._place_x(it, *tlm.bar_start_placement(it, self._hold_off))
+            g["stop_x"] = self._place_x(it, "stop", it.stop_offset)
         else:
             # _run_cx maps a window-B (anchor='hold') item to the Hold's side, so the pill
             # tracks the cursor correctly instead of jumping to the off-air anchor.

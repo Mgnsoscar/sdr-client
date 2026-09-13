@@ -71,6 +71,40 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — Hold step rendered as a WINDOW + a forward-from-resume post-hold axis: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Owner ask (mockup `docs/sequence-hold-step-mockup.html`, published Artifact): present the Hold not as a
+single divider but as a **two-edged tinted WINDOW** (like the relative band), make a task that runs
+THROUGH the Hold stay visible (not hidden behind it), and make the whole region after the Hold **one
+off-air-styled window** whose time axis counts **forward from resume** (resume is a Hold's fixed T0),
+with off-air **floating** to Proceed and MERGING with the resume edge when nothing follows. Implemented
+in **`ui/timeline_editor.py`** (`_TimelineCanvas`), fully gated on `has_hold` so the non-hold path +
+`_PlanCanvas` are byte-identical; **no model/agent/scripts/capability change** (drift-guarded files
+untouched). Only the STEP visuals (pins/chips/ramps/anchoring) were left as-is per the owner — this is
+the Hold-rendering + window/axis handling only.
+- **Fixed-width Hold window.** New `HOLD_BAND_PX = 48`: with a Hold present, a constant-width hatched +
+  amber band is inserted at the hold (`enter_x` = the hold's on-air x, `resume_x = enter_x + HOLD_BAND_PX`),
+  and resume-side content is shifted right of it. `_place_x(it, anchor, offset)` adds the band to a
+  resume-side START x (`_resume_shift`: HOLD_BAND for a window-B `anchor="hold"` step/ramp, a window-B bar,
+  or a step-anchored item resolved past the hold; 0 for the Hold marker + window-A + off-air content, which
+  rides `self._off`). Routed through `_run_cx`/`_item_left`/`_span`/`_place`/`_live_relayout`.
+- **Off-air FLOATS + MERGES.** `relayout` overrides `_c_off` for the hold case: `off_x = resume_x +
+  (fwd+bwd)·eff + POST_HOLD_PAD` where `_post_hold_extents()` returns the furthest resume-forward
+  (window-B) and off-air-backward times; **0/0 ⇒ off_x == resume_x** (the merged case, `_hold_merged`).
+  The bar's stop (off-air) rides the floated `off_x`, so a duration task runs visibly THROUGH the Hold.
+- **Paint** (`_paint_hold_windows`): green on-air (`on_x..enter_x`), hatch+amber Hold (`enter_x..resume_x`),
+  red off-air-styled post-hold (`resume_x..off_x`); `_paint_hold_axis` draws on-air ticks forward from
+  on-air then post-hold ticks **forward from resume** (0 at resume); `_paint_hold_gridlines` matches;
+  `_paint_floating_offair` is a DASHED red OFF-AIR + "floats". `_paint_hold` now draws the two dashed band
+  edges + a centred ⏸ HOLD tab ON TOP of the bar (so a held bar stays visible), or — when merged — a
+  combined **⏸ HOLD │ OFF-AIR** marker (`_paint_merged_marker`) so the two labels never collide.
+- **Interaction.** `_anchor_base_x` for a window-B (`anchor="hold"`) item / a past-hold step target now
+  returns the **resume edge** (offset measured forward from resume, where the axis reads 0); the window-B
+  bar-start drag + drag snapping (`_snap_targets` gains `resume_x`) match. `_hit` grabs the Hold anywhere
+  across the band (enter→resume). Tests: `tests/test_timeline_hold_phase2.py` (fixed-width window +
+  floating off-air, merge-when-empty, window-B sits right of the band, bar runs through the hold, band-wide
+  hit, non-hold geometry unchanged, full + merged paint; the window-B drag test updated to the resume-edge
+  contract). Suite 976 → 983 offscreen.
+
 ## Current state — timeline axis: separate on-air / relative / off-air windows: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
 Owner ask: the RELATIVE band should be ONLY where time is actually relative. A STOP-anchored (off-air)
 step with a negative offset fires at a FIXED offset before off-air (its time IS absolute), so it belongs
