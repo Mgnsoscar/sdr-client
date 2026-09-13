@@ -1628,8 +1628,9 @@ class _TimelineCanvas(QWidget):
                     anchor_cap = (tx, tx + total)
             text = self._offset_chip_text(offset)
             chip_w = QFontMetrics(mono_font(10)).horizontalAdvance(text) + 14.0
+            two_sided = tlm._is_ramp(tgt) or getattr(tgt, "kind", "") == "bar"
             pts = self._connector_points(x1, y1, x2, y2, exit_dir, obstacles, chip_w + 24.0,
-                                         anchor_cap, entry_from_right)
+                                         anchor_cap, entry_from_right, two_sided=two_sided)
             conns.append(dict(pts=pts, base=base, ink=ink, sel=sel, x2=x2, y2=y2,
                               entry_from_right=entry_from_right, text=text, chip_w=chip_w))
         # 1) draw every path first, so the lines sit UNDER every arrowhead + offset chip.
@@ -1708,7 +1709,7 @@ class _TimelineCanvas(QWidget):
         return path
 
     def _connector_points(self, x1, y1, x2, y2, exit_dir, obstacles, chip_run, anchor_cap=None,
-                          entry_from_right=False):
+                          entry_from_right=False, two_sided=False):
         """Waypoints for a connector that ENTERS the dependent HORIZONTALLY, with the drop column
         chosen clear of any intervening third-party step. Normally the dependent sits at/right of
         the anchor edge and is entered from the LEFT; when that column falls left of the anchor edge,
@@ -1725,6 +1726,15 @@ class _TimelineCanvas(QWidget):
         runs through the text. (anchor_cap is not applied to a right-entry line.)"""
         STUB, GAP = 16.0, 14.0
         sgn = 1.0 if y2 >= y1 else -1.0
+        # A two-sided target (ramp/bar) must exit AWAY from its body: an END edge (body to the left)
+        # exits right, a START edge (body to the right) exits left. When the dependent sits on the
+        # BODY side (an end edge with the dependent to its left, or a start edge with it to the
+        # right — a dependent between the two sides), a straight run to the dependent would go back
+        # OVER the bar. Exit a stub the other way first, drop to the dependent's row, then run in
+        # (owner #9). The entry stays horizontal, so the arrow/chip placement is unaffected.
+        if two_sided and ((exit_dir > 0 and x2 < x1 - 1.0) or (exit_dir < 0 and x2 > x1 + 1.0)):
+            xe = x1 + STUB * exit_dir
+            return [(x1, y1), (xe, y1), (xe, y2), (x2, y2)]
         if entry_from_right:
             # Drop column just RIGHT of the dependent — prefer it BETWEEN the dependent and the
             # anchor, pushed clear (left) of any intervening obstacle.

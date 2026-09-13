@@ -709,3 +709,32 @@ def test_selected_root_anchored_step_paints_a_hint():
     cv.render(QPixmap(1400, 360))                        # paints the on-air tie without error
     # the hint only shows for a root-anchored selection; a step-anchored one uses the connector
     assert cv._selected == src.uid and getattr(src, "anchor", "") == "start"
+
+
+# ── #9: a two-sided target (ramp/bar) exits AWAY from its body, never behind the bar ────
+
+def test_connector_exits_right_from_a_two_sided_end_edge():
+    cv = _chirp_editor([_bar()])._canvas
+    # END edge at x1=400 (exit_dir +1, body to the left); dependent at x2=250 sits LEFT of the
+    # edge (between the two sides) → the exit must go RIGHT (away from the body), not left.
+    pts = cv._connector_points(400.0, 10.0, 250.0, 60.0, 1.0, [], 60.0, two_sided=True)
+    assert pts[0] == (400.0, 10.0)
+    assert pts[1][0] > 400.0                       # exits RIGHT, clear of the bar
+    assert pts[-1] == (250.0, 60.0)
+
+
+def test_connector_exits_left_from_a_two_sided_start_edge():
+    cv = _chirp_editor([_bar()])._canvas
+    # START edge at x1=200 (exit_dir −1, body to the right); dependent at x2=350 sits RIGHT of the
+    # edge (between the sides) → the exit must go LEFT (away from the body), not right.
+    pts = cv._connector_points(200.0, 10.0, 350.0, 60.0, -1.0, [], 60.0, two_sided=True)
+    assert pts[1][0] < 200.0                        # exits LEFT, clear of the bar
+    assert pts[-1] == (350.0, 60.0)
+
+
+def test_connector_two_sided_off_keeps_the_old_routing():
+    cv = _chirp_editor([_bar()])._canvas
+    # a POINT target (two_sided=False) with a left dependent keeps the entry-from-right routing
+    pts = cv._connector_points(400.0, 10.0, 250.0, 60.0, 1.0, [], 60.0, entry_from_right=True)
+    assert pts[0] == (400.0, 10.0) and pts[-1] == (250.0, 60.0)
+    assert pts[1][0] <= 400.0                       # does NOT jump right past the edge (unchanged)
