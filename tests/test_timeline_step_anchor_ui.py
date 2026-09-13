@@ -157,14 +157,14 @@ def _ramp_item(off, sid="", task="chirp"):
 def test_canvas_make_anchor_connects_two_steps():
     """A drag-to-anchor drop sets anchor="step" + target id + edge + a >= 0 offset, and the
     target is assigned a stable id — no dialog."""
-    up = _ramp_item(0.0)                              # start 0, end 6 (no id yet)
+    up = _ramp_item(0.0)                              # start 0, last fire 4.5 (end edge)
     later = _tune(20.0)
     cv = _chirp_editor([_bar(), up, later])._canvas
     cv._make_anchor(later.uid, up, "end")
     assert later.anchor == "step"
     assert up.step_id and later.anchor_step_id == up.step_id     # id assigned in place
     assert later.anchor_edge == "end"
-    assert later.offset == 14.0                       # 20 - 6, kept in place
+    assert later.offset == 16.0                       # round(20 - 4.5), kept in place
 
 
 def test_canvas_make_anchor_rejects_ineligible_drop():
@@ -178,7 +178,7 @@ def test_canvas_make_anchor_rejects_ineligible_drop():
 
 
 def test_canvas_detach_anchor_reverts_to_start_in_place():
-    up = _ramp_item(0.0, sid="up")                   # end 6
+    up = _ramp_item(0.0, sid="up")                   # last fire 4.5 (end edge)
     down = tlm.RunItem(task_name="chirp", action="ramp", anchor="step", offset=3.0,
                        anchor_step_id="up", anchor_edge="end",
                        ramp={"param": "power", "start": -50.0, "stop": -90.0,
@@ -187,7 +187,7 @@ def test_canvas_detach_anchor_reverts_to_start_in_place():
     cv._detach_anchor(down.uid)
     assert down.anchor == "start"
     assert not down.anchor_step_id and down.anchor_edge == "end"
-    assert down.offset == 9.0                         # resolved base (6 + 3) — stays put
+    assert down.offset == 7.5                         # resolved base (4.5 + 3) — stays put
 
 
 def test_canvas_selection_records_the_remove_chip_only_when_anchored():
@@ -251,16 +251,16 @@ def test_canvas_duplicate_clones_with_fresh_uid_and_no_step_id():
 
 
 def test_canvas_delete_reanchors_dependents_to_on_air():
-    up = _ramp_item(0.0, sid="up")                   # start 0, end 6
+    up = _ramp_item(0.0, sid="up")                   # start 0, last fire 4.5 (end edge)
     down = tlm.RunItem(task_name="chirp", action="ramp", anchor="step", offset=3.0,
                        anchor_step_id="up", anchor_edge="end",
                        ramp={"param": "power", "start": -50.0, "stop": -90.0,
-                             "steps": 3, "duration_s": 6.0})       # fires at 6 + 3 = 9
+                             "steps": 3, "duration_s": 6.0})       # fires at 4.5 + 3 = 7.5
     cv = _chirp_editor([_bar(), up, down])._canvas
     cv._delete_with_reanchor(up.uid)
     assert all(it.uid != up.uid for it in cv._items)   # up is gone
     assert down.anchor == "start" and not down.anchor_step_id
-    assert down.offset == 9.0                          # kept at its would-be fire time
+    assert down.offset == 7.5                          # kept at its would-be fire time
 
 
 def test_canvas_delete_plain_item_just_removes_it():

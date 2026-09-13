@@ -209,7 +209,9 @@ class SequenceEditorDialog(QDialog):
     # ── Validation / save ────────────────────────────────────────────────────
 
     def _revalidate(self) -> None:
-        err = self._current_error()
+        # Include the capability gate (_step_anchor_block) so the Ready/Needs-a-fix pill
+        # can't say "Ready" while _on_save would refuse the save on the same condition.
+        err = self._current_error() or self._step_anchor_block()
         if err:
             self._set_status(err, warn=True)
             self._set_ready("warn", "Needs a fix")

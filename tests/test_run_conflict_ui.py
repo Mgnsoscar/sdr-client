@@ -98,7 +98,7 @@ def test_on_start_fires_precheck(monkeypatch):
     monkeypatch.setattr(sp, "_hold_offset_of", lambda seq: None)
     seq = _seq()
     p._on_start(seq)
-    assert p._pending_arm is seq
+    assert p._pending_arm["sid"] is seq          # keyed by sequence id (no cross-wire)
     assert any(l.startswith("seq_precheck:u:") for l in p.hub.calls)
 
 
@@ -110,19 +110,19 @@ def test_precheck_clear_arms_conflict_offers_stop(monkeypatch):
     monkeypatch.setattr(p, "_offer_stop_and_arm", lambda s, c: routed.append(("offer", c)))
 
     # No conflicts → arm straight through.
-    p._pending_arm = seq
+    p._pending_arm = {"sid": seq}
     p._on_task_done("seq_precheck:u:sid", [])
     assert routed == [("arm", seq)]
 
     # Conflicts → offer stop-and-arm (not arm).
     routed.clear()
-    p._pending_arm = seq
+    p._pending_arm = {"sid": seq}
     p._on_task_done("seq_precheck:u:sid", ["tx"])
     assert routed == [("offer", ["tx"])]
 
     # After stopping, arm.
     routed.clear()
-    p._pending_arm = seq
+    p._pending_arm = {"sid": seq}
     p._on_task_done("seq_stoptasks:u:sid", [object()])
     assert routed == [("arm", seq)]
 

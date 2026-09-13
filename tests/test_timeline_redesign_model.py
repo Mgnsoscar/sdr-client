@@ -50,3 +50,18 @@ def test_display_order_does_not_mutate_input():
     before = list(items)
     tlm.display_order(items)
     assert items == before
+
+
+def test_display_order_orders_step_anchored_rows_by_resolved_time():
+    # A step anchored to a LATE target resolves late even with a small offset, so it must sort
+    # by its RESOLVED fire time (target edge + offset), not its raw offset-from-edge — else a
+    # +5 s dependent of a 200 s step would wrongly jump to the top of the group.
+    b = _bar("ca")
+    late = RunItem(task_name="ca", action="tune", anchor="start", offset=200.0,
+                   step_id="late", params={"x": 1})
+    early = _tune("ca", 60)                                 # plain start at 60
+    dep = RunItem(task_name="ca", action="tune", anchor="step", offset=5.0,
+                  anchor_step_id="late", anchor_edge="start", params={"x": 1})   # resolves at 205
+    rows, _ = tlm.display_order([b, late, early, dep])
+    assert rows.index(early) < rows.index(dep)             # 60 before 205 (not before the raw +5)
+    assert rows.index(late) < rows.index(dep)              # 200 before 205

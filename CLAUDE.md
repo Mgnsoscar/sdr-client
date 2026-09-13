@@ -71,6 +71,52 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — sequence editor `/code-review` fixes (7 findings): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+A `/code-review` of the sequence editor surfaced 7 findings; all fixed client-only (no agent/scripts/
+capability change; drift-guarded files untouched). Suite 945 → 949 offscreen.
+- **#2 — the reported save-blocker: a step anchored to an OFF-AIR target gave a cryptic error.** A step
+  anchored (directly or via a chain) to a `stop`/`both`-anchored target can't be timed on the on-air
+  clock (off-air time is only fixed at arm — a deliberate Phase-1 limit), so `validate()` rejected it
+  with a catch-all "step-to-step anchors form a cycle, or a step anchors to one that can't be timed" —
+  the "needed a step even though everything looked correct" report. New **`timeline_model.step_anchor_
+  fault(item, by_sid)`** walks the item's single anchor chain to its root and returns a SPECIFIC,
+  actionable message naming the offending step + reason: a cycle/loop, a deleted target, or an off-air
+  root (`"… anchors to an off-air step (Ramp · chirp), whose time isn't known until the sequence is
+  armed — anchor it to an on-air step instead"`). `validate()`'s unresolved-step branch now returns it.
+- **#3 — editing a step whose target left the eligible set SILENTLY re-pointed it.** The StepEditor /
+  ramp-editor target combo was built from `eligible_step_targets` only; if the stored target had since
+  become ineligible (edited to off-air/a bar, or now reads as a cycle) the combo fell to index 0 and
+  saved a DIFFERENT target with no warning. New **`timeline_model.step_targets_for_edit(items, item)`**
+  = eligible targets PLUS the item's stored target (when it still exists), so editing never swaps the
+  anchor behind the operator's back; `validate()`/the agent stay the backstop for a target that
+  genuinely can't be timed. Both dialogs (`ui/timeline_editor.py` StepEditorDialog, `ui/ramp_editor.py`)
+  now use it.
+- **#1 — client ramp END edge diverged from the agent by one `hold_s`.** A step anchored to a ramp's
+  `end` was placed at `start + duration_s`, but the agent's `edges[id]` = `max(fire_at)` = the LAST
+  tune point = `start + (duration_s − hold_s)` (the final level is HELD one more `hold_s` past its
+  fire). New **`timeline_model._ramp_last_fire(r)`** (= `n_intervals · hold_s`) replaces `_ramp_duration`
+  at the three END-edge sites (`resolve_step_offsets`, `step_edge_offset`, `_item_edge_offset`) so a
+  dependent draws + resolves where the unit actually fires it; `ramp_span` still spans the full duration
+  for the visual bar. (Baked `start+duration` test assertions updated.)
+- **#4 — a rapid double-arm armed the WRONG sequence.** `sequences_panel._pending_arm` was a single slot
+  resolved by op name, so arming seq B before seq A's running-task pre-check returned made A's result
+  arm B. Now a **`Dict[str, Sequence]` keyed by sequence id** (the async label already carries the id);
+  the `seq_precheck`/`seq_stoptasks` handlers `pop(seq_id)`.
+- **#5 — the Ready pill could say "Ready" while Save would refuse.** `sequence_editor._revalidate`
+  checked only `_current_error()`; `_on_save` also checks `_step_anchor_block()` (the ≥1.24/≥1.25 agent
+  capability gate). `_revalidate` now includes it, so the pill matches Save.
+- **#6 — the Gantt ordered step-anchored rows by RAW offset-from-edge.** `display_order`/`_row_fire` now
+  order a step-anchored item by its RESOLVED base (`resolve_step_offsets`), so a `+5 s` dependent of a
+  `200 s` step sits after it, not at the top of the group.
+- **#7 — `_make_anchor` pushed a dead no-op undo entry** when `ensure_step_id` early-returned; `_record()`
+  moved after the early-returns.
+Tests: `tests/test_timeline_step_anchor.py` (off-air actionable message + `step_anchor_fault`;
+`step_targets_for_edit` preserves an ineligible stored target / matches eligible otherwise; ramp end =
+last fire), `tests/test_timeline_step_anchor_ui.py` (make/detach/delete use the last-fire edge),
+`tests/test_timeline_redesign_model.py` (`display_order` by resolved time), `tests/test_run_conflict_ui.py`
+(pending arm keyed by id). #5 is a one-line consistency fix (no fleet-stub harness exists) verified by
+inspection.
+
 ## Current state — step anchors accept a NEGATIVE offset + arrow-placement / caption-flip: COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo)
 Owner ask (a 4-step sketch): a step anchored to another step should be able to fire BEFORE its target's
 edge (a negative offset — the warm-up lead-in the owner already uses with on-/off-air anchors), and the

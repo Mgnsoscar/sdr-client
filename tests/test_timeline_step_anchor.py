@@ -41,13 +41,16 @@ def test_point_anchor_end_start_and_chain():
     assert bases[d.uid] == 5.0
 
 
-def test_ramp_end_edge_is_start_plus_duration():
-    r = _ramp(off=2.0, sid="rmp")                                 # start 2, end 2+6 = 8
-    after = _tune(off=1.0, anchor="step", ref="rmp", edge="end")  # 8+1 = 9
+def test_ramp_end_edge_is_the_last_fire_not_the_full_duration():
+    # A ramp's END edge is its LAST fire (matching the agent's edges[id]=max(fire_at)), NOT
+    # start+duration: steps=3, duration_s=6.0 → 4 levels held 1.5 s each, so the last tune
+    # point fires at 3·1.5 = 4.5 s (the final level is HELD one more 1.5 s past that).
+    r = _ramp(off=2.0, sid="rmp")                                 # start 2, last fire 2+4.5 = 6.5
+    after = _tune(off=1.0, anchor="step", ref="rmp", edge="end")  # 6.5+1 = 7.5
     at_start = _tune(off=0.0, anchor="step", ref="rmp", edge="start", gain=20)  # 2
     items = [_bar(), r, after, at_start]
     bases = tlm.resolve_step_offsets(items, None)
-    assert bases[after.uid] == 9.0
+    assert bases[after.uid] == 7.5
     assert bases[at_start.uid] == 2.0
 
 
@@ -56,13 +59,13 @@ def test_ramp_end_edge_is_start_plus_duration():
 def test_step_drop_offset_keeps_the_source_in_place():
     """Dropping a later step onto a target edge anchors it at the gap it already has, so it
     doesn't jump — dragging the target then moves it."""
-    r = _ramp(off=2.0, sid="rmp")                        # start 2, end 8
+    r = _ramp(off=2.0, sid="rmp")                        # start 2, last fire 6.5 (end edge)
     later = _tune(off=20.0)                              # sits at 20
     items = [_bar(), r, later]
     bases = tlm.resolve_step_offsets(items, None)
-    # anchor `later` to the ramp's END (8): offset = 20 - 8 = 12
+    # anchor `later` to the ramp's END (6.5): offset = round(20 - 6.5) = 14
     off = tlm.step_drop_offset(items, later.uid, r.uid, "end", None, bases)
-    assert off == 12.0
+    assert off == 14.0
     # to its START (2): offset = 20 - 2 = 18
     assert tlm.step_drop_offset(items, later.uid, r.uid, "start", None, bases) == 18.0
 
@@ -70,11 +73,11 @@ def test_step_drop_offset_keeps_the_source_in_place():
 def test_step_drop_offset_keeps_a_source_before_the_edge_negative():
     # A source dropped BEFORE its target's edge keeps its place with a NEGATIVE offset (it fires
     # before the edge, like a start/stop anchor's warm-up lead-in) — no longer clamped to 0.
-    r = _ramp(off=10.0, sid="rmp")                       # end 16
+    r = _ramp(off=10.0, sid="rmp")                       # last fire 14.5 (end edge)
     early = _tune(off=3.0)                               # before the edge
     items = [_bar(), r, early]
     off = tlm.step_drop_offset(items, early.uid, r.uid, "end", None, None)
-    assert off == -13.0                                  # 3 - 16 → stays put, before its anchor
+    assert off == -12.0                                  # round(3 - 14.5) → stays put, before its anchor
 
 
 def test_step_drop_offset_rejects_ineligible_targets():
@@ -169,7 +172,43 @@ def test_self_anchor_rejected():
 def test_cycle_rejected():
     a = _tune(off=1.0, sid="a", anchor="step", ref="b", edge="end")
     b = _tune(off=1.0, sid="b", anchor="step", ref="a", edge="end")
-    assert "cycle" in (tlm.validate(_valid_with([a, b]), ["tx"]) or "")
+    err = tlm.validate(_valid_with([a, b]), ["tx"]) or ""
+    assert "cycle" in err or "loop" in err
+    # actionable: names one of the offending steps, not a catch-all
+    assert "tx" in err
+
+
+def test_off_air_target_gives_an_actionable_message():
+    # A step anchored to an OFF-AIR (stop) step can't be timed on the on-air clock. This state
+    # is reachable (the target was edited to off-air after the anchor was made); validate names
+    # the offending step + the off-air target instead of a cryptic "cycle or can't be timed".
+    a = _tune(off=0.0, sid="a", anchor="stop")               # target is off-air anchored
+    b = _tune(off=1.0, anchor="step", ref="a", edge="start")
+    err = tlm.validate(_valid_with([a, b]), ["tx"]) or ""
+    assert "off-air" in err and "on-air step" in err
+    # step_anchor_fault diagnoses it directly too
+    by_sid = {getattr(it, "step_id", "") or "": it for it in _valid_with([a, b])
+              if getattr(it, "step_id", "")}
+    assert "off-air" in (tlm.step_anchor_fault(b, by_sid) or "")
+
+
+# ── step_targets_for_edit (never silently re-point on edit) ──────────────────────
+
+def test_step_targets_for_edit_preserves_an_ineligible_stored_target():
+    a = _tune(off=0.0, sid="a", anchor="stop")               # b's target, now off-air (ineligible)
+    other = _tune(off=5.0, sid="c")                          # an eligible on-air target
+    b = _tune(off=1.0, anchor="step", ref="a", edge="start")
+    items = [_bar(), a, other, b]
+    assert a not in tlm.eligible_step_targets(items, b.uid)  # off-air → not offered for a NEW anchor
+    tgts = tlm.step_targets_for_edit(items, b)               # …but preserved when EDITING b
+    assert a in tgts and other in tgts
+
+
+def test_step_targets_for_edit_matches_eligible_when_no_stored_target():
+    src = _tune(off=1.0)
+    a = _tune(off=5.0, sid="a")
+    items = [_bar(), src, a]
+    assert tlm.step_targets_for_edit(items, src) == tlm.eligible_step_targets(items, src.uid)
 
 
 def test_step_anchor_with_hold_rejected():

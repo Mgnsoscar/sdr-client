@@ -2203,11 +2203,11 @@ class _TimelineCanvas(QWidget):
         if off is None:
             self.update()
             return
-        self._record()
         sid = tlm.ensure_step_id(tgt)
         if not sid:
             self.update()
             return
+        self._record()          # snapshot AFTER the early-returns, so no dead no-op undo entry
         src.anchor = "step"
         src.anchor_step_id = sid
         src.anchor_edge = edge
@@ -2582,7 +2582,7 @@ class StepEditorDialog(QDialog):
         # target (no cycle), or when the step already uses it; saving to an agent that can't
         # resolve it is blocked at save-time (the _blocks_on_step_anchor gate). The window-B
         # Hold path and a step anchor are mutually exclusive (Phase 1).
-        self._step_targets = tlm.eligible_step_targets(self._editor.items(), item.uid) \
+        self._step_targets = tlm.step_targets_for_edit(self._editor.items(), item) \
             if not self._editor.has_hold() else []
         if self._step_targets or getattr(item, "anchor", "") == "step":
             self._anchor.addItem("after another step…", "step")

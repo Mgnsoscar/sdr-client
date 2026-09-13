@@ -220,6 +220,24 @@ def _ramp_duration(r: dict) -> float:
         return 0.0
 
 
+def _ramp_last_fire(r: dict) -> float:
+    """On-air offset of a forward (start/step/hold) ramp's LAST fire from its base — the
+    END edge a step anchors to. This matches the AGENT, whose `edges[id]` = max(fire_at) =
+    the last tune point, NOT start+duration: the final level is HELD one more `hold_s` past
+    its fire, so the last fire lands at `n_intervals · hold_s` (= duration_s − hold_s).
+    Anchoring a dependent to a ramp's end via `_ramp_duration` would place it one hold too
+    late vs. where the unit actually fires it."""
+    from api import ramp as _ramp
+    try:
+        rr = _ramp.resolve_ramp(r.get("start"), r.get("stop"), steps=r.get("steps"), step=r.get("step"),
+                                hold_s=r.get("hold_s"), duration_s=r.get("duration_s"),
+                                include_first=r.get("include_first", True),
+                                include_last=r.get("include_last", True))
+        return rr.n_intervals * rr.hold_s
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def ramp_span(it, h_off: Optional[float] = None, step_bases: Optional[Dict[int, float]] = None):
     """A ramp's two timeline endpoints as ((left_anchor, left_off), (right_anchor,
     right_off)) — so it can be drawn as a duration bar. A 'both' ramp spans on-air
@@ -287,10 +305,17 @@ def task_hue_map(items) -> Dict[str, str]:
     return {name: TASK_HUES[i % len(TASK_HUES)] for i, name in enumerate(order)}
 
 
-def _row_fire(it) -> float:
-    """Best-effort on-air offset used only to ORDER a task's steps within its group."""
+def _row_fire(it, step_bases: Optional[Dict[int, float]] = None) -> float:
+    """Best-effort on-air offset used only to ORDER a task's steps within its group. A
+    step-anchored item is ordered at its RESOLVED base (target edge + offset, from
+    step_bases) — not its raw offset-from-edge, which would sort it as if it fired at that
+    raw value regardless of when its target actually fires."""
     if getattr(it, "kind", None) == "bar":
         return float(getattr(it, "start_offset", 0.0))
+    if getattr(it, "anchor", "start") == "step" and step_bases is not None:
+        base = step_bases.get(getattr(it, "uid", None))
+        if base is not None:
+            return base
     return float(getattr(it, "offset", 0.0))
 
 
@@ -301,6 +326,7 @@ def display_order(items):
     Holds own no row (they paint as dividers) and are returned separately. Pure; does not
     mutate the input and is never used for serialisation (that keeps the authored order)."""
     holds = [it for it in items if _is_hold(it)]
+    step_bases = resolve_step_offsets(items, hold_offset(items))
     seen: List[str] = []
     groups: Dict[str, list] = {}
     for it in items:
@@ -315,11 +341,12 @@ def display_order(items):
     # first-seen index breaking ties so the order is stable.
     def _group_key(name):
         g = groups[name]
-        return (min(_row_fire(it) for it in g), seen.index(name))
+        return (min(_row_fire(it, step_bases) for it in g), seen.index(name))
     rows: list = []
     for name in sorted(seen, key=_group_key):
         g = sorted(groups[name],
-                   key=lambda it: (0 if getattr(it, "kind", None) == "bar" else 1, _row_fire(it)))
+                   key=lambda it: (0 if getattr(it, "kind", None) == "bar" else 1,
+                                   _row_fire(it, step_bases)))
         rows.extend(g)
     return rows, holds
 
@@ -376,7 +403,7 @@ def resolve_step_offsets(items, h_off: Optional[float]) -> Dict[int, float]:
         if base is None:
             return None
         if edge == "end" and _is_ramp(it):
-            return base + _ramp_duration(dict(getattr(it, "ramp", None) or {}))
+            return base + _ramp_last_fire(dict(getattr(it, "ramp", None) or {}))
         return base                                   # point: start == end; ramp start edge
 
     def resolve_base(it, seen: set) -> Optional[float]:
@@ -424,6 +451,34 @@ def _target_label(it) -> str:
     return f"{name} · {task}"
 
 
+def step_anchor_fault(item, by_sid: Dict[str, object]) -> Optional[str]:
+    """Diagnose WHY a step-anchored `item` won't resolve on the on-air clock — a specific,
+    actionable message naming the offending step and reason, so a save that fails
+    validation tells the operator what to fix (instead of a catch-all "cycle or can't be
+    timed"). Walks the single anchor chain up to its root; returns None if it resolves.
+
+    `by_sid` maps step_id → item (for every item that carries a step_id)."""
+    label = _target_label(item)
+    seen = set()
+    cur = item
+    while getattr(cur, "anchor", "start") == "step":
+        uid = getattr(cur, "uid", None)
+        if uid in seen:
+            return (f"{label} is part of a step-anchor loop (a step ends up anchored back "
+                    f"to itself) — re-anchor one of the steps to break the cycle")
+        seen.add(uid)
+        nxt = by_sid.get(getattr(cur, "anchor_step_id", "") or "")
+        if nxt is None:
+            return f"{label} anchors to a step that no longer exists — pick a new target"
+        cur = nxt
+    # `cur` is the chain's ultimate root (a non-step anchor). An off-air (stop/both) root
+    # has no on-air-clock time until arm, so nothing hanging off it can be placed here.
+    if getattr(cur, "anchor", "start") in ("stop", "both"):
+        return (f"{label} anchors to an off-air step ({_target_label(cur)}), whose time isn't "
+                f"known until the sequence is armed — anchor it to an on-air step instead")
+    return None
+
+
 def eligible_step_targets(items, source_uid) -> List:
     """The items `source_uid` may anchor to (anchor="step") without forming a cycle: the
     run/tune/ramp points + ramps whose edge lands on the on-air clock (a bar's off-air end and
@@ -445,6 +500,27 @@ def eligible_step_targets(items, source_uid) -> List:
             continue
         out.append(it)
     return out
+
+
+def step_targets_for_edit(items, item) -> List:
+    """The step-anchor targets to OFFER when EDITING `item`: the eligible on-air targets
+    (`eligible_step_targets`), PLUS — when `item` is already step-anchored to a target that
+    is no longer eligible (it was edited to off-air / into a bar, or now looks like a cycle) —
+    that stored target itself, so re-editing the step never SILENTLY re-points it to a
+    different one. The stored target is only added when it still exists as an item; a target
+    that genuinely can't be timed is left for `validate()`/the agent to reject, with the
+    anchor the operator chose intact (not swapped out behind their back)."""
+    targets = list(eligible_step_targets(items, getattr(item, "uid", None)))
+    if getattr(item, "anchor", "start") == "step":
+        want = getattr(item, "anchor_step_id", "") or ""
+        if want and not any((getattr(t, "step_id", "") or "") == want for t in targets):
+            stored = next(
+                (o for o in items
+                 if (getattr(o, "step_id", "") or "") == want
+                 and getattr(o, "uid", None) != getattr(item, "uid", None)), None)
+            if stored is not None:
+                targets.append(stored)
+    return targets
 
 
 def step_edge_offset(items, target_step_id: str, edge: str,
@@ -479,7 +555,7 @@ def step_edge_offset(items, target_step_id: str, edge: str,
         if base is None:
             return None
         if edge_ == "end" and _is_ramp(it):
-            return base + _ramp_duration(dict(getattr(it, "ramp", None) or {}))
+            return base + _ramp_last_fire(dict(getattr(it, "ramp", None) or {}))
         return base
 
     return _edge(tgt, edge or "end", set())
@@ -510,12 +586,13 @@ def _item_edge_offset(items, it, edge: str, h_off: Optional[float],
                       step_bases: Optional[Dict[int, float]] = None) -> Optional[float]:
     """On-air offset of `it`'s start/end edge for GEOMETRY (its start-side base, from
     effective_anchor_offset — so a hold/step-anchored item resolves through step_bases),
-    or None when the edge isn't on the on-air clock (a stop/both-anchored item)."""
+    or None when the edge isn't on the on-air clock (a stop/both-anchored item). A ramp's
+    END edge is its LAST fire (matching the agent), not the full-duration right edge."""
     a, base = effective_anchor_offset(it, h_off, step_bases)
     if a != "start":
         return None
     if edge == "end" and _is_ramp(it):
-        return base + _ramp_duration(dict(getattr(it, "ramp", None) or {}))
+        return base + _ramp_last_fire(dict(getattr(it, "ramp", None) or {}))
     return base
 
 
@@ -879,12 +956,14 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
                 return f"a step on '{it.task_name}' anchors to a step that no longer exists"
         # Resolution catches cycles and targets whose edge isn't on an on-air clock (a duration
         # task's off-air end, a stop/both ramp — not offered as Phase-1 targets): any step-anchored
-        # item that didn't resolve is invalid.
+        # item that didn't resolve is invalid. Name the offending step + reason so the operator
+        # knows what to fix (step_anchor_fault), not a catch-all message.
         bases = resolve_step_offsets(items, None)
         for it in step_items:
             if getattr(it, "uid", None) not in bases:
-                return ("step-to-step anchors form a cycle, or a step anchors to one that "
-                        "can't be timed on the on-air clock")
+                return (step_anchor_fault(it, by_sid)
+                        or ("a step anchors to one that can't be timed on the on-air clock — "
+                            "re-anchor it to an on-air step"))
     # A tune step retunes a running duration task, so the task it targets must be
     # started by a duration (bar) step in this same sequence.
     duration_tasks = {it.task_name for it in items if getattr(it, "kind", None) == "bar"}

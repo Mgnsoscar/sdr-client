@@ -33,7 +33,7 @@ Operation labels (parsed back in _on_task_done):
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 
@@ -375,7 +375,10 @@ class SequencesPanel(QWidget):
         self._wb_edits: dict = {}
         self._seq_loaded = False
         self._runs_pending = False
-        self._pending_arm: Optional[m.Sequence] = None   # sequence awaiting the running-task pre-check
+        # Sequences awaiting the running-task pre-check / stop, keyed by sequence id — so two
+        # arms started in quick succession can't cross-wire (a single slot would let seq A's
+        # pre-check result arm the last seq B stored).
+        self._pending_arm: Dict[str, m.Sequence] = {}
         self._export_path: Optional[str] = None
         self._build()
         self.hub.task_done.connect(self._on_task_done)
@@ -521,7 +524,7 @@ class SequencesPanel(QWidget):
         # Guard: don't silently collide with a task already transmitting on this unit (the
         # agent refuses such an arm anyway). Pre-check its tasks; if any are running, offer to
         # stop them and arm. The result routes back through _on_task_done ("seq_precheck").
-        self._pending_arm = seq
+        self._pending_arm[seq.id] = seq
         self._set_status("checking…")
         client = self.hub.fleet.get(self.hostname)
         wanted = run_conflict.sequence_task_names(seq.steps)
@@ -568,7 +571,7 @@ class SequencesPanel(QWidget):
         if box.clickedButton() is not stop_arm:
             self._set_status("arm cancelled")
             return
-        self._pending_arm = seq
+        self._pending_arm[seq.id] = seq
         client = self.hub.fleet.get(self.hostname)
         self._set_status("stopping task(s)…")
         self.hub.run_async(
@@ -924,8 +927,8 @@ class SequencesPanel(QWidget):
                 self._runs = result if isinstance(result, list) else []
                 self._rebuild()
         elif op == "seq_precheck":
-            seq = self._pending_arm
-            self._pending_arm = None
+            seq_id = ":".join(parts[2:]) if len(parts) > 2 else ""
+            seq = self._pending_arm.pop(seq_id, None)
             if seq is None:
                 return
             conflicts = result if isinstance(result, list) else []
@@ -934,8 +937,8 @@ class SequencesPanel(QWidget):
             else:
                 self._offer_stop_and_arm(seq, conflicts)
         elif op == "seq_stoptasks":
-            seq = self._pending_arm
-            self._pending_arm = None
+            seq_id = ":".join(parts[2:]) if len(parts) > 2 else ""
+            seq = self._pending_arm.pop(seq_id, None)
             if seq is None:
                 return
             if isinstance(result, Exception):

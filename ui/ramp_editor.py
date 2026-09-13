@@ -307,7 +307,7 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         # an eligible target (no cycle) or the ramp already uses it; saving to an agent that
         # can't resolve it is blocked at save-time. Mutually exclusive with a Hold (Phase 1).
         items_getter = getattr(self._editor, "items", None)
-        self._step_targets = tlm.eligible_step_targets(list(items_getter()), self._src.uid) \
+        self._step_targets = tlm.step_targets_for_edit(list(items_getter()), self._src) \
             if (items_getter is not None and not getattr(self._editor, "has_hold", lambda: False)()) \
             else []
         if self._step_targets or src_anchor == "step":
