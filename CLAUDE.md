@@ -71,9 +71,10 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
-## Current state — sequence-editor owner-testing fixes (8 of 10 done + bar-anchoring groundwork): IN PROGRESS (branch `claude/step-to-step-anchoring`, client-only)
-Owner testing surfaced 10 issues (Word doc). Six shipped, all client-only; drift-guarded files
-untouched. Suite 976 → 992 offscreen.
+## Current state — sequence-editor owner-testing fixes (all 13 done): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Owner testing surfaced 13 issues (a 10-issue Word doc + 3 follow-ups). All shipped, client-only;
+drift-guarded files untouched. Suite 976 → 1006 offscreen. The final anchoring-expansion
+(off-air/bar targets + bar sources + ramp-end drag) is at the bottom of this note.
 - **#2 Ramps drag to MOVE (never resize).** A ramp body is now a `ramp_body` drag part that shifts the
   ramp's `offset` (its duration is fixed; a window-filling "both" ramp has no free offset and stays put);
   its start/end dots remain anchor handles. `_live_relayout` now updates a ramp's `start_x`/`stop_x`
@@ -106,17 +107,44 @@ Tests: `tests/test_timeline_step_anchor_ui.py` (ramp body moves without resizing
 repositions a dependent + a chain; the ramp-end notice; root drop targets + `_make_root_anchor` + selected
 hint; #9 two-sided exit; #11 delta drag), `tests/test_timeline_step_anchor.py` (#4 before-on-air block).
 Suite → 1000 offscreen.
-**Bar-anchoring MODEL groundwork landed** (`tests/test_timeline_step_anchor.py`): `BarItem` gains
+**Bar-anchoring MODEL groundwork** (`tests/test_timeline_step_anchor.py`): `BarItem` gains
 `step_id` + `start_anchor="step"`/`start_anchor_step_id`/`start_anchor_edge`; a bar flattens to two wire
 steps with distinct ids (start = the bar id, stop = id + `BAR_STOP_SUFFIX`) so a dependent can anchor to
 either edge; `items_to_steps`/`steps_to_items` encode/decode (`_encode_anchor_ref`/`_decode_anchor_ref`),
 `resolve_step_offsets`/`_item_edge_offset`/`step_edge_offset`/`bar_start_placement`/`compute_anchors` resolve
-a bar as source + target. Inert/backward-compatible (no UI yet).
-**REMAINING (one coherent anchoring-expansion feature)** — the CANVAS/dialog wiring to create bar anchors
-(**#1/#6/#7**: bar start/stop edges as drag targets, a bar's start as a drag source), plus **#12** off-air
-steps as eligible targets (draw an off-air-rooted dependent relative to off-air, resolved at arm) and
-**#13** drag-anchoring from a ramp's END side — all share the need to resolve/draw OFF-AIR-rooted anchor
-chains on the off-air clock, so they're best built together.
+a bar as source + target. Backward-compatible (a plain sequence's wire is byte-identical).
+
+**Off-air-clock resolution (the shared groundwork for #1/#6/#7/#12/#13).** A step-anchored item now
+resolves to a **(clock, offset)** — `_resolve_step_clocked` returns `'start'` (on-air) or `'stop'`
+(off-air), so a chain rooted at a stop step / a bar's off-air stop edge draws relative to off-air (its
+absolute time set at arm). `resolve_step_offsets` (on-air) is unchanged for its ~15 float consumers;
+a parallel `resolve_step_offsets_off` (off-air) feeds `effective_anchor_offset`/`ramp_span`/
+`bar_start_placement` an `off_bases` dict, threaded through the canvas as `self._step_off_bases`.
+`eligible_step_targets` now admits off-air steps AND bars (start/stop edges), excluding only self /
+the Hold / a window-filling 'both' ramp; `validate()` accepts a chain resolving on EITHER clock.
+
+**Canvas + dialog wiring (the anchoring-expansion feature).** Client-only; no agent/scripts/capability
+change; drift-guarded files untouched.
+- **Off-air + bar edges as drag targets (#1/#7/#12).** `_make_anchor` computes the drop offset from
+  the canvas GEOMETRY (the pixel gap between the source's start and the target edge, snapped) instead
+  of `step_drop_offset`, so a drop keeps the source in place whatever CLOCK the target sits on and works
+  for a bar's start/stop edge as readily as a point/ramp. New `_drop_edge_at` offers a bar's start/stop
+  dot as a DROP target (its dots are resize handles → bars stay out of `_edge_at`; a step still anchors
+  TO them). The connect-drag readout is geometry-based too.
+- **Drag-anchor from a ramp's END dot (#13).** The mousePress gate begins a connect-drag from EITHER
+  ramp edge (the ramp is still positioned by its start); the rubber-band starts from the grabbed edge
+  (`from_edge`). The old #3 edge-end "notice" is superseded (`_edge_notice` removed).
+- **A bar's START hung off another step (#6 — "only the start anchors"; the stop stays off-air).** The
+  step editor offers "after another step…" in the bar's Start-anchor picker when an eligible target
+  exists (hidden with a Hold), reuses the shared target/edge pickers (`_sync_start_anchor` reveals them),
+  and `_accept` persists `start_anchor_step_id`/`start_anchor_edge` (and now preserves the bar's own
+  `step_id` so editing it doesn't orphan its dependents). The save/arm gate `_step_anchor_block`
+  (`sequence_editor`) now detects a bar source (`start_anchor="step"`, offset = `start_offset`).
+Tests: `tests/test_timeline_step_anchor_ui.py` (bar-edge / off-air / ramp-end drops keep the source in
+place via the geometry gap; `_drop_edge_at`/`_drop_target` find a bar edge + an off-air tune; the
+ramp-end press begins a connect-drag; the bar Start-anchor picker offers + saves a start step anchor).
+Verified live: a scene with a ramp-end dependent, an off-air-tune dependent, a probe dropped on a bar's
+stop edge, and a bar whose start hangs off a lead tune all resolve + draw correctly (`validate` clean).
 
 ## Current state — Hold step rendered as a WINDOW + a forward-from-resume post-hold axis: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
 Owner ask (mockup `docs/sequence-hold-step-mockup.html`, published Artifact): present the Hold not as a
