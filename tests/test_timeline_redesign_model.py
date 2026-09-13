@@ -67,6 +67,33 @@ def test_display_order_ramp_then_tune_then_oneshot_ranks():
     assert [r for r in rows] == [b, ramp, tune, one]
 
 
+def test_display_order_oneshot_is_its_own_group_not_under_a_task():
+    # A one-shot run stands alone: even sharing a task_name with a duration bar it must NOT
+    # be pulled under that bar's group — it launches a task once, it doesn't modify one.
+    b = _bar("ca")
+    tune = _tune("ca", 20)
+    shot = _one("ca", 40)              # same task_name as the bar, but a one-shot
+    rows, _ = tlm.display_order([b, tune, shot])
+    # ca bar + its tune form one group; the one-shot slots in by its own fire time (40 > 20),
+    # as its own row — it is NOT sorted last-within-the-ca-group by kind rank.
+    assert rows.index(shot) > rows.index(tune)   # after by fire time
+    # the one-shot orders as a standalone group, not appended inside the ca group:
+    # a one-shot firing BEFORE the bar starts must sit ABOVE the whole ca task group.
+    late_bar = BarItem(task_name="ca", start_offset=30.0, stop_offset=0.0)
+    late_tune = _tune("ca", 35)
+    early_shot = _one("ca", 5)                    # a one-shot BEFORE the bar goes on air
+    rows2, _ = tlm.display_order([late_bar, late_tune, early_shot])
+    assert rows2[0] is early_shot                 # its own group, earliest fire → top row
+    assert rows2[1] is late_bar and rows2[2] is late_tune   # the ca task group follows
+
+
+def test_display_order_two_oneshots_same_task_are_separate_rows():
+    a = _one("cw", 10)
+    c = _one("cw", 60)
+    rows, _ = tlm.display_order([c, a])
+    assert rows == [a, c]                          # two independent rows, by fire time
+
+
 def test_display_order_does_not_mutate_input():
     items = [_ramp("ca", 300), _bar("ca")]
     before = list(items)

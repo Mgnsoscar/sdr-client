@@ -301,10 +301,26 @@ def _row_fire(it, step_bases: Optional[Dict[int, float]] = None) -> float:
     return float(getattr(it, "offset", 0.0))
 
 
+def _is_oneshot(it) -> bool:
+    """A one-shot RUN launches a task once — it does not modify a running duration task
+    (a tune/ramp does), so it is not a child of any duration bar and never groups under
+    one, even a bar that happens to share its task_name."""
+    return getattr(it, "kind", None) != "bar" and getattr(it, "action", "run") == "run"
+
+
+def _group_key_of(it):
+    """Grouping key for display_order. Tunes/ramps group under their parent task
+    (task_name, beneath its bar); a one-shot run stands alone (a unique per-item key)."""
+    if _is_oneshot(it):
+        return ("\x00oneshot", getattr(it, "uid", id(it)))
+    return getattr(it, "task_name", "") or ""
+
+
 def _row_kind_rank(it) -> int:
     """Within a task's group the rows sort by KIND first: the duration bar, then that
-    task's RAMPS, then its TUNES, then one-shot runs — so a task's ramps always sit
-    directly under it, above the tunes (fire time breaks ties within each kind)."""
+    task's RAMPS, then its TUNES — so a task's ramps always sit directly under it, above
+    the tunes (fire time breaks ties within each kind). A one-shot run is its own group,
+    so this rank only orders a bar and its tune/ramp children."""
     if getattr(it, "kind", None) == "bar":
         return 0
     action = getattr(it, "action", "run")
@@ -316,32 +332,33 @@ def _row_kind_rank(it) -> int:
 
 
 def display_order(items):
-    """(rows, holds) for the Gantt-style canvas: every non-Hold item grouped under its
-    task — the duration bar first, then that task's ramps, then its tunes, then one-shot
-    runs (fire time breaking ties within each kind) — with tasks ordered by earliest fire,
-    so a task's steps always sit directly beneath it. Holds own no row (they paint as
-    dividers) and are returned separately. Pure; does not mutate the input and is never
-    used for serialisation (that keeps the authored order)."""
+    """(rows, holds) for the Gantt-style canvas: a duration bar leads its group with that
+    task's ramps then its tunes beneath it (fire time breaking ties within each kind); a
+    one-shot RUN stands on its OWN row, never grouped under a duration task (it launches a
+    task once rather than modifying a running one). Groups are ordered by earliest fire, so
+    a task's steps sit directly beneath it and a one-shot slots in at its own fire time.
+    Holds own no row (they paint as dividers) and are returned separately. Pure; does not
+    mutate the input and is never used for serialisation (that keeps the authored order)."""
     holds = [it for it in items if _is_hold(it)]
     step_bases = resolve_step_offsets(items, hold_offset(items))
-    seen: List[str] = []
-    groups: Dict[str, list] = {}
+    seen: list = []
+    groups: Dict[object, list] = {}
     for it in items:
         if _is_hold(it):
             continue
-        name = getattr(it, "task_name", "") or ""
-        if name not in groups:
-            groups[name] = []
-            seen.append(name)
-        groups[name].append(it)
+        key = _group_key_of(it)
+        if key not in groups:
+            groups[key] = []
+            seen.append(key)
+        groups[key].append(it)
     # Order groups by their earliest fire time (a task that goes on air sooner sits higher),
     # first-seen index breaking ties so the order is stable.
-    def _group_key(name):
-        g = groups[name]
-        return (min(_row_fire(it, step_bases) for it in g), seen.index(name))
+    def _group_key(key):
+        g = groups[key]
+        return (min(_row_fire(it, step_bases) for it in g), seen.index(key))
     rows: list = []
-    for name in sorted(seen, key=_group_key):
-        g = sorted(groups[name],
+    for key in sorted(seen, key=_group_key):
+        g = sorted(groups[key],
                    key=lambda it: (_row_kind_rank(it), _row_fire(it, step_bases)))
         rows.extend(g)
     return rows, holds
