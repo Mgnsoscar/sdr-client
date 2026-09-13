@@ -71,6 +71,17 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — window-filling ("both") ramp holds its LAST level before off-air: COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo, drift-guarded)
+Owner ask: a dual-anchor ("both") ramp filling the on-air window reached its top exactly AT off-air with
+0 hold. Now it holds the last level one dwell before off-air (like a single-anchor / "stop" ramp). Fix
+is in the **drift-guarded** `api/ramp.py::resolve_ramp` window branch — the window is divided by LEVELS
+(`hold = D/N`), so the last value fires at `D − hold` and is held to off-air; `place_ramp` and
+`duration_s` (= the full window `D`) are unchanged, so `ramp_span` still draws the "both" bar across the
+window and the discrete last-point timing (which the canvas doesn't show for "both") is the only thing
+that moved — **no client UI change**. Mirrored byte-identically to `sdr-agent/agent/ramp.py` (agent
+`1.25.2`); drift guard green. Tests: agent side (see `sdr-agent/CLAUDE.md`); no client test asserted the
+old "both" timing.
+
 ## Current state — sequence editor `/code-review` fixes (7 findings): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
 A `/code-review` of the sequence editor surfaced 7 findings; all fixed client-only (no agent/scripts/
 capability change; drift-guarded files untouched). Suite 945 → 949 offscreen.
