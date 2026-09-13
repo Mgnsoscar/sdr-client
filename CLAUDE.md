@@ -96,6 +96,12 @@ drift-guarded files untouched. Tests: `tests/test_timeline_step_anchor_ui.py::
 test_paint_gridlines_cover_both_windows_not_the_relative_band` (a stop-anchored −60 s tune opens the
 off-air window; gridlines fill both absolute windows, the relative middle stays clear, all vertical).
 Suite still 976 offscreen.
+**Relative-band SPRING (drop the text badge).** Owner: the "relative — length set at arm" text pill was
+cluttering. Replaced `_paint_rel_badge` with **`_paint_rel_spring(p, x0, x1, cy)`** — a horizontal SPRING
+(coiled zigzag with a dot end-cap at each dashed boundary, `Palette.TEXT_FAINT`) drawn across the relative
+band, which reads instantly as an elastic / variable-length section so no words are needed. Behind the
+rows; shown when the band is wider than 22 px (was 82 for the badge), else the hatch alone reads. Paint-
+only; still 976.
 
 ## Current state — timeline canvas: discreet vertical gridlines: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
 Owner ask: discreet but informative gridlines. New **`_TimelineCanvas._paint_gridlines`** (`ui/timeline_editor.py`),
