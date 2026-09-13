@@ -326,10 +326,18 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         self._anchor_edge = Dropdown()
         self._anchor_edge.addItem("its end", "end")
         self._anchor_edge.addItem("its start", "start")
+        # Which of THIS ramp's edges is tied there: its start (runs forward from the point) or its
+        # END (sits at the point, runs backward from it — e.g. a down-ramp that must FINISH when
+        # another step fires). The offset then belongs to the tied edge.
+        self._own_edge = Dropdown()
+        self._own_edge.addItem("the ramp's start", "start")
+        self._own_edge.addItem("the ramp's end", "end")
         self._target_row = _ofield("Anchor to", self._anchor_target)
         self._edge_row = _ofield("Relative to", self._anchor_edge)
+        self._own_row = _ofield("Tie", self._own_edge)
         form.addWidget(self._target_row)
         form.addWidget(self._edge_row)
+        form.addWidget(self._own_row)
         if src_anchor == "step":
             want = getattr(self._src, "anchor_step_id", "") or ""
             for tgt in self._step_targets:
@@ -340,6 +348,8 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
                     break
             ei = self._anchor_edge.findData(getattr(self._src, "anchor_edge", "end") or "end")
             self._anchor_edge.setCurrentIndex(ei if ei >= 0 else 0)
+            oi = self._own_edge.findData(getattr(self._src, "anchor_own_edge", "start") or "start")
+            self._own_edge.setCurrentIndex(oi if oi >= 0 else 0)
 
         self._off_row = _ofield("Offset from anchor", self._offset)
         self._off_lbl = self._off_row._klabel
@@ -486,6 +496,7 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         self._offset.valueChanged.connect(self._update_preview)
         self._offset_end.valueChanged.connect(self._update_preview)
         self._anchor.currentIndexChanged.connect(self._sync_anchor)
+        self._own_edge.currentIndexChanged.connect(self._sync_anchor)   # relabel + sublabels
         self._mode.currentIndexChanged.connect(self._sync_mode)
 
         # Restore the mode this ramp was authored in (else _sync_anchor defaults to
@@ -824,16 +835,19 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
             self._off_lbl.setText("Offset from Hold (resume)")
         elif anchor == "step":
             # Direction-neutral: the offset runs from the step's edge and may be negative
-            # (the ramp starts before it), like a start/stop-anchored warm-up lead-in.
-            self._off_lbl.setText("Offset from the step")
+            # (the tied edge sits before it), like a start/stop-anchored warm-up lead-in.
+            end_tied = (getattr(self, "_own_edge", None) is not None
+                        and self._own_edge.currentData() == "end")
+            self._off_lbl.setText("End offset from the step" if end_tied else "Offset from the step")
         else:
             self._off_lbl.setText("Offset from anchor")
         self._offend_row.setVisible(both)
-        # Target/edge pickers only when anchoring to another step.
+        # Target/edge/tie pickers only when anchoring to another step.
         is_step = anchor == "step"
         if getattr(self, "_target_row", None) is not None:
             self._target_row.setVisible(is_step)
             self._edge_row.setVisible(is_step)
+            self._own_row.setVisible(is_step)
         # Include first/last applies to single-anchor ramps; a window-filling ramp
         # always spans both edges, so hide the whole row there.
         self._inc_row.setVisible(not both)
@@ -1304,6 +1318,12 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         if anchor == "hold":
             # Window B: the ramp runs forward from the resume instant to its end.
             return (self._time_sub("on-resume", off), "ramp end")
+        if anchor == "step":
+            # Tied to another step's edge by its start (runs forward from there) or by its END
+            # (the TO level is reached at that point; the ramp runs backward from it).
+            if getattr(self, "_own_edge", None) is not None and self._own_edge.currentData() == "end":
+                return ("ramp start", self._time_sub("the step", off))
+            return (self._time_sub("the step", off), "ramp end")
         return (self._time_sub("on-air", off), "ramp end")
 
     @staticmethod
@@ -1652,7 +1672,8 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
             if target is None:
                 return self._set_preview("pick a step to anchor to", error=True)
             step_fields = {"anchor_step_id": tlm.ensure_step_id(target),
-                           "anchor_edge": self._anchor_edge.currentData() or "end"}
+                           "anchor_edge": self._anchor_edge.currentData() or "end",
+                           "anchor_own_edge": self._own_edge.currentData() or "start"}
 
         args: List[str] = []
         if self._run_mode:

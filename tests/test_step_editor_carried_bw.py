@@ -340,7 +340,11 @@ def test_two_sided_pin_keeps_caption_right_with_a_wide_gap():
     span = c._pin_right_caption(mid)                                         # two-sided → right span
     assert span is not None
     assert span[0] == pytest.approx(c._geom[mid.uid]["cx"] + PIN_CAP_GAP2)   # right side, wide gap
-    assert c._pin_right_caption(A) is None                                   # target-only → flips LEFT
+    # A is target-only with `mid` only 15 s after it — too close for the offset chip on the right —
+    # so its exit leaves LEFT toward mid's drop column and the caption stays on the clear RIGHT.
+    assert c._point_exit_dir(A, mid) < 0
+    assert c._pin_conn_sides(A) == (False, True) and c._pin_caption_side(A) == "right"
+    assert c._pin_right_caption(A) is not None
 
 
 def test_negative_dependent_that_is_also_a_target_flips_its_caption_left():

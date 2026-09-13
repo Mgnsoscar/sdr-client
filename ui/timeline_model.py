@@ -211,6 +211,12 @@ class RunItem:
     step_id: str = ""
     anchor_step_id: str = ""
     anchor_edge: str = "end"    # "start" | "end" of the target's extent
+    # Which of THIS item's edges is tied to the target (step anchors only). A point has one
+    # edge, so this only matters for a RAMP: "start" (the default — the ramp runs forward from
+    # `target edge + offset`) or "end" (the ramp's END sits at `target edge + offset` and the ramp
+    # runs BACKWARD from there; `offset` is then the END's offset). On the wire `offset_s` is always
+    # the START's offset (= offset − duration for an end tie), so the agent needs no new logic.
+    anchor_own_edge: str = "start"
     uid: int = 0
     kind: str = "run"
 
@@ -266,6 +272,43 @@ def ramp_span(it, h_off: Optional[float] = None, step_bases: Optional[Dict[int, 
 
 def _is_ramp(it) -> bool:
     return getattr(it, "action", "run") == "ramp"
+
+
+def is_step_source(it) -> bool:
+    """True when `it` hangs off ANOTHER step (anchor="step") — a run/tune/ramp via `anchor`, or a
+    duration task (bar) via its START anchor (`start_anchor="step"`; its stop stays off-air)."""
+    if getattr(it, "kind", None) == "bar":
+        return getattr(it, "start_anchor", "start") == "step"
+    return getattr(it, "anchor", "start") == "step"
+
+
+def step_source_ref(it) -> Tuple[str, str]:
+    """(target step_id, target edge) a step-anchor SOURCE hangs off — a run via anchor_*, a bar
+    via start_anchor_*. ("", "end") for anything that isn't a step source."""
+    if getattr(it, "kind", None) == "bar":
+        return (getattr(it, "start_anchor_step_id", "") or "",
+                getattr(it, "start_anchor_edge", "end") or "end")
+    return (getattr(it, "anchor_step_id", "") or "",
+            getattr(it, "anchor_edge", "end") or "end")
+
+
+def own_edge_shift(it) -> float:
+    """Seconds between a step-anchored item's TIED edge and its START: the ramp duration for a
+    ramp tied by its END (`anchor_own_edge="end"`), else 0. `offset − own_edge_shift` is the
+    start's offset from the target edge (the wire `offset_s`)."""
+    if (_is_ramp(it) and getattr(it, "anchor", "start") == "step"
+            and (getattr(it, "anchor_own_edge", "start") or "start") == "end"):
+        return _ramp_duration(dict(getattr(it, "ramp", None) or {}))
+    return 0.0
+
+
+def step_wire_offset(it) -> float:
+    """The `offset_s` a step-anchored RunItem puts on the wire: its START's offset from the target
+    edge. Equal to `offset` except for an end-tied ramp (offset − duration). A bar's start offset
+    is already its start's offset."""
+    if getattr(it, "kind", None) == "bar":
+        return float(getattr(it, "start_offset", 0.0))
+    return float(getattr(it, "offset", 0.0)) - own_edge_shift(it)
 
 
 def _is_hold(it) -> bool:
@@ -464,14 +507,10 @@ def _resolve_step_clocked(items, h_off: Optional[float]) -> Dict[int, Tuple[str,
         uid = getattr(it, "uid", None)
         if uid in seen:
             return None                               # cycle
-        if getattr(it, "kind", None) == "bar":        # a bar SOURCE hangs its start off a step
-            ref = getattr(it, "start_anchor_step_id", "") or ""
-            edge = getattr(it, "start_anchor_edge", "end") or "end"
-            own = float(getattr(it, "start_offset", 0.0))
-        else:
-            ref = getattr(it, "anchor_step_id", "") or ""
-            edge = getattr(it, "anchor_edge", "end") or "end"
-            own = float(getattr(it, "offset", 0.0))
+        # A bar SOURCE hangs its start off a step; a run its start too — except a ramp tied by its
+        # END, whose start sits `duration` before the tied point (step_wire_offset folds that in).
+        ref, edge = step_source_ref(it)
+        own = step_wire_offset(it)
         tgt = by_id.get(ref)
         if tgt is None:
             return None                               # unknown target
@@ -482,10 +521,7 @@ def _resolve_step_clocked(items, h_off: Optional[float]) -> Dict[int, Tuple[str,
 
     out: Dict[int, Tuple[str, float]] = {}
     for it in items:
-        step_src = (getattr(it, "anchor", "start") == "step"
-                    or (getattr(it, "kind", None) == "bar"
-                        and getattr(it, "start_anchor", "start") == "step"))
-        if step_src:
+        if is_step_source(it):
             cb = resolve_base(it, set())
             if cb is not None:
                 out[getattr(it, "uid", None)] = cb
@@ -874,6 +910,12 @@ def item_to_steps(it) -> List[dict]:
         if getattr(it, "anchor", "start") == "step":
             step["anchor_step_id"] = asid
             step["anchor_edge"] = aedge
+            # A ramp tied by its END: the wire offset is the START's (offset − duration) — the
+            # agent runs the ramp forward from there unchanged; the tie is carried as metadata so
+            # the client redraws/edits it by its end (emitted only when set, plain wire unchanged).
+            if (getattr(it, "anchor_own_edge", "start") or "start") == "end" and _is_ramp(it):
+                step["offset_s"] = step_wire_offset(it)
+                step["anchor_own_edge"] = "end"
         return step
 
     if it.kind == "bar":
@@ -976,7 +1018,18 @@ def _step_anchor_fields(s: dict) -> dict:
     (id + suffix) decodes back to the bar id + the 'end' edge."""
     asid, aedge = _decode_anchor_ref(str(s.get("anchor_step_id") or ""),
                                      str(s.get("anchor_edge") or "end"))
-    return {"step_id": str(s.get("id") or ""), "anchor_step_id": asid, "anchor_edge": aedge}
+    own = "end" if str(s.get("anchor_own_edge") or "start") == "end" else "start"
+    return {"step_id": str(s.get("id") or ""), "anchor_step_id": asid, "anchor_edge": aedge,
+            "anchor_own_edge": own}
+
+
+def _ramp_item_offset(s: dict) -> float:
+    """A ramp wire step's item `offset`: the START's offset (`offset_s`), or — for a ramp tied by
+    its END — the end's offset (`offset_s` + duration), which is what the item stores/edits."""
+    off = float(s["offset_s"])
+    if str(s.get("anchor") or "start") == "step" and str(s.get("anchor_own_edge") or "") == "end":
+        off += _ramp_duration(dict(s.get("ramp") or {}))
+    return off
 
 
 def steps_to_items(steps: List[dict]) -> List:
@@ -1012,7 +1065,7 @@ def steps_to_items(steps: List[dict]) -> List:
                 ramp=dict(s.get("ramp") or {}),
                 args=list(s.get("args") or []),
                 replace_args=bool(s.get("replace_args", True)),
-                anchor=s.get("anchor", "start"), offset=float(s["offset_s"]),
+                anchor=s.get("anchor", "start"), offset=_ramp_item_offset(s),
                 offset_end=float(s.get("offset_end_s") or 0.0),
                 power_view=s.get("power_view"), **_step_anchor_fields(s)))
         elif action == "start":
@@ -1227,26 +1280,14 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
     if not has_hold(items) and any(s["anchor"] == "hold" for s in steps):
         return "a post-hold (‘hold’-anchored) step needs a Hold — add one or re-anchor the step"
     # ── Step-to-step anchoring (mirrors the agent's _validate_steps) ──────────────────────
-    def _anchor_ref(it):
-        """(target step_id, edge) of a step-anchor SOURCE — a run via anchor_*, a bar via
-        start_anchor_*."""
-        if getattr(it, "kind", None) == "bar":
-            return (getattr(it, "start_anchor_step_id", "") or "",
-                    getattr(it, "start_anchor_edge", "end") or "end")
-        return (getattr(it, "anchor_step_id", "") or "",
-                getattr(it, "anchor_edge", "end") or "end")
-
-    step_items = [it for it in items
-                  if getattr(it, "anchor", "start") == "step"
-                  or (getattr(it, "kind", None) == "bar"
-                      and getattr(it, "start_anchor", "start") == "step")]
+    step_items = [it for it in items if is_step_source(it)]
     if step_items:
         if has_hold(items):
             return ("step-to-step anchoring isn't supported in a sequence with a Hold yet — "
                     "anchor to on-air/off-air/Hold instead")
         by_sid = {getattr(it, "step_id", "") or "": it for it in items if getattr(it, "step_id", "")}
         for it in step_items:
-            tgt_id, aedge = _anchor_ref(it)
+            tgt_id, aedge = step_source_ref(it)
             if not tgt_id:
                 return f"a step anchored to another step needs a target (on '{it.task_name}')"
             if aedge not in ("start", "end"):

@@ -375,3 +375,51 @@ def test_plain_bar_wire_is_unchanged():
     assert [s["action"] for s in wire] == ["start", "stop"]
     assert "id" not in wire[0] and "anchor_step_id" not in wire[0]
     assert wire[0]["anchor"] == "start" and wire[1]["anchor"] == "stop"
+
+
+# ── A ramp tied by its END (anchor_own_edge="end"): the end sits at the target edge + offset ──
+
+def test_end_tied_ramp_resolves_its_start_one_duration_earlier():
+    # dur 6 (steps=3, duration_s=6): tied by its END at t.end(40) + (−2) = 38 → start base = 32.
+    t = _tune(off=40.0, sid="t")
+    r = _ramp(off=-2.0, anchor="step", ref="t", edge="end")
+    r.anchor_own_edge = "end"
+    bases = tlm.resolve_step_offsets([_bar(), t, r], None)
+    assert bases[r.uid] == 32.0
+    assert tlm.step_wire_offset(r) == -8.0                 # the START's offset from the edge
+    assert tlm.own_edge_shift(r) == 6.0
+    # a dependent hanging off the ramp's END edge fires at 38 (+1) — the tied point itself
+    after = _tune(off=1.0, anchor="step", ref="rmp", edge="end", gain=20)
+    r.step_id = "rmp"
+    bases = tlm.resolve_step_offsets([_bar(), t, r, after], None)
+    assert bases[after.uid] == 39.0
+    assert tlm.validate([_bar(), t, r, after], ["tx"]) is None
+
+
+def test_end_tied_ramp_wire_carries_the_start_offset_and_the_tie():
+    t = _tune(off=40.0, sid="t")
+    r = _ramp(off=-2.0, anchor="step", ref="t", edge="end")
+    r.anchor_own_edge = "end"
+    wire = tlm.items_to_steps([_bar(), t, r])
+    rs = next(s for s in wire if s.get("action") == "ramp")
+    assert rs["offset_s"] == -8.0                          # the agent places the START unchanged
+    assert rs["anchor_own_edge"] == "end"
+    back = tlm.steps_to_items(wire)
+    rb = next(it for it in back if tlm._is_ramp(it))
+    assert rb.anchor_own_edge == "end" and rb.offset == -2.0     # the item keeps the END's offset
+    # a start-tied ramp's wire is byte-identical to before (no anchor_own_edge key at all)
+    r2 = _ramp(off=-2.0, anchor="step", ref="t", edge="end")
+    rs2 = next(s for s in tlm.items_to_steps([_bar(), t, r2]) if s.get("action") == "ramp")
+    assert rs2["offset_s"] == -2.0 and "anchor_own_edge" not in rs2
+
+
+def test_step_source_helpers_cover_runs_and_bars():
+    t = _tune(off=40.0, sid="t")
+    run_dep = _tune(off=3.0, anchor="step", ref="t", edge="start")
+    bar_dep = _bar_t(sanc="step", saref="t", saedge="end", so=5.0)
+    plain = _bar()
+    assert tlm.is_step_source(run_dep) and tlm.is_step_source(bar_dep)
+    assert not tlm.is_step_source(t) and not tlm.is_step_source(plain)
+    assert tlm.step_source_ref(run_dep) == ("t", "start")
+    assert tlm.step_source_ref(bar_dep) == ("t", "end")
+    assert tlm.step_wire_offset(bar_dep) == 5.0

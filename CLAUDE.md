@@ -71,6 +71,54 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — owner-testing round 2 (connector exit sides · END-tied ramps · delete cascade · bar-source connectors): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo)
+A second Word doc (3 issues + the bar-source gap from #6). Suite 1006 → 1019 offscreen; agent 483 → 485.
+- **Connector exit side / ramp entry (owner images).** A ramp anchored to a TUNE at +0 s had the tune's
+  line exit RIGHT and wrap around; a ramp anchored at a NEGATIVE offset was entered from the right
+  THROUGH its own capsule. Router (`_TimelineCanvas._connector_points` + new `_drop_column`,
+  `_dep_entry`, `_point_exit_dir`, `_chip_w`, `_dep_offset`): a POINT target (both sides free) now
+  exits TOWARD the dependent's drop column (left when the dependent starts at/just after/before the
+  pin — no room for the chip on the right; right when it fits), except a pin that is ITSELF a
+  dependent keeps the right exit + under-caption duck (option C) for a left-entry dependent. A
+  TWO-SIDED dependent (ramp/bar) is always entered from OUTSIDE its body — a start tie from the left,
+  an end tie from the right — never through the capsule; the #9 stub route applies only when the
+  entry side faces the stub, else the general wrap. `_pin_conn_sides` uses the SAME decision, so a
+  pin's caption never sits on a side a line uses. The router honours a given `exit_dir` and wraps
+  when the column is on the body side; a point target with a right-entry dependent leaves straight
+  toward the column (the old validated route).
+- **A ramp dragged by its END is tied by its END (#C).** New `RunItem.anchor_own_edge`
+  ("start"|"end", ramps only) + `SequenceStep.anchor_own_edge` on BOTH wire models (agent `1.25.3`
+  carries it through; the runtime never reads it). An end-tied ramp's END sits at `target edge +
+  offset` and the ramp runs BACKWARD from it; `offset` is the END's. The wire `offset_s` is ALWAYS
+  the START's offset (`step_wire_offset` = offset − duration), so the agent places it unchanged — an
+  older agent drops the field and the ramp reloads start-tied at identical timing. Model:
+  `own_edge_shift`, `step_wire_offset`, `_ramp_item_offset` (load), `is_step_source`/`step_source_ref`
+  (a run via `anchor_*`, a bar via `start_anchor_*` — used everywhere a step source is detected).
+  Canvas: `_make_anchor(…, from_edge)` ties the grabbed edge (offset = its pixel gap), the connector
+  enters at the END from the right (at the capsule's VISUAL right edge — a short ramp is padded to
+  `RAMP_MIN_W`, so the true stop x sits inside it), `_edge_linked` fills the tied dot, tooltip says
+  "its end", detach/`_reanchor_deps` go through `_revert_to_root` (on-air at the resolved START, or
+  OFF-AIR at the off-air base for an off-air-rooted chain; resets the tie). Ramp editor: a **Tie**
+  picker ("the ramp's start" / "the ramp's end") under Anchor to / Relative to, relabels the offset
+  row, `_ft_sublabels` reads "ramp start" / "the step ±X". `TimelineEditor.steps()/set_steps()` +
+  `sequence_editor._step_anchor_block` (negative check on the WIRE offset) carry it.
+- **Deleting a duration task deletes its tunes/ramps (#D).** `_delete_uids` (shared by
+  `_delete_with_reanchor`, `_delete_selection`, the editor's Remove button via `edit_item`) expands a
+  bar to its task's tunes/ramps (`_cascade_uids`; one-shots of the task are independent launches and
+  stay), re-roots every surviving dependent of a deleted item at its fire time, ONE undo step.
+- **Bar-source connectors.** A bar whose START hangs off a step (#6) drew no connector and had no
+  Remove-anchor: `_paint_connectors`, `_is_anchor_target`, `_pin_conn_sides`, `_edge_linked`,
+  `_reanchor_deps`, `_detach_anchor`, `_context_menu_spec`, `_tooltip_text`, `_anchor_base_x` (now the
+  target's DRAWN edge — clock-agnostic), the `bar_start` drag, `_group_move`/`_live_move`, and
+  `_paint_root_anchor_hint` all key on `tlm.is_step_source`.
+Tests: `tests/test_timeline_step_anchor.py` (end-tied resolve/wire/helpers), `tests/test_timeline_
+step_anchor_ui.py` (exit-left for a +0 / negative ramp, far dependent still exits right, end-tie
+drag keeps the end in place + connector from the right + detach, steps() round-trip, ramp-editor
+Tie picker, delete cascade single + selection, bar-source connector/detach), `tests/test_step_editor_
+carried_bw.py` (a near dependent → left exit, caption stays right); agent `tests/test_sequence_step_
+anchor.py` (field round-trips/defaults; an end-tied ramp fires exactly like a start-tied one). Verified
+live: the owner's two layouts + an end-tied ramp + a bar source render as asked (`validate` clean).
+
 ## Current state — sequence-editor owner-testing fixes (all 13 done): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
 Owner testing surfaced 13 issues (a 10-issue Word doc + 3 follow-ups). All shipped, client-only;
 drift-guarded files untouched. Suite 976 → 1006 offscreen. The final anchoring-expansion

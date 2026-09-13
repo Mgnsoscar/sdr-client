@@ -847,3 +847,178 @@ def test_tune_body_drag_moves_by_delta_not_to_the_cursor():
     new_dot = cv._geom[t.uid]["cx"]
     assert new_dot > dot_x + 8.0                        # the dot moved right by roughly the delta
     assert new_dot < tgt_x - 20.0                       # …and did NOT jump under the cursor
+
+
+# ── v2 owner issues: connector exit side, END-tied ramps, delete cascade, bar-source connectors ──
+
+def _connector_for(cv, dep):
+    """Route `dep`'s connector exactly as _paint_connectors does, returning its waypoints."""
+    by_sid = {getattr(o, "step_id", "") or "": o for o in cv._rows if getattr(o, "step_id", "")}
+    ref, edge = tlm.step_source_ref(dep)
+    tgt = by_sid[ref]
+    x1 = cv._edge_x(tgt, edge); y1 = cv._geom[tgt.uid]["y"] + LANE_H / 2
+    x2, efr, _two = cv._dep_entry(dep); y2 = cv._geom[dep.uid]["y"] + LANE_H / 2
+    if efr is None:
+        efr = x2 < x1 - 1.0
+    two_sided = tlm._is_ramp(tgt) or getattr(tgt, "kind", "") == "bar"
+    exit_dir = (-1.0 if edge == "start" else 1.0) if two_sided else cv._point_exit_dir(tgt, dep)
+    return cv._connector_points(x1, y1, x2, y2, exit_dir, cv._intervening_obstacles(tgt.uid, dep.uid),
+                                cv._chip_w(dep) + 24.0, None, efr, two_sided=two_sided)
+
+
+def test_point_target_exits_left_toward_a_ramp_starting_at_it():
+    # Owner image: a ramp anchored to a tune at +0 s. The line must leave the pin on the LEFT (the
+    # ramp's start is at the pin; the drop column is left of it), not exit right and wrap around.
+    t = _tune(20.0, sid="t")
+    r = tlm.RunItem(task_name="chirp", action="ramp", anchor="step", offset=0.0, anchor_step_id="t",
+                    anchor_edge="start", ramp={"param": "power", "start": -90.0, "stop": -50.0,
+                                               "steps": 3, "duration_s": 6.0})
+    cv = _chirp_editor([_bar(), t, r])._canvas
+    assert cv._point_exit_dir(t, r) < 0
+    pts = _connector_for(cv, r)
+    cx = cv._geom[t.uid]["cx"]
+    assert pts[0][0] == cx and pts[1][0] < cx                 # exits LEFT of the pin…
+    assert pts[-2][1] == pts[-1][1] and pts[-2][0] < pts[-1][0]   # …and enters the ramp from the left
+    assert len(pts) == 4                                       # no wrap
+    assert cv._pin_caption_side(t) == "right"                  # the caption keeps the clear side
+
+
+def test_ramp_dependent_before_its_target_is_entered_outside_its_body():
+    # Owner image: a ramp anchored to a tune with a NEGATIVE offset (it starts before the tune).
+    # A ramp is always entered from OUTSIDE its body — from the left of its start — never from the
+    # right (through the capsule); and the pin exits left toward it.
+    t = _tune(30.0, sid="t")
+    r = tlm.RunItem(task_name="chirp", action="ramp", anchor="step", offset=-3.0, anchor_step_id="t",
+                    anchor_edge="start", ramp={"param": "power", "start": -90.0, "stop": -50.0,
+                                               "steps": 3, "duration_s": 6.0})
+    cv = _chirp_editor([_bar(), t, r])._canvas
+    x2, efr, two = cv._dep_entry(r)
+    assert two and efr is False and x2 == cv._geom[r.uid]["start_x"]
+    assert cv._point_exit_dir(t, r) < 0
+    pts = _connector_for(cv, r)
+    assert pts[1][0] < cv._geom[t.uid]["cx"]                    # exits left
+    assert pts[-2][0] < pts[-1][0] == x2                       # enters the ramp START from the left
+
+
+def test_far_dependent_still_exits_right_and_flips_the_caption():
+    # The old rule is kept where the chip fits: a dependent well to the right → exit right.
+    t = _tune(20.0, sid="t")
+    d = _tune(80.0)
+    d.anchor, d.anchor_step_id, d.anchor_edge = "step", "t", "end"; d.offset = 60.0
+    cv = _chirp_editor([_bar(), t, d])._canvas
+    assert cv._point_exit_dir(t, d) > 0
+    assert cv._pin_caption_side(t) == "left"
+
+
+def test_drag_from_a_ramps_end_ties_its_end_and_keeps_it_in_place():
+    # #C: dragging from the END dot ties the END: offset = (end x − target x)/eff, the ramp runs
+    # backward from there, and its start base stays where it was (the ramp doesn't move).
+    r = _long_ramp(10.0)                                       # 10 → 50 (dur 40)
+    t = _tune(60.0, sid="t")
+    cv = _chirp_editor([_bar(), r, t])._canvas
+    cv._make_anchor(r.uid, t, "start", from_edge="end")
+    assert r.anchor == "step" and r.anchor_own_edge == "end"
+    assert r.offset == -10.0                                   # its END sits 10 s before the tune
+    assert tlm.step_wire_offset(r) == -50.0                    # the START's offset on the wire
+    assert cv._step_bases[r.uid] == 10.0                       # didn't move
+    x2, efr, two = cv._dep_entry(r)
+    assert two and efr is True and x2 == cv._geom[r.uid]["stop_x"]   # entered at its end, from the right
+    pts = _connector_for(cv, r)
+    assert pts[-2][0] > pts[-1][0] == x2                       # the run comes in from the right
+    assert cv._edge_linked(r, "end") and not cv._edge_linked(r, "start")
+    assert "its end" in cv._tooltip_text(r)
+    # detaching re-roots it on-air at its resolved START and clears the tie
+    cv._detach_anchor(r.uid)
+    assert r.anchor == "start" and r.offset == 10.0 and r.anchor_own_edge == "start"
+
+
+def test_drag_from_a_ramps_start_still_ties_its_start():
+    r = _long_ramp(10.0)
+    t = _tune(60.0, sid="t")
+    cv = _chirp_editor([_bar(), r, t])._canvas
+    cv._make_anchor(r.uid, t, "start", from_edge="start")
+    assert r.anchor_own_edge == "start" and r.offset == -50.0
+
+
+def test_editor_steps_roundtrip_preserves_the_end_tie():
+    t = _tune(60.0, sid="t")
+    r = tlm.RunItem(task_name="chirp", action="ramp", anchor="step", offset=-10.0, anchor_step_id="t",
+                    anchor_edge="start", anchor_own_edge="end",
+                    ramp={"param": "power", "start": -90.0, "stop": -50.0, "steps": 3, "duration_s": 40.0})
+    ed = _chirp_editor([_bar(), t, r])
+    steps = ed.steps()
+    rs = next(s for s in steps if s.action.value == "ramp")
+    assert rs.offset_s == -50.0 and rs.anchor_own_edge == "end"
+    ed.set_steps(steps)
+    rb = next(it for it in ed.items() if tlm._is_ramp(it))
+    assert rb.anchor_own_edge == "end" and rb.offset == -10.0
+
+
+def test_ramp_editor_tie_picker_saves_an_end_tie():
+    dlg = _ramp_dlg([_bar(), _tune(5.0, sid="tgt")])
+    dlg._anchor.setCurrentIndex(dlg._anchor.findData("step"))
+    _app.processEvents()
+    assert dlg._own_row.isVisibleTo(dlg)                       # Tie picker shown for a step anchor
+    dlg._own_edge.setCurrentIndex(dlg._own_edge.findData("end"))
+    _app.processEvents()
+    assert dlg._ft_sublabels()[0] == "ramp start"              # the TO end is what's timed now
+    assert "End offset" in dlg._off_lbl.text()
+    dlg._mode.setCurrentIndex(dlg._mode.findData("step_hold"))
+    dlg._step.setText("1"); dlg._hold.setText("10")
+    dlg._start_field.setValue(-25.0); dlg._stop_field.setValue(-18.0)
+    _app.processEvents()
+    dlg._accept()
+    assert dlg.result_item is not None
+    assert dlg.result_item.anchor == "step" and dlg.result_item.anchor_own_edge == "end"
+    dlg._anchor.setCurrentIndex(dlg._anchor.findData("start"))
+    _app.processEvents()
+    assert not dlg._own_row.isVisible()
+
+
+def test_deleting_a_bar_cascades_to_its_tunes_and_ramps_but_not_one_shots():
+    # #D: a duration task takes its tunes/ramps with it; a one-shot of the same task is an
+    # independent launch and stays; a dependent of a deleted tune is re-rooted at its fire time.
+    bar = _bar()
+    tune = _tune(10.0, sid="tn")
+    ramp = _ramp_item(20.0)
+    shot = tlm.RunItem(task_name="chirp", action="run", anchor="start", offset=30.0)
+    dep = tlm.RunItem(task_name="chirp", action="run", anchor="step", offset=5.0,
+                      anchor_step_id="tn", anchor_edge="end")        # a one-shot hanging off the tune
+    cv = _chirp_editor([bar, tune, ramp, shot, dep])._canvas
+    cv._delete_with_reanchor(bar.uid)
+    left = {it.uid for it in cv._items}
+    assert bar.uid not in left and tune.uid not in left and ramp.uid not in left
+    assert shot.uid in left and dep.uid in left
+    assert dep.anchor == "start" and dep.offset == 15.0             # re-rooted at 10 + 5
+    cv.undo()                                                       # ONE undo restores everything
+    assert {it.uid for it in cv._items} >= {bar.uid, tune.uid, ramp.uid, shot.uid, dep.uid}
+
+
+def test_delete_selection_with_a_bar_cascades_too():
+    bar = _bar(); tune = _tune(10.0); other = _tune(20.0)
+    cv = _chirp_editor([bar, tune, other])._canvas
+    cv._selection = {bar.uid}; cv._selected = bar.uid
+    cv._delete_selection()
+    assert all(it.uid not in (bar.uid, tune.uid, other.uid) for it in cv._items)
+    assert not cv._selection
+
+
+def test_bar_source_draws_a_connector_and_can_be_detached():
+    # Gap from #6: a bar whose START hangs off a step gets a connector, a Remove-anchor entry,
+    # a tooltip line, and detaches onto on-air at its resolved start.
+    t = _tune(20.0, sid="t")
+    b2 = tlm.BarItem(task_name="other", start_anchor="step", start_anchor_step_id="t",
+                     start_anchor_edge="end", start_offset=5.0, stop_offset=0.0, args=[])
+    ed = _chirp_editor([_bar(), t, b2]); cv = ed._canvas
+    calls = []
+    orig = cv._connector_points
+    cv._connector_points = lambda *a, **k: (calls.append(a), orig(*a, **k))[1]
+    cv.grab()
+    assert len(calls) == 1
+    assert calls[0][0] == cv._geom[t.uid]["cx"] and calls[0][2] == cv._geom[b2.uid]["start_x"]
+    assert "Remove anchor" in cv._context_menu_spec(b2)
+    assert "its start" in cv._tooltip_text(b2)
+    assert cv._edge_linked(b2, "start")
+    assert cv._is_anchor_target(t)
+    cv._detach_anchor(b2.uid)
+    assert b2.start_anchor == "start" and b2.start_offset == 25.0 and not b2.start_anchor_step_id

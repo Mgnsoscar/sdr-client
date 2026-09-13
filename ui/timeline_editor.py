@@ -1217,13 +1217,69 @@ class _TimelineCanvas(QWidget):
         p.drawEllipse(r)
 
     def _edge_linked(self, it, edge: str) -> bool:
+        """A ramp/bar edge dot draws FILLED when a connector attaches there: some step hangs off
+        this edge of `it` (it is a target), or it is the edge `it` itself is tied BY (a ramp tied
+        by its start or — `anchor_own_edge` — its end; a bar always by its start)."""
+        if tlm.is_step_source(it):
+            own = (getattr(it, "anchor_own_edge", "start") or "start") if tlm._is_ramp(it) else "start"
+            if own == edge:
+                return True
         sid = getattr(it, "step_id", "") or ""
         if not sid:
             return False
-        return any(getattr(o, "anchor", "") == "step"
-                   and (getattr(o, "anchor_step_id", "") or "") == sid
-                   and (getattr(o, "anchor_edge", "end") or "end") == edge
+        return any(tlm.is_step_source(o) and tlm.step_source_ref(o) == (sid, edge)
                    for o in self._rows)
+
+    @staticmethod
+    def _dep_offset(it) -> float:
+        """A step-anchor dependent's offset from the target edge as the operator sees it: a run's
+        `offset` (an end-tied ramp's is its END's), a bar's `start_offset`."""
+        if getattr(it, "kind", None) == "bar":
+            return float(getattr(it, "start_offset", 0.0))
+        return float(getattr(it, "offset", 0.0))
+
+    def _chip_w(self, dep) -> float:
+        """Width of a dependent's inline offset chip."""
+        return QFontMetrics(mono_font(10)).horizontalAdvance(
+            self._offset_chip_text(self._dep_offset(dep))) + 14.0
+
+    def _dep_entry(self, dep):
+        """(x2, entry_from_right, two_sided) for a step-anchor DEPENDENT: the x of its TIED edge
+        (a point's centre; a ramp's start — or its END when tied by the end; a bar's start) and the
+        side its connector enters from. A two-sided item (ramp/bar) is ALWAYS entered from OUTSIDE
+        its body: a start tie from the left, an end tie from the right. A point may be entered from
+        either side (it's decided against the anchor's x → None here)."""
+        g = self._geom.get(getattr(dep, "uid", None)) or {}
+        if not (tlm._is_ramp(dep) or getattr(dep, "kind", "") == "bar"):
+            return g.get("cx", 0.0), None, False
+        end_tied = tlm._is_ramp(dep) and (getattr(dep, "anchor_own_edge", "start") or "start") == "end"
+        if end_tied:
+            # Enter at the capsule's VISUAL right edge: a short ramp is padded out to RAMP_MIN_W
+            # (see _paint_ramp), so its true stop x can sit inside the capsule and a line ending
+            # there would bury its arrow + chip under the pill. (The tie's offset math still uses
+            # the true stop x — this is drawing only.)
+            sx = g.get("start_x", 0.0)
+            return max(g.get("stop_x", sx), sx + RAMP_MIN_W), True, True
+        return g.get("start_x", g.get("cx", 0.0)), False, True
+
+    def _point_exit_dir(self, tgt, dep) -> float:
+        """Which way a POINT target's connector to `dep` leaves the pin. Both sides of a pin are
+        free, so it leaves TOWARD the dependent's drop column (−1 left, +1 right, 0 = the column is
+        at the pin → a straight drop) — a dependent at/just after the pin, or before it, is reached
+        by a plain exit on that side instead of a wrap around the far side. A pin that is ITSELF a
+        dependent keeps the right-side exit (its own incoming line already claims a side; the
+        caption logic + the under-caption duck are built around a right exit there)."""
+        cx = self._geom[tgt.uid]["cx"]
+        dx, efr, _two = self._dep_entry(dep)
+        if efr is None:
+            efr = dx < cx - 1.0
+        if tlm.is_step_source(tgt) and not efr:
+            return 1.0                          # a dependent pin: right exit + duck (option C)
+        xd = self._drop_column(cx, dx, efr, self._chip_w(dep) + 24.0,
+                               self._intervening_obstacles(tgt.uid, dep.uid))
+        if abs(xd - cx) <= 1.0:
+            return 0.0
+        return 1.0 if xd > cx else -1.0
 
     def _chip(self, p, cx, cy, text, border, ink, mono=True):
         f = mono_font(10) if mono else self._f(10, True)
@@ -1388,14 +1444,14 @@ class _TimelineCanvas(QWidget):
         sid = getattr(it, "step_id", "") or ""
         if not sid:
             return False
-        return any(getattr(d, "anchor", "") == "step"
-                   and (getattr(d, "anchor_step_id", "") or "") == sid for d in self._rows)
+        return any(tlm.is_step_source(d) and tlm.step_source_ref(d)[0] == sid for d in self._rows)
 
     def _pin_conn_sides(self, it):
         """(right_busy, left_busy): whether a step-anchor connector attaches on the pin's RIGHT
-        and/or LEFT side, from resolved geometry. A DEPENDENT's incoming line enters from the side
-        its anchor sits on (a negative offset → the anchor is to the RIGHT → enters from the right);
-        an ANCHOR-TARGET's exit runs toward each dependent (a dependent to the right → exits right)."""
+        and/or LEFT side, from the SAME geometry the router uses. A DEPENDENT's incoming line enters
+        from the side its anchor sits on (a negative offset → the anchor is to the RIGHT → enters
+        from the right); an ANCHOR-TARGET's exit leaves toward each dependent's drop column
+        (`_point_exit_dir`), so the caption never sits on a side a line actually uses."""
         g = self._geom.get(getattr(it, "uid", None))
         if not g:
             return (False, False)
@@ -1412,19 +1468,18 @@ class _TimelineCanvas(QWidget):
                     right = True
                 else:
                     left = True
-        # As an ANCHOR TARGET: an exit runs toward each dependent.
+        # As an ANCHOR TARGET: an exit leaves toward each dependent's drop column.
         sid = getattr(it, "step_id", "") or ""
-        if sid:
+        if sid and "cx" in g:
             for d in self._rows:
-                if getattr(d, "anchor", "") != "step" or (getattr(d, "anchor_step_id", "") or "") != sid:
+                if not tlm.is_step_source(d) or tlm.step_source_ref(d)[0] != sid:
                     continue
-                dg = self._geom.get(getattr(d, "uid", None))
-                if not dg:
+                if getattr(d, "uid", None) not in self._geom:
                     continue
-                dx = dg.get("start_x", dg.get("cx", 0.0))
-                if dx > cx + 1.0:
+                ed = self._point_exit_dir(it, d)
+                if ed > 0:
                     right = True
-                else:
+                elif ed < 0:
                     left = True
         return (right, left)
 
@@ -1569,11 +1624,11 @@ class _TimelineCanvas(QWidget):
             return
         it = next((o for o in self._rows if o.uid == uid), None)
         g = self._geom.get(uid) if it is not None else None
-        if it is None or g is None or tlm._is_hold(it):
-            return
+        if it is None or g is None or tlm._is_hold(it) or tlm.is_step_source(it):
+            return                                  # step anchors (runs AND bars) have a connector
         anchor = getattr(it, "anchor", "start")
         if anchor not in ("start", "stop", "hold"):
-            return                                  # step anchors already have a connector
+            return
         if anchor == "hold" and self._resume_x is None:
             return
         base_x = self._root_x(anchor)
@@ -1596,41 +1651,45 @@ class _TimelineCanvas(QWidget):
                   if getattr(it, "step_id", "")}
         conns = []
         for it in self._rows:
-            if getattr(it, "anchor", "") != "step":
+            if not tlm.is_step_source(it):          # a run/tune/ramp, or a bar via its START
                 continue
-            tgt = by_sid.get(getattr(it, "anchor_step_id", "") or "")
+            ref, edge = tlm.step_source_ref(it)
+            tgt = by_sid.get(ref)
             gi = self._geom.get(it.uid)
             if tgt is None or gi is None or tgt.uid not in self._geom:
                 continue
-            edge = getattr(it, "anchor_edge", "end") or "end"
             x1 = self._edge_x(tgt, edge)
             y1 = self._geom[tgt.uid]["y"] + LANE_H / 2
-            x2 = gi.get("start_x", gi.get("cx"))
+            # The dependent is entered at its TIED edge (a ramp tied by its end: at the end), from
+            # OUTSIDE its body for a ramp/bar; a point from the side its anchor sits on (a NEGATIVE
+            # offset → the anchor is to the right → enter from the right, arrow pointing left).
+            x2, entry_from_right, _dep_two = self._dep_entry(it)
             y2 = gi["y"] + LANE_H / 2
-            # Exit the anchor AWAY from its body along the time axis: an END edge (body to the
-            # left) exits right, a START edge (body to the right) exits left, a point exits right.
-            exit_dir = -1.0 if ((tlm._is_ramp(tgt) or getattr(tgt, "kind", "") == "bar")
-                                and edge == "start") else 1.0
+            if entry_from_right is None:
+                entry_from_right = x2 < x1 - 1.0
+            # Exit a two-sided anchor AWAY from its body along the time axis: an END edge (body to
+            # the left) exits right, a START edge (body to the right) exits left. A POINT is free on
+            # both sides, so it exits toward the dependent's drop column (_point_exit_dir).
+            two_sided = tlm._is_ramp(tgt) or getattr(tgt, "kind", "") == "bar"
+            if two_sided:
+                exit_dir = -1.0 if edge == "start" else 1.0
+            else:
+                exit_dir = self._point_exit_dir(tgt, it)
             obstacles = self._intervening_obstacles(tgt.uid, it.uid)
             base, _e, _fa, _fb, ink = self._item_colors(it)
             sel = (it.uid == self._selected)
-            offset = float(getattr(it, "offset", 0.0))
-            # A NEGATIVE offset places the dependent LEFT of its anchor edge; enter it from the
-            # RIGHT (the side facing the anchor), arrow pointing left. Otherwise enter from the
-            # left, as before. (byte-identical routing for the common x2 >= x1 case.)
-            entry_from_right = x2 < x1 - 1.0
+            offset = self._dep_offset(it)
             # If the anchor is a two-sided pin its readout sits on its RIGHT, in the exit's path;
             # hand the router that span so the line ducks UNDER it (option C). Only meaningful for a
             # left-entry line exiting right.
             anchor_cap = None
-            if exit_dir > 0 and not entry_from_right:
+            if not two_sided and exit_dir > 0 and not entry_from_right:
                 rc = self._pin_right_caption(tgt)
                 if rc is not None:
                     tx, total = rc
                     anchor_cap = (tx, tx + total)
             text = self._offset_chip_text(offset)
-            chip_w = QFontMetrics(mono_font(10)).horizontalAdvance(text) + 14.0
-            two_sided = tlm._is_ramp(tgt) or getattr(tgt, "kind", "") == "bar"
+            chip_w = self._chip_w(it)
             pts = self._connector_points(x1, y1, x2, y2, exit_dir, obstacles, chip_w + 24.0,
                                          anchor_cap, entry_from_right, two_sided=two_sided)
             conns.append(dict(pts=pts, base=base, ink=ink, sel=sel, x2=x2, y2=y2,
@@ -1726,56 +1785,76 @@ class _TimelineCanvas(QWidget):
         pin, option C): the exit then leaves HORIZONTALLY, ducks into a channel just past the caption
         (in the dependent's direction), runs UNDER the readout, and carries on — so the line never
         runs through the text. (anchor_cap is not applied to a right-entry line.)"""
-        STUB, GAP = 16.0, 14.0
+        STUB = 16.0
         sgn = 1.0 if y2 >= y1 else -1.0
         # A two-sided target (ramp/bar) must exit AWAY from its body: an END edge (body to the left)
         # exits right, a START edge (body to the right) exits left. When the dependent sits on the
         # BODY side (an end edge with the dependent to its left, or a start edge with it to the
-        # right — a dependent between the two sides), a straight run to the dependent would go back
-        # OVER the bar. Exit a stub the other way first, drop to the dependent's row, then run in
-        # (owner #9). The entry stays horizontal, so the arrow/chip placement is unaffected.
-        if two_sided and ((exit_dir > 0 and x2 < x1 - 1.0) or (exit_dir < 0 and x2 > x1 + 1.0)):
+        # right — a dependent between the two sides) AND is entered from the side that stub faces,
+        # a straight run to the dependent would go back OVER the bar: exit a stub the other way
+        # first, drop to the dependent's row, then run in (owner #9). The entry stays horizontal, so
+        # the arrow/chip placement is unaffected. (A dependent entered from the OTHER side — a ramp
+        # tied by its start, sitting left of an end edge — takes the general wrap below instead, so
+        # the line never enters it through its own body.)
+        if two_sided and ((exit_dir > 0 and x2 < x1 - 1.0 and entry_from_right)
+                          or (exit_dir < 0 and x2 > x1 + 1.0 and not entry_from_right)):
             xe = x1 + STUB * exit_dir
             return [(x1, y1), (xe, y1), (xe, y2), (x2, y2)]
-        if entry_from_right:
-            # Drop column just RIGHT of the dependent — prefer it BETWEEN the dependent and the
-            # anchor, pushed clear (left) of any intervening obstacle.
-            xd = min(x2 + chip_run, max(x2 + 20.0, x1 - GAP))
-            for _ in range(len(obstacles) + 2):
-                hit = next(((lo, hi) for (lo, hi) in obstacles if lo - 6.0 <= xd <= hi + 6.0), None)
-                if hit is None:
-                    break
-                xd = hit[0] - GAP
-            xd = max(xd, x2 + 12.0)
-            if abs(xd - x1) <= 1.0:                  # drop column ~at the anchor edge → drop straight
-                return [(x1, y1), (x1, y2), (x2, y2)]
-            return [(x1, y1), (xd, y1), (xd, y2), (x2, y2)]
+        xd = self._drop_column(x1, x2, entry_from_right, chip_run, obstacles)
+        if not two_sided and entry_from_right:
+            # A point target with a right-entry dependent (a negative offset — the dependent, or an
+            # end-tied ramp's end, sits left of the pin): both sides of a pin are free, so leave
+            # straight toward the drop column, never around the far side.
+            exit_dir = 1.0 if xd > x1 + 1.0 else -1.0
         pre = []
-        if anchor_cap and exit_dir > 0:
+        if anchor_cap and exit_dir > 0 and not entry_from_right:
             cap_lo, cap_hi = anchor_cap
             if x2 > cap_hi + 10.0:                  # dependent clearly past the readout → duck under it
                 drop = cap_lo - 6.0                 # drop the exit just BEFORE the caption's left edge
                 yd = y1 + sgn * (LANE_H / 2.0 + 6.0)  # a channel just below/above the readout
                 pre = [(x1, y1), (drop, y1), (drop, yd)]
                 x1, y1 = drop, yd                   # resume routing from the under-channel, past the pin
+        if abs(xd - x1) <= 1.0:                     # the column is AT the anchor x: drop straight, run in
+            pts = [(x1, y1), (x1, y2), (x2, y2)]
+        elif exit_dir == 0.0 or (xd - x1) * exit_dir > 0:
+            # The column lies on the exit side → leave toward it, drop, run in (the common case; a
+            # point target's exit was chosen toward the column, so it never wraps).
+            pts = [(x1, y1), (xd, y1), (xd, y2), (x2, y2)]
+        else:
+            # The column is on the BODY side of the (resumed) anchor edge → wrap: stub out, run a
+            # channel just outside the dependent's row back to xd, drop, run in.
+            xe = x1 + STUB * exit_dir
+            ch = y2 - (LANE_H / 2.0 + LANE_VGAP / 2.0) * sgn
+            pts = [(x1, y1), (xe, y1), (xe, ch), (xd, ch), (xd, y2), (x2, y2)]
+        return pre + pts[1:] if pre else pts        # pts[0] == pre[-1] (the resume point)
+
+    @staticmethod
+    def _drop_column(x1, x2, entry_from_right, chip_run, obstacles) -> float:
+        """The x a connector drops along to reach the dependent at x2, on its ENTRY side, leaving
+        `chip_run` of horizontal entry run for the inline chip and pushed clear of any intervening
+        third-party step (`obstacles` = x-intervals on the rows in between). A left entry drops
+        LEFT of x2 (pushed further left past an obstacle); a right entry drops RIGHT of x2 —
+        preferring the column BETWEEN the dependent and an anchor that sits to its right (pushed
+        toward the dependent past an obstacle, else away from it)."""
+        GAP = 14.0
+        if entry_from_right:
+            if x1 > x2 + 1.0:
+                xd = min(x2 + chip_run, max(x2 + 20.0, x1 - GAP))
+            else:                                   # anchor at/left of the dependent → run past it
+                xd = x2 + chip_run
+            for _ in range(len(obstacles) + 2):
+                hit = next(((lo, hi) for (lo, hi) in obstacles if lo - 6.0 <= xd <= hi + 6.0), None)
+                if hit is None:
+                    break
+                xd = hit[0] - GAP if hit[0] - GAP >= x2 + 12.0 else hit[1] + GAP
+            return max(xd, x2 + 12.0)
         xd = x2 - chip_run                          # leave room for the chip inline on the entry run
         for _ in range(len(obstacles) + 2):         # push left of any obstacle the drop lands in
             hit = next(((lo, hi) for (lo, hi) in obstacles if lo - 6.0 <= xd <= hi + 6.0), None)
             if hit is None:
                 break
             xd = hit[0] - GAP
-        xd = min(xd, x2 - 20.0)
-        if xd >= x1 - 1.0:
-            if xd <= x1 + 1.0:                      # dependent ~at the anchor x: drop straight, run in
-                pts = [(x1, y1), (x1, y2), (x2, y2)]
-            else:
-                pts = [(x1, y1), (xd, y1), (xd, y2), (x2, y2)]
-        else:
-            # xd is LEFT of the (resumed) anchor edge → wrap: run a channel to xd, drop, run in
-            xe = x1 + STUB * exit_dir
-            ch = y2 - (LANE_H / 2.0 + LANE_VGAP / 2.0) * sgn
-            pts = [(x1, y1), (xe, y1), (xe, ch), (xd, ch), (xd, y2), (x2, y2)]
-        return pre + pts[1:] if pre else pts        # pts[0] == pre[-1] (the resume point)
+        return min(xd, x2 - 20.0)
 
     def _offset_chip_text(self, offset: float) -> str:
         """The connector's offset label. `_mmss` already prints a leading − for a negative
@@ -1926,12 +2005,12 @@ class _TimelineCanvas(QWidget):
             label = f"anchor to {root_name}"
         elif ok:
             t, edge = tgt
-            # Offset measured from the SOURCE's start (where it will actually anchor), matching
-            # `_make_anchor` — not from the grabbed edge x1, which may be a ramp's end.
-            src_start = g.get("start_x", g.get("cx", x1))
-            off = tlm._snap((src_start - self._edge_x(t, edge)) / self._eff())   # any clock
+            # Offset measured from the GRABBED edge x1 — the edge that will be tied (a ramp grabbed
+            # by its end is tied by its end), matching `_make_anchor`. Any clock.
+            off = tlm._snap((x1 - self._edge_x(t, edge)) / self._eff())
             edge_word = "start" if edge == "start" else "end"
-            label = f"{self._offset_chip_text(off)} after {t.task_name or '?'} · {edge_word}"
+            what = "its end " if (self._connect.get("from_edge") == "end" and tlm._is_ramp(src)) else ""
+            label = f"{what}{self._offset_chip_text(off)} after {t.task_name or '?'} · {edge_word}"
         else:
             label = "drop on a step edge or an anchor line"
         self._paint_tag(p, x2, y2 - 16, label, ok)
@@ -2382,7 +2461,15 @@ class _TimelineCanvas(QWidget):
             self._live_move(it)
             return
         if part == "bar_start":
-            if getattr(it, "start_anchor", "start") == "hold" and self._hold_off is not None:
+            if getattr(it, "start_anchor", "start") == "step":
+                # A bar whose START hangs off another step: its start offset is measured from
+                # that step's edge (any clock), like a step-anchored run's body drag.
+                base_x = self._anchor_base_x(it)
+                if sx is not None:
+                    it.start_offset = (sx - base_x) / eff; self._snap_guide = sx
+                else:
+                    it.start_offset = tlm._snap((x - base_x) / eff)
+            elif getattr(it, "start_anchor", "start") == "hold" and self._hold_off is not None:
                 # A window-B bar's start is measured from the Hold RESUME edge, never before it.
                 hold_x = self._on + self._hold_off * eff + HOLD_BAND_PX
                 if sx is not None and sx >= hold_x - 0.5:
@@ -2419,9 +2506,14 @@ class _TimelineCanvas(QWidget):
         resolved independently of this item's live offset so it's stable across the drag)."""
         anchor = getattr(it, "anchor", "start")
         eff = self._eff()
-        if anchor == "step":
-            e = tlm.step_edge_offset(self._items, getattr(it, "anchor_step_id", "") or "",
-                                     getattr(it, "anchor_edge", "end") or "end", self._hold_off)
+        if tlm.is_step_source(it):                  # a run, or a bar via its START anchor
+            ref, aedge = tlm.step_source_ref(it)
+            tgt = next((o for o in self._items if (getattr(o, "step_id", "") or "") == ref and ref), None)
+            if tgt is not None and tgt.uid in self._geom:
+                # The target's DRAWN edge: clock-agnostic (an off-air-rooted target too) and stable
+                # across this item's drag (a target never depends on its own dependent — acyclic).
+                return self._edge_x(tgt, aedge)
+            e = tlm.step_edge_offset(self._items, ref, aedge, self._hold_off)
             x = self._on + (e * eff if e is not None else 0.0)
             # a target resolved past the hold sits in the post-hold window (shifted by the band)
             if self._hold_present and e is not None and e > (self._hold_off or 0.0) + 1e-6:
@@ -2507,12 +2599,14 @@ class _TimelineCanvas(QWidget):
             itu = next((o for o in self._items if o.uid == u), None)
             if itu is None:
                 continue
-            if kind == "bar":
+            if tlm.is_step_source(itu) and by_sid.get(tlm.step_source_ref(itu)[0]) in group:
+                # Follows its (also-moving) target — don't shift. A step-anchored BAR's stop is
+                # still off-air, so it shifts like any bar's stop.
+                if kind == "bar":
+                    itu.stop_offset = max(e0 + ds, (mid - self._off) / eff)
+            elif kind == "bar":
                 itu.start_offset = min(s0 + ds, (mid - self._on) / eff)
                 itu.stop_offset = max(e0 + ds, (mid - self._off) / eff)
-            elif (getattr(itu, "anchor", "start") == "step"
-                  and by_sid.get(getattr(itu, "anchor_step_id", "") or "") in group):
-                pass                               # follows its (also-moving) target — don't shift
             else:
                 itu.offset = self._clamp_tune_offset(itu, o0 + ds)
         # Re-place the moved group AND every step-anchored dependent from the live offsets, so a
@@ -2522,7 +2616,7 @@ class _TimelineCanvas(QWidget):
         for itu in (o for o in self._items if o.uid in group):
             self._live_relayout(itu)
         for dep in self._rows:
-            if dep.uid not in group and getattr(dep, "anchor", "start") == "step":
+            if dep.uid not in group and tlm.is_step_source(dep):
                 self._live_relayout(dep)
 
     def _apply_marquee(self):
@@ -2592,7 +2686,7 @@ class _TimelineCanvas(QWidget):
         self._step_off_bases = tlm.resolve_step_offsets_off(self._items, self._hold_off)
         self._live_relayout(it)
         for dep in self._rows:
-            if dep.uid != it.uid and getattr(dep, "anchor", "start") == "step":
+            if dep.uid != it.uid and tlm.is_step_source(dep):
                 self._live_relayout(dep)
 
     def mouseReleaseEvent(self, e):  # noqa: N802
@@ -2615,7 +2709,7 @@ class _TimelineCanvas(QWidget):
                 if tgt == "__root__":
                     self._make_root_anchor(conn["src"], edge)
                 else:
-                    self._make_anchor(conn["src"], tgt, edge)
+                    self._make_anchor(conn["src"], tgt, edge, conn.get("from_edge", "start"))
             else:
                 self.update()          # cancelled — clear the rubber-band
             return
@@ -2688,8 +2782,9 @@ class _TimelineCanvas(QWidget):
         lines: List[str] = []
         if it.kind == "bar":
             lines.append(f"<b>{it.task_name or '(no task)'}</b> · duration task")
-            side = "hold" if getattr(it, "start_anchor", "start") == "hold" else "start"
-            lines.append("starts " + _timing_text(float(getattr(it, "start_offset", 0.0)), side, True))
+            if not tlm.is_step_source(it):          # a step-anchored start is described by ⚓ below
+                side = "hold" if getattr(it, "start_anchor", "start") == "hold" else "start"
+                lines.append("starts " + _timing_text(float(getattr(it, "start_offset", 0.0)), side, True))
             lines.append("stops " + _timing_text(float(getattr(it, "stop_offset", 0.0)), "stop", True))
         elif act == "ramp":
             lines.append(f"<b>{it.task_name or '(no task)'}</b> · ramp")
@@ -2703,12 +2798,14 @@ class _TimelineCanvas(QWidget):
         else:
             lines.append(f"<b>{it.task_name or '(no task)'}</b> · one-shot")
         anc = getattr(it, "anchor", "start")
-        if anc == "step":
-            tgt = next((o for o in self._items
-                        if (getattr(o, "step_id", "") or "") == (getattr(it, "anchor_step_id", "") or "")), None)
+        if tlm.is_step_source(it):
+            ref, aedge = tlm.step_source_ref(it)
+            tgt = next((o for o in self._items if (getattr(o, "step_id", "") or "") == ref), None)
             tname = (getattr(tgt, "task_name", "") or "?") if tgt is not None else "?"
-            lines.append(f"⚓ after {tname}'s {getattr(it, 'anchor_edge', 'end')} "
-                         f"{self._offset_chip_text(float(getattr(it, 'offset', 0.0)))}")
+            end_tied = tlm._is_ramp(it) and (getattr(it, "anchor_own_edge", "start") or "start") == "end"
+            what = "its end " if end_tied else ("its start " if it.kind == "bar" else "")
+            lines.append(f"⚓ {what}after {tname}'s {aedge} "
+                         f"{self._offset_chip_text(self._dep_offset(it))}")
         elif act != "ramp" and it.kind != "bar":
             side = "hold" if anc == "hold" else (anc if anc in ("start", "stop") else "start")
             lines.append("fires " + _timing_text(float(getattr(it, "offset", 0.0)), side, True))
@@ -2720,13 +2817,16 @@ class _TimelineCanvas(QWidget):
         super().leaveEvent(e)
 
     # ── Anchor create / detach (100% UI, no forms) ─────────────────────────────
-    def _make_anchor(self, src_uid: int, tgt, edge: str) -> None:
-        """Anchor the source item's start to `tgt`'s `edge` (a drag-to-anchor drop). Keeps
-        the source visually in place — the offset is the current pixel gap between the source's
-        start and the TARGET EDGE, read straight off the geometry, so it works whatever CLOCK the
-        target sits on (on-air, off-air, resume) and for a bar edge as readily as a point/ramp.
-        The offset may be NEGATIVE (the source sits before the edge, like a start/stop anchor's
-        lead-in); the save/arm gate enforces the negative capability."""
+    def _make_anchor(self, src_uid: int, tgt, edge: str, from_edge: str = "start") -> None:
+        """Anchor the source item to `tgt`'s `edge` (a drag-to-anchor drop) by the edge it was
+        GRABBED by: a point by its instant, a ramp by its start — or by its END when the drag began
+        on its end dot (`from_edge="end"`; the ramp's end then sits at the target edge + offset and
+        the ramp runs backward from it). Keeps the source visually in place — the offset is the
+        current pixel gap between that tied edge and the TARGET EDGE, read straight off the
+        geometry, so it works whatever CLOCK the target sits on (on-air, off-air, resume) and for a
+        bar edge as readily as a point/ramp. The offset may be NEGATIVE (the tied edge sits before
+        the target edge, like a start/stop anchor's lead-in); the save/arm gate enforces the
+        negative capability."""
         src = next((it for it in self._items if it.uid == src_uid), None)
         if src is None or not self._is_anchor_source(src):
             self.update()
@@ -2741,14 +2841,16 @@ class _TimelineCanvas(QWidget):
         eff = self._eff()
         tgt_x = self._edge_x(tgt, edge)
         g = self._geom.get(src_uid) or {}
-        src_x = g.get("start_x", g.get("cx"))
+        end_tied = tlm._is_ramp(src) and from_edge == "end"
+        src_x = g.get("stop_x", g.get("start_x")) if end_tied else g.get("start_x", g.get("cx"))
         if src_x is None:
             src_x = tgt_x
-        off = tlm._snap((src_x - tgt_x) / eff)   # keep the source's pixel position, any clock
+        off = tlm._snap((src_x - tgt_x) / eff)   # keep the tied edge's pixel position, any clock
         self._record()          # snapshot AFTER the early-returns, so no dead no-op undo entry
         src.anchor = "step"
         src.anchor_step_id = sid
         src.anchor_edge = edge
+        src.anchor_own_edge = "end" if end_tied else "start"
         src.offset = off
         self._select_only(src_uid)
         self.relayout()
@@ -2778,23 +2880,47 @@ class _TimelineCanvas(QWidget):
         src.anchor = kind
         src.anchor_step_id = ""
         src.anchor_edge = "end"
+        src.anchor_own_edge = "start"
         src.offset = self._clamp_tune_offset(src, off)
         self._select_only(src_uid)
         self.relayout()
         self.changed.emit()
 
-    def _detach_anchor(self, uid: Optional[int]) -> None:
-        """Remove a step anchor (the "Remove anchor" chip / a UI detach): revert the item to
-        a plain on-air start anchor at the offset it currently resolves to, so it stays put."""
-        it = next((o for o in self._items if o.uid == uid), None)
-        if it is None or getattr(it, "anchor", "") != "step":
-            return
-        self._record()
+    def _revert_to_root(self, it) -> None:
+        """Drop `it`'s step anchor, re-rooting it at the instant it currently resolves to so it
+        stays put: on-air (`start`) at its resolved on-air base, or — when its chain roots
+        off-air — off-air (`stop`) at its off-air base (a ramp's stop offset is its END's). A bar
+        re-roots its start on-air (its only root option; an off-air-rooted bar keeps its raw
+        start offset)."""
+        uid = getattr(it, "uid", None)
         base = self._step_bases.get(uid)
-        it.offset = base if base is not None else float(getattr(it, "offset", 0.0))
-        it.anchor = "start"
+        obase = self._step_off_bases.get(uid)
+        if getattr(it, "kind", None) == "bar":
+            it.start_offset = base if base is not None else float(getattr(it, "start_offset", 0.0))
+            it.start_anchor = "start"
+            it.start_anchor_step_id = ""
+            it.start_anchor_edge = "end"
+            return
+        if base is not None:
+            it.anchor, it.offset = "start", base
+        elif obase is not None:
+            dur = tlm._ramp_duration(dict(getattr(it, "ramp", None) or {})) if tlm._is_ramp(it) else 0.0
+            it.anchor, it.offset = "stop", obase + dur
+        else:
+            it.anchor, it.offset = "start", tlm.step_wire_offset(it)
         it.anchor_step_id = ""
         it.anchor_edge = "end"
+        it.anchor_own_edge = "start"
+
+    def _detach_anchor(self, uid: Optional[int]) -> None:
+        """Remove a step anchor (the "Remove anchor" chip / a UI detach): revert the item (a
+        run, or a bar anchored by its start) to a plain root anchor at the instant it currently
+        resolves to, so it stays put."""
+        it = next((o for o in self._items if o.uid == uid), None)
+        if it is None or not tlm.is_step_source(it):
+            return
+        self._record()
+        self._revert_to_root(it)
         self.relayout()
         self.changed.emit()
 
@@ -2824,29 +2950,30 @@ class _TimelineCanvas(QWidget):
         if not sid:
             return
         for dep in self._items:
-            if dep is target or getattr(dep, "anchor", "") != "step":
+            if dep is target or not tlm.is_step_source(dep):
                 continue
-            if (getattr(dep, "anchor_step_id", "") or "") != sid or dep.uid in skip:
+            if tlm.step_source_ref(dep)[0] != sid or dep.uid in skip:
                 continue
-            base = self._step_bases.get(dep.uid)
-            dep.offset = base if base is not None else float(getattr(dep, "offset", 0.0))
-            dep.anchor = "start"
-            dep.anchor_step_id = ""
-            dep.anchor_edge = "end"
+            self._revert_to_root(dep)
 
-    def _delete_with_reanchor(self, uid: Optional[int]) -> None:
-        """Delete an item, re-anchoring any dependents so they stay at their fire time."""
-        target = next((o for o in self._items if o.uid == uid), None)
-        if target is None:
-            return
-        self._record()
-        self._reanchor_deps(target)
-        self.remove_item(uid, record=False)     # one undo entry covers the reanchor + delete
+    def _cascade_uids(self, uids: set) -> set:
+        """Deleting a DURATION task also deletes that task's tunes and ramps — they retune the
+        running task and cannot exist without it (validate() rejects them as orphans). A one-shot
+        of the same task is an independent launch and stays (owner rule)."""
+        out = set(uids)
+        tasks = {o.task_name for o in self._items
+                 if o.uid in uids and getattr(o, "kind", None) == "bar"}
+        if tasks:
+            out |= {o.uid for o in self._items
+                    if getattr(o, "kind", None) != "bar"
+                    and getattr(o, "action", "run") in ("tune", "ramp")
+                    and o.task_name in tasks}
+        return out
 
-    def _delete_selection(self) -> None:
-        """Delete every selected item (dependents re-anchored to their fire time) in one undo
-        step; a dependent that is itself being deleted is not re-anchored."""
-        uids = set(self._selection)
+    def _delete_uids(self, uids: set) -> None:
+        """Delete a set of items in ONE undo step: a bar takes its tunes/ramps with it, and every
+        dependent of a deleted item that is NOT itself deleted is re-rooted at its fire time."""
+        uids = self._cascade_uids(set(uids))
         if not uids:
             return
         self._record()
@@ -2857,9 +2984,22 @@ class _TimelineCanvas(QWidget):
         self._items = [o for o in self._items if o.uid not in uids]
         for u in uids:
             self._collapsed.discard(u)
-        self._clear_selection()
+        self._prune_selection()
         self.relayout()
         self.changed.emit()
+
+    def _delete_with_reanchor(self, uid: Optional[int]) -> None:
+        """Delete an item (a bar together with its tunes/ramps), re-anchoring any dependents so
+        they stay at their fire time."""
+        if any(o.uid == uid for o in self._items):
+            self._delete_uids({uid})
+
+    def _delete_selection(self) -> None:
+        """Delete every selected item (a bar's tunes/ramps included; dependents re-anchored to
+        their fire time) in one undo step; a dependent that is itself being deleted is not
+        re-anchored."""
+        if self._selection:
+            self._delete_uids(set(self._selection))
 
     # ── Right-click context menu ──────────────────────────────────────────────
     def contextMenuEvent(self, e):  # noqa: N802
@@ -2882,7 +3022,7 @@ class _TimelineCanvas(QWidget):
         spec = ["Edit…"]
         if not tlm._is_hold(it):
             spec.append("Duplicate")
-        if getattr(it, "anchor", "") == "step":
+        if tlm.is_step_source(it):                 # a run, or a bar anchored by its start
             spec.append("Remove anchor")
         spec += ["—", "Delete"]
         return spec
@@ -2984,7 +3124,7 @@ class _TimelineCanvas(QWidget):
         dlg = self._dialog_for(item, new=False)
         r = dlg.exec()
         if r == dlg.REMOVE:
-            self.remove_item(item.uid)
+            self._delete_with_reanchor(item.uid)   # a bar takes its tunes/ramps; deps re-rooted
         elif r == QDialog.DialogCode.Accepted and dlg.result_item is not None:
             self.replace_item(item.uid, dlg.result_item)
 
@@ -4754,6 +4894,7 @@ class TimelineEditor(QWidget):
                 "id": getattr(s, "id", "") or "",
                 "anchor_step_id": getattr(s, "anchor_step_id", "") or "",
                 "anchor_edge": getattr(s, "anchor_edge", "end") or "end",
+                "anchor_own_edge": getattr(s, "anchor_own_edge", "start") or "start",
                 # power_hold_dest is deliberately NOT carried onto the canvas item — the injected
                 # --power was just stripped, so the authored item is clean and re-derived on save.
             })
@@ -4788,7 +4929,8 @@ class TimelineEditor(QWidget):
                 # (items_to_steps emits them only when present, so a plain step stays unchanged).
                 id=d.get("id", "") or "",
                 anchor_step_id=d.get("anchor_step_id", "") or "",
-                anchor_edge=d.get("anchor_edge", "end") or "end"))
+                anchor_edge=d.get("anchor_edge", "end") or "end",
+                anchor_own_edge=d.get("anchor_own_edge", "start") or "start"))
         return out
 
     # ── Validation (mirrors the agent's _validate_steps) ─────────────────────

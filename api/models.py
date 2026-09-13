@@ -316,6 +316,13 @@ class SequenceStep(BaseModel):
     id: str = ""                       # stable id (client-assigned); blank = not referenced
     anchor_step_id: str = ""           # target step id (when anchor == "step")
     anchor_edge: str = "end"           # "start" | "end" of the target step's extent
+    # Which of THIS step's edges is tied to that target — only a RAMP has two. "start" (default):
+    # the ramp runs forward from `target edge + offset_s`. "end": the ramp's END sits at the tied
+    # point and the ramp runs backward from it; offset_s is STILL the start's offset (the end's
+    # offset − duration), so the agent places it unchanged — this is client authoring metadata the
+    # agent carries through (≥ 1.25.3; an older agent drops it and the ramp reloads start-tied at
+    # the same timing).
+    anchor_own_edge: str = "start"
     action: StepAction
     task_name: str
     args: List[str] = []               # CLI args for this step's start/run
