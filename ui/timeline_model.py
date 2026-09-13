@@ -893,6 +893,143 @@ def steps_to_items(steps: List[dict]) -> List:
 
 # ── Validation (mirrors the agent's _validate_steps) ─────────────────────────
 
+# ── Step-conflict validation (a tune/ramp can't step outside its task, and two steps
+#    can't fight over the same live control at the same time) ─────────────────────────
+
+# --power (calibrated) and --gain (raw SDR gain) are two ways to drive the SAME output level,
+# so a tune/ramp on either conflicts with a tune/ramp on the other.
+_LEVEL_DESTS = frozenset({"power", "gain"})
+
+
+def _control_key(dest: str) -> str:
+    """Normalise a parameter dest to its CONTROL identity: power and gain both drive the one
+    output level, so they share a key; every other parameter is its own key."""
+    return "level" if dest in _LEVEL_DESTS else dest
+
+
+def _controlled_keys(it) -> set:
+    """The normalised control keys a tune/ramp step SETS — a tune's changed params, or a ramp's
+    swept param. Empty for anything else (a bar / one-shot / Hold)."""
+    act = getattr(it, "action", "run")
+    if act == "tune":
+        return {_control_key(str(d)) for d in (getattr(it, "params", None) or {})}
+    if act == "ramp":
+        p = (getattr(it, "ramp", None) or {}).get("param")
+        return {_control_key(str(p))} if p else set()
+    return set()
+
+
+def _step_time_span(it, h_off, step_bases):
+    """A tune/ramp's fire interval as (clock, lo, hi) on a comparable axis, or None when it
+    isn't time-comparable at authoring (an unresolved step anchor). `clock` is "on" (the on-air
+    clock — start/hold/step anchors), "off" (the off-air clock — a stop anchor; its offset is
+    ≤ 0), or "both" (a window-filling ramp, which overlaps everything). A tune is a point
+    (lo == hi); a ramp spans its duration from the anchored edge. Cross-clock intervals ("on"
+    vs "off") aren't comparable until the window length is fixed at arm, so they never overlap
+    here (the agent stays the backstop)."""
+    anchor = getattr(it, "anchor", "start")
+    if _is_ramp(it):
+        if anchor == "both":
+            return ("both", 0.0, 0.0)
+        dur = _ramp_duration(dict(getattr(it, "ramp", None) or {}))
+        if anchor == "stop":
+            off = float(getattr(it, "offset", 0.0))
+            return ("off", off - dur, off)
+        a, base = effective_anchor_offset(it, h_off, step_bases)
+        if a != "start":
+            return None
+        return ("on", base, base + dur)
+    # a point (tune / run)
+    if anchor == "stop":
+        off = float(getattr(it, "offset", 0.0))
+        return ("off", off, off)
+    a, base = effective_anchor_offset(it, h_off, step_bases)
+    if a != "start":
+        return None
+    return ("on", base, base)
+
+
+def _spans_overlap(s1, s2, tol: float = 1e-6) -> bool:
+    """True if two `_step_time_span` intervals overlap in time. A window-filling ("both") ramp
+    overlaps everything; two intervals on different clocks (on vs off) are not comparable at
+    authoring, so they don't."""
+    c1, lo1, hi1 = s1
+    c2, lo2, hi2 = s2
+    if c1 == "both" or c2 == "both":
+        return True
+    if c1 != c2:
+        return False
+    return lo1 <= hi2 + tol and lo2 <= hi1 + tol
+
+
+def _step_conflict_error(items) -> Optional[str]:
+    """Error string if any tune/ramp fires outside its parent duration task, if a task is
+    started more than once, or if two steps drive the SAME live control at the SAME time
+    (a tune vs tune, tune vs ramp, or ramp vs ramp on the same task / output level). None if
+    the set is conflict-free. Off-air / hold / step-anchored timing that can't be resolved on
+    a single clock at authoring is left to the agent's runtime validation."""
+    h_off = hold_offset(items)
+    step_bases = resolve_step_offsets(items, h_off)
+
+    # Rule E — a task can be started at most once (you can't run one task twice at a time;
+    # its bars would share the on-air window). The off-air time isn't known until arm, so
+    # "overlap" can't be computed here — a second bar for a task is refused outright.
+    bars_by_task: Dict[str, list] = {}
+    for it in items:
+        if getattr(it, "kind", None) == "bar":
+            bars_by_task.setdefault(it.task_name or "", []).append(it)
+    for task, bars in bars_by_task.items():
+        if len(bars) > 1:
+            return (f"'{task}' is started {len(bars)} times — a duration task can run only once "
+                    f"per sequence; remove the extra duration step (retune it with a tune/ramp "
+                    f"instead of restarting it)")
+
+    # Rule A — a tune/ramp must fire inside its parent task's on-air span (start/stop/both
+    # anchors; a hold/step-anchored step is timed relative to another point, checked elsewhere).
+    for it in items:
+        act = getattr(it, "action", "run")
+        if act not in ("tune", "ramp"):
+            continue
+        anchor = getattr(it, "anchor", "start")
+        if anchor not in ("start", "stop", "both"):
+            continue
+        spans = [(float(b.start_offset), float(b.stop_offset))
+                 for b in bars_by_task.get(it.task_name or "", [])]
+        if not spans:
+            continue   # the "targets a task with a duration step" check already covers this
+        err = step_within_task_error(spans, anchor, float(getattr(it, "offset", 0.0)),
+                                     float(getattr(it, "offset_end", 0.0)), kind=act)
+        if err:
+            return f"{_target_label(it)}: {err}"
+
+    # Rules B / C / D — two steps can't drive the same control at the same time. Group tune/ramp
+    # steps by task, then any pair whose control keys intersect AND whose time spans overlap is a
+    # conflict (tune·tune at one instant, a tune inside a ramp's sweep, or two overlapping ramps).
+    by_task: Dict[str, list] = {}
+    for it in items:
+        if getattr(it, "action", "run") not in ("tune", "ramp"):
+            continue
+        keys = _controlled_keys(it)
+        span = _step_time_span(it, h_off, step_bases)
+        if not keys or span is None:
+            continue
+        by_task.setdefault(it.task_name or "", []).append((it, keys, span))
+    for task, entries in by_task.items():
+        for i in range(len(entries)):
+            it_a, keys_a, span_a = entries[i]
+            for j in range(i + 1, len(entries)):
+                it_b, keys_b, span_b = entries[j]
+                shared = keys_a & keys_b
+                if not shared or not _spans_overlap(span_a, span_b):
+                    continue
+                what = "the output level" if shared == {"level"} else \
+                    "'" + "', '".join(sorted(shared)) + "'"
+                return (f"{_target_label(it_a)} and {_target_label(it_b)} both set {what} at "
+                        f"the same time on '{task}' — two steps can't drive one control at once; "
+                        f"move one, or remove it")
+    return None
+
+
 def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
     """Return an error string if the item set wouldn't make a valid sequence."""
     if not items:
@@ -959,6 +1096,11 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
             err = _ramp_spec_error(getattr(it, "ramp", None), it.anchor)
             if err:
                 return f"ramp on '{it.task_name}': {err}"
+    # A step must fire inside its parent task, a task starts once, and two steps can't drive the
+    # same live control at the same time (tune·tune / tune·ramp / ramp·ramp on one output level).
+    conflict = _step_conflict_error(items)
+    if conflict:
+        return conflict
     return None
 
 

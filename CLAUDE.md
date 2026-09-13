@@ -71,6 +71,34 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — sequence step-conflict validation (in-task / same-control): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Owner ask: block invalid sequences at save/arm — a tune/ramp outside its parent task, two tunes setting
+the same param at the same time, and a power/gain tune where a ramp already controls power/gain; plus
+(owner-chosen extras) ramp-vs-ramp on the same control, and a task started more than once. Enforcement:
+**save & arm gate only** (no live canvas hard-block). All in **`timeline_model.validate()`** (which already
+gates the editor Save button + Ready pill), via new `_step_conflict_error(items)`:
+- **Rule A (in-task)** — a `start`/`stop`/`both`-anchored tune/ramp must fire inside its task's on-air
+  span (reuses `step_within_task_error` per the task's bar window). Hold/step-anchored steps are timed
+  relative to another point (off-air/cross-clock), left to the agent's runtime check.
+- **Rule B (tune·tune)** / **C (tune·ramp)** / **D (ramp·ramp)** — one pairwise check per task: any two
+  tune/ramp steps whose CONTROL KEYS intersect AND whose time spans overlap conflict. `_controlled_keys`
+  = a tune's changed params / a ramp's swept param, normalised by `_control_key` so **`power` and `gain`
+  collapse to one `"level"` key** (either drives the output level). `_step_time_span` returns
+  `(clock, lo, hi)` on the on-air clock (start/hold/step), the off-air clock (stop), or `"both"` (a
+  window-filling ramp overlaps everything); `_spans_overlap` treats different clocks as non-comparable
+  (the honest authoring limit — the agent is the arm-time backstop for cross-clock cases).
+- **Rule E (one bar/task)** — a duration task may have at most one bar (can't run one task twice; two
+  bars would share the on-air window, and "overlap" isn't computable until the window is fixed at arm, so
+  a second bar is refused outright — retune with a tune/ramp instead of restarting).
+Also a belt-and-suspenders **arm-time re-check** in `sequences_panel._on_start` (`steps_to_items` on the
+stored `model_dump`ed steps → `validate()`), so a sequence saved BEFORE these rules is caught at arm too
+(fail-open on any converter error). Client-only; no agent/scripts/capability change; drift-guarded files
+untouched. Tests: `tests/test_step_conflicts.py` (all five rules + power/gain level equivalence + the
+arm-time wire round-trip); one existing paint test fixture updated to use distinct params (it had three
+tunes on `bw` at one instant — a real conflict the new rule now flags). Suite 954 → 970 offscreen.
+**Deliberately NOT blocked** (owner): a tune param the task doesn't accept (editor already restricts the
+picker), and a duplicate no-op tune.
+
 ## Current state — sequence editor `/code-review` round 2 (6 findings): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
 A second `/code-review` of the full sequence-editor branch surfaced 6 findings; all fixed client-only
 (no agent/scripts/capability change; drift-guarded files untouched). Suite 949 → 954 offscreen.

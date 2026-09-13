@@ -433,18 +433,20 @@ def test_span_clear_detects_a_crossing_line():
     assert cv._span_clear(300.0, 70.0, 5.0, [other])      # well away → clear
 
 
-def _dep(off, ref, edge="start", sid=""):
+def _dep(off, ref, edge="start", sid="", param="bw"):
     return tlm.RunItem(task_name="chirp", action="tune", anchor="step", offset=off,
-                       params={"bw": 12}, anchor_step_id=ref, anchor_edge=edge, step_id=sid)
+                       params={param: 12}, anchor_step_id=ref, anchor_edge=edge, step_id=sid)
 
 
 def test_negative_offset_dependent_paints_without_error():
     # A four-step layout in the owner's shape: a dependent BEFORE its anchor + two after it. The
-    # canvas must lay out + paint (connectors routed, arrows placed) without raising.
-    s1 = _tune(30.0, sid="s1")                             # fires at 0:30
-    s2 = _dep(-30.0, "s1", "start", sid="s2")             # anchored to s1, fires 30 s BEFORE → 0:00
-    s3 = _dep(30.0, "s2", "start")                        # anchored to s2, +30 s → 0:30
-    s4 = _dep(30.0, "s2", "start")                        # anchored to s2, +30 s → 0:30
+    # canvas must lay out + paint (connectors routed, arrows placed) without raising. Each step
+    # sets a DISTINCT param so the layout (not param conflicts) is what's under test — s3/s4 fire
+    # at the same 0:30 as s1, which the same-param/same-time rule would otherwise flag.
+    s1 = _tune(30.0, sid="s1")                             # fires at 0:30 (sets bw)
+    s2 = _dep(-30.0, "s1", "start", sid="s2", param="sidelobes")   # anchored to s1, 30 s BEFORE → 0:00
+    s3 = _dep(30.0, "s2", "start", param="freq")          # anchored to s2, +30 s → 0:30
+    s4 = _dep(30.0, "s2", "start", param="prn")           # anchored to s2, +30 s → 0:30
     ed = _chirp_editor([_bar(), s1, s2, s3, s4])
     assert tlm.validate(ed._canvas._items, ["chirp"]) is None
     ed._canvas.resize(900, 400)

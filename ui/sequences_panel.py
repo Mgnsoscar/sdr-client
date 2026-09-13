@@ -55,6 +55,7 @@ from .sequence_editor import SequenceEditorDialog
 from .sequence_log_dialog import SequenceLogDialog
 from .theme import Palette
 from .hold_edit_dialog import HoldEditDialog
+from . import timeline_model as tlm
 from .timeline_model import (
     SEQUENCE_HOLD_CAPABILITY, SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY,
     SEQUENCE_LOG_TABLE_CAPABILITY, hold_runtime_supported, step_anchor_supported,
@@ -495,6 +496,20 @@ class SequencesPanel(QWidget):
                         seq.name or seq.id, parent=self.window()).exec()
 
     def _on_start(self, seq: m.Sequence) -> None:
+        # Re-validate at arm — catches a step conflict / out-of-task step / duplicate task bar in
+        # a sequence saved before these rules existed (the editor's Save gate blocks new ones). The
+        # unknown-task check is skipped (known_tasks omitted); only structural conflicts matter here.
+        try:
+            step_dicts = [s.model_dump(mode="json") for s in seq.steps]
+            conflict = tlm.validate(tlm.steps_to_items(step_dicts))
+        except Exception:  # noqa: BLE001 — a validation helper must never block arming on its own bug
+            conflict = None
+        if conflict:
+            QMessageBox.warning(
+                self, "Cannot arm sequence",
+                f"“{seq.name or seq.id}” can’t be armed:\n\n{conflict}\n\nEdit the sequence to fix it.")
+            self._set_status("arm blocked — invalid sequence", error=True)
+            return
         hold_off = _hold_offset_of(seq)
         if hold_off is not None:
             self._arm_hold_aware(seq, hold_off)
