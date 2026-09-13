@@ -311,3 +311,65 @@ def test_step_anchored_tune_at_on_air_is_allowed():
     target = _tune(off=30.0, sid="t")
     dep = _tune(off=-30.0, anchor="step", ref="t", edge="start")   # resolves to exactly 0 (on-air)
     assert tlm.validate([_bar(), target, dep], ["tx"]) is None
+
+
+# ── Bar (duration task) anchoring: wire round-trip + resolution (groundwork for #1/#6/#7) ──
+
+def _bar_t(task="tx", so=0.0, po=0.0, sid="", sanc="start", saref="", saedge="end"):
+    return BarItem(task_name=task, start_offset=so, stop_offset=po, step_id=sid,
+                   start_anchor=sanc, start_anchor_step_id=saref, start_anchor_edge=saedge)
+
+
+def test_bar_as_target_round_trips_start_and_stop_edges():
+    # A tune anchored to a bar's START edge and another to its STOP edge must survive
+    # items_to_steps -> steps_to_items, mapping to the bar's two wire steps (id / id+suffix).
+    bar = _bar_t(sid="b1")
+    dep_start = _tune(off=3.0, anchor="step", ref="b1", edge="start")
+    dep_stop = _tune(off=-4.0, anchor="step", ref="b1", edge="end")
+    wire = tlm.items_to_steps([bar, dep_start, dep_stop])
+    # the bar's two wire steps carry distinct ids
+    ids = {s.get("id") for s in wire if s.get("action") in ("start", "stop")}
+    assert "b1" in ids and ("b1" + tlm.BAR_STOP_SUFFIX) in ids
+    # the stop-edge dependent points at the stop wire step; the start-edge one at the start id
+    refs = {(s.get("anchor_step_id")) for s in wire if s.get("anchor") == "step"}
+    assert "b1" in refs and ("b1" + tlm.BAR_STOP_SUFFIX) in refs
+    # decode: the two dependents come back with the bar id + the right edge
+    items = tlm.steps_to_items(wire)
+    deps = [it for it in items if getattr(it, "anchor", "") == "step"]
+    edges = {(d.anchor_step_id, d.anchor_edge) for d in deps}
+    assert ("b1", "start") in edges and ("b1", "end") in edges
+
+
+def test_bar_as_source_round_trips_start_anchor():
+    # A bar whose START hangs off another step (start_anchor="step"); its STOP stays off-air.
+    target = _tune(off=40.0, sid="t")
+    bar = _bar_t(sanc="step", saref="t", saedge="end", so=5.0)
+    wire = tlm.items_to_steps([target, bar])
+    start = next(s for s in wire if s.get("action") == "start")
+    assert start["anchor"] == "step" and start["anchor_step_id"] == "t" and start["anchor_edge"] == "end"
+    stop = next(s for s in wire if s.get("action") == "stop")
+    assert stop["anchor"] == "stop"                     # the STOP stays off-air (only start anchors)
+    items = tlm.steps_to_items(wire)
+    b = next(it for it in items if it.kind == "bar")
+    assert b.start_anchor == "step" and b.start_anchor_step_id == "t" and b.start_offset == 5.0
+
+
+def test_resolve_places_a_bar_target_and_a_bar_source():
+    target = _tune(off=40.0, sid="t")
+    bar_src = _bar_t(sid="b1", sanc="step", saref="t", saedge="end", so=5.0)   # start = t.end(40)+5 = 45
+    dep = _tune(off=2.0, anchor="step", ref="b1", edge="start")                 # bar.start(45)+2 = 47
+    bases = tlm.resolve_step_offsets([_bar(), target, bar_src, dep], None)
+    assert bases[bar_src.uid] == 45.0
+    assert bases[dep.uid] == 47.0
+    # anchoring to the bar's STOP edge is off-air → unresolved on the on-air clock (agent-timed)
+    dep_stop = _tune(off=-2.0, anchor="step", ref="b1", edge="end")
+    bases2 = tlm.resolve_step_offsets([_bar(), target, bar_src, dep_stop], None)
+    assert dep_stop.uid not in bases2
+
+
+def test_plain_bar_wire_is_unchanged():
+    # A bar with no anchoring emits the SAME two steps as before (no id / anchor fields).
+    wire = tlm.items_to_steps([_bar_t(task="tx", so=0.0, po=0.0)])
+    assert [s["action"] for s in wire] == ["start", "stop"]
+    assert "id" not in wire[0] and "anchor_step_id" not in wire[0]
+    assert wire[0]["anchor"] == "start" and wire[1]["anchor"] == "stop"
