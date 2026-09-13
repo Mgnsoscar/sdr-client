@@ -80,11 +80,12 @@ svg{display:block; width:100%; height:auto}
     <h1>Hold step, as a window</h1>
     <p>With a Hold, the end can’t be scheduled — off-air <b>floats</b> to Proceed, so the Hold becomes the
       one variable-length section (it replaces the relative band). Everything after it is one <b>absolute
-      off-air window</b> — tinted red, <code>0</code> at off-air and counting back — holding whatever is
-      anchored to the Hold’s <i>resume</i> edge or to off-air. With nothing anchored after the Hold, its
-      resume edge <b>is</b> off-air and the two markers merge into one. A step anchored to an off-air step
-      resolves through it and lands at its <b>own</b> off-air time. Tasks that run through the Hold stay
-      <b>visible</b> — the bar is drawn over the window, its held stretch faintly shaded.</p>
+      window</b> — styled like off-air (tinted red), but <b>timed from the Hold’s resume</b>: <code>0</code>
+      at the resume edge, counting forward, since with a Hold, resume is the fixed reference the rest hangs
+      off. It holds whatever is anchored to <i>resume</i> or to off-air. With nothing anchored after the
+      Hold, its resume edge <b>is</b> off-air and the two markers merge into one. A step anchored to an
+      off-air step resolves through it to its own time. Tasks that run through the Hold stay <b>visible</b> —
+      the bar is drawn over the window, its held stretch faintly shaded.</p>
   </div>
 
   <div class="app">
@@ -119,10 +120,10 @@ svg{display:block; width:100%; height:auto}
 
   <div class="rules">
     <div class="rule">
-      <h3><span class="swatch sw-red"></span>One off-air window</h3>
-      <p>Everything after the Hold sits in a single absolute window in the <b>off-air style</b> — red-tinted,
-        <code>0</code> at off-air, counting back. Present whenever a step is anchored to <i>resume</i> or to
-        off-air.</p>
+      <h3><span class="swatch sw-red"></span>One window, timed from resume</h3>
+      <p>Everything after the Hold sits in a single window in the <b>off-air style</b> — red-tinted — but the
+        axis counts <b>from resume</b> (<code>0</code> at the resume edge, forward), because for a Hold that
+        is the fixed T0. Present whenever a step is anchored to <i>resume</i> or off-air.</p>
     </div>
     <div class="rule">
       <h3><span class="swatch sw-held"></span>Held task stays visible</h3>
@@ -227,8 +228,8 @@ function render(){
 
   // axis line + ticks (gridlines sit behind the bar)
   s.g+=line(headerW,axisY,VW,axisY,{stroke:C.border});
-  ticks(s,on_x,1,0,Math.floor((ex-on_x)/eff)-6,30);                       // on-air, forward
-  if(!merged) ticks(s,off_x,-1,0,Math.floor((off_x-rx)/eff),30);          // off-air, backward — fills the red window
+  ticks(s,on_x,1,0,Math.floor((ex-on_x)/eff)-6,30);                       // on-air, forward from on-air
+  if(!merged) ticks(s,rx,1,0,Math.floor((off_x-rx)/eff),30);              // post-hold, forward from RESUME (resume is the fixed T0)
 
   // ── task bar (OPAQUE, over the bands, so it stays visible through the Hold) ──
   const by=rowY(0);
@@ -285,7 +286,7 @@ function render(){
   }
 
   document.getElementById("canvas").innerHTML =
-    `<svg viewBox="0 0 ${VW} ${VH}" role="img" aria-label="Timeline: an on-air window, a Hold window, and one absolute off-air window after the Hold, merging when nothing follows the hold">${s.g}</svg>`;
+    `<svg viewBox="0 0 ${VW} ${VH}" role="img" aria-label="Timeline: an on-air window, a Hold window, and one absolute window after the Hold styled like off-air but with its axis counting forward from resume, merging when nothing follows the hold">${s.g}</svg>`;
 }
 
 document.getElementById("segAnchor").addEventListener("click",e=>{ const b=e.target.closest("button"); if(!b) return;
