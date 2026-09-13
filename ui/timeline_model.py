@@ -220,24 +220,6 @@ def _ramp_duration(r: dict) -> float:
         return 0.0
 
 
-def _ramp_last_fire(r: dict) -> float:
-    """On-air offset of a forward (start/step/hold) ramp's LAST fire from its base — the
-    END edge a step anchors to. This matches the AGENT, whose `edges[id]` = max(fire_at) =
-    the last tune point, NOT start+duration: the final level is HELD one more `hold_s` past
-    its fire, so the last fire lands at `n_intervals · hold_s` (= duration_s − hold_s).
-    Anchoring a dependent to a ramp's end via `_ramp_duration` would place it one hold too
-    late vs. where the unit actually fires it."""
-    from api import ramp as _ramp
-    try:
-        rr = _ramp.resolve_ramp(r.get("start"), r.get("stop"), steps=r.get("steps"), step=r.get("step"),
-                                hold_s=r.get("hold_s"), duration_s=r.get("duration_s"),
-                                include_first=r.get("include_first", True),
-                                include_last=r.get("include_last", True))
-        return rr.n_intervals * rr.hold_s
-    except (ValueError, TypeError):
-        return 0.0
-
-
 def ramp_span(it, h_off: Optional[float] = None, step_bases: Optional[Dict[int, float]] = None):
     """A ramp's two timeline endpoints as ((left_anchor, left_off), (right_anchor,
     right_off)) — so it can be drawn as a duration bar. A 'both' ramp spans on-air
@@ -403,7 +385,7 @@ def resolve_step_offsets(items, h_off: Optional[float]) -> Dict[int, float]:
         if base is None:
             return None
         if edge == "end" and _is_ramp(it):
-            return base + _ramp_last_fire(dict(getattr(it, "ramp", None) or {}))
+            return base + _ramp_duration(dict(getattr(it, "ramp", None) or {}))
         return base                                   # point: start == end; ramp start edge
 
     def resolve_base(it, seen: set) -> Optional[float]:
@@ -555,7 +537,7 @@ def step_edge_offset(items, target_step_id: str, edge: str,
         if base is None:
             return None
         if edge_ == "end" and _is_ramp(it):
-            return base + _ramp_last_fire(dict(getattr(it, "ramp", None) or {}))
+            return base + _ramp_duration(dict(getattr(it, "ramp", None) or {}))
         return base
 
     return _edge(tgt, edge or "end", set())
@@ -587,12 +569,13 @@ def _item_edge_offset(items, it, edge: str, h_off: Optional[float],
     """On-air offset of `it`'s start/end edge for GEOMETRY (its start-side base, from
     effective_anchor_offset — so a hold/step-anchored item resolves through step_bases),
     or None when the edge isn't on the on-air clock (a stop/both-anchored item). A ramp's
-    END edge is its LAST fire (matching the agent), not the full-duration right edge."""
+    END edge is its full duration (last fire + the final level's hold), matching the agent
+    (>= 1.25.1): a dependent anchored to the end fires after the final level's hold."""
     a, base = effective_anchor_offset(it, h_off, step_bases)
     if a != "start":
         return None
     if edge == "end" and _is_ramp(it):
-        return base + _ramp_last_fire(dict(getattr(it, "ramp", None) or {}))
+        return base + _ramp_duration(dict(getattr(it, "ramp", None) or {}))
     return base
 
 

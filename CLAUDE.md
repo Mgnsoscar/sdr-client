@@ -91,13 +91,16 @@ capability change; drift-guarded files untouched). Suite 945 → 949 offscreen.
   anchor behind the operator's back; `validate()`/the agent stay the backstop for a target that
   genuinely can't be timed. Both dialogs (`ui/timeline_editor.py` StepEditorDialog, `ui/ramp_editor.py`)
   now use it.
-- **#1 — client ramp END edge diverged from the agent by one `hold_s`.** A step anchored to a ramp's
-  `end` was placed at `start + duration_s`, but the agent's `edges[id]` = `max(fire_at)` = the LAST
-  tune point = `start + (duration_s − hold_s)` (the final level is HELD one more `hold_s` past its
-  fire). New **`timeline_model._ramp_last_fire(r)`** (= `n_intervals · hold_s`) replaces `_ramp_duration`
-  at the three END-edge sites (`resolve_step_offsets`, `step_edge_offset`, `_item_edge_offset`) so a
-  dependent draws + resolves where the unit actually fires it; `ramp_span` still spans the full duration
-  for the visual bar. (Baked `start+duration` test assertions updated.)
+- **#1 — client/agent ramp END edge divergence (RESOLVED at duration-end, agent fixed to match — see
+  the ramp-end-hold note below).** A step anchored to a ramp's `end` was placed at `start + duration_s`
+  on the client but `start + (duration_s − hold_s)` (the last tune fire) on the agent. The FIRST fix
+  aligned the client DOWN to the agent's last-fire; owner testing then clarified the correct semantics —
+  the ramp's final level must be HELD its full dwell before the ramp is "finished", so a dependent
+  anchored to the end fires at `start + duration_s` (after the final hold). So the client keeps
+  `_ramp_duration` at the three END-edge sites (`resolve_step_offsets`/`step_edge_offset`/
+  `_item_edge_offset`) and the **AGENT was fixed** to `last fire + hold` (agent `1.25.1`); both now
+  agree at the ramp's full-duration end. `ramp_span` already spanned the full duration for the visual
+  bar, so a dependent draws at the ramp bar's right edge.
 - **#4 — a rapid double-arm armed the WRONG sequence.** `sequences_panel._pending_arm` was a single slot
   resolved by op name, so arming seq B before seq A's running-task pre-check returned made A's result
   arm B. Now a **`Dict[str, Sequence]` keyed by sequence id** (the async label already carries the id);
