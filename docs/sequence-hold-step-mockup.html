@@ -27,7 +27,7 @@ body{
 .wrap{max-width:1160px; margin:0 auto; padding-inline:20px}
 .lede{margin:0 0 16px}
 .lede h1{font-size:19px; font-weight:600; letter-spacing:.2px; margin:0 0 5px; text-wrap:balance}
-.lede p{margin:0; color:var(--muted); font-size:13.5px; line-height:1.5; max-width:72ch}
+.lede p{margin:0; color:var(--muted); font-size:13.5px; line-height:1.5; max-width:74ch}
 
 .app{background:var(--surface); border:1px solid var(--border); border-radius:var(--r); box-shadow:var(--shadow-md); overflow:hidden}
 .title{display:flex; align-items:center; gap:12px; padding:11px 16px; border-bottom:1px solid var(--hairline); background:linear-gradient(180deg,#FFFFFF,#FCFDFE)}
@@ -66,7 +66,7 @@ svg{display:block; width:100%; height:auto}
 .rule p{margin:0; font-size:12.5px; line-height:1.5; color:var(--muted)}
 .rule code{font-family:var(--mono); font-size:11.5px; background:var(--inset); padding:1px 5px; border-radius:4px; color:var(--accent-ink)}
 .swatch{width:13px;height:13px;border-radius:4px;flex:none}
-.sw-hold{background:repeating-linear-gradient(-45deg,#EFE3CC 0 3px, #F7EEDD 3px 6px); border:1px dashed var(--armed)}
+.sw-merge{background:linear-gradient(90deg,var(--armed) 0 50%,var(--crash) 50% 100%)}
 .sw-green{background:var(--online-soft); border:1px solid var(--online)}
 .sw-red{background:var(--crash-soft); border:1px solid var(--crash)}
 .foot{margin-top:14px; font-size:12px; color:var(--faint); line-height:1.5}
@@ -78,11 +78,12 @@ svg{display:block; width:100%; height:auto}
 <div class="wrap">
   <div class="lede">
     <h1>Hold step, as a window</h1>
-    <p>Once a Hold is in the sequence, the run’s end can’t be scheduled — off-air <b>floats</b> to
-      wherever Proceed lands. So the Hold takes the place of the old relative band: it becomes the one
-      variable-length section. Everything after it is a fixed-length block that slides along with resume,
-      shown as up to two <b>absolute</b> windows — a green <i>resume</i> window, then a red <i>off-air</i>
-      window — each present only when a step is anchored in it, and the two never overlap.</p>
+    <p>With a Hold, the end can’t be scheduled — off-air <b>floats</b> to Proceed, so the Hold becomes the
+      one variable-length section (it replaces the relative band). After it sit up to two <b>absolute</b>
+      windows — a green <i>resume</i> window then a red <i>off-air</i> window — each present only when a
+      step is anchored in it. With nothing anchored after the Hold, its <i>resume</i> edge <b>is</b>
+      off-air; the two markers merge into one. And a step anchored to an off-air step lands in the red
+      window at its own resolved time.</p>
   </div>
 
   <div class="app">
@@ -117,34 +118,34 @@ svg{display:block; width:100%; height:auto}
 
   <div class="rules">
     <div class="rule">
-      <h3><span class="swatch sw-hold"></span>The Hold is the only relative part</h3>
-      <p>With a Hold, the end can’t be scheduled — off-air floats to Proceed. The Hold <b>replaces</b>
-        the relative band: it’s the sole variable-length section, hatched with no interior ticks.</p>
-    </div>
-    <div class="rule">
       <h3><span class="swatch sw-green"></span>Resume window</h3>
       <p>Steps anchored to <b>resume</b> live in a green absolute window right of the Hold — <code>0</code>
-        at resume, counting forward. It appears only when something is anchored there.</p>
+        at resume, counting forward. Present only when something is anchored there.</p>
     </div>
     <div class="rule">
-      <h3><span class="swatch sw-red"></span>Off-air window</h3>
-      <p>Steps anchored to <b>off-air</b> live in a red absolute window — <code>0</code> at off-air,
-        counting back. It appears only when something is anchored there, and never overlaps the green
-        one — the two abut into one floating block.</p>
+      <h3><span class="swatch sw-red"></span>Off-air window &amp; chains</h3>
+      <p>Steps anchored to <b>off-air</b> (or to a step that is) live in a red absolute window —
+        <code>0</code> at off-air, counting back. A chained step resolves through its target and lands
+        at its <b>own</b> off-air time in the same window.</p>
+    </div>
+    <div class="rule">
+      <h3><span class="swatch sw-merge"></span>Nothing after? They merge</h3>
+      <p>With no step anchored after the Hold, its <i>resume</i> edge <b>is</b> off-air — one shared line.
+        The two labels join into a single <b>HOLD │ OFF-AIR</b> marker so they never collide.</p>
     </div>
   </div>
 
-  <p class="foot">Toggle the two switches to add or remove an anchored step and watch each absolute window appear or
-    fold away. The Hold’s own anchor can be on-air or another step (never off-air — that would be circular).</p>
+  <p class="foot">Turn both switches off to collapse the resume/off-air windows and watch the Hold’s end become off-air
+    (the merged marker). The red switch also shows a step anchored to the off-air step — it lands at its own resolved time.</p>
 </div>
 
 <script>
 const S={ anchor:"onair", green:true, red:true };
 
-const VW=1120, VH=384;
-const headerW=170, on_x=182, eff=3.2, holdW=58, GREEN_S=60, RED_S=45;
-const laneTop=74, pitch=44, rowH=30, axisY=298, bandTop=60;
-const rowY=i=>laneTop+i*pitch;                            // 0 bar,1 pre,2 res-tune,3 res-ramp,4 offair
+const VW=1120, VH=404;
+const headerW=170, on_x=182, eff=3.2, holdW=58, GREEN_S=60, RED_S=48;
+const laneTop=70, pitch=40, rowH=28, axisY=316, bandTop=58;
+const rowY=i=>laneTop+i*pitch;                            // 0 bar,1 pre,2 res-tune,3 res-ramp,4 offair,5 chain
 const C={ text:"#1E2530",muted:"#5C6675",faint:"#8A93A2",border:"#E2E5EA",bstrong:"#CDD2DA",
   accent:"#2C6E9B",accentInk:"#1F5476",online:"#1D9E75",crash:"#C23B3B",armed:"#BA7517",
   teal:"#1E8FA3",tealInk:"#12707F" };
@@ -156,8 +157,9 @@ function geom(){
   const ex = S.anchor==="onair" ? on_x+120*eff : on_x+140*eff;
   const rx = ex+holdW;
   const green_end = S.green ? rx+GREEN_S*eff : rx;
-  const off_x = Math.max(green_end + (S.red?RED_S*eff:0), rx+26);
-  return {ex,rx,green_end,off_x};
+  const off_x = green_end + (S.red?RED_S*eff:0);          // merges with rx when nothing is anchored after
+  const merged = off_x <= rx + 0.5;
+  return {ex,rx,green_end,off_x,merged};
 }
 
 const A=o=>Object.entries(o).map(([k,v])=>`${k}="${v}"`).join(" ");
@@ -177,6 +179,12 @@ function pin(cx,cy,color,label,side,shape="dot"){
 }
 function pill(cx,topY,label,color){ const w=label.length*6.6+16,h=17;
   return rect(cx-w/2,topY,w,h,{rx:5,fill:color})+txt(cx,topY+12,label,{"text-anchor":"middle","font-family":"var(--sans)","font-size":10,"font-weight":700,fill:"#FFFFFF","letter-spacing":.4}); }
+function mergedMark(seamX,topY){          // amber ⏸ HOLD | red OFF-AIR, seam on the shared line
+  const hw=60,ow=62,h=17;
+  return rect(seamX-1-hw,topY,hw,h,{rx:5,fill:C.armed})+
+    txt(seamX-1-hw/2,topY+12,"⏸ HOLD",{"text-anchor":"middle","font-family":"var(--sans)","font-size":10,"font-weight":700,fill:"#fff","letter-spacing":.4})+
+    rect(seamX+1,topY,ow,h,{rx:5,fill:C.crash})+
+    txt(seamX+1+ow/2,topY+12,"OFF-AIR",{"text-anchor":"middle","font-family":"var(--sans)","font-size":10,"font-weight":700,fill:"#fff","letter-spacing":.4}); }
 function ticks(s,x0,dir,fromS,toS,step){
   for(let t=fromS;t<=toS;t+=step){ const x=x0+dir*t*eff;
     s.g+=line(x,axisY,x,axisY+6,{stroke:C.faint});
@@ -186,11 +194,11 @@ function ticks(s,x0,dir,fromS,toS,step){
 }
 
 function render(){
-  const {ex,rx,green_end,off_x}=geom();
+  const {ex,rx,green_end,off_x,merged}=geom();
   const s={g:""};
-  const rowLbl=["gps_ca","tune · RF off","tune · RF on","ramp · −50→−90","tune · RF off"];
-  const rowSub=["duration","before hold","on resume","on resume","before off-air"];
-  const dimRow=[false,false,!S.green,!S.green,!S.red];
+  const rowLbl=["gps_ca","tune · RF off","tune · RF on","ramp · −50→−90","tune · RF off","tune · sidelobes"];
+  const rowSub=["duration","before hold","on resume","on resume","before off-air","anchored to ↑"];
+  const dimRow=[false,false,!S.green,!S.green,!S.red,!S.red];
 
   s.g+=`<defs>
     <pattern id="hatch" width="7" height="7" patternUnits="userSpaceOnUse">
@@ -198,66 +206,82 @@ function render(){
       <path d="M-1,6 l7,-7 M0,7 l7,-7 M6,7 l1,-1" stroke="#DFE4EA" stroke-width="1"/></pattern>
     <marker id="arw" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M1,1 L6,4 L1,7" fill="none" stroke="${C.armed}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="arwR" viewBox="0 0 8 8" refX="6.5" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M1,1 L6,4 L1,7" fill="none" stroke="${C.crash}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></marker>
   </defs>`;
 
   // header
   s.g+=rect(0,0,headerW,VH,{fill:"#FBFCFD"})+line(headerW,0,headerW,VH,{stroke:C.border});
-  s.g+=txt(14,26,"TASKS &amp; STEPS",{"font-family":"var(--sans)","font-size":9.5,"font-weight":700,"letter-spacing":1,fill:C.faint});
-  for(let i=0;i<5;i++){ const y=rowY(i)+rowH/2, isTask=i===0, dim=dimRow[i];
+  s.g+=txt(14,24,"TASKS &amp; STEPS",{"font-family":"var(--sans)","font-size":9.5,"font-weight":700,"letter-spacing":1,fill:C.faint});
+  for(let i=0;i<6;i++){ const y=rowY(i)+rowH/2, isTask=i===0, dim=dimRow[i];
     s.g+=rect(14,y-6.5,9,13,{rx:3,fill:isTask?C.teal:"none",stroke:isTask?"none":C.bstrong,"stroke-width":isTask?0:1,opacity:dim?.4:1});
     s.g+=txt(32,y-1,rowLbl[i]+(dim?"  ·  off":""),{"font-family":"var(--sans)","font-size":12,"font-weight":isTask?600:500,fill:dim?C.faint:C.text});
     s.g+=txt(32,y+11,rowSub[i],{"font-family":"var(--sans)","font-size":9.5,fill:C.faint}); }
 
-  // absolute windows (fills) — on-air green, resume green, off-air red. NO relative band (the Hold is it).
+  // absolute windows — on-air green, resume green, off-air red (NO relative band; the Hold is it)
   s.g+=rect(on_x,bandTop+2,ex-on_x,axisY-(bandTop+2),{fill:C.online,opacity:.055});
   if(S.green) s.g+=rect(rx,bandTop+2,green_end-rx,axisY-(bandTop+2),{fill:C.online,opacity:.075});
   if(S.red)   s.g+=rect(green_end,bandTop+2,off_x-green_end,axisY-(bandTop+2),{fill:C.crash,opacity:.05});
   s.g+=line(headerW,axisY,VW,axisY,{stroke:C.border});
-  ticks(s,on_x,1,0,Math.floor((ex-on_x)/eff)-15,30);              // on-air window, forward from 0
-  if(S.green) ticks(s,rx,1,0,GREEN_S,30);                          // resume window, forward from 0
-  if(S.red)   ticks(s,off_x,-1,0,RED_S-15,30);                     // off-air window, back from 0
+  ticks(s,on_x,1,0,Math.floor((ex-on_x)/eff)-15,30);
+  if(S.green) ticks(s,rx,1,0,GREEN_S,30);
+  if(S.red)   ticks(s,off_x,-1,0,RED_S-18,30);
 
-  // task bar across the whole run
+  // task bar
   const by=rowY(0);
   s.g+=rect(on_x,by,off_x-on_x,rowH,{rx:8,fill:C.teal,opacity:.1,stroke:C.teal,"stroke-width":1,"stroke-opacity":.5});
-  s.g+=rect(on_x+3,by+6,3,rowH-12,{rx:1.5,fill:C.teal});
-  s.g+=txt(on_x+14,by+19,"gps_ca",{"font-family":"var(--sans)","font-size":12,"font-weight":600,fill:C.tealInk});
+  s.g+=rect(on_x+3,by+5,3,rowH-10,{rx:1.5,fill:C.teal});
+  s.g+=txt(on_x+14,by+18,"gps_ca",{"font-family":"var(--sans)","font-size":12,"font-weight":600,fill:C.tealInk});
   s.g+=circ(on_x,by+rowH/2,4.5,{fill:"#FFFFFF",stroke:C.teal,"stroke-width":2})+circ(off_x,by+rowH/2,4.5,{fill:"#FFFFFF",stroke:C.teal,"stroke-width":2});
   if(S.anchor==="ramp"){ const r0=ex-50*eff,r1=ex-10*eff;
     s.g+=rect(r0,by+4,r1-r0,rowH-8,{rx:6,fill:C.teal,opacity:.22,stroke:C.teal,"stroke-width":1,"stroke-opacity":.6});
     s.g+=line(r0+7,by+rowH-8,r1-7,by+8,{stroke:C.tealInk,"stroke-width":1.6,"stroke-linecap":"round"})+circ(r1-7,by+8,2.4,{fill:C.tealInk}); }
 
-  // HOLD window (two amber lines, hatch + amber wash, ⏸ tab) — where the relative band used to be
+  // HOLD window — enter line amber; resume line amber (or RED when it IS off-air, i.e. merged)
   s.g+=rect(ex,bandTop+2,rx-ex,axisY-(bandTop+2),{fill:"url(#hatch)"})+rect(ex,bandTop+2,rx-ex,axisY-(bandTop+2),{fill:C.armed,opacity:.10});
-  s.g+=line(ex,bandTop,ex,axisY+4,{stroke:C.armed,"stroke-width":2,"stroke-dasharray":"5 4"})+line(rx,bandTop,rx,axisY+4,{stroke:C.armed,"stroke-width":2,"stroke-dasharray":"5 4"});
-  const cxh=(ex+rx)/2;
-  s.g+=rect(cxh-32,bandTop-13,64,18,{rx:9,fill:C.armed})+txt(cxh,bandTop-0.5,"⏸ HOLD",{"text-anchor":"middle","font-family":"var(--sans)","font-size":10,"font-weight":700,fill:"#FFFFFF","letter-spacing":.5});
+  s.g+=line(ex,bandTop,ex,axisY+4,{stroke:C.armed,"stroke-width":2,"stroke-dasharray":"5 4"});
+  s.g+=line(rx,bandTop,rx,axisY+4,{stroke:merged?C.crash:C.armed,"stroke-width":2,"stroke-dasharray":merged?"2 3":"5 4"});
 
-  // Hold's own anchor connector (top rule) — on-air or a step
+  // Hold's own anchor connector (top rule)
   const yA=bandTop-24;
   if(S.anchor==="onair"){ s.g+=line(on_x,bandTop-2,on_x,yA,{stroke:C.armed,"stroke-width":1.5,opacity:.5})+line(on_x,yA,ex,yA,{stroke:C.armed,"stroke-width":1.5,"marker-end":"url(#arw)"})+chipAt((on_x+ex)/2,yA,"+2:00",C.armed); }
   else { const re=ex-10*eff; s.g+=line(re,by-2,re,yA,{stroke:C.armed,"stroke-width":1.5,opacity:.5})+line(re,yA,ex,yA,{stroke:C.armed,"stroke-width":1.5,"marker-end":"url(#arw)"})+chipAt((re+ex)/2,yA,"+0:10 · after ramp end",C.armed); }
 
-  // steps — placed at their TRUE time inside whichever absolute window they fall in
-  s.g+=pin(ex-30*eff, rowY(1)+rowH/2, C.teal, "−0:30 · before hold", "l");        // window A (on-air), true time
+  // steps — at true time in their window
+  s.g+=pin(ex-30*eff, rowY(1)+rowH/2, C.teal, "−0:30 · before hold", "l");
   if(S.green){
-    s.g+=pin(rx, rowY(2)+rowH/2, C.teal, "+0:00 · RF on", "r");                    // resume window, at 0
-    const rs=rx+15*eff, re2=rx+60*eff, ry=rowY(3);                                 // resume ramp +0:15 → +1:00
+    s.g+=pin(rx, rowY(2)+rowH/2, C.teal, "+0:00 · RF on", "r");
+    const rs=rx+15*eff, re2=rx+60*eff, ry=rowY(3);
     s.g+=rect(rs,ry+4,re2-rs,rowH-8,{rx:6,fill:C.teal,opacity:.2,stroke:C.teal,"stroke-width":1,"stroke-opacity":.6});
-    s.g+=txt(rs+8,ry+18,"−50→−90",{"font-family":"var(--mono)","font-size":10.5,"font-weight":600,fill:C.tealInk});
-    s.g+=line(rs+9,ry+rowH-8,re2-9,ry+8,{stroke:C.tealInk,"stroke-width":1.6,"stroke-linecap":"round"})+circ(re2-9,ry+8,2.4,{fill:C.tealInk});
+    s.g+=txt(rs+8,ry+17,"−50→−90",{"font-family":"var(--mono)","font-size":10,"font-weight":600,fill:C.tealInk});
+    s.g+=line(rs+9,ry+rowH-7,re2-9,ry+7,{stroke:C.tealInk,"stroke-width":1.6,"stroke-linecap":"round"})+circ(re2-9,ry+7,2.4,{fill:C.tealInk});
     s.g+=chipSide(rs, ry+rowH/2, "+0:15", C.tealInk, "l");
   }
-  if(S.red) s.g+=pin(off_x-30*eff, rowY(4)+rowH/2, C.crash, "−0:30 · before off-air", "l");  // off-air window, true time
+  if(S.red){
+    const s1x=off_x-30*eff, s1y=rowY(4)+rowH/2;
+    const s2x=off_x-40*eff, s2y=rowY(5)+rowH/2;           // chained: −0:10 from the off-air step → −0:40
+    // connector: from the off-air step down-left into the chained step (arrow points at the chain)
+    s.g+=line(s1x,s1y+6,s1x,s2y,{stroke:C.crash,"stroke-width":1.3,opacity:.55})+line(s1x,s2y,s2x,s2y,{stroke:C.crash,"stroke-width":1.3,opacity:.55,"marker-end":"url(#arwR)"});
+    s.g+=chipAt((s1x+s2x)/2, s2y-13, "−0:10", C.crash);
+    s.g+=pin(s1x, s1y, C.crash, "−0:30 · before off-air", "l");
+    s.g+=pin(s2x, s2y, C.crash, "−0:40 · resolved", "l", "diamond");
+  }
 
-  // on-air / off-air lines + pills (off-air floats, so it is drawn dashed)
-  s.g+=line(on_x,bandTop-2,on_x,axisY+4,{stroke:C.online,"stroke-width":2});
-  s.g+=line(off_x,bandTop-2,off_x,axisY+4,{stroke:C.crash,"stroke-width":2,"stroke-dasharray":"2 3"});
-  s.g+=pill(on_x,bandTop-14,"ON-AIR",C.online)+pill(off_x,bandTop-14,"OFF-AIR",C.crash);
-  s.g+=txt(off_x,bandTop-19,"floats",{"text-anchor":"middle","font-family":"var(--sans)","font-size":8.5,"font-style":"italic",fill:C.faint});
+  // on-air line + pill; off-air marker (merged combined pill, or separate)
+  s.g+=line(on_x,bandTop-2,on_x,axisY+4,{stroke:C.online,"stroke-width":2})+pill(on_x,bandTop-14,"ON-AIR",C.online);
+  const ftY=bandTop-19;
+  if(merged){
+    s.g+=mergedMark(rx,bandTop-14);
+    s.g+=txt(rx+32,ftY,"floats",{"text-anchor":"middle","font-family":"var(--sans)","font-size":8.5,"font-style":"italic",fill:C.faint});
+  } else {
+    const cxh=(ex+rx)/2;
+    s.g+=rect(cxh-32,bandTop-13,64,18,{rx:9,fill:C.armed})+txt(cxh,bandTop-0.5,"⏸ HOLD",{"text-anchor":"middle","font-family":"var(--sans)","font-size":10,"font-weight":700,fill:"#FFFFFF","letter-spacing":.5});
+    s.g+=line(off_x,bandTop-2,off_x,axisY+4,{stroke:C.crash,"stroke-width":2,"stroke-dasharray":"2 3"});
+    s.g+=pill(off_x,bandTop-14,"OFF-AIR",C.crash)+txt(off_x,ftY,"floats",{"text-anchor":"middle","font-family":"var(--sans)","font-size":8.5,"font-style":"italic",fill:C.faint});
+  }
 
   document.getElementById("canvas").innerHTML =
-    `<svg viewBox="0 0 ${VW} ${VH}" role="img" aria-label="Timeline: a Hold window, then a green resume window and a red off-air window">${s.g}</svg>`;
+    `<svg viewBox="0 0 ${VW} ${VH}" role="img" aria-label="Timeline: a Hold window, a green resume window and a red off-air window, merging when nothing follows the hold">${s.g}</svg>`;
 }
 
 document.getElementById("segAnchor").addEventListener("click",e=>{ const b=e.target.closest("button"); if(!b) return;
