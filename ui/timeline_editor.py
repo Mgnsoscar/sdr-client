@@ -774,8 +774,10 @@ class _TimelineCanvas(QWidget):
         cool-down; the hatched 'relative' band (length set at arm) is left clear. The
         on-air/off-air instants get their own strong anchor lines, so they're skipped here."""
         eff = self._eff(); tick_s = self._tick_interval()
-        major = QColor(Palette.BORDER); major.setAlpha(205)
-        minor = QColor(Palette.BORDER); minor.setAlpha(100)
+        # BORDER_STRONG (not the lighter BORDER) so the lines keep enough contrast over the
+        # green on-air tint too; a clear major/minor alpha split keeps the minors readable.
+        major = QColor(Palette.BORDER_STRONG); major.setAlpha(175)
+        minor = QColor(Palette.BORDER_STRONG); minor.setAlpha(95)
         y0, y1 = int(top), int(baseline)
         p.save()
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)

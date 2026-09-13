@@ -79,11 +79,15 @@ row band `top..baseline`, aligned to the axis's MAJOR ticks (`_paint_axis`'s own
 warm-up, cool-down) with fainter half-tick minors in the defined region only. Drawn only where time is
 REAL — the on-air anchor (t=0) and off-air get their own strong lines and are skipped, and the hatched
 "relative" band (`def_x..off_x`, length set at arm) is left clear. Antialiasing off for crisp 1-px
-hairlines (save/restore around it). Major/minor alpha 205/100 (nudged up from 150/70 on owner feedback
-"a little too discreet"). Bars + ramps stopped the gridlines bleeding THROUGH them: `_capsule` now
-paints an OPAQUE `Palette.SURFACE` rounded-rect under the translucent hue gradient, so a duration/ramp
-capsule hides whatever is behind it (gridlines, the on-air tint). Paint-only; no geometry/model/
-serialisation change; drift-guarded files untouched. Tests: `tests/test_timeline_step_anchor_ui.py::
+hairlines (save/restore around it). Colour `Palette.BORDER_STRONG` (NOT the lighter `BORDER`) at
+alpha 175 major / 95 minor: pixel-measured, the light `BORDER` washed out under the green on-air tint
+(contrast ~6 major / ~3 minor → minors invisible, and the low contrast is what made a phone downscaler
+drop some lines and thicken others — the reported "double lines"); `BORDER_STRONG` restores a clear
+split (~18 major / ~10 minor over the tint) with both readable. Bars + ramps stopped the gridlines
+bleeding THROUGH them: `_capsule` now paints an OPAQUE `Palette.SURFACE` rounded-rect under the
+translucent hue gradient, so a duration/ramp capsule hides whatever is behind it (gridlines, the on-air
+tint). Paint-only; no geometry/model/serialisation change; drift-guarded files untouched. Tests:
+`tests/test_timeline_step_anchor_ui.py::
 test_paint_gridlines_are_vertical_and_skip_the_hatch_band` (a stub painter records the drawn x's: every
 line vertical, none inside the hatch band, a defined-region tune pins a major there). Suite 975 → 976
 offscreen.
