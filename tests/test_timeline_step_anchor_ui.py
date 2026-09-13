@@ -675,3 +675,37 @@ def test_ramp_end_handle_drag_gets_a_notice_not_silence():
     g = cv._geom[down.uid]
     hit = cv._hit(g["stop_x"], g["y"] + LANE_H / 2)
     assert hit is not None and hit[0] is down and hit[1] == "edge_end"
+
+
+# ── #10: drag-anchor a step onto a root line (on-air / off-air / Hold resume) + selected hint ──
+
+def test_drop_target_locks_onto_the_on_air_line():
+    src = _tune(40.0)
+    cv = _chirp_editor([_bar(), src])._canvas
+    # a drop near the on-air line resolves to the root-start anchor sentinel
+    tgt = cv._drop_target(cv._on + 2.0, cv._geom[src.uid]["y"] + LANE_H / 2, src.uid)
+    assert tgt == ("__root__", "start")
+    # near off-air → root-stop; far from any line → nothing
+    assert cv._drop_target(cv._off - 1.0, 60.0, src.uid) == ("__root__", "stop")
+    assert cv._drop_target((cv._on + cv._off) / 2.0, 60.0, src.uid) is None
+
+
+def test_make_root_anchor_sets_a_stop_anchor_in_place():
+    src = _tune(40.0)                                    # start-anchored at +40
+    cv = _chirp_editor([_bar(), src])._canvas
+    x0 = cv._geom[src.uid]["cx"]; off0 = cv._off; eff = cv._eff()
+    cv._make_root_anchor(src.uid, "stop")               # drag onto off-air → stop-anchored
+    assert src.anchor == "stop" and src.anchor_step_id == ""
+    # its offset now measures its (unchanged) time from off-air — it kept its instant, not its
+    # pixel x (the band reflows to fit the new stop-anchored content).
+    assert abs(src.offset - (x0 - off0) / eff) < 1e-6
+
+
+def test_selected_root_anchored_step_paints_a_hint():
+    from PyQt6.QtGui import QPixmap
+    src = _tune(40.0)
+    cv = _chirp_editor([_bar(), src])._canvas
+    cv._select_only(src.uid)
+    cv.render(QPixmap(1400, 360))                        # paints the on-air tie without error
+    # the hint only shows for a root-anchored selection; a step-anchored one uses the connector
+    assert cv._selected == src.uid and getattr(src, "anchor", "") == "start"

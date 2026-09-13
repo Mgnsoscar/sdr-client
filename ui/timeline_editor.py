@@ -81,6 +81,7 @@ HANDLE_HIT = 11             # px each side of a handle centre that grabs it
 PIN_HIT = 10                # px around a pin / ramp edge dot that starts a drag-to-anchor
 SNAP_PX = 7                 # px a dragged edge snaps to a nearby edge / anchor / tick
 HOLD_HIT = 9                # px each side of the Hold band edge that grabs it
+ROOT_SNAP = 13              # px around a root anchor line (on-air/off-air/resume) a drop locks onto
 HOLD_BAND_PX = 48           # fixed visual width of the Hold WINDOW (its length is set at Proceed,
                             # so it draws at a constant width, hatched — like the old relative band)
 POST_HOLD_PAD = 130         # min px between the resume-forward and off-air-backward step groups in
@@ -782,6 +783,7 @@ class _TimelineCanvas(QWidget):
                 self._paint_pin(p, it)
         for it in self._holds:
             self._paint_hold(p, it)
+        self._paint_root_anchor_hint(p)
         self._paint_selection(p)
         if self._rmchip_pos is not None:
             self._paint_remove_chip(p, *self._rmchip_pos)
@@ -1555,6 +1557,38 @@ class _TimelineCanvas(QWidget):
                 else g.get("start_x", 0.0)
         return g.get("cx", 0.0)
 
+    def _paint_root_anchor_hint(self, p):
+        """When a ROOT-anchored (start/off-air/hold) step is SELECTED, draw a discreet tie from
+        the item to its anchor line with an offset chip — so the operator can SEE what it is
+        anchored to (step anchors already draw an always-on connector). Selected-only, so the
+        default view stays uncluttered (every step is anchored to something)."""
+        uid = self._selected
+        if uid is None or (self._selection and len(self._selection) > 1):
+            return
+        it = next((o for o in self._rows if o.uid == uid), None)
+        g = self._geom.get(uid) if it is not None else None
+        if it is None or g is None or tlm._is_hold(it):
+            return
+        anchor = getattr(it, "anchor", "start")
+        if anchor not in ("start", "stop", "hold"):
+            return                                  # step anchors already have a connector
+        if anchor == "hold" and self._resume_x is None:
+            return
+        base_x = self._root_x(anchor)
+        item_x = g.get("cx", g.get("start_x"))
+        if item_x is None:
+            return
+        y = int(g["y"] + LANE_H / 2)
+        col = QColor(Palette.ACCENT); col.setAlpha(150)
+        pen = QPen(col, 1.4); pen.setStyle(Qt.PenStyle.DashLine)
+        p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(int(base_x), y, int(item_x), y)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(Palette.ACCENT))
+        p.drawEllipse(QPointF(float(base_x), float(y)), 3.4, 3.4)     # a dot on the anchor line
+        root_name = {"start": "on-air", "stop": "off-air", "hold": "resume"}[anchor]
+        chip = f"{root_name} {self._offset_chip_text(float(getattr(it, 'offset', 0.0)))}"
+        self._paint_tag(p, (base_x + item_x) / 2.0, y - 15, chip, True)
+
     def _paint_connectors(self, p):
         by_sid = {getattr(it, "step_id", "") or "": it for it in self._rows
                   if getattr(it, "step_id", "")}
@@ -1852,8 +1886,13 @@ class _TimelineCanvas(QWidget):
         cur = self._connect["cursor"]; x2, y2 = cur.x(), cur.y()
         tgt = self._connect["target"]
         ok = tgt is not None
+        is_root = ok and tgt[0] == "__root__"
         col = QColor(Palette.ACCENT) if ok else QColor(Palette.TEXT_FAINT)
-        if ok:
+        if is_root:
+            x2 = self._root_x(tgt[1])            # snap the end to the root line; y2 stays at cursor
+            p.setPen(QPen(QColor("#FFFFFF"), 2)); p.setBrush(QColor(Palette.ACCENT))
+            p.drawEllipse(QPointF(x2, y2), 6.0, 6.0)
+        elif ok:
             t, edge = tgt
             x2 = self._edge_x(t, edge); y2 = self._geom[t.uid]["y"] + LANE_H / 2
             p.setPen(QPen(QColor("#FFFFFF"), 2)); p.setBrush(QColor(Palette.ACCENT))
@@ -1867,12 +1906,16 @@ class _TimelineCanvas(QWidget):
         p.drawPath(path)
         p.setPen(QPen(QColor("#FFFFFF"), 2)); p.setBrush(col)
         p.drawEllipse(QPointF(x1, y1), 5.5, 5.5)
-        if ok:
+        if is_root:
+            root_name = {"start": "on-air", "stop": "off-air", "hold": "resume"}[tgt[1]]
+            label = f"anchor to {root_name}"
+        elif ok:
+            t, edge = tgt
             off = tlm.step_drop_offset(self._items, self._connect["src"], t.uid, edge,
                                        self._hold_off, self._step_bases)
             label = f"{self._offset_chip_text(off or 0.0)} after {t.task_name or '?'} · {edge}"
         else:
-            label = "drop on a step edge to anchor"
+            label = "drop on a step edge or an anchor line"
         self._paint_tag(p, x2, y2 - 16, label, ok)
 
     def _paint_snap_guide(self, p):
@@ -2109,17 +2152,39 @@ class _TimelineCanvas(QWidget):
                 "drag the ramp's start (or its body) to move it.")
 
     def _drop_target(self, x: float, y: float, src_uid: int) -> Optional[Tuple[object, str]]:
-        """The (target, edge) a connect drag from `src_uid` would land on at (x, y): an
-        edge handle of an ELIGIBLE target (cycle-safe, on-air), never the source itself."""
+        """The (target, edge) a connect drag from `src_uid` would land on at (x, y): an edge
+        handle of an ELIGIBLE step target (cycle-safe, on-air), OR one of the ROOT anchor lines
+        (on-air / off-air / the Hold resume edge), returned as ("__root__", "start"|"stop"|"hold").
+        Never the source itself."""
         hit = self._edge_at(x, y)
-        if hit is None:
-            return None
-        tgt, edge = hit
-        if getattr(tgt, "uid", None) == src_uid:
-            return None
-        if tgt not in tlm.eligible_step_targets(self._items, src_uid):
-            return None
-        return tgt, edge
+        if hit is not None:
+            tgt, edge = hit
+            if (getattr(tgt, "uid", None) != src_uid
+                    and tgt in tlm.eligible_step_targets(self._items, src_uid)):
+                return tgt, edge
+        root = self._root_anchor_at(x)
+        if root is not None:
+            return "__root__", root
+        return None
+
+    def _root_anchor_at(self, x: float) -> Optional[str]:
+        """Which root anchor line (if any) x is over: 'start' (on-air), 'stop' (off-air), or
+        'hold' (the Hold resume edge). None away from all of them."""
+        if abs(x - self._on) <= ROOT_SNAP:
+            return "start"
+        if abs(x - self._off) <= ROOT_SNAP:
+            return "stop"
+        if self._resume_x is not None and abs(x - self._resume_x) <= ROOT_SNAP:
+            return "hold"
+        return None
+
+    def _root_x(self, kind: str) -> float:
+        """The x of a root anchor line ('start'→on-air, 'stop'→off-air, 'hold'→resume edge)."""
+        if kind == "stop":
+            return float(self._off)
+        if kind == "hold" and self._resume_x is not None:
+            return float(self._resume_x)
+        return float(self._on)
 
     # ── Mouse ─────────────────────────────────────────────────────────────────
 
@@ -2506,7 +2571,10 @@ class _TimelineCanvas(QWidget):
             self._connect = None
             if conn["moved"] and conn["target"] is not None:
                 tgt, edge = conn["target"]
-                self._make_anchor(conn["src"], tgt, edge)
+                if tgt == "__root__":
+                    self._make_root_anchor(conn["src"], edge)
+                else:
+                    self._make_anchor(conn["src"], tgt, edge)
             else:
                 self.update()          # cancelled — clear the rubber-band
             return
@@ -2632,6 +2700,35 @@ class _TimelineCanvas(QWidget):
         src.anchor_step_id = sid
         src.anchor_edge = edge
         src.offset = off
+        self._select_only(src_uid)
+        self.relayout()
+        self.changed.emit()
+
+    def _make_root_anchor(self, src_uid: int, kind: str) -> None:
+        """Anchor the source to a ROOT line (on-air='start', off-air='stop', Hold resume='hold')
+        by a drag-to-anchor drop onto that line — keeping the source visually in place (its offset
+        becomes the current gap from that line). Replaces any step anchor it had."""
+        src = next((it for it in self._items if it.uid == src_uid), None)
+        if src is None or tlm._is_hold(src) or getattr(src, "kind", None) == "bar":
+            self.update()
+            return
+        if kind == "hold" and self._resume_x is None:
+            self.update()
+            return
+        eff = self._eff(); base_x = self._root_x(kind)
+        g = self._geom.get(src_uid) or {}
+        if tlm._is_ramp(src):
+            cur_x = g.get("stop_x", g.get("start_x")) if kind == "stop" else g.get("start_x")
+        else:
+            cur_x = g.get("cx")
+        if cur_x is None:
+            cur_x = base_x
+        off = (cur_x - base_x) / eff          # exact — keep the source visually in place
+        self._record()
+        src.anchor = kind
+        src.anchor_step_id = ""
+        src.anchor_edge = "end"
+        src.offset = self._clamp_tune_offset(src, off)
         self._select_only(src_uid)
         self.relayout()
         self.changed.emit()
