@@ -71,6 +71,39 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — sequence-editor owner-testing fixes, round 1 (6 of 10): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Owner testing surfaced 10 issues (Word doc). Six shipped, all client-only; drift-guarded files
+untouched. Suite 976 → 992 offscreen.
+- **#2 Ramps drag to MOVE (never resize).** A ramp body is now a `ramp_body` drag part that shifts the
+  ramp's `offset` (its duration is fixed; a window-filling "both" ramp has no free offset and stays put);
+  its start/end dots remain anchor handles. `_live_relayout` now updates a ramp's `start_x`/`stop_x`
+  (previously only bars + pins). `mousePressEvent` stores `off0`.
+- **#5 Step-anchor dependents move in REAL TIME.** New `_live_move(it)` recomputes `_step_bases` from the
+  live offsets and re-places every step-anchored dependent (and chains) as a target is dragged (and a
+  dragged dependent now tracks the cursor too) — not just on release. Wired into the single drag +
+  `_group_move`.
+- **#3 A ramp END-handle drag gets a NOTICE, not silence.** Dragging from a ramp's end dot (which can't
+  begin an anchor — a ramp is positioned by its start) shows a brief non-interrupting `QToolTip`
+  (`_edge_notice`, naming the already-anchored start side when anchored).
+- **#8 Validity pill "Needs a fix" → "Needs correction"** (`sequence_editor._revalidate`).
+- **#4 A step-anchored dependent that resolves BEFORE its task's on-air start is blocked.** `validate()`
+  Rule A now also checks a step-anchored tune/ramp at its RESOLVED on-air time (via the anchor chain);
+  before-on-air → rejected with a clear message (Save/arm blocked). Only the on-air lower bound is
+  checkable at authoring (off-air floats); an off-air-rooted chain stays the agent's runtime check.
+- **#10 Drag-anchor to the ROOT lines + a selected tie.** `_drop_target` returns `("__root__",
+  "start"|"stop"|"hold")` over the on-air/off-air/Hold-resume line (`_root_anchor_at`/`ROOT_SNAP`);
+  `_make_root_anchor` sets that anchor keeping the item in place. A SELECTED root-anchored step draws a
+  discreet dashed tie to its anchor line + an "on-air/off-air/resume +M:SS" chip
+  (`_paint_root_anchor_hint`, selected-only so the default view stays uncluttered).
+Tests: `tests/test_timeline_step_anchor_ui.py` (ramp body moves without resizing; `_live_move`
+repositions a dependent + a chain; the ramp-end notice; root drop targets + `_make_root_anchor` +
+selected hint), `tests/test_timeline_step_anchor.py` (#4 before-on-air block).
+**REMAINING (4 of 10)** — the larger, cross-cutting pieces: **#1/#7** anchor a step TO a duration
+task's start/stop edge (needs the bar's two wire steps to carry distinct ids + the item↔wire round-trip
+translation), **#6** anchor a duration task (bar) FROM another step (bar's start hangs off a target,
+stop stays off-air), and **#9** connector wiring hiccups when a dependent sits between a two-sided
+step's two sides (needs a repro).
+
 ## Current state — Hold step rendered as a WINDOW + a forward-from-resume post-hold axis: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
 Owner ask (mockup `docs/sequence-hold-step-mockup.html`, published Artifact): present the Hold not as a
 single divider but as a **two-edged tinted WINDOW** (like the relative band), make a task that runs
