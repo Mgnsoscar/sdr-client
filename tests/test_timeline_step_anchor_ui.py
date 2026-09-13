@@ -738,3 +738,24 @@ def test_connector_two_sided_off_keeps_the_old_routing():
     pts = cv._connector_points(400.0, 10.0, 250.0, 60.0, 1.0, [], 60.0, entry_from_right=True)
     assert pts[0] == (400.0, 10.0) and pts[-1] == (250.0, 60.0)
     assert pts[1][0] <= 400.0                       # does NOT jump right past the edge (unchanged)
+
+
+def test_tune_body_drag_moves_by_delta_not_to_the_cursor():
+    # Grabbing a tune's CAPTION (offset from the dot) and dragging must move the dot by the drag
+    # DELTA from where it was — not jump the dot under the cursor (owner #11).
+    from PyQt6.QtCore import QPointF, QEvent, Qt
+    from PyQt6.QtGui import QMouseEvent
+    t = _tune(30.0)
+    cv = _chirp_editor([_bar(), t])._canvas
+    g = cv._geom[t.uid]; dot_x = g["cx"]; y = g["y"] + LANE_H / 2
+    press_x = dot_x + 50.0                              # grab the caption, 50 px right of the dot
+    cv._drag = {"item": t, "part": "run_body", "press_x": press_x, "moved": True,
+                "start0": 0.0, "stop0": 0.0, "off0": 30.0, "undo0": [], "collapse": None,
+                "group": None, "group0": {}}
+    tgt_x = press_x + 24.0                              # move the mouse +24 px
+    ev = QMouseEvent(QEvent.Type.MouseMove, QPointF(tgt_x, y), QPointF(tgt_x, y),
+                     Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    cv.mouseMoveEvent(ev)
+    new_dot = cv._geom[t.uid]["cx"]
+    assert new_dot > dot_x + 8.0                        # the dot moved right by roughly the delta
+    assert new_dot < tgt_x - 20.0                       # …and did NOT jump under the cursor

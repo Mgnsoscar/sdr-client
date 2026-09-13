@@ -2325,15 +2325,28 @@ class _TimelineCanvas(QWidget):
         # Snap the dragged edge to a nearby step edge / anchor / tick (exact when snapped, else
         # the 1 s grid). `sx` is the snap target x (None when nothing is near).
         sx = self._snap_cursor(x, it.uid)
-        if part in ("run_body", "hold_body"):
-            # A one-shot (or the Hold marker) keeps its anchor (changed only in the
-            # editor); dragging only moves the offset, measured to scale from that fixed
-            # anchor. A window-B (anchor="hold") one-shot is placed from the Hold's position.
+        if part == "hold_body":
+            # The Hold divider is a line grabbed on itself — drag it to scale from its anchor.
             anchor_x = self._anchor_base_x(it)
             if sx is not None:
                 off = (sx - anchor_x) / eff; self._snap_guide = sx
             else:
                 off = tlm._snap((x - anchor_x) / eff)
+            it.offset = self._clamp_tune_offset(it, off)
+            self._live_move(it)
+            return
+        if part == "run_body":
+            # A tune / one-shot pin: MOVE by the drag DELTA from where it sat when grabbed, not
+            # snap the dot under the cursor — its caption/chips sit beside the dot, so grabbing the
+            # text and dragging must not jump the dot to the mouse (owner #11). Snap the dot's new
+            # position, and it keeps its anchor (changed only in the editor).
+            anchor_x = self._anchor_base_x(it)
+            ref0_x = anchor_x + self._drag["off0"] * eff          # the dot's x at press
+            sbx = self._snap_cursor(ref0_x + (x - self._drag["press_x"]), it.uid)
+            if sbx is not None:
+                off = (sbx - anchor_x) / eff; self._snap_guide = sbx
+            else:
+                off = tlm._snap(self._drag["off0"] + (x - self._drag["press_x"]) / eff)
             it.offset = self._clamp_tune_offset(it, off)
             self._live_move(it)
             return
