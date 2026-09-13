@@ -774,8 +774,8 @@ class _TimelineCanvas(QWidget):
         cool-down; the hatched 'relative' band (length set at arm) is left clear. The
         on-air/off-air instants get their own strong anchor lines, so they're skipped here."""
         eff = self._eff(); tick_s = self._tick_interval()
-        major = QColor(Palette.BORDER); major.setAlpha(150)
-        minor = QColor(Palette.BORDER); minor.setAlpha(70)
+        major = QColor(Palette.BORDER); major.setAlpha(205)
+        minor = QColor(Palette.BORDER); minor.setAlpha(100)
         y0, y1 = int(top), int(baseline)
         p.save()
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
@@ -945,6 +945,10 @@ class _TimelineCanvas(QWidget):
     def _capsule(self, p, rect, base, edge, fa, fb, rail=True):
         grad = QLinearGradient(rect.topLeft(), rect.bottomLeft())
         grad.setColorAt(0.0, fa); grad.setColorAt(1.0, fb)
+        # Opaque base first so nothing behind the capsule (gridlines, on-air tint) bleeds
+        # through the translucent hue gradient painted over it.
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(Palette.SURFACE))
+        p.drawRoundedRect(rect, BAR_R, BAR_R)
         p.setPen(QPen(edge, 1)); p.setBrush(QBrush(grad))
         p.drawRoundedRect(rect, BAR_R, BAR_R)
         if rail:
