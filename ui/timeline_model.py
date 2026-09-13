@@ -1018,22 +1018,37 @@ def _step_conflict_error(items) -> Optional[str]:
                     f"instead of restarting it)")
 
     # Rule A — a tune/ramp must fire inside its parent task's on-air span (start/stop/both
-    # anchors; a hold/step-anchored step is timed relative to another point, checked elsewhere).
+    # anchors; a hold-anchored step is timed at proceed, checked elsewhere).
     for it in items:
         act = getattr(it, "action", "run")
         if act not in ("tune", "ramp"):
             continue
         anchor = getattr(it, "anchor", "start")
-        if anchor not in ("start", "stop", "both"):
-            continue
         spans = [(float(b.start_offset), float(b.stop_offset))
                  for b in bars_by_task.get(it.task_name or "", [])]
         if not spans:
             continue   # the "targets a task with a duration step" check already covers this
-        err = step_within_task_error(spans, anchor, float(getattr(it, "offset", 0.0)),
-                                     float(getattr(it, "offset_end", 0.0)), kind=act)
-        if err:
-            return f"{_target_label(it)}: {err}"
+        if anchor in ("start", "stop", "both"):
+            err = step_within_task_error(spans, anchor, float(getattr(it, "offset", 0.0)),
+                                         float(getattr(it, "offset_end", 0.0)), kind=act)
+            if err:
+                return f"{_target_label(it)}: {err}"
+        elif anchor == "step":
+            # A step-anchored tune/ramp fires at its RESOLVED on-air time (via the anchor chain).
+            # If that lands BEFORE its own task goes on air it's invalid — e.g. dragging its target
+            # so the dependent falls before the task's start (the owner-reported case). Only the
+            # lower (on-air) bound is checkable at authoring — off-air floats until arm — and only
+            # when the chain resolves on the on-air clock (an off-air-rooted chain is the agent's).
+            base = step_bases.get(getattr(it, "uid", None))
+            if base is None:
+                continue
+            s0 = min(s for s, _ in spans)
+            if base < s0 - 1e-6:
+                from .param_form import fmt_duration
+                return (f"{_target_label(it)}: anchored to another step, this {act} resolves to "
+                        f"{fmt_duration(base, signed=True)} from on-air — before '{it.task_name}' "
+                        f"goes on air; it must fire at or after on-air "
+                        f"({fmt_duration(s0, signed=True)})")
 
     # Rules B / C / D — two steps can't drive the same control at the same time. Group tune/ramp
     # steps by task, then any pair whose control keys intersect AND whose time spans overlap is a

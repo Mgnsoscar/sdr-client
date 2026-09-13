@@ -290,3 +290,24 @@ def test_ensure_step_id_is_stable():
     sid = tlm.ensure_step_id(it)
     assert sid and it.step_id == sid
     assert tlm.ensure_step_id(it) == sid          # idempotent
+
+
+# ── #4: a step-anchored dependent must not resolve before its task goes on air ──────────
+
+def test_step_anchored_tune_before_on_air_is_blocked():
+    # A dependent anchored 30 s BEFORE a target: fine while the target sits at +40 (dep=+10),
+    # but dragging the target to +10 pushes the dependent to −20 — before the task's on-air
+    # start — which validate() must reject (the owner-reported case).
+    target = _tune(off=40.0, sid="t")
+    dep = _tune(off=-30.0, anchor="step", ref="t", edge="start")
+    items = [_bar(), target, dep]
+    assert tlm.validate(items, ["tx"]) is None            # dep resolves to +10 → inside the window
+    target.offset = 10.0                                   # "drag" the target left → dep = −20
+    err = tlm.validate(items, ["tx"])
+    assert err is not None and "before" in err and "on air" in err
+
+
+def test_step_anchored_tune_at_on_air_is_allowed():
+    target = _tune(off=30.0, sid="t")
+    dep = _tune(off=-30.0, anchor="step", ref="t", edge="start")   # resolves to exactly 0 (on-air)
+    assert tlm.validate([_bar(), target, dep], ["tx"]) is None
