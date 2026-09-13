@@ -68,8 +68,8 @@ def test_step_editor_resolve_step_anchor_assigns_target_id():
     src = _tune(20.0)
     dlg = StepEditorDialog(src, _chirp_editor([_bar(), target, src]), new=True)
     _app.processEvents()
-    # pick the target + edge
-    dlg._anchor_target.setCurrentIndex(0)
+    # pick the tune target (bars are eligible too now, so select by uid, not index 0) + edge
+    dlg._anchor_target.setCurrentIndex(dlg._anchor_target.findData(target.uid))
     dlg._anchor_edge.setCurrentIndex(dlg._anchor_edge.findData("end"))
     sa = dlg._resolve_step_anchor("step", 3.0)
     assert sa and sa["anchor_edge"] == "end"
@@ -83,10 +83,41 @@ def test_step_editor_accepts_negative_offset():
     src = _tune(20.0)
     dlg = StepEditorDialog(src, _chirp_editor([_bar(), target, src]), new=True)
     _app.processEvents()
-    dlg._anchor_target.setCurrentIndex(0)
+    dlg._anchor_target.setCurrentIndex(dlg._anchor_target.findData(target.uid))
     sa = dlg._resolve_step_anchor("step", -2.0)
     assert sa and sa["anchor_step_id"] == "tgt"           # negative offset accepted
     assert dlg._resolve_step_anchor("start", 0.0) == {}   # non-step anchors pass through
+
+
+def test_step_editor_bar_offers_and_saves_a_start_step_anchor():
+    """#6: a duration task (bar) can hang its START off another step (only the start anchors —
+    the stop stays off-air). The dialog offers 'after another step…' in the Start-anchor picker
+    when an eligible target exists, and _accept persists start_anchor_step_id/edge."""
+    target = _tune(5.0, sid="tgt")
+    src_bar = _bar()
+    dlg = StepEditorDialog(src_bar, _chirp_editor([target, src_bar]), new=False)
+    _app.processEvents()
+    assert dlg._start_anchor.findData("step") >= 0          # the option is offered
+    dlg._start_anchor.setCurrentIndex(dlg._start_anchor.findData("step"))
+    _app.processEvents()
+    assert dlg._anchor_target.isVisibleTo(dlg)              # target/edge pickers revealed
+    assert "the step" in dlg._start_off._row_label.text().lower()   # offset row relabelled
+    dlg._anchor_target.setCurrentIndex(dlg._anchor_target.findData(target.uid))
+    dlg._anchor_edge.setCurrentIndex(dlg._anchor_edge.findData("end"))
+    dlg._accept()
+    r = dlg.result_item
+    assert r is not None and r.kind == "bar"
+    assert r.start_anchor == "step" and r.start_anchor_step_id == "tgt"
+    assert r.start_anchor_edge == "end"
+
+
+def test_step_editor_bar_step_anchor_hidden_with_a_hold():
+    # A Hold and step anchoring are mutually exclusive (Phase 1) — no 'after another step…'.
+    src_bar = _bar()
+    dlg = StepEditorDialog(src_bar, _chirp_editor([_tune(5.0, sid="tgt"), _hold(300.0), src_bar]),
+                           new=False)
+    _app.processEvents()
+    assert dlg._start_anchor.findData("step") < 0
 
 
 # ── RampEditorDialog ────────────────────────────────────────────────────────────
@@ -167,13 +198,39 @@ def test_canvas_make_anchor_connects_two_steps():
     assert later.offset == 14.0                       # 20 - 6, kept in place
 
 
-def test_canvas_make_anchor_rejects_ineligible_drop():
-    up = _ramp_item(0.0, sid="up")
+def test_canvas_make_anchor_onto_a_bar_edge():
+    """A step now anchors to a duration task's (bar's) on-air START edge — kept in place by the
+    pixel gap read off the geometry (#1/#7)."""
     later = _tune(20.0)
-    cv = _chirp_editor([_bar(), up, later])._canvas
-    # a bar isn't a Phase-1 target → no anchor created
+    cv = _chirp_editor([_bar(), later])._canvas
     bar = next(it for it in cv._items if it.kind == "bar")
+    cv._make_anchor(later.uid, bar, "start")
+    assert later.anchor == "step"
+    assert bar.step_id and later.anchor_step_id == bar.step_id
+    assert later.anchor_edge == "start"
+    assert later.offset == 20.0                        # 20 - 0 (bar starts on-air), kept in place
+
+
+def test_canvas_make_anchor_onto_a_bar_stop_edge_uses_the_geometry_gap():
+    """Anchoring a mid-window tune to the bar's OFF-AIR stop edge crosses the clock boundary:
+    the offset is the pixel gap between the tune's start and the off-air stop edge, read off the
+    PRE-anchor geometry (the band reflows once the off-air window opens, so it's a semantic — not
+    pixel — keep-in-place). It comes out negative — the tune fires before off-air (#12)."""
+    later = _tune(20.0)
+    cv = _chirp_editor([_bar(), later])._canvas
+    bar = next(it for it in cv._items if it.kind == "bar")   # stop at 600 s (off-air)
+    eff = cv._eff()
+    want = tlm._snap((cv._geom[later.uid]["cx"] - cv._edge_x(bar, "end")) / eff)
     cv._make_anchor(later.uid, bar, "end")
+    assert later.anchor == "step" and later.anchor_edge == "end"
+    assert later.offset < 0.0                           # off-air relative — fires before off-air
+    assert abs(later.offset - want) < 1e-6
+
+
+def test_canvas_make_anchor_rejects_self_drop():
+    later = _tune(20.0)
+    cv = _chirp_editor([_bar(), later])._canvas
+    cv._make_anchor(later.uid, later, "start")         # a step can't anchor to itself
     assert later.anchor == "start" and not later.anchor_step_id
 
 
@@ -249,6 +306,32 @@ def test_canvas_edge_at_finds_handles_and_drop_target_respects_eligibility():
     # …but not on itself
     gl = cv._geom[later.uid]
     assert cv._drop_target(gl["cx"], gl["y"] + LANE_H / 2, later.uid) is None
+
+
+def test_drop_target_finds_a_bar_start_and_stop_edge():
+    """A duration task's (bar's) start/stop dots are resize handles, so they stay out of
+    `_edge_at`; but `_drop_edge_at`/`_drop_target` still offer them as drop targets (#1/#7)."""
+    later = _tune(20.0)
+    cv = _chirp_editor([_bar(), later])._canvas
+    bar = next(it for it in cv._items if it.kind == "bar")
+    bg = cv._geom[bar.uid]; cy = bg["y"] + LANE_H / 2
+    # _edge_at ignores the bar (its dots resize) …
+    assert cv._edge_at(bg["start_x"], cy) is None
+    # … but a connect-drag from `later` can drop on either bar edge
+    assert cv._drop_target(bg["start_x"], cy, later.uid) == (bar, "start")
+    assert cv._drop_target(bg["stop_x"], cy, later.uid) == (bar, "end")
+
+
+def test_drop_target_finds_an_off_air_tune():
+    """An off-air-anchored tune is a valid target now, so a drag from another step can drop
+    on it (the #12 asymmetry — off-air targets were previously ineligible)."""
+    off = tlm.RunItem(task_name="chirp", action="tune", anchor="stop", offset=-30.0,
+                      params={"bw": 12}, step_id="off")
+    src = _tune(20.0)
+    cv = _chirp_editor([_bar(), off, src])._canvas
+    g = cv._geom[off.uid]
+    tgt = cv._drop_target(g["cx"], g["y"] + LANE_H / 2, src.uid)
+    assert tgt is not None and tgt[0] is off and tgt[1] == "start"
 
 
 # ── Context menu (Edit · Duplicate · Remove anchor · Delete) ────────────────────
@@ -660,21 +743,26 @@ def test_live_move_repositions_a_chained_dependent():
     assert abs((cv._geom[c.uid]["cx"] - c_x0) - 20.0 * eff) < 1e-6   # the whole chain followed
 
 
-def test_ramp_end_handle_drag_gets_a_notice_not_silence():
-    # An anchored ramp's END dot can't begin a re-anchor (a ramp is positioned by its START).
-    # Instead of a silent no-op, _edge_notice explains it — naming the already-anchored side.
+def test_ramp_end_handle_begins_an_anchor(qtbot=None):
+    # A drag from a ramp's END dot now BEGINS a drag-to-anchor (the ramp is still positioned by
+    # its start), so the operator can grab whichever end is nearer the target (#13).
+    from PyQt6.QtCore import QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
     up = _long_ramp(2.0, sid="up")
-    down = tlm.RunItem(task_name="chirp", action="ramp", anchor="step", offset=3.0,
-                       anchor_step_id="up", anchor_edge="end",
-                       ramp={"param": "power", "start": -50.0, "stop": -90.0,
-                             "steps": 3, "duration_s": 40.0})
+    down = _long_ramp(60.0)                                  # a plain start-anchored ramp
     cv = _chirp_editor([_bar(), up, down])._canvas
-    assert "already anchored" in cv._edge_notice(down).lower()
-    assert "other steps" in cv._edge_notice(up).lower()     # an unanchored ramp's end = a target handle
-    # pressing the down-ramp's END dot hit-tests as edge_end (the path that shows the notice)
     g = cv._geom[down.uid]
+    # the END dot hit-tests as edge_end …
     hit = cv._hit(g["stop_x"], g["y"] + LANE_H / 2)
     assert hit is not None and hit[0] is down and hit[1] == "edge_end"
+    # … and pressing it starts a connect-drag with the source = the ramp, grabbed from its end
+    pos = QPointF(g["stop_x"], g["y"] + LANE_H / 2)
+    ev = QMouseEvent(QMouseEvent.Type.MouseButtonPress, pos, pos,
+                     Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier)
+    cv.mousePressEvent(ev)
+    assert cv._connect is not None
+    assert cv._connect["src"] == down.uid and cv._connect["from_edge"] == "end"
 
 
 # ── #10: drag-anchor a step onto a root line (on-air / off-air / Hold resume) + selected hint ──

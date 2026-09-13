@@ -232,14 +232,16 @@ def _ramp_duration(r: dict) -> float:
         return 0.0
 
 
-def ramp_span(it, h_off: Optional[float] = None, step_bases: Optional[Dict[int, float]] = None):
+def ramp_span(it, h_off: Optional[float] = None, step_bases: Optional[Dict[int, float]] = None,
+              off_bases: Optional[Dict[int, float]] = None):
     """A ramp's two timeline endpoints as ((left_anchor, left_off), (right_anchor,
     right_off)) — so it can be drawn as a duration bar. A 'both' ramp spans on-air
     to off-air; a single-anchor ramp runs `duration` seconds from its anchor. A
     window-B (`anchor="hold"`) ramp is placed as if start-anchored at the hold's
     position (`h_off + its offset`) — the geometry treats the hold as a start-side
     dwell; the stored anchor stays "hold" (see effective_anchor_offset). A step-anchored
-    (`anchor="step"`) ramp is placed start-side at its resolved base (step_bases[uid])."""
+    (`anchor="step"`) ramp runs forward from its resolved base — on the ON-AIR clock
+    (step_bases[uid]) or, when its chain roots off-air, the OFF-AIR clock (off_bases[uid])."""
     r = dict(getattr(it, "ramp", None) or {})
     if it.anchor == "both":
         return (("start", float(it.offset)), ("stop", float(getattr(it, "offset_end", 0.0))))
@@ -250,9 +252,14 @@ def ramp_span(it, h_off: Optional[float] = None, step_bases: Optional[Dict[int, 
         base = h_off + float(it.offset)
         return (("start", base), ("start", base + dur))
     if it.anchor == "step":
-        base = (step_bases or {}).get(getattr(it, "uid", None))
-        if base is None:
-            base = float(it.offset)          # unresolved (validate rejects) → draw sanely
+        uid = getattr(it, "uid", None)
+        base = (step_bases or {}).get(uid)
+        if base is not None:
+            return (("start", base), ("start", base + dur))
+        obase = (off_bases or {}).get(uid)
+        if obase is not None:
+            return (("stop", obase), ("stop", obase + dur))     # chain roots off-air
+        base = float(it.offset)              # orphan → draw sanely
         return (("start", base), ("start", base + dur))
     return (("start", float(it.offset)), ("start", float(it.offset) + dur))
 
@@ -379,74 +386,81 @@ def display_order(items):
 
 
 def effective_anchor_offset(item, h_off: Optional[float],
-                            step_bases: Optional[Dict[int, float]] = None) -> Tuple[str, float]:
-    """(anchor, offset) used for GEOMETRY/placement only. A window-B item
-    (`anchor="hold"`) is placed as if start-anchored at `hold_offset + its offset`
-    (the hold sits at `hold_offset` on the on-air side, and window B flows on from
-    there); a step-anchored item (`anchor="step"`) is placed start-side at its resolved
-    base (`step_bases[uid]`, from resolve_step_offsets); every other item keeps its own
-    anchor/offset. The stored item keeps its real anchor — this mapping is purely for
-    drawing, never for round-trip. An ORPHANED hold/step anchor (the thing it hangs off is
-    gone — an invalid state `validate()` rejects at save) is placed start-side at its own
-    offset, so it draws sanely on-air rather than jumping to off-air."""
+                            step_bases: Optional[Dict[int, float]] = None,
+                            off_bases: Optional[Dict[int, float]] = None) -> Tuple[str, float]:
+    """(anchor, offset) used for GEOMETRY/placement only. A window-B item (`anchor="hold"`) is
+    placed as if start-anchored at `hold_offset + its offset`; a step-anchored item
+    (`anchor="step"`) whose chain roots at ON-AIR is placed start-side at its resolved base
+    (`step_bases[uid]`), one whose chain roots at OFF-AIR stop-side at its off-air base
+    (`off_bases[uid]`, when supplied — otherwise it falls back on-air); every other item keeps
+    its own anchor/offset. The stored item keeps its real anchor — drawing only, never round-trip.
+    An ORPHANED anchor is placed start-side at its own offset, so it draws sanely on-air."""
     anchor = getattr(item, "anchor", "start")
     off = float(getattr(item, "offset", 0.0))
     if anchor == "hold":
         return "start", (h_off or 0.0) + off
     if anchor == "step":
-        base = (step_bases or {}).get(getattr(item, "uid", None))
-        return "start", (base if base is not None else off)
+        uid = getattr(item, "uid", None)
+        base = (step_bases or {}).get(uid)
+        if base is not None:
+            return "start", base
+        obase = (off_bases or {}).get(uid)
+        if obase is not None:
+            return "stop", obase                      # its chain roots at off-air
+        return "start", off                           # orphan fallback
     return anchor, off
 
 
 _ANCHOR_ON_AIR = ("start", "hold", "step")   # anchors whose edges live in on-air-offset space
 
 
-def resolve_step_offsets(items, h_off: Optional[float]) -> Dict[int, float]:
-    """Resolve every step-anchored (`anchor="step"`) item to its on-air base offset —
-    {uid: base} — by hanging it off its target step's referenced edge (+ its own offset).
+def _resolve_step_clocked(items, h_off: Optional[float]) -> Dict[int, Tuple[str, float]]:
+    """Resolve every step-anchored item to a (clock, offset) — clock 'start' = ON-AIR, 'stop' =
+    OFF-AIR — by hanging it off its target step's referenced edge (+ its own offset). A chain
+    inherits its ROOT's clock: a dependent whose chain roots at on-air is placed relative to
+    on-air; one rooted at off-air (a stop-anchored step, or a bar's off-air stop edge) relative
+    to off-air (its absolute time isn't known until arm, but its OFF-AIR-relative position is).
 
-    Resolution is TOPOLOGICAL (mirrors the agent's two-pass `_resolve_steps`): a target
-    may itself be step-anchored, so chains resolve; a point's start==end==its offset, a
-    ramp's end == start + duration. A cyclic or unknown target (or one whose edge isn't on
-    an on-air clock — a stop/both-anchored target, not offered as a Phase-1 target) is left
-    UNRESOLVED and omitted, so the caller falls back to the item's own offset; `validate()`
-    rejects those states before a save, and the agent is the backstop."""
+    Resolution is TOPOLOGICAL (mirrors the agent's `_resolve_steps`): a target may itself be
+    step-anchored, so chains resolve. A cyclic/unknown target is left UNRESOLVED and omitted."""
     by_id = {getattr(it, "step_id", "") or "": it for it in items if getattr(it, "step_id", "")}
 
-    def own_base(it, seen: set) -> Optional[float]:
-        """On-air offset of the item's OWN start edge. A bar hangs off `start_anchor`
-        (start/hold/step); a run off `anchor`. Off-air/both roots have no on-air time here."""
+    def own_base(it, seen: set) -> Optional[Tuple[str, float]]:
+        """(clock, offset) of the item's OWN start edge. A bar hangs off `start_anchor`, a run
+        off `anchor`; a stop anchor roots off-air; both stays unresolved (window-filling)."""
         if getattr(it, "kind", None) == "bar":
             sa = getattr(it, "start_anchor", "start")
             if sa == "start":
-                return float(getattr(it, "start_offset", 0.0))
+                return ("start", float(getattr(it, "start_offset", 0.0)))
             if sa == "hold":
-                return (h_off or 0.0) + float(getattr(it, "start_offset", 0.0))
+                return ("start", (h_off or 0.0) + float(getattr(it, "start_offset", 0.0)))
             if sa == "step":
                 return resolve_base(it, seen)
             return None
         anchor = getattr(it, "anchor", "start")
         if anchor == "start":
-            return float(getattr(it, "offset", 0.0))
+            return ("start", float(getattr(it, "offset", 0.0)))
+        if anchor == "stop":
+            return ("stop", float(getattr(it, "offset", 0.0)))
         if anchor == "hold":
-            return (h_off or 0.0) + float(getattr(it, "offset", 0.0))
+            return ("start", (h_off or 0.0) + float(getattr(it, "offset", 0.0)))
         if anchor == "step":
             return resolve_base(it, seen)
-        return None                                   # stop/both — off-air, not on-air-expressible
+        return None                                   # both — window-filling, not a point edge
 
-    def edge_offset(it, edge: str, seen: set) -> Optional[float]:
-        # A bar's END edge is its OFF-AIR stop — not on the on-air clock, so unresolvable here.
+    def edge_offset(it, edge: str, seen: set) -> Optional[Tuple[str, float]]:
+        # A bar's END edge is its OFF-AIR stop (relative to off-air), not the start clock.
         if getattr(it, "kind", None) == "bar" and edge == "end":
+            return ("stop", float(getattr(it, "stop_offset", 0.0)))
+        cb = own_base(it, seen)
+        if cb is None:
             return None
-        base = own_base(it, seen)
-        if base is None:
-            return None
+        clock, base = cb
         if edge == "end" and _is_ramp(it):
-            return base + _ramp_duration(dict(getattr(it, "ramp", None) or {}))
-        return base                                   # point: start == end; ramp/bar start edge
+            base += _ramp_duration(dict(getattr(it, "ramp", None) or {}))
+        return (clock, base)                          # point: start == end; ramp/bar start edge
 
-    def resolve_base(it, seen: set) -> Optional[float]:
+    def resolve_base(it, seen: set) -> Optional[Tuple[str, float]]:
         uid = getattr(it, "uid", None)
         if uid in seen:
             return None                               # cycle
@@ -464,23 +478,41 @@ def resolve_step_offsets(items, h_off: Optional[float]) -> Dict[int, float]:
         e = edge_offset(tgt, edge, seen | {uid})
         if e is None:
             return None
-        return e + own
+        return (e[0], e[1] + own)
 
-    out: Dict[int, float] = {}
+    out: Dict[int, Tuple[str, float]] = {}
     for it in items:
         step_src = (getattr(it, "anchor", "start") == "step"
                     or (getattr(it, "kind", None) == "bar"
                         and getattr(it, "start_anchor", "start") == "step"))
         if step_src:
-            b = resolve_base(it, set())
-            if b is not None:
-                out[getattr(it, "uid", None)] = b
+            cb = resolve_base(it, set())
+            if cb is not None:
+                out[getattr(it, "uid", None)] = cb
     return out
+
+
+def resolve_step_offsets(items, h_off: Optional[float]) -> Dict[int, float]:
+    """{uid: on-air base offset} for every step-anchored item whose chain roots at ON-AIR
+    (a point's start==end==offset; a ramp's end == start+duration). Off-air-rooted chains and
+    cyclic/unknown targets are omitted (see resolve_step_offsets_off / the agent backstop).
+    Kept as plain floats — the shape most consumers (ordering, in-task checks) rely on."""
+    return {uid: off for uid, (clock, off) in _resolve_step_clocked(items, h_off).items()
+            if clock == "start"}
+
+
+def resolve_step_offsets_off(items, h_off: Optional[float]) -> Dict[int, float]:
+    """{uid: off-air base offset} for every step-anchored item whose chain roots at OFF-AIR
+    (anchored to a stop step, a bar's off-air stop edge, or a chain that reaches one). The
+    offset is relative to off-air; its absolute time is set at arm."""
+    return {uid: off for uid, (clock, off) in _resolve_step_clocked(items, h_off).items()
+            if clock == "stop"}
 
 
 def _reaches(src_uid, target_it, by_sid, seen=None) -> bool:
     """True if following anchor edges FROM target_it reaches the item with uid src_uid —
-    i.e. anchoring src → target would close a cycle."""
+    i.e. anchoring src → target would close a cycle. Follows a run's `anchor_step_id` and a
+    bar's `start_anchor_step_id` (a bar hangs off a step via its START)."""
     seen = seen or set()
     uid = getattr(target_it, "uid", None)
     if uid in seen:
@@ -488,9 +520,14 @@ def _reaches(src_uid, target_it, by_sid, seen=None) -> bool:
     seen.add(uid)
     if uid == src_uid:
         return True
-    if getattr(target_it, "anchor", "start") != "step":
-        return False
-    nxt = by_sid.get(getattr(target_it, "anchor_step_id", "") or "")
+    if getattr(target_it, "kind", None) == "bar":
+        if getattr(target_it, "start_anchor", "start") != "step":
+            return False
+        nxt = by_sid.get(getattr(target_it, "start_anchor_step_id", "") or "")
+    else:
+        if getattr(target_it, "anchor", "start") != "step":
+            return False
+        nxt = by_sid.get(getattr(target_it, "anchor_step_id", "") or "")
     return nxt is not None and _reaches(src_uid, nxt, by_sid, seen)
 
 
@@ -522,30 +559,33 @@ def step_anchor_fault(item, by_sid: Dict[str, object]) -> Optional[str]:
         if nxt is None:
             return f"{label} anchors to a step that no longer exists — pick a new target"
         cur = nxt
-    # `cur` is the chain's ultimate root (a non-step anchor). An off-air (stop/both) root
-    # has no on-air-clock time until arm, so nothing hanging off it can be placed here.
-    if getattr(cur, "anchor", "start") in ("stop", "both"):
-        return (f"{label} anchors to an off-air step ({_target_label(cur)}), whose time isn't "
-                f"known until the sequence is armed — anchor it to an on-air step instead")
+    # `cur` is the chain's ultimate root. An off-air (stop) root is fine — it resolves on the
+    # off-air clock (set at arm). Only a window-filling ('both') ramp has no single edge to hang
+    # off, so a chain rooted there can't be placed.
+    if getattr(cur, "anchor", "start") == "both":
+        return (f"{label} anchors to a window-filling ramp ({_target_label(cur)}), which has no "
+                f"single edge to hang off — anchor it to a point/edge step instead")
     return None
 
 
 def eligible_step_targets(items, source_uid) -> List:
-    """The items `source_uid` may anchor to (anchor="step") without forming a cycle: the
-    run/tune/ramp points + ramps whose edge lands on the on-air clock (a bar's off-air end and
-    the Hold are NOT Phase-1 targets), excluding the source itself and any item that already
-    (transitively) anchors back to the source. Order mirrors the timeline."""
+    """The items `source_uid` may anchor to (anchor="step") without forming a cycle: run/tune/ramp
+    points+ramps AND duration tasks (a bar — its on-air start edge or its off-air stop edge),
+    on EITHER clock (an off-air-anchored step is a valid target now; the Hold and a window-filling
+    'both' ramp are not). Excludes the source itself and anything that already (transitively)
+    anchors back to it. Order mirrors the timeline."""
     by_sid = {getattr(it, "step_id", "") or "": it for it in items if getattr(it, "step_id", "")}
     out: List = []
     for it in items:
-        if getattr(it, "uid", None) == source_uid:
+        if getattr(it, "uid", None) == source_uid or _is_hold(it):
             continue
-        if getattr(it, "kind", None) == "bar" or _is_hold(it):
+        if getattr(it, "kind", None) == "bar":
+            if not _reaches(source_uid, it, by_sid):
+                out.append(it)
             continue
         if getattr(it, "action", "run") not in ("run", "tune", "ramp"):
             continue
-        # A stop/both-anchored target edge isn't on the on-air clock → can't be timed here.
-        if getattr(it, "anchor", "start") in ("stop", "both"):
+        if getattr(it, "anchor", "start") == "both":   # window-filling — no single point edge
             continue
         if _reaches(source_uid, it, by_sid):
             continue
@@ -609,24 +649,30 @@ def _by_uid(items, uid):
     return None
 
 
-def _item_edge_offset(items, it, edge: str, h_off: Optional[float],
-                      step_bases: Optional[Dict[int, float]] = None) -> Optional[float]:
-    """On-air offset of `it`'s start/end edge for GEOMETRY (its start-side base, from
-    effective_anchor_offset — so a hold/step-anchored item resolves through step_bases),
-    or None when the edge isn't on the on-air clock (a stop/both-anchored item, or a bar's
-    OFF-AIR stop edge). A ramp's END edge is its full duration (last fire + the final level's
-    hold), matching the agent (>= 1.25.1): a dependent anchored to the end fires after that hold."""
+def _item_edge_clocked(items, it, edge: str, h_off: Optional[float],
+                       step_bases: Optional[Dict[int, float]] = None,
+                       off_bases: Optional[Dict[int, float]] = None) -> Optional[Tuple[str, float]]:
+    """(clock, offset) of `it`'s start/end edge for GEOMETRY — clock 'start' = on-air, 'stop' =
+    off-air. A bar's END edge is its OFF-AIR stop; a ramp's END edge is its full duration (last
+    fire + the final level's hold). None for a window-filling ('both') / orphaned edge."""
     if getattr(it, "kind", None) == "bar":
         if edge == "end":
-            return None                               # a bar's stop edge is off-air, not on-air
-        _a, base = bar_start_placement(it, h_off, step_bases)   # its on-air (or hold/step) start
-        return base
-    a, base = effective_anchor_offset(it, h_off, step_bases)
-    if a != "start":
-        return None
+            return ("stop", float(getattr(it, "stop_offset", 0.0)))
+        return bar_start_placement(it, h_off, step_bases, off_bases)     # its start edge
+    a, base = effective_anchor_offset(it, h_off, step_bases, off_bases)
+    if a not in ("start", "stop"):
+        return None                                   # 'both' — no single point edge here
     if edge == "end" and _is_ramp(it):
-        return base + _ramp_duration(dict(getattr(it, "ramp", None) or {}))
-    return base
+        base += _ramp_duration(dict(getattr(it, "ramp", None) or {}))
+    return (a, base)
+
+
+def _item_edge_offset(items, it, edge: str, h_off: Optional[float],
+                      step_bases: Optional[Dict[int, float]] = None) -> Optional[float]:
+    """ON-AIR offset of `it`'s edge (None if the edge isn't on the on-air clock). A thin
+    on-air-only view of `_item_edge_clocked`, kept for callers that only place on-air."""
+    ce = _item_edge_clocked(items, it, edge, h_off, step_bases)
+    return ce[1] if ce is not None and ce[0] == "start" else None
 
 
 def step_drop_offset(items, source_uid, target_uid, edge: str,
@@ -655,18 +701,26 @@ def step_drop_offset(items, source_uid, target_uid, edge: str,
 
 
 def bar_start_placement(item, h_off: Optional[float],
-                        step_bases: Optional[Dict[int, float]] = None) -> Tuple[str, float]:
+                        step_bases: Optional[Dict[int, float]] = None,
+                        off_bases: Optional[Dict[int, float]] = None) -> Tuple[str, float]:
     """(anchor, offset) for drawing a duration bar's START handle. A window-B bar
     (`start_anchor="hold"`) places its start at the Hold divider (`hold_offset + start_offset`);
-    a STEP-anchored bar (`start_anchor="step"`) places it at its resolved base (`step_bases[uid]`,
-    from resolve_step_offsets); a normal bar places it on-air at its own offset. Drawing only —
-    the stored bar keeps `start_anchor` + `start_offset` for round-trip."""
+    a STEP-anchored bar (`start_anchor="step"`) places it at its resolved base — on-air
+    (`step_bases[uid]`) or, when its chain roots off-air, off-air (`off_bases[uid]`); a normal
+    bar places it on-air at its own offset. Drawing only — the stored bar keeps its round-trip
+    fields."""
     sa = getattr(item, "start_anchor", "start")
     if sa == "hold" and h_off is not None:
         return "start", (h_off or 0.0) + float(getattr(item, "start_offset", 0.0))
     if sa == "step":
-        base = (step_bases or {}).get(getattr(item, "uid", None))
-        return "start", (base if base is not None else float(getattr(item, "start_offset", 0.0)))
+        uid = getattr(item, "uid", None)
+        base = (step_bases or {}).get(uid)
+        if base is not None:
+            return "start", base
+        obase = (off_bases or {}).get(uid)
+        if obase is not None:
+            return "stop", obase
+        return "start", float(getattr(item, "start_offset", 0.0))
     return "start", float(getattr(item, "start_offset", 0.0))
 
 
@@ -1173,17 +1227,29 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
     if not has_hold(items) and any(s["anchor"] == "hold" for s in steps):
         return "a post-hold (‘hold’-anchored) step needs a Hold — add one or re-anchor the step"
     # ── Step-to-step anchoring (mirrors the agent's _validate_steps) ──────────────────────
-    step_items = [it for it in items if getattr(it, "anchor", "start") == "step"]
+    def _anchor_ref(it):
+        """(target step_id, edge) of a step-anchor SOURCE — a run via anchor_*, a bar via
+        start_anchor_*."""
+        if getattr(it, "kind", None) == "bar":
+            return (getattr(it, "start_anchor_step_id", "") or "",
+                    getattr(it, "start_anchor_edge", "end") or "end")
+        return (getattr(it, "anchor_step_id", "") or "",
+                getattr(it, "anchor_edge", "end") or "end")
+
+    step_items = [it for it in items
+                  if getattr(it, "anchor", "start") == "step"
+                  or (getattr(it, "kind", None) == "bar"
+                      and getattr(it, "start_anchor", "start") == "step")]
     if step_items:
         if has_hold(items):
             return ("step-to-step anchoring isn't supported in a sequence with a Hold yet — "
                     "anchor to on-air/off-air/Hold instead")
         by_sid = {getattr(it, "step_id", "") or "": it for it in items if getattr(it, "step_id", "")}
         for it in step_items:
-            tgt_id = getattr(it, "anchor_step_id", "") or ""
+            tgt_id, aedge = _anchor_ref(it)
             if not tgt_id:
                 return f"a step anchored to another step needs a target (on '{it.task_name}')"
-            if getattr(it, "anchor_edge", "end") not in ("start", "end"):
+            if aedge not in ("start", "end"):
                 return "a step anchor's edge must be ‘start’ or ‘end’"
             # A negative offset is allowed (fire BEFORE the target's edge — like a start/stop anchor's
             # lead-in); the agent accepts it from 1.25.0. Saving/arming with a negative step offset is
@@ -1192,16 +1258,15 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
                 return f"a step can't anchor to itself (on '{it.task_name}')"
             if tgt_id not in by_sid:
                 return f"a step on '{it.task_name}' anchors to a step that no longer exists"
-        # Resolution catches cycles and targets whose edge isn't on an on-air clock (a duration
-        # task's off-air end, a stop/both ramp — not offered as Phase-1 targets): any step-anchored
-        # item that didn't resolve is invalid. Name the offending step + reason so the operator
-        # knows what to fix (step_anchor_fault), not a catch-all message.
+        # Resolution catches cycles and a chain rooted at a window-filling ('both') ramp (no single
+        # edge). A chain that resolves on EITHER clock — on-air or off-air (set at arm) — is valid.
         bases = resolve_step_offsets(items, None)
+        off = resolve_step_offsets_off(items, None)
         for it in step_items:
-            if getattr(it, "uid", None) not in bases:
+            uid = getattr(it, "uid", None)
+            if uid not in bases and uid not in off:
                 return (step_anchor_fault(it, by_sid)
-                        or ("a step anchors to one that can't be timed on the on-air clock — "
-                            "re-anchor it to an on-air step"))
+                        or "a step anchors to one that can't be timed — re-anchor it")
     # A tune step retunes a running duration task, so the task it targets must be
     # started by a duration (bar) step in this same sequence.
     duration_tasks = {it.task_name for it in items if getattr(it, "kind", None) == "bar"}

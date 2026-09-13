@@ -155,9 +155,14 @@ def test_step_editor_bar_offers_hold_start_anchor_only_with_a_hold():
     assert with_hold._start_anchor.findData("hold") >= 0
     assert not with_hold._start_anchor.isHidden()          # row shown for a bar + hold
 
-    without = StepEditorDialog(_bar(10), _chirp_editor([_bar(10)]), new=False)
+    # No Hold and no OTHER step to anchor to → the start-anchor picker has a single option
+    # (on-air) and its row is hidden. Edit the SAME bar the editor holds, so it isn't offered
+    # as its own anchor target.
+    lone = _bar(10)
+    without = StepEditorDialog(lone, _chirp_editor([lone]), new=False)
     _app.processEvents()
     assert without._start_anchor.findData("hold") < 0
+    assert without._start_anchor.findData("step") < 0       # no other step → no step anchor option
     assert without._start_anchor.isHidden()                # single option → row hidden
 
 

@@ -86,7 +86,9 @@ def test_step_drop_offset_rejects_ineligible_targets():
     bar = _bar()
     items = [bar, r, later]
     assert tlm.step_drop_offset(items, later.uid, later.uid, "end", None, None) is None  # self
-    assert tlm.step_drop_offset(items, later.uid, bar.uid, "end", None, None) is None    # a bar
+    # a bar's END is its OFF-AIR stop — not on the on-air clock this helper measures, so None
+    # (the canvas drag path uses geometry via _make_anchor, which handles the off-air edge)
+    assert tlm.step_drop_offset(items, later.uid, bar.uid, "end", None, None) is None
     # a cycle: r already anchors to later → later can't anchor back to r
     later.step_id = "later"
     r.anchor = "step"; r.anchor_step_id = "later"; r.anchor_edge = "end"
@@ -178,28 +180,28 @@ def test_cycle_rejected():
     assert "tx" in err
 
 
-def test_off_air_target_gives_an_actionable_message():
-    # A step anchored to an OFF-AIR (stop) step can't be timed on the on-air clock. This state
-    # is reachable (the target was edited to off-air after the anchor was made); validate names
-    # the offending step + the off-air target instead of a cryptic "cycle or can't be timed".
-    a = _tune(off=0.0, sid="a", anchor="stop")               # target is off-air anchored
-    b = _tune(off=1.0, anchor="step", ref="a", edge="start")
-    err = tlm.validate(_valid_with([a, b]), ["tx"]) or ""
-    assert "off-air" in err and "on-air step" in err
-    # step_anchor_fault diagnoses it directly too
-    by_sid = {getattr(it, "step_id", "") or "": it for it in _valid_with([a, b])
-              if getattr(it, "step_id", "")}
-    assert "off-air" in (tlm.step_anchor_fault(b, by_sid) or "")
+def test_off_air_target_now_resolves_on_the_off_air_clock():
+    # Anchoring to an OFF-AIR (stop) step is now VALID — the dependent resolves on the off-air
+    # clock (its absolute time is set at arm), not rejected (owner #12).
+    a = _tune(off=-10.0, sid="a", anchor="stop")             # off-air −10 s
+    b = _tune(off=-2.0, anchor="step", ref="a", edge="start")  # a's edge(−10) − 2 = −12 off-air
+    items = _valid_with([a, b])
+    assert tlm.validate(items, ["tx"]) is None
+    off = tlm.resolve_step_offsets_off(items, None)
+    assert off.get(b.uid) == -12.0
+    assert b.uid not in tlm.resolve_step_offsets(items, None)   # not on the on-air clock
+    by_sid = {getattr(it, "step_id", "") or "": it for it in items if getattr(it, "step_id", "")}
+    assert tlm.step_anchor_fault(b, by_sid) is None            # off-air is no longer a fault
 
 
 # ── step_targets_for_edit (never silently re-point on edit) ──────────────────────
 
 def test_step_targets_for_edit_preserves_an_ineligible_stored_target():
-    a = _tune(off=0.0, sid="a", anchor="stop")               # b's target, now off-air (ineligible)
-    other = _tune(off=5.0, sid="c")                          # an eligible on-air target
+    a = _ramp(off=0.0, sid="a", anchor="both")               # window-filling → ineligible target
+    other = _tune(off=5.0, sid="c")                          # an eligible target
     b = _tune(off=1.0, anchor="step", ref="a", edge="start")
     items = [_bar(), a, other, b]
-    assert a not in tlm.eligible_step_targets(items, b.uid)  # off-air → not offered for a NEW anchor
+    assert a not in tlm.eligible_step_targets(items, b.uid)  # 'both' → not offered for a NEW anchor
     tgts = tlm.step_targets_for_edit(items, b)               # …but preserved when EDITING b
     assert a in tgts and other in tgts
 
@@ -239,18 +241,18 @@ class _Client:
         return cap in self._caps
 
 
-def test_eligible_targets_exclude_self_bar_hold_and_offair():
+def test_eligible_targets_include_bars_and_off_air_exclude_self_hold_both():
     src = _tune(off=1.0)
     a = _tune(off=5.0, sid="a")                                  # eligible point
     r = _ramp(off=2.0, sid="rmp")                                # eligible ramp
-    stop = RunItem(task_name="tx", action="run", anchor="stop", offset=0.0)  # off-air → no
+    bar2 = BarItem(task_name="rx", start_offset=0.0, stop_offset=0.0)   # a duration task → eligible
+    stop = RunItem(task_name="tx", action="run", anchor="stop", offset=0.0)  # off-air → eligible now
+    both = _ramp(off=0.0, sid="bth", anchor="both")             # window-filling → NOT eligible
     hold = RunItem(task_name="", action="hold", anchor="start", offset=3.0)  # hold → no
-    items = [_bar(), src, a, r, stop, hold]
+    items = [_bar(), src, a, r, bar2, stop, both, hold]
     tgts = tlm.eligible_step_targets(items, src.uid)
-    kinds = {getattr(t, "action", t.kind) for t in tgts}
-    assert a in tgts and r in tgts
-    assert src not in tgts and stop not in tgts and hold not in tgts
-    assert all(getattr(t, "kind", "") != "bar" for t in tgts)
+    assert a in tgts and r in tgts and bar2 in tgts and stop in tgts     # bars + off-air now targets
+    assert src not in tgts and hold not in tgts and both not in tgts
 
 
 def test_eligible_targets_exclude_would_be_cycle():

@@ -235,7 +235,18 @@ class SequenceEditorDialog(QDialog):
         # which folds calibration per task — on every keystroke of a plain sequence.
         if self.hostname == LIBRARY_HOST:
             return None
-        step_items = [it for it in self._timeline.items() if getattr(it, "anchor", "") == "step"]
+
+        def _is_step_src(it) -> bool:      # a bar hangs off a step via its START anchor
+            if getattr(it, "kind", None) == "bar":
+                return getattr(it, "start_anchor", "") == "step"
+            return getattr(it, "anchor", "") == "step"
+
+        def _step_src_offset(it) -> float:
+            if getattr(it, "kind", None) == "bar":
+                return float(getattr(it, "start_offset", 0.0))
+            return float(getattr(it, "offset", 0.0))
+
+        step_items = [it for it in self._timeline.items() if _is_step_src(it)]
         if not step_items:
             return None
         try:
@@ -246,7 +257,7 @@ class SequenceEditorDialog(QDialog):
             return ("this sequence anchors a step to another step, which needs a newer agent "
                     "(≥ 1.24.0). Update the unit’s agent, or re-anchor those steps to "
                     "on-air / off-air.")
-        if any(float(getattr(it, "offset", 0.0)) < 0 for it in step_items) \
+        if any(_step_src_offset(it) < 0 for it in step_items) \
                 and not step_anchor_negative_supported(client):
             return ("a step here is anchored to fire BEFORE another step (a negative offset), which "
                     "needs a newer agent (≥ 1.25.0). Update the unit’s agent, or set those offsets "

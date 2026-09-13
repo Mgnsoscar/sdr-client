@@ -309,6 +309,7 @@ class _TimelineCanvas(QWidget):
         self._hue: Dict[str, str] = {}   # task_name -> hue hex (task_hue_map)
         self._hold_off: Optional[float] = None       # the Hold marker's on-air offset (None = none)
         self._step_bases: dict = {}                   # uid -> resolved on-air base for step anchors
+        self._step_off_bases: dict = {}               # uid -> resolved OFF-AIR base (chain roots off-air)
         # Hold-window geometry (set in relayout/_place when a Hold is present): the Hold draws as a
         # fixed-width WINDOW [enter_x, resume_x]; everything after it is one off-air-styled window
         # [resume_x, off_x] whose axis counts FORWARD from resume; off-air FLOATS to just past the
@@ -371,10 +372,10 @@ class _TimelineCanvas(QWidget):
                 if so < 0:
                     bwd = max(bwd, -so)
             elif tlm._is_ramp(it):
-                (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases)
+                (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases, self._step_off_bases)
                 take(la, lo); take(ra, ro)
             else:
-                a, o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases)
+                a, o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases, self._step_off_bases)
                 take(a, o)
         return fwd, bwd
 
@@ -580,13 +581,13 @@ class _TimelineCanvas(QWidget):
         """Centre x of a one-shot — to scale from its anchor (the band widens to
         keep on-air-anchored points left of off-air-anchored ones). A window-B
         (anchor="hold") item is placed to scale from the Hold's position."""
-        a, o = tlm.effective_anchor_offset(item, self._hold_off, self._step_bases)
+        a, o = tlm.effective_anchor_offset(item, self._hold_off, self._step_bases, self._step_off_bases)
         return self._place_x(item, a, o)
 
     def _item_left(self, item) -> float:
         """Left x the item's name/panel starts at (for panel anchoring/packing)."""
         if item.kind == "bar":
-            sx = self._place_x(item, *tlm.bar_start_placement(item, self._hold_off))
+            sx = self._place_x(item, *tlm.bar_start_placement(item, self._hold_off, self._step_bases, self._step_off_bases))
             px = self._place_x(item, "stop", item.stop_offset)
             return min(sx, px)
         return self._run_cx(item) - self._run_width(item) / 2
@@ -599,11 +600,11 @@ class _TimelineCanvas(QWidget):
         """Horizontal [left, right] the item occupies (for lane packing) — includes
         the inline argument panel when it's expanded."""
         if item.kind == "bar":
-            sx = self._place_x(item, *tlm.bar_start_placement(item, self._hold_off))
+            sx = self._place_x(item, *tlm.bar_start_placement(item, self._hold_off, self._step_bases, self._step_off_bases))
             px = self._place_x(item, "stop", item.stop_offset)
             left, right = sx - HANDLE_W, px + HANDLE_W
         elif tlm._is_ramp(item):
-            (la, lo), (ra, ro) = tlm.ramp_span(item, self._hold_off, self._step_bases)
+            (la, lo), (ra, ro) = tlm.ramp_span(item, self._hold_off, self._step_bases, self._step_off_bases)
             sx = self._place_x(item, la, lo)
             px = self._place_x(item, ra, ro)
             left, right = min(sx, px) - RAMP_MIN_W / 2, max(sx, px) + RAMP_MIN_W / 2
@@ -633,6 +634,7 @@ class _TimelineCanvas(QWidget):
         # so resolve it before geometry (compute_anchors reads it too).
         self._hold_off = tlm.hold_offset(self._items)
         self._step_bases = tlm.resolve_step_offsets(self._items, self._hold_off)
+        self._step_off_bases = tlm.resolve_step_offsets_off(self._items, self._hold_off)
         # Un-centered content anchors + intrinsic content width. Factored into a
         # hook so a subclass (the plan timeline) can supply a window-only geometry.
         self._c_on, self._c_off, self._content_w = self._compute_anchors()
@@ -693,7 +695,7 @@ class _TimelineCanvas(QWidget):
                 if it.kind == "bar":
                     offs.append(float(getattr(it, "start_offset", 0.0)))
                 elif not tlm._is_hold(it):
-                    a, o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases)
+                    a, o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases, self._step_off_bases)
                     if a == "start":
                         offs.append(o)
             preroll = max(0.0, -min(offs)) if offs else 0.0
@@ -721,11 +723,11 @@ class _TimelineCanvas(QWidget):
                 g["kind"] = "hold"
                 g["cx"] = self._run_cx(it)     # start-anchored at the hold offset (the ENTER edge)
             elif it.kind == "bar":
-                g["start_x"] = self._place_x(it, *tlm.bar_start_placement(it, self._hold_off))
+                g["start_x"] = self._place_x(it, *tlm.bar_start_placement(it, self._hold_off, self._step_bases, self._step_off_bases))
                 g["stop_x"] = self._place_x(it, "stop", it.stop_offset)
             elif tlm._is_ramp(it):
                 # A ramp draws as a duration bar between its two anchored ends.
-                (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases)
+                (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases, self._step_off_bases)
                 g["start_x"] = self._place_x(it, la, lo)
                 g["stop_x"] = self._place_x(it, ra, ro)
                 g["ends"] = ((la, lo), (ra, ro))
@@ -814,7 +816,7 @@ class _TimelineCanvas(QWidget):
                 if getattr(it, "anchor", "start") in ("start", "step"):
                     x = max(x, g.get("stop_x", x))         # the ramp's end
             else:
-                a, _o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases)
+                a, _o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases, self._step_off_bases)
                 if a == "start":
                     x = max(x, g.get("cx", x))
         return x
@@ -1891,7 +1893,10 @@ class _TimelineCanvas(QWidget):
         g = self._geom.get(self._connect["src"]) if src is not None else None
         if not g:
             return
-        x1 = g.get("start_x", g.get("cx", 0.0))
+        if self._connect.get("from_edge") == "end":
+            x1 = g.get("stop_x", g.get("start_x", g.get("cx", 0.0)))
+        else:
+            x1 = g.get("start_x", g.get("cx", 0.0))
         y1 = g["y"] + LANE_H / 2
         cur = self._connect["cursor"]; x2, y2 = cur.x(), cur.y()
         tgt = self._connect["target"]
@@ -1921,9 +1926,12 @@ class _TimelineCanvas(QWidget):
             label = f"anchor to {root_name}"
         elif ok:
             t, edge = tgt
-            off = tlm.step_drop_offset(self._items, self._connect["src"], t.uid, edge,
-                                       self._hold_off, self._step_bases)
-            label = f"{self._offset_chip_text(off or 0.0)} after {t.task_name or '?'} · {edge}"
+            # Offset measured from the SOURCE's start (where it will actually anchor), matching
+            # `_make_anchor` — not from the grabbed edge x1, which may be a ramp's end.
+            src_start = g.get("start_x", g.get("cx", x1))
+            off = tlm._snap((src_start - self._edge_x(t, edge)) / self._eff())   # any clock
+            edge_word = "start" if edge == "start" else "end"
+            label = f"{self._offset_chip_text(off)} after {t.task_name or '?'} · {edge_word}"
         else:
             label = "drop on a step edge or an anchor line"
         self._paint_tag(p, x2, y2 - 16, label, ok)
@@ -2152,21 +2160,35 @@ class _TimelineCanvas(QWidget):
         return (not tlm._is_hold(it) and getattr(it, "kind", None) != "bar"
                 and getattr(it, "action", "run") in ("run", "tune", "ramp"))
 
-    def _edge_notice(self, it) -> str:
-        """The non-interrupting message shown when the operator drags from a ramp's END handle
-        (which can't begin an anchor — a ramp is positioned by its start; its end is only a
-        target for OTHER steps to anchor to)."""
-        if getattr(it, "anchor", "start") == "step":
-            return "This ramp is already anchored on its start side — drag its start to re-anchor it."
-        return ("A ramp's end is a handle for other steps to anchor to — "
-                "drag the ramp's start (or its body) to move it.")
+    def _drop_edge_at(self, x: float, y: float) -> Optional[Tuple[object, str]]:
+        """Like `_edge_at`, but ALSO offers a duration task's (bar's) start/stop dot as a DROP
+        target. A bar can't BEGIN an anchor (its dots are resize handles, so it stays out of
+        `_edge_at`, which wins in `_hit`), but another step may anchor TO its on-air start or its
+        off-air stop edge. Used only while resolving a connect-drag's target, never for a press."""
+        hit = self._edge_at(x, y)
+        if hit is not None:
+            return hit
+        for it in self._rows:
+            if getattr(it, "kind", None) != "bar":
+                continue
+            g = self._geom.get(it.uid)
+            if not g:
+                continue
+            cy = g["y"] + LANE_H / 2
+            if abs(y - cy) > PIN_HIT + 3:
+                continue
+            if abs(x - g.get("start_x", -1e9)) <= HANDLE_HIT:
+                return it, "start"
+            if abs(x - g.get("stop_x", -1e9)) <= HANDLE_HIT:
+                return it, "end"
+        return None
 
     def _drop_target(self, x: float, y: float, src_uid: int) -> Optional[Tuple[object, str]]:
         """The (target, edge) a connect drag from `src_uid` would land on at (x, y): an edge
-        handle of an ELIGIBLE step target (cycle-safe, on-air), OR one of the ROOT anchor lines
-        (on-air / off-air / the Hold resume edge), returned as ("__root__", "start"|"stop"|"hold").
-        Never the source itself."""
-        hit = self._edge_at(x, y)
+        handle of an ELIGIBLE step target (a point/ramp on either clock, or a bar's start/stop),
+        OR one of the ROOT anchor lines (on-air / off-air / the Hold resume edge), returned as
+        ("__root__", "start"|"stop"|"hold"). Never the source itself."""
+        hit = self._drop_edge_at(x, y)
         if hit is not None:
             tgt, edge = hit
             if (getattr(tgt, "uid", None) != src_uid
@@ -2226,11 +2248,15 @@ class _TimelineCanvas(QWidget):
             self._drag = None; self._connect = None
             self.update()
             return
-        # A press on a connection handle of an anchorable item starts a drag-to-anchor (single).
-        if part.startswith("edge_") and part == "edge_start" and self._is_anchor_source(it):
+        # A press on EITHER connection handle of an anchorable item starts a drag-to-anchor. A
+        # ramp offers both a start and an end dot (a point only a start); dragging from either
+        # anchors the source (a ramp is still positioned by its start), so the operator can grab
+        # whichever end is nearer the target.
+        if part.startswith("edge_") and self._is_anchor_source(it):
             self._select_only(it.uid); self.update()
             self._connect = {"src": it.uid, "cursor": pos, "target": None,
-                             "moved": False, "press_x": pos.x()}
+                             "moved": False, "press_x": pos.x(),
+                             "from_edge": "end" if part == "edge_end" else "start"}
             self._drag = None
             return
         # Plain click: select just this item, UNLESS it's already part of a multi-selection
@@ -2298,16 +2324,6 @@ class _TimelineCanvas(QWidget):
         if not (e.buttons() & Qt.MouseButton.LeftButton):
             return
         if self._drag["part"] not in DRAG_PARTS:
-            # A drag from a ramp's END handle can't begin an anchor (a ramp is positioned by its
-            # START; its end is only a target for OTHER steps). Rather than a silent no-op, show a
-            # brief non-interrupting tooltip so the operator learns why — especially when the ramp
-            # is already anchored on its start side.
-            if (self._drag["part"] == "edge_end"
-                    and abs(pos.x() - self._drag["press_x"]) >= DRAG_THRESHOLD
-                    and not self._drag.get("noticed")):
-                self._drag["noticed"] = True
-                QToolTip.showText(e.globalPosition().toPoint(),
-                                  self._edge_notice(self._drag["item"]), self)
             return   # e.g. a click in the panel/caption region — never a drag
         if not self._drag["moved"] and abs(pos.x() - self._drag["press_x"]) < DRAG_THRESHOLD:
             return
@@ -2502,6 +2518,7 @@ class _TimelineCanvas(QWidget):
         # Re-place the moved group AND every step-anchored dependent from the live offsets, so a
         # dependent of a moving target follows it in real time (not only on release).
         self._step_bases = tlm.resolve_step_offsets(self._items, self._hold_off)
+        self._step_off_bases = tlm.resolve_step_offsets_off(self._items, self._hold_off)
         for itu in (o for o in self._items if o.uid in group):
             self._live_relayout(itu)
         for dep in self._rows:
@@ -2551,10 +2568,10 @@ class _TimelineCanvas(QWidget):
         if not g:
             return
         if it.kind == "bar":
-            g["start_x"] = self._place_x(it, *tlm.bar_start_placement(it, self._hold_off))
+            g["start_x"] = self._place_x(it, *tlm.bar_start_placement(it, self._hold_off, self._step_bases, self._step_off_bases))
             g["stop_x"] = self._place_x(it, "stop", it.stop_offset)
         elif tlm._is_ramp(it):
-            (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases)
+            (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases, self._step_off_bases)
             g["start_x"] = self._place_x(it, la, lo)
             g["stop_x"] = self._place_x(it, ra, ro)
             g["ends"] = ((la, lo), (ra, ro))
@@ -2572,6 +2589,7 @@ class _TimelineCanvas(QWidget):
         their chains) as it moves — and a dragged dependent itself tracks the cursor — instead of
         snapping into place only on release."""
         self._step_bases = tlm.resolve_step_offsets(self._items, self._hold_off)
+        self._step_off_bases = tlm.resolve_step_offsets_off(self._items, self._hold_off)
         self._live_relayout(it)
         for dep in self._rows:
             if dep.uid != it.uid and getattr(dep, "anchor", "start") == "step":
@@ -2704,20 +2722,29 @@ class _TimelineCanvas(QWidget):
     # ── Anchor create / detach (100% UI, no forms) ─────────────────────────────
     def _make_anchor(self, src_uid: int, tgt, edge: str) -> None:
         """Anchor the source item's start to `tgt`'s `edge` (a drag-to-anchor drop). Keeps
-        the source visually in place (offset = the current gap — NEGATIVE when the source sits
-        before the edge, so it stays put; the save/arm gate enforces the negative capability)."""
+        the source visually in place — the offset is the current pixel gap between the source's
+        start and the TARGET EDGE, read straight off the geometry, so it works whatever CLOCK the
+        target sits on (on-air, off-air, resume) and for a bar edge as readily as a point/ramp.
+        The offset may be NEGATIVE (the source sits before the edge, like a start/stop anchor's
+        lead-in); the save/arm gate enforces the negative capability."""
         src = next((it for it in self._items if it.uid == src_uid), None)
-        if src is None:
+        if src is None or not self._is_anchor_source(src):
+            self.update()
             return
-        off = tlm.step_drop_offset(self._items, src_uid, tgt.uid, edge,
-                                   self._hold_off, self._step_bases)
-        if off is None:
+        if tgt not in tlm.eligible_step_targets(self._items, src_uid):
             self.update()
             return
         sid = tlm.ensure_step_id(tgt)
         if not sid:
             self.update()
             return
+        eff = self._eff()
+        tgt_x = self._edge_x(tgt, edge)
+        g = self._geom.get(src_uid) or {}
+        src_x = g.get("start_x", g.get("cx"))
+        if src_x is None:
+            src_x = tgt_x
+        off = tlm._snap((src_x - tgt_x) / eff)   # keep the source's pixel position, any clock
         self._record()          # snapshot AFTER the early-returns, so no dead no-op undo entry
         src.anchor = "step"
         src.anchor_step_id = sid
@@ -3001,11 +3028,11 @@ class _TimelineCanvas(QWidget):
                 latest = max(latest, float(getattr(it, "start_offset", 0.0)))
             elif tlm._is_ramp(it):
                 # A ramp's furthest on-air moment is its right (start-anchored) end.
-                for anchor, off in tlm.ramp_span(it, self._hold_off, self._step_bases):
+                for anchor, off in tlm.ramp_span(it, self._hold_off, self._step_bases, self._step_off_bases):
                     if anchor == "start":
                         latest = max(latest, off)
             elif getattr(it, "anchor", "start") in ("start", "step"):
-                _a, o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases)
+                _a, o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases, self._step_off_bases)
                 latest = max(latest, o)
         return round(latest, 1) if latest > 0 else 60.0
 
@@ -3093,13 +3120,39 @@ class StepEditorDialog(QDialog):
         self._type.currentIndexChanged.connect(self._sync_type)
         form.addRow("Type", self._type)
 
-        # Duration START anchor: on-air (the usual case) or the Hold — the latter makes
-        # this a window-B duration task that only starts once the operator proceeds (its
-        # STOP stays off-air). Offered only when a Hold exists (or the bar already uses it).
+        # Step-to-step targets (agent ≥ 1.24.0): the eligible steps THIS item may hang off (no
+        # cycle). Computed up front so both a point's Anchor picker and a bar's Start-anchor
+        # picker can offer "after another step…". A bar hangs off a step via its START anchor, so
+        # `step_targets_for_edit` (which reads the point `anchor`) can't preserve a bar's stored
+        # target — build the bar list directly and re-add its stored target if it's gone stale.
+        if self._editor.has_hold():
+            self._step_targets: List = []
+        elif item.kind == "bar":
+            self._step_targets = list(
+                tlm.eligible_step_targets(self._editor.items(), getattr(item, "uid", None)))
+            if getattr(item, "start_anchor", "") == "step":
+                want = getattr(item, "start_anchor_step_id", "") or ""
+                if want and not any((getattr(t, "step_id", "") or "") == want
+                                    for t in self._step_targets):
+                    stored = next(
+                        (o for o in self._editor.items()
+                         if (getattr(o, "step_id", "") or "") == want
+                         and getattr(o, "uid", None) != getattr(item, "uid", None)), None)
+                    if stored is not None:
+                        self._step_targets.append(stored)
+        else:
+            self._step_targets = tlm.step_targets_for_edit(self._editor.items(), item)
+
+        # Duration START anchor: on-air (the usual case), the Hold (a window-B duration task that
+        # only starts once the operator proceeds — its STOP stays off-air), or hung off ANOTHER
+        # step (only the START anchors; the STOP is always off-air). The Hold option shows when a
+        # Hold exists; the step option when there's an eligible target (or the bar already uses one).
         self._start_anchor = Dropdown()
         self._start_anchor.addItem("on-air (T0)", "start")
         if self._editor.has_hold() or getattr(item, "start_anchor", "") == "hold":
             self._start_anchor.addItem("at Hold (resume)", "hold")
+        if self._step_targets or getattr(item, "start_anchor", "") == "step":
+            self._start_anchor.addItem("after another step…", "step")
         self._start_anchor.currentIndexChanged.connect(self._sync_start_anchor)
         self._row_start_anchor = self._add_row(form, "Start anchor", self._start_anchor)
 
@@ -3121,9 +3174,8 @@ class StepEditorDialog(QDialog):
         # start/end edge, so editing that step moves this one. Offered when there's an eligible
         # target (no cycle), or when the step already uses it; saving to an agent that can't
         # resolve it is blocked at save-time (the _blocks_on_step_anchor gate). The window-B
-        # Hold path and a step anchor are mutually exclusive (Phase 1).
-        self._step_targets = tlm.step_targets_for_edit(self._editor.items(), item) \
-            if not self._editor.has_hold() else []
+        # Hold path and a step anchor are mutually exclusive (Phase 1). `_step_targets` is
+        # computed above (shared with the bar's Start-anchor picker).
         if self._step_targets or getattr(item, "anchor", "") == "step":
             self._anchor.addItem("after another step…", "step")
         self._run_off = DurationSpinBox()
@@ -3146,6 +3198,17 @@ class StepEditorDialog(QDialog):
             self._start_anchor.setCurrentIndex(sai if sai >= 0 else 0)
             self._start_off.setValue(float(item.start_offset))
             self._stop_off.setValue(float(item.stop_offset))
+            if getattr(item, "start_anchor", "") == "step":
+                # A bar hung off a step: select its stored target + edge in the shared pickers.
+                want = getattr(item, "start_anchor_step_id", "") or ""
+                for tgt in self._step_targets:
+                    if (getattr(tgt, "step_id", "") or "") == want:
+                        ti = self._anchor_target.findData(getattr(tgt, "uid", None))
+                        if ti >= 0:
+                            self._anchor_target.setCurrentIndex(ti)
+                        break
+                ei = self._anchor_edge.findData(getattr(item, "start_anchor_edge", "end") or "end")
+                self._anchor_edge.setCurrentIndex(ei if ei >= 0 else 0)
         else:
             ai = self._anchor.findData(getattr(item, "anchor", "start"))
             self._anchor.setCurrentIndex(ai if ai >= 0 else 0)
@@ -3254,12 +3317,24 @@ class StepEditorDialog(QDialog):
             widget._row_label.setVisible(visible)
 
     def _sync_start_anchor(self) -> None:
-        """Relabel a bar's START-offset row to match its anchor: measured from ON-AIR
-        (T0) normally, or from the Hold's resume instant for a window-B duration task."""
-        hold = self._start_anchor.currentData() == "hold"
+        """Relabel a bar's START-offset row to match its anchor and show the target/edge pickers
+        when the start hangs off another step. On-air (T0) normally; the Hold's resume instant for
+        a window-B duration task; or another step's edge (only the START anchors — the STOP stays
+        off-air)."""
+        data = self._start_anchor.currentData()
+        is_step = data == "step"
+        # A bar reuses the shared step target/edge pickers (only when its start hangs off a step).
+        if self._type.currentData() == "bar":
+            self._set_row_visible(self._anchor_target, is_step)
+            self._set_row_visible(self._anchor_edge, is_step)
         lbl = getattr(self._start_off, "_row_label", None)
         if lbl is not None:
-            lbl.setText("Start — from Hold (resume)" if hold else "Start — from ON-AIR")
+            if is_step:
+                lbl.setText("Start — from the step")     # neutral: may be negative (before the edge)
+            elif data == "hold":
+                lbl.setText("Start — from Hold (resume)")
+            else:
+                lbl.setText("Start — from ON-AIR")
 
     def _sync_anchor(self) -> None:
         """Show the target + edge pickers only when anchoring to another step, and relabel
@@ -3317,9 +3392,7 @@ class StepEditorDialog(QDialog):
         self._set_row_visible(self._anchor, not is_bar)   # a point (run/tune) has one anchor
         self._set_row_visible(self._run_off, not is_bar)
         if is_bar:
-            self._sync_start_anchor()
-            self._set_row_visible(self._anchor_target, False)
-            self._set_row_visible(self._anchor_edge, False)
+            self._sync_start_anchor()          # manages the shared target/edge pickers for a bar
         else:
             self._sync_anchor()
         # Tune sends live-parameter values, not CLI args.
@@ -3683,12 +3756,25 @@ class StepEditorDialog(QDialog):
                 anchor=anchor, offset=offset, uid=uid, power_view=pview,
                 step_id=getattr(self._src, "step_id", "") or "", **sa)
         elif mode == "bar":
+            start_anchor = self._start_anchor.currentData() or "start"
+            start_off = round(self._start_off.value(), 1)
+            # A bar hangs its START off another step via the SHARED target/edge pickers (only
+            # the start anchors; the stop is always off-air). _resolve_step_anchor validates +
+            # assigns the target a stable id, returning {} for a non-step anchor.
+            sa = self._resolve_step_anchor(start_anchor, start_off)
+            if sa is False:
+                return
+            step_kw = {}
+            if start_anchor == "step":
+                step_kw = {"start_anchor_step_id": sa.get("anchor_step_id", ""),
+                           "start_anchor_edge": sa.get("anchor_edge", "end")}
             self.result_item = tlm.BarItem(
                 task_name=task, args=self._build_args(), replace_args=True,
-                start_offset=round(self._start_off.value(), 1),
+                start_offset=start_off,
                 stop_offset=round(self._stop_off.value(), 1),
-                start_anchor=self._start_anchor.currentData() or "start",
-                uid=uid, power_view=pview)
+                start_anchor=start_anchor,
+                step_id=getattr(self._src, "step_id", "") or "",   # keep it a valid anchor target
+                uid=uid, power_view=pview, **step_kw)
         else:
             anchor = self._anchor.currentData()
             offset = round(self._run_off.value(), 1)

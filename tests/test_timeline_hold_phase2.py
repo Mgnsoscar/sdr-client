@@ -241,11 +241,13 @@ def test_validate_rejects_an_orphaned_hold_anchored_step():
 # ── The step editor's "Hold" anchor option ───────────────────────────────────
 
 def test_hold_anchor_option_appears_only_with_a_hold():
-    # No hold on the timeline → only on-air / off-air.
+    # No hold on the timeline → on-air / off-air (and "step", since the duration task is now an
+    # eligible anchor target), but NOT "hold".
     ed = _editor([tlm.BarItem(task_name="tx", start_offset=0, stop_offset=0)])
     d0 = StepEditorDialog(tlm.RunItem(task_name="tx", action="tune", anchor="start", offset=0.0),
                           ed, new=True)
-    assert [d0._anchor.itemData(i) for i in range(d0._anchor.count())] == ["start", "stop"]
+    opts = [d0._anchor.itemData(i) for i in range(d0._anchor.count())]
+    assert "start" in opts and "stop" in opts and "hold" not in opts
 
     # A hold present → the "hold" anchor is offered.
     ed2 = _editor([tlm.BarItem(task_name="tx", start_offset=0, stop_offset=0), _hold(100.0)])
