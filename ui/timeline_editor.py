@@ -121,7 +121,7 @@ PANEL_BOT_PAD = 7
 PANEL_H_PAD = 10            # horizontal padding inside the panel
 PANEL_MIN_W = 112
 
-DRAG_PARTS = ("bar_start", "bar_stop", "bar_body", "run_body", "hold_body")
+DRAG_PARTS = ("bar_start", "bar_stop", "bar_body", "run_body", "hold_body", "ramp_body")
 
 
 def task_signals_from_yaml(yaml_text) -> Dict[str, str]:
@@ -2099,6 +2099,15 @@ class _TimelineCanvas(QWidget):
         return (not tlm._is_hold(it) and getattr(it, "kind", None) != "bar"
                 and getattr(it, "action", "run") in ("run", "tune", "ramp"))
 
+    def _edge_notice(self, it) -> str:
+        """The non-interrupting message shown when the operator drags from a ramp's END handle
+        (which can't begin an anchor — a ramp is positioned by its start; its end is only a
+        target for OTHER steps to anchor to)."""
+        if getattr(it, "anchor", "start") == "step":
+            return "This ramp is already anchored on its start side — drag its start to re-anchor it."
+        return ("A ramp's end is a handle for other steps to anchor to — "
+                "drag the ramp's start (or its body) to move it.")
+
     def _drop_target(self, x: float, y: float, src_uid: int) -> Optional[Tuple[object, str]]:
         """The (target, edge) a connect drag from `src_uid` would land on at (x, y): an
         edge handle of an ELIGIBLE target (cycle-safe, on-air), never the source itself."""
@@ -2160,6 +2169,7 @@ class _TimelineCanvas(QWidget):
             "item": it, "part": part, "press_x": pos.x(), "moved": False,
             "start0": getattr(it, "start_offset", 0.0),
             "stop0": getattr(it, "stop_offset", 0.0),
+            "off0": getattr(it, "offset", 0.0),
             "undo0": self._snapshot(),       # pre-drag state, pushed only if the drag commits
             "collapse": it.uid if len(self._selection) > 1 else None,
             "group": group,
@@ -2213,6 +2223,16 @@ class _TimelineCanvas(QWidget):
         if not (e.buttons() & Qt.MouseButton.LeftButton):
             return
         if self._drag["part"] not in DRAG_PARTS:
+            # A drag from a ramp's END handle can't begin an anchor (a ramp is positioned by its
+            # START; its end is only a target for OTHER steps). Rather than a silent no-op, show a
+            # brief non-interrupting tooltip so the operator learns why — especially when the ramp
+            # is already anchored on its start side.
+            if (self._drag["part"] == "edge_end"
+                    and abs(pos.x() - self._drag["press_x"]) >= DRAG_THRESHOLD
+                    and not self._drag.get("noticed")):
+                self._drag["noticed"] = True
+                QToolTip.showText(e.globalPosition().toPoint(),
+                                  self._edge_notice(self._drag["item"]), self)
             return   # e.g. a click in the panel/caption region — never a drag
         if not self._drag["moved"] and abs(pos.x() - self._drag["press_x"]) < DRAG_THRESHOLD:
             return
@@ -2240,7 +2260,22 @@ class _TimelineCanvas(QWidget):
             else:
                 off = tlm._snap((x - anchor_x) / eff)
             it.offset = self._clamp_tune_offset(it, off)
-            self._live_relayout(it)
+            self._live_move(it)
+            return
+        if part == "ramp_body":
+            # A ramp is MOVED along the timeline (its offset shifts) but never resized — its
+            # duration is fixed, so only the offset changes. A window-filling ("both") ramp
+            # spans on-air→off-air, so it has no free offset to move; leave it be.
+            if getattr(it, "anchor", "start") == "both":
+                return
+            base_x = self._anchor_base_x(it)
+            ref0_x = base_x + self._drag["off0"] * eff        # the ramp's anchored edge at press
+            sbx = self._snap_cursor(ref0_x + (x - self._drag["press_x"]), it.uid)
+            if sbx is not None:
+                it.offset = (sbx - base_x) / eff; self._snap_guide = sbx
+            else:
+                it.offset = tlm._snap(self._drag["off0"] + (x - self._drag["press_x"]) / eff)
+            self._live_move(it)
             return
         if part == "bar_start":
             if getattr(it, "start_anchor", "start") == "hold" and self._hold_off is not None:
@@ -2269,7 +2304,7 @@ class _TimelineCanvas(QWidget):
                 ds = tlm._snap((x - self._drag["press_x"]) / eff)
             it.start_offset = min(self._drag["start0"] + ds, (mid - self._on) / eff)
             it.stop_offset = max(self._drag["stop0"] + ds, (mid - self._off) / eff)
-        self._live_relayout(it)
+        self._live_move(it)
 
     def _anchor_base_x(self, it) -> float:
         """The x a one-shot's offset is measured from while dragging: on-air for a start
@@ -2376,7 +2411,14 @@ class _TimelineCanvas(QWidget):
                 pass                               # follows its (also-moving) target — don't shift
             else:
                 itu.offset = self._clamp_tune_offset(itu, o0 + ds)
+        # Re-place the moved group AND every step-anchored dependent from the live offsets, so a
+        # dependent of a moving target follows it in real time (not only on release).
+        self._step_bases = tlm.resolve_step_offsets(self._items, self._hold_off)
+        for itu in (o for o in self._items if o.uid in group):
             self._live_relayout(itu)
+        for dep in self._rows:
+            if dep.uid not in group and getattr(dep, "anchor", "start") == "step":
+                self._live_relayout(dep)
 
     def _apply_marquee(self):
         """Set the selection to the items intersecting the marquee rect (added to the base set
@@ -2414,14 +2456,20 @@ class _TimelineCanvas(QWidget):
         return min(offset, max(e for _, e in spans))
 
     def _live_relayout(self, it) -> None:
-        """Update just the dragged item's geometry without resizing the canvas
-        (keeps anchors fixed mid-drag so the item tracks the cursor smoothly)."""
+        """Update just this item's geometry without resizing the canvas (keeps anchors fixed
+        mid-drag so the item tracks the cursor smoothly). Reads the LIVE `_step_bases`, so a
+        step-anchored item re-places off its target's current position."""
         g = self._geom.get(it.uid)
         if not g:
             return
         if it.kind == "bar":
             g["start_x"] = self._place_x(it, *tlm.bar_start_placement(it, self._hold_off))
             g["stop_x"] = self._place_x(it, "stop", it.stop_offset)
+        elif tlm._is_ramp(it):
+            (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases)
+            g["start_x"] = self._place_x(it, la, lo)
+            g["stop_x"] = self._place_x(it, ra, ro)
+            g["ends"] = ((la, lo), (ra, ro))
         else:
             # _run_cx maps a window-B (anchor='hold') item to the Hold's side, so the pill
             # tracks the cursor correctly instead of jumping to the off-air anchor.
@@ -2429,6 +2477,17 @@ class _TimelineCanvas(QWidget):
         if "panel" in g:
             g["panel"] = (self._item_left(it) + 2, g["panel"][1], g["panel"][2], g["panel"][3])
         self.update()
+
+    def _live_move(self, it) -> None:
+        """Re-place the dragged item AND every step-anchored dependent in REAL TIME. Recomputes
+        `_step_bases` from the live offsets first, so dragging a TARGET moves its dependents (and
+        their chains) as it moves — and a dragged dependent itself tracks the cursor — instead of
+        snapping into place only on release."""
+        self._step_bases = tlm.resolve_step_offsets(self._items, self._hold_off)
+        self._live_relayout(it)
+        for dep in self._rows:
+            if dep.uid != it.uid and getattr(dep, "anchor", "start") == "step":
+                self._live_relayout(dep)
 
     def mouseReleaseEvent(self, e):  # noqa: N802
         if e.button() != Qt.MouseButton.LeftButton:

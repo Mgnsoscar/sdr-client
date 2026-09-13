@@ -596,3 +596,82 @@ def test_plan_step_anchor_gate_blocks_an_old_agent():
     assert lines and "1.25.0" in lines[0]
     # no step anchor → never blocked (agent never consulted)
     assert _step_anchor_block_lines([("u", "Unit A", [plain])], fleet({"u": old})) == []
+
+
+# ── Ramp move (drag on the timeline; never resized) + real-time dependent movement ──────
+
+def _long_ramp(off, sid="", task="chirp"):
+    return tlm.RunItem(task_name=task, action="ramp", anchor="start", offset=off, step_id=sid,
+                       ramp={"param": "power", "start": -90.0, "stop": -50.0,
+                             "steps": 3, "duration_s": 40.0})
+
+
+def test_ramp_body_is_draggable_and_moves_the_offset():
+    from ui.timeline_editor import DRAG_PARTS, LANE_H
+    assert "ramp_body" in DRAG_PARTS
+    r = _long_ramp(20.0)
+    cv = _chirp_editor([_bar(), r])._canvas
+    g = cv._geom[r.uid]
+    midx = (g["start_x"] + g["stop_x"]) / 2.0
+    y = g["y"] + LANE_H / 2
+    # the middle of a ramp body hit-tests as a movable body (not an edge/anchor handle)
+    hit = cv._hit(midx, y)
+    assert hit is not None and hit[0] is r and hit[1] == "ramp_body"
+    # a body drag shifts the ramp's OFFSET (its start_x moves), duration unchanged
+    eff = cv._eff(); w0 = g["stop_x"] - g["start_x"]
+    from PyQt6.QtCore import QPointF, QEvent, Qt
+    from PyQt6.QtGui import QMouseEvent
+    cv._drag = {"item": r, "part": "ramp_body", "press_x": midx, "moved": True,
+                "start0": 0.0, "stop0": 0.0, "off0": 20.0, "undo0": [], "collapse": None,
+                "group": None, "group0": {}}
+    tgt_x = midx + 30.0 * eff
+    ev = QMouseEvent(QEvent.Type.MouseMove, QPointF(tgt_x, y), QPointF(tgt_x, y),
+                     Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier)
+    cv.mouseMoveEvent(ev)
+    assert 48.0 <= r.offset <= 52.0                         # ~+30 s (snapping tolerant)
+    g2 = cv._geom[r.uid]
+    assert abs((g2["stop_x"] - g2["start_x"]) - w0) < 1.0   # width (duration) unchanged — no resize
+
+
+def test_live_move_repositions_a_dependent_in_real_time():
+    # Dragging a TARGET moves every step anchored to it AS IT MOVES (not only on release).
+    target = _tune(30.0, sid="tgt")
+    dep = _dep(10.0, "tgt", edge="start")                   # fires 10 s after the target's start
+    cv = _chirp_editor([_bar(), target, dep])._canvas
+    eff = cv._eff()
+    dep_x0 = cv._geom[dep.uid]["cx"]
+    target.offset = 60.0                                    # simulate the drag mutating the target
+    cv._live_move(target)
+    dep_x1 = cv._geom[dep.uid]["cx"]
+    assert abs((dep_x1 - dep_x0) - 30.0 * eff) < 1e-6        # the dependent tracked +30 s live
+
+
+def test_live_move_repositions_a_chained_dependent():
+    a = _tune(30.0, sid="a")
+    b = _dep(5.0, "a", edge="start", sid="b")               # b anchored to a
+    c = _dep(5.0, "b", edge="start")                        # c anchored to b (a chain)
+    cv = _chirp_editor([_bar(), a, b, c])._canvas
+    eff = cv._eff()
+    b_x0 = cv._geom[b.uid]["cx"]; c_x0 = cv._geom[c.uid]["cx"]
+    a.offset = 50.0
+    cv._live_move(a)
+    assert abs((cv._geom[b.uid]["cx"] - b_x0) - 20.0 * eff) < 1e-6
+    assert abs((cv._geom[c.uid]["cx"] - c_x0) - 20.0 * eff) < 1e-6   # the whole chain followed
+
+
+def test_ramp_end_handle_drag_gets_a_notice_not_silence():
+    # An anchored ramp's END dot can't begin a re-anchor (a ramp is positioned by its START).
+    # Instead of a silent no-op, _edge_notice explains it — naming the already-anchored side.
+    up = _long_ramp(2.0, sid="up")
+    down = tlm.RunItem(task_name="chirp", action="ramp", anchor="step", offset=3.0,
+                       anchor_step_id="up", anchor_edge="end",
+                       ramp={"param": "power", "start": -50.0, "stop": -90.0,
+                             "steps": 3, "duration_s": 40.0})
+    cv = _chirp_editor([_bar(), up, down])._canvas
+    assert "already anchored" in cv._edge_notice(down).lower()
+    assert "other steps" in cv._edge_notice(up).lower()     # an unanchored ramp's end = a target handle
+    # pressing the down-ramp's END dot hit-tests as edge_end (the path that shows the notice)
+    g = cv._geom[down.uid]
+    hit = cv._hit(g["stop_x"], g["y"] + LANE_H / 2)
+    assert hit is not None and hit[0] is down and hit[1] == "edge_end"
