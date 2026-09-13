@@ -71,6 +71,16 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — Gantt rows: a task's RAMPS display above its TUNES: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Owner ask: under each duration step, show the ramps first, then the tune steps (they were ordered by
+add order). Fix in **`timeline_model.display_order`**: the within-group sort now keys on a new
+`_row_kind_rank(it)` FIRST (bar 0 → ramp 1 → tune 2 → one-shot run 3), with `_row_fire` (resolved fire
+time) breaking ties inside each kind — so a task's ramps always sit directly under its bar, above the
+tunes, regardless of authored order or cross-kind fire time. Group (task) ordering by earliest fire is
+unchanged; pure, non-mutating, never used for serialisation. Client-only; drift-guarded files untouched.
+Tests: `tests/test_timeline_redesign_model.py` (ramps before tunes even when a tune fires first;
+bar→ramp→tune→one-shot ranks; existing group/resolved-time tests unaffected). Suite 970 → 972 offscreen.
+
 ## Current state — sequence step-conflict validation (in-task / same-control): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
 Owner ask: block invalid sequences at save/arm — a tune/ramp outside its parent task, two tunes setting
 the same param at the same time, and a power/gain tune where a ramp already controls power/gain; plus

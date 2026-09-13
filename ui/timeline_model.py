@@ -301,12 +301,27 @@ def _row_fire(it, step_bases: Optional[Dict[int, float]] = None) -> float:
     return float(getattr(it, "offset", 0.0))
 
 
+def _row_kind_rank(it) -> int:
+    """Within a task's group the rows sort by KIND first: the duration bar, then that
+    task's RAMPS, then its TUNES, then one-shot runs — so a task's ramps always sit
+    directly under it, above the tunes (fire time breaks ties within each kind)."""
+    if getattr(it, "kind", None) == "bar":
+        return 0
+    action = getattr(it, "action", "run")
+    if action == "ramp":
+        return 1
+    if action == "tune":
+        return 2
+    return 3
+
+
 def display_order(items):
     """(rows, holds) for the Gantt-style canvas: every non-Hold item grouped under its
-    task — the duration bar first, then that task's tunes/ramps/one-shots by fire time —
-    with tasks in first-seen order, so a task's steps always sit directly beneath it.
-    Holds own no row (they paint as dividers) and are returned separately. Pure; does not
-    mutate the input and is never used for serialisation (that keeps the authored order)."""
+    task — the duration bar first, then that task's ramps, then its tunes, then one-shot
+    runs (fire time breaking ties within each kind) — with tasks ordered by earliest fire,
+    so a task's steps always sit directly beneath it. Holds own no row (they paint as
+    dividers) and are returned separately. Pure; does not mutate the input and is never
+    used for serialisation (that keeps the authored order)."""
     holds = [it for it in items if _is_hold(it)]
     step_bases = resolve_step_offsets(items, hold_offset(items))
     seen: List[str] = []
@@ -327,8 +342,7 @@ def display_order(items):
     rows: list = []
     for name in sorted(seen, key=_group_key):
         g = sorted(groups[name],
-                   key=lambda it: (0 if getattr(it, "kind", None) == "bar" else 1,
-                                   _row_fire(it, step_bases)))
+                   key=lambda it: (_row_kind_rank(it), _row_fire(it, step_bases)))
         rows.extend(g)
     return rows, holds
 

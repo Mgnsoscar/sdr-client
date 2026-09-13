@@ -45,6 +45,28 @@ def test_display_order_groups_steps_under_their_task():
     assert holds == [hold]                       # holds pulled out (own no row)
 
 
+def test_display_order_puts_ramps_before_tunes_within_a_task():
+    # Under a duration task the rows sort by KIND: the bar, then RAMPS, then TUNES, then
+    # one-shot runs — regardless of authored order or fire time across kinds.
+    b = _bar("ca")
+    t_early = _tune("ca", 5)          # a tune that fires BEFORE the ramp
+    r = _ramp("ca", 40)              # a ramp that fires AFTER the tune
+    t_late = _tune("ca", 90)
+    rows, _ = tlm.display_order([b, t_early, r, t_late])
+    assert rows[0] is b               # bar leads
+    assert rows[1] is r               # ramp next, even though it fires after t_early
+    assert rows[2] is t_early and rows[3] is t_late   # then tunes, by fire time
+
+
+def test_display_order_ramp_then_tune_then_oneshot_ranks():
+    b = _bar("ca")
+    one = _one("ca", 10)
+    tune = _tune("ca", 20)
+    ramp = _ramp("ca", 30)
+    rows, _ = tlm.display_order([b, one, tune, ramp])
+    assert [r for r in rows] == [b, ramp, tune, one]
+
+
 def test_display_order_does_not_mutate_input():
     items = [_ramp("ca", 300), _bar("ca")]
     before = list(items)
