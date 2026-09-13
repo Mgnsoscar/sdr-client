@@ -335,8 +335,9 @@ def display_order(items):
     """(rows, holds) for the Gantt-style canvas: a duration bar leads its group with that
     task's ramps then its tunes beneath it (fire time breaking ties within each kind); a
     one-shot RUN stands on its OWN row, never grouped under a duration task (it launches a
-    task once rather than modifying a running one). Groups are ordered by earliest fire, so
-    a task's steps sit directly beneath it and a one-shot slots in at its own fire time.
+    task once rather than modifying a running one). The duration-task groups come first
+    (ordered by earliest fire), then ALL one-shots collected at the BOTTOM (ordered among
+    themselves by fire time) — they are independent of the tasks, so they don't interleave.
     Holds own no row (they paint as dividers) and are returned separately. Pure; does not
     mutate the input and is never used for serialisation (that keeps the authored order)."""
     holds = [it for it in items if _is_hold(it)]
@@ -351,11 +352,12 @@ def display_order(items):
             groups[key] = []
             seen.append(key)
         groups[key].append(it)
-    # Order groups by their earliest fire time (a task that goes on air sooner sits higher),
-    # first-seen index breaking ties so the order is stable.
+    # Duration-task groups first, then all one-shots at the bottom; within each band by
+    # earliest fire, first-seen index breaking ties so the order is stable.
     def _group_key(key):
         g = groups[key]
-        return (min(_row_fire(it, step_bases) for it in g), seen.index(key))
+        band = 1 if all(_is_oneshot(it) for it in g) else 0
+        return (band, min(_row_fire(it, step_bases) for it in g), seen.index(key))
     rows: list = []
     for key in sorted(seen, key=_group_key):
         g = sorted(groups[key],

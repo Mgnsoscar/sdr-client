@@ -71,23 +71,28 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
-## Current state — Gantt rows: ramps above tunes; one-shots stand alone: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+## Current state — Gantt rows: ramps above tunes; one-shots stand alone at the bottom: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
 Two owner asks about `timeline_model.display_order` row grouping/ordering:
 - **Ramps above tunes under a task** — the within-group sort keys on a new `_row_kind_rank(it)` FIRST
   (bar 0 → ramp 1 → tune 2), with `_row_fire` (resolved fire time) breaking ties inside each kind — so a
   task's ramps always sit directly under its bar, above the tunes, regardless of authored order or
   cross-kind fire time.
-- **One-shot runs are NOT grouped under a duration task** — a one-shot `run` launches a task once; it
-  does not modify a running duration task (a tune/ramp does), so it should stand on its own row rather
-  than nest under a bar. New `_is_oneshot(it)` (`action=="run"` and not a bar) + `_group_key_of(it)`: a
-  one-shot gets a unique per-item group key (`("\x00oneshot", uid)`) so it never merges into a bar's
-  group — even a bar that happens to share its `task_name` — and slots in among the groups at its OWN
-  fire time. Tunes/ramps still group under their parent task (`task_name`). The row header already
-  rendered a one-shot as a top-level row (`child` is only true for tune/ramp), so this is grouping-only.
-Group (task) ordering by earliest fire is unchanged; pure, non-mutating, never used for serialisation.
-Client-only; drift-guarded files untouched. Tests: `tests/test_timeline_redesign_model.py` (ramps before
-tunes even when a tune fires first; bar→ramp→tune ranks; a one-shot sharing a task_name stays its own
-group and orders by its own fire; two one-shots on one task are separate rows). Suite 970 → 974 offscreen.
+- **One-shot runs are NOT grouped under a duration task, and sink to the BOTTOM** — a one-shot `run`
+  launches a task once; it does not modify a running duration task (a tune/ramp does), so it stands on
+  its own row rather than nest under a bar. New `_is_oneshot(it)` (`action=="run"` and not a bar) +
+  `_group_key_of(it)`: a one-shot gets a unique per-item group key (`("\x00oneshot", uid)`) so it never
+  merges into a bar's group — even a bar that happens to share its `task_name`. In `display_order`'s
+  group-ordering key a `band` field (0 = duration-task group, 1 = one-shot) puts ALL one-shots after
+  every duration-task group; within each band, earliest fire (then first-seen) decides. So the duration
+  tasks + their ramps/tunes render first and the one-shots collect at the bottom in fire-time order,
+  never interleaved. Tunes/ramps still group under their parent task (`task_name`). The row header
+  already rendered a one-shot as a top-level row (`child` is only true for tune/ramp), so this is
+  ordering-only.
+Duration-task group ordering by earliest fire is unchanged; pure, non-mutating, never used for
+serialisation. Client-only; drift-guarded files untouched. Tests: `tests/test_timeline_redesign_model.py`
+(ramps before tunes even when a tune fires first; bar→ramp→tune ranks; a one-shot sharing a task_name
+stays its own group; an early one-shot still sinks below its task group; all one-shots collect at the
+bottom in fire order; two one-shots on one task are separate rows). Suite 970 → 975 offscreen.
 
 ## Current state — sequence step-conflict validation (in-task / same-control): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
 Owner ask: block invalid sequences at save/arm — a tune/ramp outside its parent task, two tunes setting

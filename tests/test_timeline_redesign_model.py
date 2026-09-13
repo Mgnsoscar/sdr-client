@@ -76,15 +76,29 @@ def test_display_order_oneshot_is_its_own_group_not_under_a_task():
     rows, _ = tlm.display_order([b, tune, shot])
     # ca bar + its tune form one group; the one-shot slots in by its own fire time (40 > 20),
     # as its own row — it is NOT sorted last-within-the-ca-group by kind rank.
-    assert rows.index(shot) > rows.index(tune)   # after by fire time
-    # the one-shot orders as a standalone group, not appended inside the ca group:
-    # a one-shot firing BEFORE the bar starts must sit ABOVE the whole ca task group.
+    assert rows.index(shot) > rows.index(tune)   # after (one-shots sit at the bottom)
+    # a one-shot is its own group AND is pinned to the BOTTOM — even one firing before the
+    # bar goes on air sits below the whole ca task group, never nested in it.
     late_bar = BarItem(task_name="ca", start_offset=30.0, stop_offset=0.0)
     late_tune = _tune("ca", 35)
     early_shot = _one("ca", 5)                    # a one-shot BEFORE the bar goes on air
     rows2, _ = tlm.display_order([late_bar, late_tune, early_shot])
-    assert rows2[0] is early_shot                 # its own group, earliest fire → top row
-    assert rows2[1] is late_bar and rows2[2] is late_tune   # the ca task group follows
+    assert rows2 == [late_bar, late_tune, early_shot]   # task group first, one-shot last
+
+
+def test_display_order_all_oneshots_sink_to_the_bottom():
+    # One-shots are independent of the tasks, so they collect at the bottom regardless of
+    # their fire times — never interleaved between duration-task groups.
+    b_ca = _bar("ca")
+    t_ca = _tune("ca", 40)
+    b_ch = BarItem(task_name="chirp", start_offset=100.0, stop_offset=0.0)
+    early = _one("marker", 5)      # fires first of all
+    mid = _one("ping", 70)         # between the two task groups by fire time
+    late = _one("beep", 300)
+    rows, _ = tlm.display_order([early, b_ca, t_ca, mid, b_ch, late])
+    names = [r.task_name for r in rows]
+    # both task groups first (ca then chirp by fire), then the three one-shots by fire time
+    assert names == ["ca", "ca", "chirp", "marker", "ping", "beep"]
 
 
 def test_display_order_two_oneshots_same_task_are_separate_rows():
