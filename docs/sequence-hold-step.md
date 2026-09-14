@@ -294,7 +294,15 @@ mechanism (`ArmSequenceRequest.steps`, `arm(...:471)`) — the stored sequence i
 this run's window B is replaced. This is the flexibility that makes the test method work: you discover
 the receiver lost lock at −50 dBm, you retarget the down-ramp to −50 dBm, then proceed.
 
-Window A (already executed) is immutable.
+Window A (already executed) is immutable — and the client SHOWS it that way (DECIDED with the owner;
+mockup `docs/hold-edit-elapsed-mockup.html`, option A without fired clock times): in the Hold-edit
+dialog everything at or before the Hold paints monochrome under a frosted wash with a
+"✓ ELAPSED — ran before the Hold · locked" ribbon; those steps take no drag, anchor handle,
+double-click editor, delete or duplicate (a click just says "already ran"), a task running since
+before the pause keeps only its stop editable, the Hold itself reads "⏸ HOLDING" and can't move, and
+new steps seed in the post-hold window. As a backstop the dialog refuses to return a step list whose
+window A differs from the one it loaded. The agent side needs nothing: `proceed` ignores window A
+regardless.
 
 ### 6.5 Achievability warnings across the hold
 

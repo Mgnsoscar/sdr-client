@@ -10,9 +10,16 @@ FULL step list via ``result_steps`` (the caller sends it as ``ProceedRequest.ste
 re-extracts window B from it and ignores the already-fired window A). A ramp that crosses the Hold
 is loaded SPLIT (``api.models.split_ramps_at_hold``): its run-up stays in window A and its
 not-yet-fired remainder becomes its own post-hold ramp, pre-filled as if resumed (§5.7).
+
+The ELAPSED window is LOCKED (docs/hold-edit-elapsed-mockup.html, option A): every step at/before
+the Hold already ran, so the timeline paints it frosted + monochrome and takes no drag, anchor,
+double-click, delete or duplicate on it — a click just says so — and the Hold itself (which is
+NOW) can't be moved or removed. New steps seed in the post-hold window. As the backstop behind
+those canvas gates, OK refuses a result whose window A differs from what was loaded.
 """
 from __future__ import annotations
 
+import json
 from typing import Dict, List, Optional
 
 import yaml
@@ -22,6 +29,7 @@ from PyQt6.QtWidgets import (
 )
 
 from api import models as m
+from . import timeline_model as tlm
 from .qt_adapter import DataHub
 from .theme import Palette
 from .widgets import fit_dialog_to_screen
@@ -44,6 +52,10 @@ class HoldEditDialog(QDialog):
         # not-yet-fired remainder as its OWN post-hold ramp, pre-filled with the levels and timing
         # resuming would give — so the operator retargets it like any window-B step (§5.7).
         self._timeline.set_steps(m.split_ramps_at_hold(sequence.steps))
+        # Everything at/before the Hold has already run: lock it (frosted, read-only), and remember
+        # its wire shape so OK can refuse a change that slipped past the canvas gates.
+        self._timeline.set_elapsed_locked(True)
+        self._window_a_sig = self._window_a_signature()
         self.hub.task_done.connect(self._on_task_done)
         self.finished.connect(lambda _=0: self._disconnect())
         self._load()
@@ -56,10 +68,10 @@ class HoldEditDialog(QDialog):
         outer.setSpacing(10)
 
         note = QLabel(
-            "Edit the steps AFTER the Hold (the down-ramp and cool-down). Window A has already "
-            "run and is left as-is — only the post-hold steps you change here take effect when "
-            "you Proceed. A ramp that runs across the Hold shows its remaining part as its own "
-            "post-hold ramp, pre-filled as if simply resumed — retarget it here if you like.")
+            "Edit the steps AFTER the Hold (the down-ramp and cool-down) — only those take effect "
+            "when you Proceed. Everything before the Hold has already run and is locked (greyed). "
+            "A ramp that ran across the Hold shows its remaining part as its own post-hold ramp, "
+            "pre-filled as if simply resumed — retarget it here if you like.")
         note.setWordWrap(True)
         note.setStyleSheet(
             f"font-size: 11px; color: {Palette.ACCENT_INK}; background: {Palette.ACCENT_SOFT}; "
@@ -107,7 +119,8 @@ class HoldEditDialog(QDialog):
         elif op == "holdedit_tasks":
             names = [t.name for t in result] if isinstance(result, list) else []
             self._timeline.set_tasks(names)
-            self._set_status("ready — edit the post-hold steps, then Use these steps")
+            self._set_status("ready — steps before the Hold are locked (they already ran) · "
+                             "edit the post-hold steps, then Use these steps")
 
     @staticmethod
     def _parse_task_commands(result) -> Dict[str, List[str]]:
@@ -125,6 +138,20 @@ class HoldEditDialog(QDialog):
                 out[name] = list(cmd)
         return out
 
+    # ── The elapsed window's signature (the accept-time backstop) ────────────
+
+    def _window_a_signature(self) -> List[str]:
+        """The steps that already RAN — window A on the agent's split: everything not measured
+        from resume (`hold`) or off-air (`stop`), the Hold marker included — as order-independent
+        wire dicts. Built from the RAW canvas items (no deploy-time power precompute), so an
+        untouched window A signs identically whether or not calibration has arrived yet."""
+        try:
+            dicts = tlm.items_to_steps(self._timeline.items())
+        except Exception:                                   # noqa: BLE001 — never block on a probe
+            return []
+        keep = [d for d in dicts if d.get("anchor") not in ("hold", "stop")]
+        return sorted(json.dumps(d, sort_keys=True, default=str) for d in keep)
+
     # ── Accept ────────────────────────────────────────────────────────────────
 
     def _accept(self) -> None:
@@ -135,6 +162,13 @@ class HoldEditDialog(QDialog):
         # The Hold must survive the edit — otherwise this isn't a window-B revision.
         if not self._timeline.has_hold():
             self._set_status("the Hold was removed — keep it to edit the post-hold window",
+                             error=True)
+            return
+        # Window A already ran: a changed / added / removed step there can never take effect
+        # (the canvas refuses those edits; this catches anything that got past it).
+        if self._window_a_signature() != self._window_a_sig:
+            self._set_status("the steps before the Hold have already run and can't be changed — "
+                             "undo those edits (Ctrl+Z) and change only the post-hold steps",
                              error=True)
             return
         self.result_steps = self._timeline.steps()

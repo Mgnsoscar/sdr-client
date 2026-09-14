@@ -126,6 +126,12 @@ PANEL_MIN_W = 112
 
 DRAG_PARTS = ("bar_start", "bar_stop", "bar_body", "run_body", "hold_body", "ramp_body")
 
+# Hold-edit (edit-while-holding): steps that already RAN — everything at/before the Hold — are
+# read-only and paint MONOCHROME under a frosted wash (docs/hold-edit-elapsed-mockup.html, option A).
+ELAPSED_HUE = "#9AA3B0"
+ELAPSED_INK = "#6B7482"
+ELAPSED_RIBBON = "✓ ELAPSED — ran before the Hold · locked"
+
 
 def task_signals_from_yaml(yaml_text) -> Dict[str, str]:
     """task_name -> SDR_CAL_SIGNAL_ID, parsed from a tasks.yaml document. Used to
@@ -339,6 +345,12 @@ class _TimelineCanvas(QWidget):
         self._snap_guide: Optional[float] = None  # x of the active snap guide line during a drag
         self._undo: List[list] = []             # past item snapshots (deepcopies) for Ctrl+Z
         self._redo: List[list] = []             # undone snapshots for Ctrl+Y / Ctrl+Shift+Z
+        # Hold-edit mode (edit-while-holding): window A already RAN, so every step at/before the
+        # Hold — and the Hold itself, which is NOW — is read-only, frosted and monochrome; only
+        # the post-hold window edits. See elapsed_kind / _paint_elapsed_wash.
+        self._lock_elapsed: bool = False
+        self._hold_tag: str = "⏸ HOLD"          # the Hold tab's label ("⏸ HOLDING" while locked)
+        self._elapsed_ribbon: Optional[QRectF] = None   # where the ELAPSED ribbon painted (tests)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)   # so the canvas receives key shortcuts
         self.grabGesture(Qt.GestureType.PinchGesture)   # touchpad pinch (where routed as a gesture)
@@ -470,6 +482,71 @@ class _TimelineCanvas(QWidget):
         self._redo = []
         self.relayout()
         self.changed.emit()
+
+    # ── Hold-edit: the elapsed window is read-only ───────────────────────────
+    def set_elapsed_locked(self, locked: bool, tag: str = "⏸ HOLDING") -> None:
+        """Edit-while-holding: lock every step that already RAN (window A — at/before the Hold)
+        and the Hold itself (it is NOW). They paint frosted + monochrome, take no drag / anchor /
+        double-click / delete, and a click just says so; the post-hold window edits as usual."""
+        self._lock_elapsed = bool(locked)
+        self._hold_tag = tag if locked else "⏸ HOLD"
+        self._clear_selection()
+        self._connect = None
+        self._drag = None
+        self.update()
+
+    def elapsed_locked(self) -> bool:
+        return self._lock_elapsed
+
+    def elapsed_kind(self, it) -> Optional[str]:
+        """In the locked (Hold-edit) mode, what part of `it` has ALREADY HAPPENED:
+        "full"  — every fire sits at or before the pause (the agent's window A): a window-A tune /
+                  one-shot / ramp, incl. a pause-anchored (`enter`) step;
+        "start" — a duration task that STARTED before the pause but is still running (its stop is
+                  post-hold and stays editable);
+        "hold"  — the Hold marker itself (it is now — fixed);
+        None    — still to come (window B, off-air, a window-B duration task). Always None when
+                  not locked or without a Hold."""
+        if not self._lock_elapsed or self._hold_off is None:
+            return None
+        h = float(self._hold_off) + 1e-6
+        if tlm._is_hold(it):
+            return "hold"
+        anc = getattr(it, "anchor", "start")
+        if getattr(it, "kind", None) == "bar":
+            if getattr(it, "start_anchor", "start") == "hold":
+                return None
+            a, o = tlm.bar_start_placement(it, self._hold_off, self._step_bases, self._step_off_bases)
+            return "start" if (a == "start" and o <= h) else None
+        if anc == "hold":
+            return None                          # window B: measured forward from resume
+        if tlm._is_ramp(it):
+            try:
+                (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases,
+                                                   self._step_off_bases)
+            except (ValueError, TypeError):
+                return None
+            if la != "start" or ra != "start" or min(lo, ro) > h:
+                return None
+            # A ramp with a point still to fire after the pause hasn't finished (the dialog loads a
+            # crossing ramp SPLIT, so its run-up is a whole ramp of its own and reads "full").
+            r = dict(getattr(it, "ramp", None) or {})
+            return None if tlm._ramp_fires_after(r, min(lo, ro), self._hold_off) else "full"
+        a, o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases, self._step_off_bases)
+        return "full" if (a == "start" and o <= h) else None
+
+    def _lock_notice(self, it, global_pt) -> None:
+        """The non-interrupting notice a press on a locked item shows (no dialog, no selection)."""
+        k = self.elapsed_kind(it)
+        if k == "hold":
+            text = "<b>The Hold is now</b> — it can't be moved while holding."
+        elif k == "start":
+            text = ("<b>Running since before the Hold</b> — its start is locked.<br>"
+                    "Only its stop (off-air) can still be changed.")
+        else:
+            text = ("<b>Already ran</b> — this step fired before the Hold and is locked.<br>"
+                    "Edit the steps after the Hold instead.")
+        QToolTip.showText(global_pt, text, self)
 
     # ── Selection (a primary uid + a multi-select set) ────────────────────────
     def _select_only(self, uid) -> None:
@@ -872,6 +949,11 @@ class _TimelineCanvas(QWidget):
                 self._paint_ramp(p, it)
             else:
                 self._paint_pin(p, it)
+        # Hold-edit: frost the elapsed window OVER its (already monochrome) steps, under the Hold's
+        # own edges so they stay crisp.
+        self._elapsed_ribbon = None
+        if self._lock_elapsed and self._hold_present and self._enter_x is not None:
+            self._paint_elapsed_wash(p, top, baseline)
         for it in self._holds:
             self._paint_hold(p, it)
         self._paint_root_anchor_hint(p)
@@ -942,12 +1024,60 @@ class _TimelineCanvas(QWidget):
     def _item_colors(self, it):
         """(base, edge, fa, fb, ink) for an item: its task hue when the task is known,
         else the red 'unknown task' treatment (so a typo still reads as a problem)."""
+        if self.elapsed_kind(it) == "full":            # Hold-edit: already ran → monochrome
+            return self._elapsed_colors()
         hexs = self._hue_for(it)
         if self.task_known(getattr(it, "task_name", "")) and hexs:
             return self._hues(hexs)
         base = QColor(Palette.CRASH); edge = QColor(Palette.CRASH); edge.setAlpha(150)
         fa = QColor(Palette.CRASH); fa.setAlpha(30); fb = QColor(Palette.CRASH); fb.setAlpha(10)
         return base, edge, fa, fb, QColor(Palette.CRASH)
+
+    @staticmethod
+    def _elapsed_colors():
+        """The locked (already-ran) treatment: one neutral grey, no task hue."""
+        base = QColor(ELAPSED_HUE); edge = QColor(ELAPSED_HUE); edge.setAlpha(150)
+        fa = QColor(ELAPSED_HUE); fa.setAlpha(46); fb = QColor(ELAPSED_HUE); fb.setAlpha(16)
+        return base, edge, fa, fb, QColor(ELAPSED_INK)
+
+    def _paint_elapsed_wash(self, p, top, baseline):
+        """Hold-edit: FROST the elapsed window — everything left of the Hold's enter edge — with a
+        translucent wash + faint diagonal hairlines over the already-ran steps, and a ribbon on the
+        anchor row saying why it's locked (elided / dropped when the window is too narrow for it,
+        so it never runs into the ON-AIR pill or the Hold tab)."""
+        ex = float(self._enter_x)
+        if ex <= 0:
+            return
+        r = QRectF(0.0, float(top), ex, float(baseline - top))
+        wash = QColor(Palette.SURFACE); wash.setAlpha(120)
+        p.fillRect(r, wash)
+        p.save(); p.setClipRect(r)
+        hair = QColor(Palette.BORDER_STRONG); hair.setAlpha(70)
+        p.setPen(QPen(hair, 1))
+        h = float(baseline - top)
+        xx = -h
+        while xx < ex:                       # 135° hairlines — the opposite slant to the Hold hatch
+            p.drawLine(QPointF(xx, float(top)), QPointF(xx + h, float(baseline)))
+            xx += 6.0
+        p.restore()
+        # The ribbon sits on the anchor row between the ON-AIR pill and the Hold tab.
+        f = self._f(8, True); fm = QFontMetrics(f)
+        ft = QFont(); ft.setPointSize(8); ft.setBold(True)
+        tab_w = QFontMetrics(ft).horizontalAdvance(self._hold_tag) + 12
+        left = float(self._on) + fm.horizontalAdvance("ON-AIR") / 2.0 + 14.0
+        right = ex + HOLD_BAND_PX / 2.0 - tab_w / 2.0 - 8.0
+        for text in (ELAPSED_RIBBON, "✓ ELAPSED · locked", "✓ ELAPSED"):
+            w = fm.horizontalAdvance(text) + 16.0
+            if left + w <= right:
+                break
+        else:
+            return
+        rr = QRectF(left, float(top) - 11.0, w, 15.0)
+        p.setPen(QPen(QColor(ELAPSED_HUE), 1)); p.setBrush(QColor(Palette.SURFACE))
+        p.drawRoundedRect(rr, 7, 7)
+        p.setFont(f); p.setPen(QColor(ELAPSED_INK))
+        p.drawText(rr, int(Qt.AlignmentFlag.AlignCenter), text)
+        self._elapsed_ribbon = rr
 
     def _paint_hatch(self, p, x0, x1, top, bot):
         if x1 - x0 <= 0:
@@ -963,8 +1093,8 @@ class _TimelineCanvas(QWidget):
             xx += 7
         p.restore()
 
-    def _paint_anchor(self, p, x, top, baseline, label, color):
-        col = QColor(color)
+    def _paint_anchor(self, p, x, top, baseline, label, color, alpha: int = 255):
+        col = QColor(color); col.setAlpha(alpha)
         p.setPen(QPen(col, 2)); p.drawLine(x, top - 2, x, baseline + 4)
         f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPointSize(8); f.setBold(True)
         p.setFont(f)
@@ -1096,7 +1226,9 @@ class _TimelineCanvas(QWidget):
             p.fillRect(QRectF(resume_x, top, max(0, off_x - resume_x), baseline - top), rtint)
 
         self._paint_hold_gridlines(p, top, baseline, on_x, enter_x, resume_x, off_x, merged)
-        self._paint_anchor(p, on_x, top, baseline, "ON-AIR", Palette.ONLINE)
+        # Hold-edit: T0 is history, RESUME is the reference the editable window hangs off → dim.
+        self._paint_anchor(p, on_x, top, baseline, "ON-AIR", Palette.ONLINE,
+                           alpha=120 if self._lock_elapsed else 255)
         self._paint_hold_axis(p, baseline, on_x, enter_x, resume_x, off_x, merged)
         if not merged:                       # OFF-AIR floats past the post-hold content
             self._paint_floating_offair(p, off_x, top, baseline)
@@ -1393,14 +1525,27 @@ class _TimelineCanvas(QWidget):
         p.drawText(QRectF(left + 12, y, w - 22, LANE_H),
                    int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), label)
         cy = y + LANE_H / 2
+        # Hold-edit: a task RUNNING since before the pause — its elapsed stretch (start → the
+        # Hold's enter edge) is greyed, and the start grip / anchor dot are gone; only the stop
+        # (off-air, post-hold) keeps its grip + dot.
+        running = self.elapsed_kind(it) == "start" and self._enter_x is not None
+        if running:
+            clip = QPainterPath(); clip.addRoundedRect(rect, BAR_R, BAR_R)
+            p.save(); p.setClipPath(clip)
+            grey = QColor(ELAPSED_HUE); grey.setAlpha(95)
+            p.fillRect(QRectF(left, y, max(0.0, min(w, float(self._enter_x) - left)), LANE_H), grey)
+            p.restore()
         # Resize GRIPS just inside each end (two hairlines) — distinct from the edge DOTS: the
         # start dot is the bar's anchor handle (drag it onto a step / anchor line to hang the task
         # off it), the grip resizes (owner v3 #5).
         if w > 4 * HANDLE_W:
             gpen = QPen(QColor(edge), 1.2); p.setPen(gpen)
-            for gx in (left + 10.0, left + 13.0, left + w - 10.0, left + w - 13.0):
+            grips = (left + w - 10.0, left + w - 13.0) if running else \
+                (left + 10.0, left + 13.0, left + w - 10.0, left + w - 13.0)
+            for gx in grips:
                 p.drawLine(QPointF(gx, y + 8.0), QPointF(gx, y + LANE_H - 8.0))
-        self._paint_edge_dot(p, sx, cy, base, self._edge_linked(it, "start"))
+        if not running:
+            self._paint_edge_dot(p, sx, cy, base, self._edge_linked(it, "start"))
         self._paint_edge_dot(p, px, cy, base, self._edge_linked(it, "end"))
 
     def _paint_ramp(self, p, it):
@@ -1485,8 +1630,9 @@ class _TimelineCanvas(QWidget):
                            fm.elidedText(rng, Qt.TextElideMode.ElideRight, avail))
 
         cy = y + LANE_H / 2
-        self._paint_edge_dot(p, sx, cy, base, self._edge_linked(it, "start"))
-        self._paint_edge_dot(p, px, cy, base, self._edge_linked(it, "end"))
+        if self.elapsed_kind(it) is None:            # a locked (already-ran) ramp has no handles
+            self._paint_edge_dot(p, sx, cy, base, self._edge_linked(it, "start"))
+            self._paint_edge_dot(p, px, cy, base, self._edge_linked(it, "end"))
 
     def _paint_slope(self, p, mx, my, rising, base, span=9.0):
         """The rising/falling trend mark: a left→right stroke ending in a filled dot
@@ -1528,9 +1674,10 @@ class _TimelineCanvas(QWidget):
         two_sided = side == "two_sided"
         left = side == "left"
         gap = PIN_CAP_GAP2 if two_sided else PIN_CAP_GAP
+        muted = self.elapsed_kind(it) == "full"      # Hold-edit: already ran → monochrome readout
         if one_shot:
             name = it.task_name or "(no task)"
-            p.setFont(self._f(12, True)); p.setPen(QColor(Palette.TEXT))
+            p.setFont(self._f(12, True)); p.setPen(QColor(ELAPSED_INK if muted else Palette.TEXT))
             if left:
                 tw = QFontMetrics(self._f(12, True)).horizontalAdvance(name)
                 p.drawText(QRectF(cx - PIN_CAP_GAP - tw, y, tw, LANE_H),
@@ -1541,7 +1688,7 @@ class _TimelineCanvas(QWidget):
         else:
             defs, total, fonts = self._tune_chip_defs(it)
             tx = (cx - PIN_CAP_GAP - total) if left else (cx + gap)
-            self._paint_tune_chips(p, defs, fonts, tx, cy, base)
+            self._paint_tune_chips(p, defs, fonts, tx, cy, base, muted=muted)
 
     def _is_anchor_target(self, it) -> bool:
         """True when some other step is anchored TO this item (a connector attaches on this pin) —
@@ -1674,9 +1821,10 @@ class _TimelineCanvas(QWidget):
             return "#0D6B57", Palette.ONLINE_SOFT, "#C3E7DB"
         return "#3B4A5C", "#EEF2F6", "#DFE6EE"
 
-    def _paint_tune_chips(self, p, defs, fonts, tx, cy, base):
+    def _paint_tune_chips(self, p, defs, fonts, tx, cy, base, muted: bool = False):
         """Draw a tune step's recessed readout chips left-to-right from tx (option B). ``defs`` and
-        ``fonts`` come pre-measured from _tune_chip_defs so the caller can left- or right-place them."""
+        ``fonts`` come pre-measured from _tune_chip_defs so the caller can left- or right-place them.
+        ``muted`` (Hold-edit, an already-ran step) drops every colour to the elapsed grey."""
         fnm, fval, funit = fonts
         x = tx
         for d in defs:
@@ -1691,19 +1839,20 @@ class _TimelineCanvas(QWidget):
                        int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), d["nm"])
             gx += d["nmw"] + TCHIP_NV_GAP
             if d["flag"]:
-                on = d["val"] == "on"
-                fg = QColor("#0D6B57" if on else Palette.TEXT_MUTED)
+                on = d["val"] == "on" and not muted
+                fg = QColor("#0D6B57" if on else (ELAPSED_INK if muted else Palette.TEXT_MUTED))
                 bg = QColor(Palette.ONLINE_SOFT if on else Palette.INSET)
                 pr = QRectF(gx, cy - 8, d["vw"] + 2 * TUCHIP_PAD, 16)
                 p.setPen(Qt.PenStyle.NoPen); p.setBrush(bg); p.drawRoundedRect(pr, 4, 4)
                 p.setFont(fval); p.setPen(fg)
                 p.drawText(pr, int(Qt.AlignmentFlag.AlignCenter), d["val"])
             else:
-                p.setFont(fval); p.setPen(QColor(Palette.TEXT))
+                p.setFont(fval); p.setPen(QColor(ELAPSED_INK if muted else Palette.TEXT))
                 p.drawText(QRectF(gx, r.top(), d["vw"] + 2, TCHIP_H),
                            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), d["val"])
                 if d["unit"]:
-                    fg, bg, bd = self._unit_chip_colors(d["unit"])
+                    fg, bg, bd = ((ELAPSED_INK, Palette.INSET, Palette.BORDER) if muted
+                                  else self._unit_chip_colors(d["unit"]))
                     ur = QRectF(gx + d["vw"] + TCHIP_VU_GAP, cy - 8, d["uw"], 16)
                     p.setPen(QPen(QColor(bd), 1)); p.setBrush(QColor(bg))
                     p.drawRoundedRect(ur, 4, 4)
@@ -2220,15 +2369,16 @@ class _TimelineCanvas(QWidget):
         rpen.setStyle(Qt.PenStyle.DashLine); p.setPen(rpen)
         p.drawLine(resume_x, top, resume_x, baseline + 6)
         if merged:
-            self._paint_merged_marker(p, resume_x, top - 3)
+            self._paint_merged_marker(p, resume_x, top - 3, self._hold_tag)
             fi = QFont(Fonts.SANS.split(",")[0].strip('"')); fi.setPointSize(7); fi.setItalic(True)
             p.setFont(fi); p.setPen(QColor(Palette.TEXT_FAINT))
             p.drawText(QRectF(resume_x - 30, top - 15, 60, 11),
                        int(Qt.AlignmentFlag.AlignHCenter), "floats")
         else:
-            # A ⏸ HOLD tab centred in the band so it reads as an anchor (like ON-AIR/OFF-AIR).
+            # A ⏸ HOLD tab centred in the band so it reads as an anchor (like ON-AIR/OFF-AIR) —
+            # "⏸ HOLDING" in the Hold-edit dialog, where the Hold is NOW.
             f = QFont(); f.setPointSize(8); f.setBold(True); p.setFont(f)
-            fm = QFontMetrics(f); text = "⏸ HOLD"; tw = fm.horizontalAdvance(text) + 12
+            fm = QFontMetrics(f); text = self._hold_tag; tw = fm.horizontalAdvance(text) + 12
             cxh = (enter_x + resume_x) / 2
             r = QRectF(cxh - tw / 2, top - 3, tw, 15)
             p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(amber)); p.drawRoundedRect(r, 7, 7)
@@ -2236,13 +2386,13 @@ class _TimelineCanvas(QWidget):
         # (No below-axis offset chip: the enter edge + the on-air axis already read the Hold's
         # position, and a chip there would crowd the resume '0' tick / the hold band.)
 
-    def _paint_merged_marker(self, p, seam_x, top_y):
+    def _paint_merged_marker(self, p, seam_x, top_y, tag: str = "⏸ HOLD"):
         """A combined ⏸ HOLD │ OFF-AIR marker straddling one line — used when nothing is
         anchored after the Hold, so its resume edge and off-air are the same instant."""
         f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPointSize(8); f.setBold(True)
         p.setFont(f); fm = QFontMetrics(f)
         h = 15
-        hw = fm.horizontalAdvance("⏸ HOLD") + 12
+        hw = fm.horizontalAdvance(tag) + 12
         ow = fm.horizontalAdvance("OFF-AIR") + 12
         rl = QRectF(seam_x - 1 - hw, top_y, hw, h)
         rr = QRectF(seam_x + 1, top_y, ow, h)
@@ -2250,7 +2400,7 @@ class _TimelineCanvas(QWidget):
         p.setBrush(QColor(Palette.ARMED)); p.drawRoundedRect(rl, 5, 5)
         p.setBrush(QColor(Palette.CRASH)); p.drawRoundedRect(rr, 5, 5)
         p.setPen(QColor("#FFFFFF"))
-        p.drawText(rl, int(Qt.AlignmentFlag.AlignCenter), "⏸ HOLD")
+        p.drawText(rl, int(Qt.AlignmentFlag.AlignCenter), tag)
         p.drawText(rr, int(Qt.AlignmentFlag.AlignCenter), "OFF-AIR")
 
     # ── Hit-testing ───────────────────────────────────────────────────────────
@@ -2283,6 +2433,19 @@ class _TimelineCanvas(QWidget):
         return lo, hi
 
     def _hit(self, x: float, y: float) -> Optional[Tuple[object, str]]:
+        """(item, part) under (x, y). In the Hold-edit (locked) mode a part of an item that has
+        ALREADY HAPPENED comes back as "locked" — no drag, no anchor handle, no edit — except a
+        running task's STOP grip (its stop is post-hold and still editable)."""
+        res = self._hit_free(x, y)
+        if res is None or not self._lock_elapsed:
+            return res
+        it, part = res
+        k = self.elapsed_kind(it)
+        if k is None or (k == "start" and part in ("bar_stop", "caret")):
+            return res
+        return it, "locked"
+
+    def _hit_free(self, x: float, y: float) -> Optional[Tuple[object, str]]:
         # The Hold WINDOW spans the whole band, so a wide bar body overlaps it — test holds
         # first so a click anywhere on the band (enter edge → resume edge) grabs it, not the
         # bar underneath.
@@ -2403,7 +2566,11 @@ class _TimelineCanvas(QWidget):
         hit = self._drop_edge_at(x, y)
         if hit is not None:
             tgt, edge = hit
-            if (getattr(tgt, "uid", None) != src_uid
+            # Hold-edit: nothing may hang off an edge that already happened (a step anchored to
+            # window A resolves before the pause — it would never fire).
+            k = self.elapsed_kind(tgt)
+            elapsed = k in ("full", "hold") or (k == "start" and edge == "start")
+            if (not elapsed and getattr(tgt, "uid", None) != src_uid
                     and tgt in tlm.eligible_step_targets(self._items, src_uid)):
                 return tgt, edge
         src = next((o for o in self._items if o.uid == src_uid), None)
@@ -2411,6 +2578,8 @@ class _TimelineCanvas(QWidget):
                    and (self._connect or {}).get("from_edge") == "end")
         root = self._root_anchor_at(x, for_end=for_end)
         if root is not None:
+            if self._lock_elapsed and root in ("start", "enter"):
+                return None                       # on-air / the pause are history while holding
             return "__root__", root
         return None
 
@@ -2464,6 +2633,11 @@ class _TimelineCanvas(QWidget):
                              "additive": additive, "base": set(self._selection), "moved": False}
             return
         it, part = hit
+        if part == "locked":
+            # Hold-edit: this already happened — no selection, no drag, just say so.
+            self._drag = None; self._connect = None
+            self._lock_notice(it, e.globalPosition().toPoint())
+            return
         if part == "caret":
             self._drag = None
             self._toggle_collapsed(it)
@@ -2536,7 +2710,9 @@ class _TimelineCanvas(QWidget):
         if self._drag is None:
             self._snap_guide = None
             hit = self._hit(pos.x(), pos.y())
-            if hit and hit[1].startswith("edge_"):
+            if hit and hit[1] == "locked":
+                self.setCursor(Qt.CursorShape.ForbiddenCursor)
+            elif hit and hit[1].startswith("edge_"):
                 self.setCursor(Qt.CursorShape.CrossCursor)
             elif hit and hit[1] in ("bar_start", "bar_stop"):
                 self.setCursor(Qt.CursorShape.SizeHorCursor)
@@ -2770,7 +2946,7 @@ class _TimelineCanvas(QWidget):
         hit = set()
         for it in self._rows:
             g = self._geom.get(it.uid)
-            if not g:
+            if not g or self.elapsed_kind(it) is not None:   # locked items never select
                 continue
             if it.kind == "bar" or tlm._is_ramp(it):
                 ix0, ix1 = sorted((g.get("start_x", 0.0), g.get("stop_x", 0.0)))
@@ -2810,8 +2986,16 @@ class _TimelineCanvas(QWidget):
     def _clamp_tune_offset(self, it, offset: float) -> float:
         """Keep a tune / ramp inside its task's on-air span (see _task_range) — both ends. A
         pause-anchored (anchor='enter') step can't reach INTO the pause. Everything else is free."""
-        if getattr(it, "anchor", "start") == "enter":
+        anc = getattr(it, "anchor", "start")
+        if anc == "enter":
             return min(offset, 0.0)
+        if self._lock_elapsed and self._resume_x is not None:
+            # Hold-edit: nothing editable may be dragged back INTO the past — a window-B step
+            # stays at/after resume, an off-air step no earlier than the resume edge.
+            if anc == "hold":
+                offset = max(offset, 0.0)
+            elif anc == "stop":
+                offset = max(offset, (float(self._resume_x) - float(self._off)) / self._eff())
         rng = self._task_range(it)
         if rng is None:
             return offset
@@ -2932,6 +3116,9 @@ class _TimelineCanvas(QWidget):
         if e.button() != Qt.MouseButton.LeftButton:
             return
         hit = self._hit(e.position().x(), e.position().y())
+        if hit is not None and hit[1] == "locked":
+            self._lock_notice(hit[0], e.globalPosition().toPoint())   # Hold-edit: no editor
+            return
         if hit is not None and hit[1] != "caret":
             self.edit_item(hit[0])
 
@@ -2944,8 +3131,8 @@ class _TimelineCanvas(QWidget):
             self.undo(); e.accept(); return
         if (ctrl and key == Qt.Key.Key_Y) or (ctrl and shift and key == Qt.Key.Key_Z):
             self.redo(); e.accept(); return
-        if ctrl and key == Qt.Key.Key_A and self._rows:      # select all
-            self._selection = {it.uid for it in self._rows}
+        if ctrl and key == Qt.Key.Key_A and self._rows:      # select all (never a locked item)
+            self._selection = {it.uid for it in self._rows if self.elapsed_kind(it) is None}
             self._selected = next(iter(self._selection), None)
             self.update(); e.accept(); return
         if ctrl and key == Qt.Key.Key_D and self._selected is not None:
@@ -2975,11 +3162,19 @@ class _TimelineCanvas(QWidget):
         """A rich, multi-line description of an item for hover (task, what it does, when it
         fires, and its anchor if step-anchored)."""
         if tlm._is_hold(it):
+            if self.elapsed_kind(it) == "hold":
+                return ("<b>Hold</b> · holding now<br>the run is parked here — it can't be moved"
+                        "<br><i>resume with Proceed</i>")
             return (f"<b>Hold</b><br>pauses the run at on-air "
                     f"{self._mmss(float(getattr(it, 'offset', 0.0)))}<br>"
                     f"<i>resume with Proceed</i>")
         act = getattr(it, "action", "run")
         lines: List[str] = []
+        k = self.elapsed_kind(it)                # Hold-edit: say up front that this already happened
+        if k == "full":
+            lines.append("<b>Locked</b> · already ran before the Hold")
+        elif k == "start":
+            lines.append("<b>Running</b> · started before the Hold — only its stop can change")
         # A tune/ramp's parent task is obvious from its row (indent, hue), so the header names the
         # STEP, not the task (owner v3 #3); a duration task / one-shot IS its task.
         if it.kind == "bar":
@@ -3245,7 +3440,9 @@ class _TimelineCanvas(QWidget):
         before = (getattr(bar, "start_anchor", "start") == "start"
                   and float(getattr(bar, "start_offset", 0.0)) < 0)
         rf_on = find("start", True)
-        if before:
+        if self.elapsed_kind(bar) == "start":
+            pass                        # Hold-edit: the launch already happened — leave its gate be
+        elif before:
             if rf_gate.gate_arg_state(bar.args, gp) is not False:
                 bar.args = rf_gate.set_gate_arg(list(bar.args or []), gp, False); changed = True
             if rf_on is None:
@@ -3349,6 +3546,10 @@ class _TimelineCanvas(QWidget):
             e.ignore()
             return
         it = hit[0]
+        if hit[1] == "locked":                 # Hold-edit: nothing to do to what already happened
+            self._lock_notice(it, e.globalPos())
+            e.accept()
+            return
         if it.uid not in self._selection:      # right-click outside the selection re-selects it
             self._select_only(it.uid)
         self.update()
@@ -3469,8 +3670,23 @@ class _TimelineCanvas(QWidget):
         elif r == QDialog.DialogCode.Accepted and dlg.result_item is not None:
             self.replace_item(item.uid, dlg.result_item)
 
-    def add_new(self, kind: str) -> None:
+    def _seed_item(self, kind: str):
+        """The item a '+ <kind>' button starts the editor with. In the Hold-edit (locked) mode a new
+        step is seeded in the POST-HOLD window (anchored to the Hold's resume edge) — on-air is
+        history there."""
         default_task = self._editor.available_tasks()[0] if self._editor.available_tasks() else ""
+        anchor = "hold" if (self._lock_elapsed and self._hold_off is not None) else "start"
+        if kind == "bar":
+            return tlm.BarItem(task_name=default_task, start_offset=0.0, stop_offset=0.0,
+                               start_anchor=anchor)
+        if kind == "tune":
+            return tlm.RunItem(task_name=default_task, action="tune", anchor=anchor, offset=0.0)
+        if kind == "ramp":
+            return tlm.RunItem(task_name=default_task, action="ramp", anchor=anchor,
+                               offset=0.0, ramp={})
+        return tlm.RunItem(task_name=default_task, anchor=anchor, offset=0.0)
+
+    def add_new(self, kind: str) -> None:
         if kind == "hold":
             # One Hold per sequence (docs/sequence-hold-step.md §5.1). Seed its position
             # after the furthest window-A on-air point so it reads as "pause at the top".
@@ -3481,15 +3697,8 @@ class _TimelineCanvas(QWidget):
                 return
             item = tlm.RunItem(task_name="", action="hold", anchor="start",
                                offset=self._default_hold_offset())
-        elif kind == "bar":
-            item = tlm.BarItem(task_name=default_task, start_offset=0.0, stop_offset=0.0)
-        elif kind == "tune":
-            item = tlm.RunItem(task_name=default_task, action="tune", anchor="start", offset=0.0)
-        elif kind == "ramp":
-            item = tlm.RunItem(task_name=default_task, action="ramp", anchor="start",
-                               offset=0.0, ramp={})
         else:
-            item = tlm.RunItem(task_name=default_task, anchor="start", offset=0.0)
+            item = self._seed_item(kind)
         dlg = self._dialog_for(item, new=True)
         r = dlg.exec()
         if r == QDialog.DialogCode.Accepted and dlg.result_item is not None:
@@ -4391,6 +4600,15 @@ class _RowHeader(QWidget):
 
     def _meta(self, it):
         """(name, sub, type_label) for a row header entry."""
+        name, sub, typ = self._meta_free(it)
+        k = self._canvas.elapsed_kind(it)           # Hold-edit: say what already happened
+        if k == "full":
+            sub = f"{sub} · ran" if sub else "ran"
+        elif k == "start":
+            sub = "runs through the Hold"           # started before the pause, still running
+        return name, sub, typ
+
+    def _meta_free(self, it):
         act = getattr(it, "action", "run")
         if getattr(it, "kind", None) == "bar":
             return it.task_name or "(no task)", "on-air → off-air", "Duration"
@@ -4431,6 +4649,10 @@ class _RowHeader(QWidget):
             base = QColor(hue) if (hue and known) else QColor(Palette.CRASH)
             cy = y + LANE_H / 2
             name, sub, typ = self._meta(it)
+            locked = self._canvas.elapsed_kind(it) == "full"     # Hold-edit: already ran
+            if locked:
+                base = QColor(ELAPSED_HUE)
+                known = True                                     # grey, never the red "unknown"
             if child:
                 # indent + a small kin elbow in the task hue
                 kin = QColor(base); kin.setAlpha(120)
@@ -4448,9 +4670,13 @@ class _RowHeader(QWidget):
             fn.setWeight(QFont.Weight(600 if not child else 500))
             fm = QFontMetrics(fn)
             badge_w = self._type_badge(p, typ, base, known, y)   # draws + returns width
+            if locked:                                           # a small padlock before the badge
+                self._paint_lock(p, self.width() - badge_w - 24, cy, QColor(ELAPSED_INK))
+                badge_w += 18
             avail = self.width() - nx - badge_w - 16
             if sub:
-                p.setFont(fn); p.setPen(QColor(Palette.TEXT if known else Palette.CRASH))
+                p.setFont(fn)
+                p.setPen(QColor(ELAPSED_INK if locked else (Palette.TEXT if known else Palette.CRASH)))
                 p.drawText(nx, int(y + 3), avail, 15,
                            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
                            fm.elidedText(name, Qt.TextElideMode.ElideRight, avail))
@@ -4477,6 +4703,14 @@ class _RowHeader(QWidget):
         p.setPen(QColor(Palette.TEXT_MUTED))
         p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
         return w + 12
+
+    @staticmethod
+    def _paint_lock(p, x, cy, col) -> None:
+        """A small padlock (shackle + body) — the Hold-edit 'already ran' marker on a row."""
+        p.setPen(QPen(col, 1.4)); p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(QRectF(x + 2.0, cy - 7.5, 6.0, 7.0), 0, 180 * 16)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(col)
+        p.drawRoundedRect(QRectF(x, cy - 3.0, 10.0, 8.0), 2.0, 2.0)
 
 
 class _Minimap(QWidget):
@@ -4787,6 +5021,28 @@ class TimelineEditor(QWidget):
         self._hold_authoring = bool(enabled)
         self._sync_hold_button()
 
+    # ── Hold-edit: the elapsed window is read-only ───────────────────────────
+    LOCKED_HINT = ("Steps before the Hold already ran and are locked · edit the post-hold "
+                   "steps · double-click to edit · Ctrl+Z undo")
+
+    def set_elapsed_locked(self, locked: bool) -> None:
+        """Edit-while-holding (docs/hold-edit-elapsed-mockup.html, option A): every step that
+        already RAN — at/before the Hold — and the Hold itself are read-only: frosted, monochrome,
+        no handles, no drag / anchor / edit / delete; a click just says so. New steps seed in the
+        post-hold window. The canvas decides what's elapsed (`elapsed_kind`)."""
+        self._elapsed_locked = bool(locked)
+        self._canvas.set_elapsed_locked(locked)
+        if locked:
+            self._hint.setText(self.LOCKED_HINT)
+        self._canvas.changed.emit()                  # row header / legend / minimap re-read
+
+    def elapsed_locked(self) -> bool:
+        return bool(getattr(self, "_elapsed_locked", False))
+
+    def elapsed_kind(self, item) -> Optional[str]:
+        """"full" / "start" / "hold" / None — see _TimelineCanvas.elapsed_kind."""
+        return self._canvas.elapsed_kind(item)
+
     def _sync_undo_buttons(self) -> None:
         cv = getattr(self, "_canvas", None)
         if cv is None:
@@ -4982,6 +5238,8 @@ class TimelineEditor(QWidget):
         self._tasks = list(names)
         if not self._tasks:
             self._hint.setText("no tasks on this unit — define one in the Tasks tab first")
+        elif self.elapsed_locked():
+            self._hint.setText(self.LOCKED_HINT)
         else:
             self._hint.setText("Drag an edge dot to anchor · click / shift-click / drag a box to "
                                "select · double-click to edit · right-click for more · Ctrl+Z undo")

@@ -71,6 +71,48 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — Hold-edit: the ELAPSED window is frosted + LOCKED (option A): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Owner ask: while a run is HOLDING, the edit dialog should grey out the already-elapsed window and make
+it impossible to even try to edit those steps. Mockup `docs/hold-edit-elapsed-mockup.html` (published
+Artifact; three treatments) — owner picked **A · Frosted & locked, WITHOUT the fired clock times**.
+Client-only (no wire/agent/capability change; drift-guarded files untouched):
+- **Canvas mode** (`ui/timeline_editor.py`, `_TimelineCanvas.set_elapsed_locked(True)`): `elapsed_kind(it)`
+  says what already happened — `"full"` (every fire at/before the pause: a window-A tune / one-shot /
+  ramp incl. an `enter` step — a ramp with a point still to fire after the pause is NOT full, but the
+  dialog loads a crossing ramp split so its run-up is), `"start"` (a duration task RUNNING since before
+  the pause — its stop is post-hold and stays editable), `"hold"` (the marker: it is NOW), None (window
+  B / off-air / a window-B bar). Always None when not locked.
+- **Gates.** `_hit` wraps `_hit_free`: a locked part returns `"locked"` (a running bar keeps `bar_stop`) →
+  `mousePressEvent` / `mouseDoubleClickEvent` / `contextMenuEvent` show only `_lock_notice` (a
+  `QToolTip`: "Already ran…" / "Running since before the Hold…" / "The Hold is now…"), no selection,
+  no drag, no editor; the hover cursor is Forbidden. Ctrl+A / the marquee skip locked items; `_drop_target`
+  refuses an elapsed edge, a running bar's START edge and the on-air / pause root lines; `_clamp_tune_
+  offset` keeps a window-B step ≥ 0 from resume and an off-air step no earlier than the resume edge;
+  `_auto_rf_gate` leaves a running task's launch gate alone (only the stop-side auto tune applies);
+  `_seed_item` (the `+ Tune/Ramp/One-shot/Duration` buttons) seeds new steps in the POST-HOLD window
+  (`anchor="hold"` / `start_anchor="hold"`).
+- **Paint.** `_item_colors` → one grey (`ELAPSED_HUE`/`ELAPSED_INK`) for a full item; no edge dots on a
+  locked ramp, none on a running bar's start (its elapsed stretch start→enter is greyed, only the stop
+  grip stays); tune chips / one-shot names muted; `_paint_elapsed_wash` (after the rows, under the Hold's
+  edges) frosts `0..enter_x` with a translucent wash + 135° hairlines and paints the
+  `✓ ELAPSED — ran before the Hold · locked` ribbon on the anchor row (elided to `✓ ELAPSED · locked` /
+  `✓ ELAPSED`, dropped when it can't clear the ON-AIR pill + Hold tab; `_elapsed_ribbon` for tests); the
+  Hold tab reads `⏸ HOLDING` (`_hold_tag`, merged marker too); the ON-AIR pill dims (`_paint_anchor(alpha)`).
+  Row header (`_RowHeader`): grey name/swatch + a padlock (`_paint_lock`) and `… · ran` for a full item;
+  `runs through the Hold` for the running task. Tooltip prefixes `Locked · already ran before the Hold` /
+  `Running · started before the Hold`; the Hold's reads `holding now`.
+- **Dialog** (`ui/hold_edit_dialog.py`): `set_elapsed_locked(True)` right after the split load; the banner
+  says window A is locked; `TimelineEditor.set_elapsed_locked` swaps the hint (`LOCKED_HINT`, kept by
+  `set_tasks`). Backstop: `_window_a_signature()` = the raw canvas items' wire dicts whose anchor isn't
+  `hold`/`stop` (incl. the Hold), order-independent, no deploy-time power precompute (so calibration
+  arriving later can't change it) — `_accept` refuses when it differs from the one taken at load.
+Tests: `tests/test_hold_edit_locked.py` (12: classification incl. enter / window-B bar / crossing vs.
+at-pause ramp / unlocked; hit-testing incl. the live stop grip + the Hold band; press/dbl-click → notice
+only; Ctrl+A + marquee; drop targets; drag clamps; the RF gate left alone; post-hold seeding; paint —
+grey/hue, ribbon placement, header meta, unlocked has no ribbon; tooltips; the dialog locks on load,
+accepts a window-B edit, refuses a window-A change). Suite 1059 → 1071 offscreen. Verified by a headless
+render (`scratchpad/hold_edit_locked.py`).
+
 ## Current state — a ramp ACROSS the Hold is PAUSED there and resumes after Proceed: COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo)
 Owner question: a ramp could be placed with its middle inside the Hold window, and its hover
 duration / end time read wrong. Decision (owner-approved): ALLOW it — the Hold freezes the ramp at
