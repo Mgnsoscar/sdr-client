@@ -48,7 +48,7 @@ from api import Fleet
 from api import models as m
 from state import PlanStore, ScheduleStore, new_scheduled_id
 from .plan_editor import PlanEditorDialog
-from .plans_tab import _collapsed_arm_steps, _plan_has_hold
+from .plans_tab import _collapsed_arm_steps, _plan_has_hold, _step_anchor_block_lines
 from .qt_adapter import DataHub
 from .theme import Palette, mono_font
 
@@ -1439,6 +1439,26 @@ class TimelineTab(QWidget):
                          "the Hold is disabled here: the sequence runs straight through without "
                          "pausing (the down-ramp starts immediately after the up-ramp). Run it "
                          "from the Library if you need the operator-gated pause.")
+        # Safety gate (mirrors the Library/plan arm): a step-to-step anchor needs agent ≥ 1.24.0
+        # (a negative step offset ≥ 1.25.0) — block rather than let the agent 400 the arm.
+        def _item_steps(it):
+            if it.steps:
+                return it.steps
+            val = seqs.get(it.hostname) if isinstance(seqs, dict) else None
+            stored = (next((s for s in val if s.id == it.sequence_id), None)
+                      if isinstance(val, list) else None)
+            return stored.steps if stored is not None else []
+        sa_block = _step_anchor_block_lines(
+            ((it.hostname, it.unit_label or it.hostname, _item_steps(it)) for it in plan.items),
+            self.hub.fleet)
+        if sa_block:
+            QMessageBox.warning(
+                self, "Cannot arm plan",
+                "A step in this plan is anchored to another step, which these units’ agents "
+                "can’t resolve yet:\n" + "\n".join(sa_block) + "\n\nUpdate the units’ agents, or "
+                "re-anchor those steps to on-air / off-air.")
+            self._status.setText("arm blocked — step anchoring unsupported")
+            return
         if QMessageBox.question(
             self, "Arm plan",
             f"Arm “{plan.name}” on {n_units} unit(s)?\n\n"

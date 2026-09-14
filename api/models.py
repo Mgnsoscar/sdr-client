@@ -305,10 +305,26 @@ class PatchEventRequest(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class SequenceStep(BaseModel):
-    anchor: str = "start"              # "start" | "stop" | "both" (ramp) | "hold" (post-Hold window B)
+    anchor: str = "start"              # "start" | "stop" | "both" (ramp) | "hold" (post-Hold window B) | "step"
+                                       #   | "enter" (from the Hold's ENTER instant — the pause's start,
+                                       #     window A; a ramp tied by its END, offset_s ≤ 0; agent ≥ 1.26.0)
     offset_s: float
     # "both"-anchored ramp: off-air-side inset (≤ 0). Fills [on-air+offset_s, off-air+offset_end_s].
     offset_end_s: Optional[float] = None
+    # Step-to-step anchoring (agent ≥ 1.24.0, capability "sequence-step-anchor"). A stable,
+    # client-assigned id lets OTHER steps hang off this one; an anchor="step" step fires at
+    # <target step's anchor_edge> + offset_s (offset >= 0 — a dependent never precedes its target).
+    # Phase 1: tunes/ramps/duration tasks only (not the Hold), and not alongside a Hold.
+    id: str = ""                       # stable id (client-assigned); blank = not referenced
+    anchor_step_id: str = ""           # target step id (when anchor == "step")
+    anchor_edge: str = "end"           # "start" | "end" of the target step's extent
+    # Which of THIS step's edges is tied to that target — only a RAMP has two. "start" (default):
+    # the ramp runs forward from `target edge + offset_s`. "end": the ramp's END sits at the tied
+    # point and the ramp runs backward from it; offset_s is STILL the start's offset (the end's
+    # offset − duration), so the agent places it unchanged — this is client authoring metadata the
+    # agent carries through (≥ 1.25.3; an older agent drops it and the ramp reloads start-tied at
+    # the same timing).
+    anchor_own_edge: str = "start"
     action: StepAction
     task_name: str
     args: List[str] = []               # CLI args for this step's start/run
@@ -472,9 +488,97 @@ def collapse_hold(steps: List["SequenceStep"]) -> List["SequenceStep"]:
         if getattr(s, "anchor", None) == "hold":
             out.append(s.model_copy(update={
                 "anchor": "start", "offset_s": hold_off + float(s.offset_s)}))
+        elif getattr(s, "anchor", None) == "enter":
+            # Measured from the pause's START, which with the Hold compiled out is just the on-air
+            # instant hold_off: a point fires at hold_off + offset; a ramp (offset = its END's, like
+            # a stop anchor) is re-expressed by its START so the agent's start layout runs it forward.
+            off = hold_off + float(s.offset_s)
+            if _step_action(s) == StepAction.RAMP.value and s.ramp is not None:
+                from . import ramp as _ramp
+                try:
+                    r = s.ramp
+                    off -= _ramp.resolve_ramp(r.start, r.stop, steps=r.steps, step=r.step,
+                                              hold_s=r.hold_s, duration_s=r.duration_s,
+                                              include_first=r.include_first,
+                                              include_last=r.include_last).duration_s
+                except (ValueError, TypeError):
+                    pass
+            out.append(s.model_copy(update={"anchor": "start", "offset_s": off}))
         else:
             out.append(s)
     return out
+
+
+def split_ramps_at_hold(steps: List["SequenceStep"]) -> List["SequenceStep"]:
+    """For EDIT-WHILE-HOLDING (docs/sequence-hold-step.md §5.7 / §6.4): present a ramp that
+    CROSSES the Hold as two steps — the run-up to the pause (window A, already fired, kept exactly:
+    the points at/before the pause) and the not-yet-fired REMAINDER as its own post-hold
+    (``anchor="hold"``) ramp whose start / stop / timing default to what resuming would have
+    produced (the first deferred level → the original stop, the original dwell, ``offset_s`` = the
+    first deferred point's time after the pause). The operator can then retarget the remainder like
+    any window-B step; left alone, it reproduces the agent's paused remainder exactly. A lone point
+    on either side becomes the single tune (or, for a run-mode ramp, the one-shot run) it is.
+    Non-crossing steps come back as the same objects; a Hold-free list is returned unchanged."""
+    from . import ramp as _ramp
+    steps = list(steps or [])
+    hold_off = next((float(s.offset_s) for s in steps
+                     if _step_action(s) == StepAction.HOLD.value), None)
+    if hold_off is None:
+        return steps
+    out: List["SequenceStep"] = []
+    for s in steps:
+        r = s.ramp
+        if (_step_action(s) != StepAction.RAMP.value or r is None
+                or getattr(s, "anchor", "start") != "start"):
+            out.append(s)
+            continue
+        try:
+            res = _ramp.resolve_ramp(r.start, r.stop, steps=r.steps, step=r.step, hold_s=r.hold_s,
+                                     duration_s=r.duration_s, include_first=r.include_first,
+                                     include_last=r.include_last)
+            pts = _ramp.place_ramp("start", float(s.offset_s), res)
+        except (ValueError, TypeError):
+            out.append(s)
+            continue
+        before = [(float(off), float(v)) for (_a, off, v) in pts if float(off) <= hold_off + 1e-6]
+        after = [(float(off), float(v)) for (_a, off, v) in pts if float(off) > hold_off + 1e-6]
+        if not before or not after:
+            out.append(s)                                  # doesn't cross the pause
+            continue
+        out.append(_ramp_piece(s, "start", before[0][0], before, res.hold_s))
+        out.append(_ramp_piece(s, "hold", after[0][0] - hold_off, after, res.hold_s, fresh=True))
+    return out
+
+
+def _fmt_ramp_value(v: float, integer: bool) -> str:
+    return str(int(round(v))) if integer else f"{v:g}"
+
+
+def _ramp_piece(s: "SequenceStep", anchor: str, offset_s: float, pts, hold_s: float,
+                fresh: bool = False) -> "SequenceStep":
+    """One piece of a ramp split at the Hold: a ramp over exactly ``pts`` (its levels, each held
+    ``hold_s``), or — for a single point — the one tune / one-shot run that point is. ``fresh``
+    marks the remainder as a NEW step (no stable id — it is not the original reference target)."""
+    r = s.ramp
+    values = [v for (_off, v) in pts]
+    base: Dict[str, Any] = {"anchor": anchor, "offset_s": float(offset_s), "offset_end_s": None,
+                            "anchor_step_id": "", "anchor_edge": "end", "anchor_own_edge": "start"}
+    if fresh:
+        base["id"] = ""
+    if len(values) == 1:
+        v = values[0]
+        if getattr(r, "mode", "tune") == "run":
+            vs = _fmt_ramp_value(v, bool(getattr(r, "integer", False)))
+            args = list(s.args or []) + ([r.flag, vs] if r.flag else [vs])
+            return s.model_copy(update={**base, "action": StepAction.RUN, "ramp": None,
+                                        "args": args, "replace_args": True, "params": {}})
+        return s.model_copy(update={**base, "action": StepAction.TUNE, "ramp": None,
+                                    "params": {r.param: v}})
+    piece = r.model_copy(update={"start": values[0], "stop": values[-1], "steps": len(values) - 1,
+                                 "step": None, "hold_s": None,
+                                 "duration_s": len(values) * float(hold_s),
+                                 "include_first": True, "include_last": True})
+    return s.model_copy(update={**base, "ramp": piece})
 
 
 # ══════════════════════════════════════════════════════════════════════════════

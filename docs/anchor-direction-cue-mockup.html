@@ -1,0 +1,166 @@
+<title>Anchor Direction Cues</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ground:#EEF0F3; --surface:#FFFFFF; --surface-alt:#FAFBFC; --inset:#F1F4F7;
+  --border:#E2E5EA; --border-strong:#CDD2DA; --hairline:#ECEEF1;
+  --text:#1E2530; --muted:#5C6675; --faint:#8A93A2;
+  --accent:#2C6E9B; --accent-ink:#1F5476; --ok:#1D9E75; --warn:#BA7517; --bad:#C23B3B;
+  --teal:#1E8FA3; --teal-ink:#12707F; --teal-soft:#E4F2F3;
+  --conn:#4E86A6; --band:#F7F9FB;
+  --sans:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --mono:"IBM Plex Mono","DejaVu Sans Mono",ui-monospace,monospace;
+  --shadow-sm:0 1px 2px rgba(22,32,48,.06), 0 1px 3px rgba(22,32,48,.05);
+}
+:root:not([data-theme="light"]){
+  @media (prefers-color-scheme: dark){
+    --ground:#14181E; --surface:#1B2129; --surface-alt:#20272F; --inset:#232B34;
+    --border:#2C353F; --border-strong:#3A4552; --hairline:#262E37;
+    --text:#E7ECF2; --muted:#A2ADBB; --faint:#727E8C;
+    --accent:#5FA8D6; --accent-ink:#9BCBE8; --ok:#3FBE93; --warn:#D69A46; --bad:#E06A6A;
+    --teal:#37B7CC; --teal-ink:#8FE0EC; --teal-soft:#183038;
+    --conn:#6E9BB6; --band:#191F26;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.28);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#14181E; --surface:#1B2129; --surface-alt:#20272F; --inset:#232B34;
+  --border:#2C353F; --border-strong:#3A4552; --hairline:#262E37;
+  --text:#E7ECF2; --muted:#A2ADBB; --faint:#727E8C;
+  --accent:#5FA8D6; --accent-ink:#9BCBE8; --ok:#3FBE93; --warn:#D69A46; --bad:#E06A6A;
+  --teal:#37B7CC; --teal-ink:#8FE0EC; --teal-soft:#183038;
+  --conn:#6E9BB6; --band:#191F26;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.28);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--text);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;padding:30px 20px 56px}
+.wrap{max-width:1000px;margin:0 auto}
+h1{font-size:21px;font-weight:600;letter-spacing:-.2px;margin:0 0 5px;text-wrap:balance}
+.lede{color:var(--muted);font-size:13px;line-height:1.65;margin:0 0 6px;max-width:76ch}
+.lede b{color:var(--text);font-weight:600}
+.lede code{font-family:var(--mono);font-size:11.5px;background:var(--inset);padding:1px 5px;border-radius:4px;color:var(--text)}
+
+.note{margin:14px 0 24px;padding:12px 16px;background:var(--teal-soft);
+  border:1px solid color-mix(in srgb,var(--teal) 30%,transparent);border-radius:12px;
+  font-size:12.5px;line-height:1.6;color:var(--teal-ink)}
+.note b{color:var(--text)}
+
+.opt{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+  box-shadow:var(--shadow-sm);padding:16px 18px 14px;margin-bottom:15px}
+.opt.pick{border-color:color-mix(in srgb,var(--teal) 55%,var(--border));
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--teal) 16%,transparent), var(--shadow-sm)}
+.opt.now{border-color:color-mix(in srgb,var(--bad) 40%,var(--border))}
+.ohead{display:flex;align-items:baseline;gap:10px;margin-bottom:3px;flex-wrap:wrap}
+.otag{font-size:11px;font-weight:700;letter-spacing:.5px;color:#fff;background:var(--faint);border-radius:6px;padding:2px 8px}
+.opt.pick .otag{background:var(--teal)} .opt.now .otag{background:var(--bad)}
+.oname{font-size:15px;font-weight:600}
+.rec{margin-left:auto;font-size:10.5px;font-weight:700;letter-spacing:.4px;color:var(--teal-ink);
+  background:color-mix(in srgb,var(--teal) 15%,transparent);border-radius:999px;padding:3px 10px}
+.orat{color:var(--muted);font-size:12.5px;line-height:1.6;margin:5px 0 12px;max-width:80ch}
+.orat b{color:var(--text)}
+.stage{width:460px;max-width:100%;height:204px;background:var(--band);border:1px solid var(--hairline);
+  border-radius:10px;overflow:hidden}
+.stage svg{display:block;width:100%;height:100%}
+
+/* SVG classes */
+.wire{stroke:var(--conn);fill:none;stroke-linecap:round;stroke-linejoin:round}
+.wire.thin{stroke-width:1.4} .wire.bold{stroke-width:2.2}
+.arw-thin{stroke:var(--conn);stroke-width:1.4;fill:none;stroke-linecap:round}
+.arw-bold{fill:var(--conn)}
+.chev{stroke:var(--conn);stroke-width:1.8;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.pinring{fill:var(--band)} .pindot{fill:var(--teal)}
+.lbl{fill:var(--muted);font-family:var(--mono);font-size:10px}
+.lbl.s{fill:var(--faint);font-family:var(--sans);font-size:9px}
+.count-bg{fill:var(--teal-soft);stroke:color-mix(in srgb,var(--teal) 35%,transparent);stroke-width:1}
+.count-tx{fill:var(--teal-ink);font-family:var(--sans);font-size:9px;font-weight:700}
+.tag{fill:var(--faint);font-family:var(--sans);font-size:8.5px;font-weight:700;letter-spacing:.4px}
+
+footer{color:var(--faint);font-size:12px;margin-top:22px;line-height:1.65;max-width:80ch}
+footer b{color:var(--muted)} footer code{font-family:var(--mono);font-size:11px}
+</style>
+
+<div class="wrap">
+  <h1>Anchor direction cues</h1>
+  <p class="lede">Marking each <b>step</b> with a role fails, because one step's edge does both at once:
+  <b>BW 20</b> below is anchored to <b>GPS</b> (one line in) AND is the anchor for <b>three</b> steps
+  (three lines out) — all meeting at the same pin. A single "anchor / anchorer" badge can't say both.</p>
+  <div class="note">The role isn't a property of the step — it's a property of <b>each line's ends</b>.
+  So mark <b>direction on the line</b>: the head sits on the <b>dependent</b> (the anchorer), the tail on
+  the <b>anchor</b>. Then a junction reads itself — an arrow pointing <b>into</b> a step means it's
+  anchored; arrows leaving mean steps hang off it — however many. Below, the same 1-in / 3-out junction
+  under each treatment.</p>
+
+  <div id="opts"></div>
+
+  <footer>The arrowhead already encodes anchor→dependent; it's just too faint to read at a fan-out. These
+  make it unmistakable and scale to any N. Reuses the editor's connector styling / task hue. Pick one and
+  I'll wire it into <code>_draw_connector</code>.</footer>
+</div>
+
+<script>
+// The hard junction: GPS -> BW (BW is anchored), and BW -> POWER / SIDELOBES / RF (3 hang off BW).
+const S={x:70,y:106}, T={x:196,y:106}, D1={x:356,y:48}, D2={x:356,y:106}, D3={x:356,y:164};
+const BR=272;                                         // branch column for the up/down dependents
+
+function pin(pt){ return `<circle class="pinring" cx="${pt.x}" cy="${pt.y}" r="8.5"/>`+
+  `<circle class="pindot" cx="${pt.x}" cy="${pt.y}" r="6"/>`; }
+function rlbl(x,y,t){ return `<text class="lbl" x="${x}" y="${y+3.5}" text-anchor="end">${t}</text>`; }
+function llbl(x,y,t){ return `<text class="lbl" x="${x}" y="${y+3.5}">${t}</text>`; }
+
+// the four wire paths (drawn under the pins). Each ends ~8px short of its dependent pin (tip = pin.x-8).
+function paths(w){
+  return [
+    `<path class="wire ${w}" d="M${S.x+8} ${S.y} L${T.x-8} ${T.y}"/>`,                                   // GPS -> BW
+    `<path class="wire ${w}" d="M${T.x+8} ${T.y} L${D2.x-8} ${D2.y}"/>`,                                  // BW -> SIDELOBES
+    `<path class="wire ${w}" d="M${T.x+8} ${T.y} L${BR-6} ${T.y} Q${BR} ${T.y} ${BR} ${T.y-6} L${BR} ${D1.y+6} Q${BR} ${D1.y} ${BR+6} ${D1.y} L${D1.x-8} ${D1.y}"/>`,  // BW -> POWER (up)
+    `<path class="wire ${w}" d="M${T.x+8} ${T.y} L${BR-6} ${T.y} Q${BR} ${T.y} ${BR} ${T.y+6} L${BR} ${D3.y-6} Q${BR} ${D3.y} ${BR+6} ${D3.y} L${D3.x-8} ${D3.y}"/>`,  // BW -> RF (down)
+  ].join('');
+}
+const HEADS = [ [T,'in'], [D2,'in'], [D1,'in'], [D3,'in'] ];   // every arrow points INTO its dependent
+function arrows(kind){
+  return HEADS.map(([p]) => kind==='thin'
+    ? `<path class="arw-thin" d="M${p.x-15} ${p.y-4} L${p.x-8} ${p.y} L${p.x-15} ${p.y+4}"/>`
+    : `<path class="arw-bold" d="M${p.x-16} ${p.y-5} L${p.x-8} ${p.y} L${p.x-16} ${p.y+5} Z"/>`).join('');
+}
+function chevAt(x,y){ return `<path class="chev" d="M${x-3} ${y-4} L${x+3} ${y} L${x-3} ${y+4}"/>`; }
+function chevrons(){   // one flow chevron mid-way along each line, pointing at the dependent
+  return chevAt(128,S.y) + chevAt(280,D2.y) + chevAt(316,D1.y) + chevAt(316,D3.y);
+}
+function pinsAndLabels(){
+  return pin(S)+pin(T)+pin(D1)+pin(D2)+pin(D3)+
+    rlbl(S.x-11,S.y,'GPS') + `<text class="lbl" x="${T.x}" y="${T.y-14}" text-anchor="middle">BW 20</text>` +
+    llbl(D1.x+11,D1.y,'POWER') + llbl(D2.x+11,D2.y,'SIDELOBES') + llbl(D3.x+11,D3.y,'RF on');
+}
+function svg(inner){ return `<svg viewBox="0 0 460 204" preserveAspectRatio="xMidYMid meet">${inner}</svg>`; }
+
+const NOW  = () => svg(paths('thin') + arrows('thin') + pinsAndLabels());
+const BOLD = () => svg(paths('bold') + arrows('bold') + pinsAndLabels());
+const FLOW = () => svg(paths('bold') + chevrons() + arrows('bold') + pinsAndLabels());
+const COUNT = () => svg(paths('bold') + arrows('bold') + pinsAndLabels() +
+  // a small "3 ↓" count on the anchor: how many hang off it (a count, never a role)
+  `<rect class="count-bg" x="${T.x+9}" y="${T.y-30}" width="30" height="15" rx="7"/>` +
+  `<text class="count-tx" x="${T.x+24}" y="${T.y-19.5}" text-anchor="middle">3 ▸</text>` +
+  `<text class="tag" x="${T.x+24}" y="${T.y+26}" text-anchor="middle">3 depend on BW</text>`);
+
+const OPTIONS = [
+  {tag:'NOW', name:'Current — faint arrowheads', now:true, build:NOW,
+   note:'The direction is already there — a thin open arrowhead into each dependent — but at a fan-out it is too light to read: four hairlines meet at BW and you can\'t see which way any of them points.'},
+  {tag:'A', name:'Bold directional arrowheads', pick:true, rec:'Recommended', build:BOLD,
+   note:'Just make the head a solid filled arrow, on every line, always into the dependent. Now BW reads itself: one arrow points INTO it (so BW is anchored to GPS) and three arrows leave toward POWER / SIDELOBES / RF (so those three hang off BW). No per-step badge, no ambiguity, scales to any N.'},
+  {tag:'B', name:'Bold arrowheads + flow chevrons', build:FLOW,
+   note:'Adds a small ▸ part-way along each line, pointing at the dependent — so direction is legible mid-line too, not only at the tip. Helps on long lines or a dense timeline where the head is far away or overlapped.'},
+  {tag:'C', name:'Arrowheads + a dependent-count chip', build:COUNT,
+   note:'Bold heads for direction, plus a tiny 3 ▸ on the anchor — a count of how many hang off it (a number, never a role, so it can\'t be ambiguous). Tells you an anchor\'s reach at a glance without tracing every line.'},
+];
+
+document.getElementById('opts').innerHTML = OPTIONS.map(o => `
+  <div class="opt ${o.pick?'pick':''} ${o.now?'now':''}">
+    <div class="ohead"><span class="otag">${o.tag}</span><span class="oname">${o.name}</span>
+      ${o.rec?`<span class="rec">${o.rec}</span>`:''}</div>
+    <div class="orat">${o.note}</div>
+    <div class="stage">${o.build()}</div>
+  </div>`).join('');
+</script>

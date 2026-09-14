@@ -40,15 +40,18 @@ the canvas; the step editor fetches a script's parameter schema via the hub.
 """
 from __future__ import annotations
 
+import copy
+import math
 import shlex
 from typing import Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import QEvent, QRectF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen
+from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetrics, QIcon, QLinearGradient, QPainter,
+                         QPainterPath, QPen, QPixmap)
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QScrollArea,
+    QToolTip, QVBoxLayout, QWidget,
 )
 
 from api import models as m
@@ -59,23 +62,51 @@ from api.fleet import LIBRARY_HOST
 from .duration_spin import DurationSpinBox
 from .param_form import ParamForm, fmt_duration, fmt_value, hz_per_unit, power_mode_of_args
 from .ramp_editor import RampEditorDialog
-from .theme import Palette
+from .theme import Fonts, Palette, mono_font
 from .widgets import fit_dialog_to_screen
 
 # ── View geometry (paint sizes; timing geometry lives in timeline_model) ──────
-LANES_TOP = 34              # y of the first lane
-LANE_H = 34                 # bar / pill (name row) height
-LANE_VGAP = 12              # vertical gap between lanes
-CAPTION_H = 17              # the offset-timing chip row under a name
-AXIS_GAP = 14               # min gap between the lowest task and the time axis
-BASELINE_FROM_BOTTOM = 50   # baseline sits this far above the canvas bottom
-HANDLE_W = 12               # drawn width of a bar's grip
+# Redesign: one row per item (Gantt-style), a compact capsule/pin visual language,
+# a real-time axis, and per-task colour. See docs/sequence-editor-mockup.html.
+LANES_TOP = 20              # y of the first row
+LANE_H = 30                 # bar / pin row height
+LANE_VGAP = 12              # vertical gap between rows
+CAPTION_H = 16              # timing-pill height (Hold offset chip)
+AXIS_GAP = 16               # gap between the last row and the time axis
+BASELINE_FROM_BOTTOM = 50   # (legacy) unused now the axis rides under the rows
+BAR_R = 9                   # capsule corner radius
+HUE_RAIL = 3               # left hue rail width inside a bar
+HANDLE_W = 10               # drawn width of a bar's grip
 HANDLE_HIT = 11             # px each side of a handle centre that grabs it
-HOLD_HIT = 9                # px each side of the Hold divider that grabs it
+PIN_HIT = 10                # px around a pin / ramp edge dot that starts a drag-to-anchor
+BAR_DOT_HIT = 6             # px around a bar's START dot that starts a drag-to-anchor (the dot
+                            # itself; the resize grip sits just inside the capsule)
+SNAP_PX = 7                 # px a dragged edge snaps to a nearby edge / anchor / tick
+HOLD_HIT = 9                # px each side of the Hold band edge that grabs it
+ROOT_SNAP = 13              # px around a root anchor line (on-air/off-air/resume) a drop locks onto
+HOLD_BAND_PX = 48           # fixed visual width of the Hold WINDOW (its length is set at Proceed,
+                            # so it draws at a constant width, hatched — like the old relative band)
+POST_HOLD_PAD = 130         # min px between the resume-forward and off-air-backward step groups in
+                            # the post-hold window (mirrors BAND_PAD; 0 content ⇒ resume IS off-air)
 RUN_MIN_W = 120             # minimum run-pill width
 RUN_MAX_W = 260
 RAMP_MIN_W = 44             # minimum ramp-bar width (so a short/zero-span ramp is clickable)
-CARET_W = 20                # width of the ▾/▴ expand-collapse zone on an item
+RAMP_CAP_W = 40             # ramp trend end-cap width (holds the rising/falling slope mark)
+CARET_W = 20                # (legacy) inline-panel caret zone — panels dropped in the redesign
+# Tune readout chip (docs/tune-pin-mockup.html · option B): one recessed inset chip per changed
+# param — a hue rail on the left, an uppercase param label, the mono value, and a family-tinted
+# unit chip — replacing the old task-name badge + raw "key=value" text.
+TCHIP_H = 20.0              # chip height (centred in the lane)
+TCHIP_R = 6.0              # chip corner radius
+TCHIP_RAIL_INSET = 11.0     # left padding past the hue rail to the first glyph
+TCHIP_PAD_R = 9.0          # right padding inside a chip
+TCHIP_NV_GAP = 6.0          # param name → value
+TCHIP_VU_GAP = 6.0          # value → unit chip
+TCHIP_SEP = 6.0            # gap between chips
+TUCHIP_PAD = 4.0           # unit-chip / state-pill horizontal padding
+PIN_CAP_GAP = 13.0         # cx → a right-side pin caption's left edge (normal)
+PIN_CAP_GAP2 = 24.0        # …wider for a TWO-SIDED pin, so its exit connector can duck under it
+                           # (docs/tune-pin-both-sides-mockup.html · option C)
 TICK_S = 30                 # base tick interval (seconds); adapts with zoom
 DRAG_THRESHOLD = 4          # px of movement before a press counts as a drag
 
@@ -93,7 +124,13 @@ PANEL_BOT_PAD = 7
 PANEL_H_PAD = 10            # horizontal padding inside the panel
 PANEL_MIN_W = 112
 
-DRAG_PARTS = ("bar_start", "bar_stop", "bar_body", "run_body", "hold_body")
+DRAG_PARTS = ("bar_start", "bar_stop", "bar_body", "run_body", "hold_body", "ramp_body")
+
+# Hold-edit (edit-while-holding): steps that already RAN — everything at/before the Hold — are
+# read-only and paint MONOCHROME under a frosted wash (docs/hold-edit-elapsed-mockup.html, option A).
+ELAPSED_HUE = "#9AA3B0"
+ELAPSED_INK = "#6B7482"
+ELAPSED_RIBBON = "✓ ELAPSED — ran before the Hold · locked"
 
 
 def task_signals_from_yaml(yaml_text) -> Dict[str, str]:
@@ -151,6 +188,11 @@ def _timing_text(offset_s: float, side: str, with_side: bool) -> str:
             return "on-resume"
         label = "pre-hold" if offset_s < 0 else "on-resume"
         return f"{_fmt_offset(offset_s)} · {label}" if with_side else _fmt_offset(offset_s)
+    if side == "enter":                          # measured from the pause's START
+        if offset_s == 0:
+            return "at pause"
+        label = "before pause" if offset_s < 0 else "into pause"
+        return f"{_fmt_offset(offset_s)} · {label}" if with_side else _fmt_offset(offset_s)
     label = "on-air" if side == "start" else "off-air"
     if offset_s == 0:
         return label
@@ -162,9 +204,10 @@ def _ramp_end_side_off(item_anchor: str, end_anchor: str, end_off: float,
     """(side, offset) for a ramp END's timing chip. A Hold-anchored ramp's ends are stored
     on the START axis (h_off + its offset) for geometry (see ramp_span); its chips must read
     hold-relative ('on-resume'/'pre-hold'), so map them back to side='hold' at (end - h_off).
-    Every other ramp keeps its geometry anchor/offset."""
-    if item_anchor == "hold":
-        return "hold", end_off - (h_off or 0.0)
+    A pause-anchored ramp (anchor='enter') likewise reads from the pause ('at pause' / 'before
+    pause'). Every other ramp keeps its geometry anchor/offset."""
+    if item_anchor in ("hold", "enter"):
+        return item_anchor, end_off - (h_off or 0.0)
     return end_anchor, end_off
 
 
@@ -202,6 +245,59 @@ def _arg_pairs(args: List[str]) -> List[Tuple[str, Optional[str]]]:
 
 # ── The canvas: paints bars + pills and handles all dragging / hit-testing ────
 
+def _tool_icon(kind: str, color: str = None) -> QIcon:
+    """A small line icon for a toolbar chip (Duration/One-shot/Tune/Ramp/Hold)."""
+    pm = QPixmap(18, 18); pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm); p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    col = QColor(color or Palette.TEXT_MUTED)
+    pen = QPen(col, 1.6); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+    if kind == "bar":
+        p.drawRoundedRect(QRectF(2, 6, 14, 6), 2.5, 2.5)
+    elif kind == "run":
+        p.drawEllipse(QRectF(4, 4, 10, 10))
+    elif kind == "tune":
+        path = QPainterPath(); path.moveTo(2, 11); path.lineTo(6, 11); path.lineTo(8, 4)
+        path.lineTo(11, 15); path.lineTo(13, 9); path.lineTo(16, 9); p.drawPath(path)
+    elif kind == "ramp":
+        p.drawLine(3, 14, 15, 5); p.drawLine(3, 14, 15, 14)
+    elif kind == "hold":
+        p.setBrush(col)
+        p.drawRoundedRect(QRectF(5, 4, 3, 10), 1, 1); p.drawRoundedRect(QRectF(10, 4, 3, 10), 1, 1)
+    p.end()
+    return QIcon(pm)
+
+
+class _Legend(QWidget):
+    """A compact task-colour key + the 'tunes & ramps inherit their parent' caption."""
+
+    def __init__(self, canvas: "_TimelineCanvas"):
+        super().__init__()
+        self._canvas = canvas
+        self.setFixedHeight(22)
+
+    def paintEvent(self, _e):  # noqa: N802
+        p = QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPixelSize(11)
+        p.setFont(f); fm = QFontMetrics(f)
+        x = 2
+        for task, hue in (getattr(self._canvas, "_hue", {}) or {}).items():
+            known = self._canvas.task_known(task)
+            base = QColor(hue) if known else QColor(Palette.CRASH)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(base)
+            p.drawRoundedRect(QRectF(x, self.height() / 2 - 5, 10, 10), 3, 3)
+            x += 15
+            p.setPen(QColor(Palette.TEXT_MUTED))
+            p.drawText(x, 0, fm.horizontalAdvance(task) + 4, self.height(),
+                       int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), task)
+            x += fm.horizontalAdvance(task) + 16
+        cap = "Tunes & ramps inherit their parent task's colour"
+        p.setPen(QColor(Palette.TEXT_FAINT))
+        p.drawText(0, 0, self.width() - 2, self.height(),
+                   int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), cap)
+
+
 class _TimelineCanvas(QWidget):
     changed = pyqtSignal()
 
@@ -222,11 +318,41 @@ class _TimelineCanvas(QWidget):
         self._c_on, self._c_off = self._on, self._off
         self._lane_of: Dict[int, int] = {}
         self._lane_y: Dict[int, int] = {}
+        self._rows: List = []            # non-Hold items, one per row (display_order)
+        self._holds: List = []           # Hold markers (own no row; paint as dividers)
+        self._hue: Dict[str, str] = {}   # task_name -> hue hex (task_hue_map)
         self._hold_off: Optional[float] = None       # the Hold marker's on-air offset (None = none)
+        self._step_bases: dict = {}                   # uid -> resolved on-air base for step anchors
+        self._step_off_bases: dict = {}               # uid -> resolved OFF-AIR base (chain roots off-air)
+        # Hold-window geometry (set in relayout/_place when a Hold is present): the Hold draws as a
+        # fixed-width WINDOW [enter_x, resume_x]; everything after it is one off-air-styled window
+        # [resume_x, off_x] whose axis counts FORWARD from resume; off-air FLOATS to just past the
+        # post-hold content, and MERGES with the resume edge when nothing is anchored after the Hold.
+        self._hold_present: bool = False
+        self._enter_x: Optional[float] = None
+        self._resume_x: Optional[float] = None
+        self._hold_merged: bool = False
         self._baseline = self._content_h - BASELINE_FROM_BOTTOM
         self._zoom = 1.0                 # horizontal (time-axis) zoom factor
         self._scroll = None              # host QScrollArea, for zoom-to-cursor
+        self._selected: Optional[int] = None    # PRIMARY selected uid (connector chip / context menu)
+        self._selection: set = set()            # ALL selected uids (multi-select); includes _selected
+        self._marquee: Optional[dict] = None    # active rubber-band rectangle {x0,y0,x1,y1}
+        self._connect: Optional[dict] = None    # active drag-to-anchor: {src, edge, cursor, target, moved}
+        self._rmchip: Optional[QRectF] = None   # hit rect of the painted "Remove anchor" chip
+        self._rmchip_pos: Optional[tuple] = None  # (cx, cy) where the chip paints, set each paint
+        self._hover_uid: Optional[int] = None   # item currently under the cursor (tooltip throttle)
+        self._snap_guide: Optional[float] = None  # x of the active snap guide line during a drag
+        self._undo: List[list] = []             # past item snapshots (deepcopies) for Ctrl+Z
+        self._redo: List[list] = []             # undone snapshots for Ctrl+Y / Ctrl+Shift+Z
+        # Hold-edit mode (edit-while-holding): window A already RAN, so every step at/before the
+        # Hold — and the Hold itself, which is NOW — is read-only, frosted and monochrome; only
+        # the post-hold window edits. See elapsed_kind / _paint_elapsed_wash.
+        self._lock_elapsed: bool = False
+        self._hold_tag: str = "⏸ HOLD"          # the Hold tab's label ("⏸ HOLDING" while locked)
+        self._elapsed_ribbon: Optional[QRectF] = None   # where the ELAPSED ribbon painted (tests)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)   # so the canvas receives key shortcuts
         self.grabGesture(Qt.GestureType.PinchGesture)   # touchpad pinch (where routed as a gesture)
         self.relayout()
 
@@ -239,6 +365,99 @@ class _TimelineCanvas(QWidget):
         may override to change the timeline's extent (e.g. the plan editor shows
         only the on-air window)."""
         return tlm.compute_anchors(self._items, self._zoom)
+
+    # ── Hold-window geometry ──────────────────────────────────────────────────
+    def _post_hold_extents(self) -> Tuple[float, float]:
+        """(forward_s, backward_s): the furthest resume-forward window-B time and the furthest
+        off-air-backward time, in seconds. The off-air anchor floats to just past both groups;
+        0/0 means nothing is anchored after the Hold, so resume IS off-air (the merged case)."""
+        h = self._hold_off or 0.0
+        fwd = bwd = 0.0
+
+        def take(anchor: str, off: float):
+            nonlocal fwd, bwd
+            if anchor == "stop":
+                if off < 0:
+                    bwd = max(bwd, -off)
+            elif off > h + 1e-6:                     # a resume-side (post-hold) start offset
+                fwd = max(fwd, off - h)
+
+        for it in self._items:
+            if tlm._is_hold(it):
+                continue
+            if it.kind == "bar":
+                if getattr(it, "start_anchor", "start") == "hold":
+                    fwd = max(fwd, float(getattr(it, "start_offset", 0.0)))
+                so = float(getattr(it, "stop_offset", 0.0))
+                if so < 0:
+                    bwd = max(bwd, -so)
+            elif tlm._is_ramp(it):
+                (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases, self._step_off_bases)
+                take(la, lo)
+                # a window-A ramp whose last hold merely spills into the pause has nothing to
+                # resume — the pause absorbs it, so its end adds no post-hold content
+                absorbed = (getattr(it, "anchor", "start") == "start" and la == "start"
+                            and ra == "start" and ro > h + 1e-6
+                            and tlm.ramp_hold_cross(it, self._hold_off, self._step_bases,
+                                                    self._step_off_bases) is None)
+                if not absorbed:
+                    take(ra, ro)
+            else:
+                a, o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases, self._step_off_bases)
+                take(a, o)
+        return fwd, bwd
+
+    def _resume_shift(self, it, offset: Optional[float] = None) -> float:
+        """HOLD_BAND_PX for a resume-side placement (an item whose START hangs off the Hold — a
+        window-B `anchor="hold"` step/ramp, a window-B bar, or a step-anchored item resolved past
+        the hold — or any on-air-clock `offset` PAST the pause, e.g. the END of a ramp that
+        crosses the Hold and resumes after it), else 0. The Hold marker itself and every
+        window-A / off-air placement are NOT shifted (off-air content rides `self._off`, which
+        already floats past the band)."""
+        if not self._hold_present or tlm._is_hold(it):
+            return 0.0
+        anc = getattr(it, "anchor", "start")
+        if anc == "hold":
+            return HOLD_BAND_PX
+        if getattr(it, "kind", None) == "bar" and getattr(it, "start_anchor", "start") == "hold":
+            return HOLD_BAND_PX
+        if anc == "step":
+            base = (self._step_bases or {}).get(getattr(it, "uid", None))
+            if base is not None and base > (self._hold_off or 0.0) + 1e-6:
+                return HOLD_BAND_PX
+        if offset is not None and offset > (self._hold_off or 0.0) + 1e-6:
+            return HOLD_BAND_PX       # a time past the pause sits on the resume side of the band
+        return 0.0
+
+    def _place_x(self, it, anchor: str, offset: float) -> float:
+        """offset -> x for item `it`, inserting the fixed Hold band so resume-side content sits
+        to the RIGHT of the window. Byte-identical to `offset_to_x` when no Hold is present."""
+        x = tlm.offset_to_x(anchor, offset, self._on, self._off, self._zoom)
+        if anchor == "start":
+            x += self._resume_shift(it, offset)
+        return x
+
+    def _ramp_cut_x(self, it) -> Optional[float]:
+        """The enter-edge x where a window-A ramp that CROSSES the Hold is frozen (None otherwise).
+        Such a ramp paints as two pieces flanking the Hold window (see _paint_ramp): the run-up to
+        the pause, then its remainder forward from resume."""
+        if not self._hold_present or self._enter_x is None:
+            return None
+        cross = tlm.ramp_hold_cross(it, self._hold_off, self._step_bases, self._step_off_bases)
+        return float(self._enter_x) if cross is not None else None
+
+    def _ramp_edges(self, it):
+        """(start_x, stop_x, ends, cut_x) for a ramp. A window-A ramp whose points all fire at or
+        before the pause but whose LAST level's hold spills past it ends AT the enter edge — the
+        pause absorbs that hold (nothing is left to resume, so it isn't split)."""
+        (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases, self._step_off_bases)
+        sx, px = self._place_x(it, la, lo), self._place_x(it, ra, ro)
+        cut = self._ramp_cut_x(it)
+        if (cut is None and self._hold_present and self._enter_x is not None
+                and getattr(it, "anchor", "start") == "start" and la == "start" and ra == "start"
+                and lo <= (self._hold_off or 0.0) + 1e-6 and ro > (self._hold_off or 0.0) + 1e-6):
+            px = float(self._enter_x)
+        return sx, px, ((la, lo), (ra, ro)), cut
 
     def set_scroll_area(self, scroll) -> None:
         self._scroll = scroll
@@ -255,16 +474,133 @@ class _TimelineCanvas(QWidget):
         return list(self._items)
 
     def set_items(self, items: List) -> None:
+        # Loading a fresh sequence is the new baseline — start undo history over.
         self._items = list(items)
+        self._clear_selection()
+        self._connect = None
+        self._undo = []
+        self._redo = []
         self.relayout()
         self.changed.emit()
 
+    # ── Hold-edit: the elapsed window is read-only ───────────────────────────
+    def set_elapsed_locked(self, locked: bool, tag: str = "⏸ HOLDING") -> None:
+        """Edit-while-holding: lock every step that already RAN (window A — at/before the Hold)
+        and the Hold itself (it is NOW). They paint frosted + monochrome, take no drag / anchor /
+        double-click / delete, and a click just says so; the post-hold window edits as usual."""
+        self._lock_elapsed = bool(locked)
+        self._hold_tag = tag if locked else "⏸ HOLD"
+        self._clear_selection()
+        self._connect = None
+        self._drag = None
+        self._refresh_elapsed()
+        self.update()
+
+    def elapsed_locked(self) -> bool:
+        return self._lock_elapsed
+
+    def _item(self, uid):
+        return next((o for o in self._items if getattr(o, "uid", None) == uid), None)
+
+    def _refresh_elapsed(self) -> None:
+        """Recompute the per-item elapsed classification (see elapsed_kind). It depends only on
+        the items, the Hold's offset and the resolved step bases — all fixed when the geometry is
+        rebuilt — so it is cached there rather than re-derived (a ramp's point list included) on
+        every paint, hover hit-test and header row."""
+        self._elapsed = ({it.uid: self._elapsed_kind_of(it) for it in self._items}
+                         if self._lock_elapsed else {})
+
+    def elapsed_kind(self, it) -> Optional[str]:
+        """In the locked (Hold-edit) mode, what part of `it` has ALREADY HAPPENED:
+        "full"  — every fire sits at or before the pause (the agent's window A): a window-A tune /
+                  one-shot / ramp, incl. a pause-anchored (`enter`) step;
+        "start" — a duration task that STARTED before the pause but is still running (its stop is
+                  post-hold and stays editable);
+        "hold"  — the Hold marker itself (it is now — fixed);
+        None    — still to come (window B, off-air, a window-B duration task). Always None when
+                  not locked or without a Hold. Cached per geometry rebuild (_refresh_elapsed)."""
+        if it is None or not self._lock_elapsed:
+            return None
+        cache = getattr(self, "_elapsed", None) or {}
+        uid = getattr(it, "uid", None)
+        if uid in cache:
+            return cache[uid]
+        return self._elapsed_kind_of(it)          # not laid out yet (a fresh item): derive it
+
+    def _elapsed_kind_of(self, it) -> Optional[str]:
+        if it is None or not self._lock_elapsed or self._hold_off is None:
+            return None
+        h = float(self._hold_off) + 1e-6
+        if tlm._is_hold(it):
+            return "hold"
+        anc = getattr(it, "anchor", "start")
+        if getattr(it, "kind", None) == "bar":
+            if getattr(it, "start_anchor", "start") == "hold":
+                return None
+            a, o = tlm.bar_start_placement(it, self._hold_off, self._step_bases, self._step_off_bases)
+            return "start" if (a == "start" and o <= h) else None
+        if anc == "hold":
+            return None                          # window B: measured forward from resume
+        if tlm._is_ramp(it):
+            try:
+                (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases,
+                                                   self._step_off_bases)
+            except (ValueError, TypeError):
+                return None
+            if la != "start" or ra != "start" or min(lo, ro) > h:
+                return None
+            # A ramp with a point still to fire after the pause hasn't finished (the dialog loads a
+            # crossing ramp SPLIT, so its run-up is a whole ramp of its own and reads "full").
+            r = dict(getattr(it, "ramp", None) or {})
+            return None if tlm._ramp_fires_after(r, min(lo, ro), self._hold_off) else "full"
+        a, o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases, self._step_off_bases)
+        return "full" if (a == "start" and o <= h) else None
+
+    def _lock_notice(self, it, global_pt) -> None:
+        """The non-interrupting notice a press on a locked item shows (no dialog, no selection)."""
+        k = self.elapsed_kind(it)
+        if k == "hold":
+            text = "<b>The Hold is now</b> — it can't be moved while holding."
+        elif k == "start":
+            text = ("<b>Running since before the Hold</b> — its start is locked.<br>"
+                    "Only its stop (off-air) can still be changed.")
+        else:
+            text = ("<b>Already ran</b> — this step fired before the Hold and is locked.<br>"
+                    "Edit the steps after the Hold instead.")
+        QToolTip.showText(global_pt, text, self)
+
+    # ── Selection (a primary uid + a multi-select set) ────────────────────────
+    def _select_only(self, uid) -> None:
+        self._selection = {uid} if uid is not None else set()
+        self._selected = uid
+
+    def _toggle_select(self, uid) -> None:
+        if uid in self._selection:
+            self._selection.discard(uid)
+            if self._selected == uid:
+                self._selected = next(iter(self._selection), None)
+        else:
+            self._selection.add(uid)
+            self._selected = uid
+
+    def _clear_selection(self) -> None:
+        self._selection = set()
+        self._selected = None
+
+    def _prune_selection(self) -> None:
+        live = {it.uid for it in self._items}
+        self._selection &= live
+        if self._selected is not None and self._selected not in live:
+            self._selected = next(iter(self._selection), None)
+
     def add_item(self, item) -> None:
+        self._record()
         self._items.append(item)
         self.relayout()
         self.changed.emit()
 
     def replace_item(self, uid: int, item) -> None:
+        self._record()
         for i, it in enumerate(self._items):
             if it.uid == uid:
                 self._items[i] = item
@@ -272,17 +608,59 @@ class _TimelineCanvas(QWidget):
         self.relayout()
         self.changed.emit()
 
-    def remove_item(self, uid: int) -> None:
+    def remove_item(self, uid: int, record: bool = True) -> None:
+        if record:
+            self._record()
         self._items = [it for it in self._items if it.uid != uid]
         self._collapsed.discard(uid)
+        self._prune_selection()
         self.relayout()
         self.changed.emit()
 
     def clear(self) -> None:
+        self._record()
         self._items = []
         self._collapsed.clear()
+        self._clear_selection()
+        self._connect = None
         self.relayout()
         self.changed.emit()
+
+    # ── Undo / redo (item-list snapshots) ─────────────────────────────────────
+    def _snapshot(self) -> list:
+        return [copy.deepcopy(it) for it in self._items]
+
+    def _record(self) -> None:
+        """Push the CURRENT state onto the undo stack before a mutation, and drop any redo
+        history (a fresh edit forks the timeline). Capped so history can't grow unbounded."""
+        self._undo.append(self._snapshot())
+        del self._undo[:-100]
+        self._redo.clear()
+
+    def _restore(self, snap: list) -> None:
+        self._items = snap
+        self._prune_selection()
+        self._connect = None
+        self.relayout()
+        self.changed.emit()
+
+    def can_undo(self) -> bool:
+        return bool(self._undo)
+
+    def can_redo(self) -> bool:
+        return bool(self._redo)
+
+    def undo(self) -> None:
+        if not self._undo:
+            return
+        self._redo.append(self._snapshot())
+        self._restore(self._undo.pop())
+
+    def redo(self) -> None:
+        if not self._redo:
+            return
+        self._undo.append(self._snapshot())
+        self._restore(self._redo.pop())
 
     def task_known(self, name: str) -> bool:
         tasks = self._editor.available_tasks()
@@ -291,6 +669,12 @@ class _TimelineCanvas(QWidget):
     # ── Layout ────────────────────────────────────────────────────────────────
 
     def _run_width(self, item) -> int:
+        if getattr(item, "action", "run") == "tune":
+            # A tune's caption is the recessed readout chips (option B); its footprint is the pin dot
+            # plus the measured chip run, so hit-testing/caret track the real drawn width.
+            _defs, total = self._tune_chip_defs(item)[:2]
+            w = 13 + 9 + total + 8
+            return int(max(RUN_MIN_W, min(RUN_MAX_W, w)))
         fm = QFontMetrics(self._label_font)
         w = fm.horizontalAdvance(self._run_label(item)) + 34
         if item.args:
@@ -318,7 +702,7 @@ class _TimelineCanvas(QWidget):
     # ── Inline argument panel (shown by default; toggled by the caret) ────────
 
     def _expanded(self, item) -> bool:
-        return bool(item.args) and item.uid not in self._collapsed
+        return False   # inline arg panels dropped in the redesign (args live in the editor)
 
     def _panel_width(self, item) -> int:
         fmf = QFontMetrics(self._arg_font)
@@ -337,37 +721,32 @@ class _TimelineCanvas(QWidget):
         """Centre x of a one-shot — to scale from its anchor (the band widens to
         keep on-air-anchored points left of off-air-anchored ones). A window-B
         (anchor="hold") item is placed to scale from the Hold's position."""
-        a, o = tlm.effective_anchor_offset(item, self._hold_off)
-        return tlm.offset_to_x(a, o, self._on, self._off, self._zoom)
+        a, o = tlm.effective_anchor_offset(item, self._hold_off, self._step_bases, self._step_off_bases)
+        return self._place_x(item, a, o)
 
     def _item_left(self, item) -> float:
         """Left x the item's name/panel starts at (for panel anchoring/packing)."""
         if item.kind == "bar":
-            sx = tlm.offset_to_x(*tlm.bar_start_placement(item, self._hold_off),
-                                 self._on, self._off, self._zoom)
-            px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off, self._zoom)
+            sx = self._place_x(item, *tlm.bar_start_placement(item, self._hold_off, self._step_bases, self._step_off_bases))
+            px = self._place_x(item, "stop", item.stop_offset)
             return min(sx, px)
         return self._run_cx(item) - self._run_width(item) / 2
 
     def _foot_h(self, item) -> int:
-        """Total vertical footprint: name row + caption row + panel (if expanded)."""
-        h = LANE_H + CAPTION_H
-        if self._expanded(item):
-            h += self._panel_height(item)
-        return h
+        """Row footprint — uniform in the redesign (one capsule/pin per row)."""
+        return LANE_H
 
     def _span(self, item) -> Tuple[float, float]:
         """Horizontal [left, right] the item occupies (for lane packing) — includes
         the inline argument panel when it's expanded."""
         if item.kind == "bar":
-            sx = tlm.offset_to_x(*tlm.bar_start_placement(item, self._hold_off),
-                                 self._on, self._off, self._zoom)
-            px = tlm.offset_to_x("stop", item.stop_offset, self._on, self._off, self._zoom)
+            sx = self._place_x(item, *tlm.bar_start_placement(item, self._hold_off, self._step_bases, self._step_off_bases))
+            px = self._place_x(item, "stop", item.stop_offset)
             left, right = sx - HANDLE_W, px + HANDLE_W
         elif tlm._is_ramp(item):
-            (la, lo), (ra, ro) = tlm.ramp_span(item, self._hold_off)
-            sx = tlm.offset_to_x(la, lo, self._on, self._off, self._zoom)
-            px = tlm.offset_to_x(ra, ro, self._on, self._off, self._zoom)
+            (la, lo), (ra, ro) = tlm.ramp_span(item, self._hold_off, self._step_bases, self._step_off_bases)
+            sx = self._place_x(item, la, lo)
+            px = self._place_x(item, ra, ro)
             left, right = min(sx, px) - RAMP_MIN_W / 2, max(sx, px) + RAMP_MIN_W / 2
         else:
             cx = self._run_cx(item)
@@ -378,80 +757,153 @@ class _TimelineCanvas(QWidget):
         return left, right
 
     def _assign_lanes(self) -> Dict[int, int]:
-        placed: List[List[Tuple[float, float]]] = []
-        lane_of: Dict[int, int] = {}
-        # The Hold marker is a full-height divider, not a lane pill — it never
-        # participates in lane packing (see _paint_hold).
-        laid = [it for it in self._items if not tlm._is_hold(it)]
-        ordered = sorted(laid, key=lambda it: self._span(it)[0])
-        for it in ordered:
-            left, right = self._span(it)
-            for idx, spans in enumerate(placed):
-                if all(right + LANE_VGAP <= l or left >= r + LANE_VGAP for (l, r) in spans):
-                    spans.append((left, right))
-                    lane_of[it.uid] = idx
-                    break
-            else:
-                placed.append([(left, right)])
-                lane_of[it.uid] = len(placed) - 1
-        return lane_of
+        """Redesign: ONE ROW PER ITEM, grouped so a task's tunes/ramps sit directly under
+        it (tlm.display_order). The Hold owns no row (it paints as a divider). Also caches
+        the per-task hue map. Returns {uid: row index}."""
+        self._rows, self._holds = tlm.display_order(self._items)
+        self._hue = tlm.task_hue_map(self._items)
+        return {it.uid: i for i, it in enumerate(self._rows)}
 
-    def relayout(self) -> None:
+    def _recompute_band(self) -> None:
+        """The item-measuring half of relayout: resolve the Hold + step anchors, then the
+        un-centred content anchors (_c_on / _c_off / _content_w) — the on-air/off-air band, the
+        Hold window and the canvas width. Shared by relayout and the mid-drag _live_expand."""
+        # The Hold marker's position (window A's end) governs where window-B items sit,
+        # so resolve it before geometry (compute_anchors reads it too).
+        self._hold_off = tlm.hold_offset(self._items)
+        self._step_bases = tlm.resolve_step_offsets(self._items, self._hold_off)
+        self._step_off_bases = tlm.resolve_step_offsets_off(self._items, self._hold_off)
+        # Un-centered content anchors + intrinsic content width. Factored into a
+        # hook so a subclass (the plan timeline) can supply a window-only geometry.
+        self._c_on, self._c_off, self._content_w = self._compute_anchors()
+        # With a Hold present, the end can't be scheduled — off-air FLOATS to Proceed. Insert a
+        # fixed-width Hold WINDOW at the hold and re-place OFF-AIR just past the post-hold content
+        # (or AT the resume edge, merged, when nothing follows), replacing the compute_anchors band.
+        self._hold_present = self._hold_off is not None
+        if self._hold_present:
+            eff = self._eff()
+            resume = self._c_on + self._hold_off * eff + HOLD_BAND_PX
+            fwd, bwd = self._post_hold_extents()
+            span = (fwd + bwd) * eff + POST_HOLD_PAD if (fwd > 0 or bwd > 0) else 0.0
+            self._c_off = resume + span
+            self._content_w = max(self._content_w, int(self._c_off + tlm.EDGE_PAD))
+
+    def relayout(self, keep_on: bool = False) -> None:
         """Recompute content metrics (depend only on the items), then place.
 
         Each lane's height is the tallest footprint of the items in it (an expanded
         task is taller), and lanes stack with cumulative y so an expanded panel or
-        an offset caption never overlaps the task below it."""
-        # The Hold marker's position (window A's end) governs where window-B items sit,
-        # so resolve it before geometry (compute_anchors reads it too).
-        self._hold_off = tlm.hold_offset(self._items)
-        # Un-centered content anchors + intrinsic content width. Factored into a
-        # hook so a subclass (the plan timeline) can supply a window-only geometry.
-        self._c_on, self._c_off, self._content_w = self._compute_anchors()
+        an offset caption never overlaps the task below it.
+
+        `keep_on` keeps ON-AIR where it is on screen (used after a drag, so the band the
+        operator just watched expand doesn't recentre and jump on release)."""
+        prev_on = getattr(self, "_on", None) if keep_on else None
+        self._recompute_band()
         self._on, self._off = self._c_on, self._c_off   # for shift-invariant lane packing
         self._lane_of = self._assign_lanes()
         n_lanes = (max(self._lane_of.values()) + 1) if self._lane_of else 1
 
-        row_h: Dict[int, int] = {}
-        for it in self._items:
-            if it.uid not in self._lane_of:
-                continue                           # the Hold divider owns no lane
-            lane = self._lane_of[it.uid]
-            row_h[lane] = max(row_h.get(lane, LANE_H + CAPTION_H), self._foot_h(it))
+        # Uniform rows (no inline arg panels in the redesign).
         self._lane_y = {}
         y = LANES_TOP
         for lane in range(n_lanes):
             self._lane_y[lane] = y
-            y += row_h.get(lane, LANE_H + CAPTION_H) + LANE_VGAP
+            y += LANE_H + LANE_VGAP
         stack_bottom = y - LANE_VGAP
-        self._content_h = max(210, stack_bottom + AXIS_GAP + BASELINE_FROM_BOTTOM)
+        # The time axis rides directly under the rows (not pinned to the widget bottom).
+        self._rows_bottom = stack_bottom
+        self._content_h = max(200, stack_bottom + AXIS_GAP + 30)
         # The host QScrollArea is widget-resizable: minimums let the canvas STRETCH
         # to fill a bigger viewport (never shrinking below the content), and only
         # scroll when the content is larger.
-        self.setMinimumWidth(self._content_w)
+        min_w = self._content_w
+        if prev_on is not None:
+            # After a drag, keep the width that shows every item with on-air held where it is (the
+            # drag may have grown the canvas to the right of a pinned on-air) — shrinking it would
+            # re-place the band on the following resize and undo the keep.
+            min_w = max(min_w, int(prev_on - self._c_on + self._content_w))
+        self.setMinimumWidth(min_w)
         self.setMinimumHeight(self._content_h)
         self.updateGeometry()
-        self._place()
+        self._place(keep_on=prev_on)
 
     def resizeEvent(self, e):  # noqa: N802
-        # Re-place on every resize so the on-air band re-centres in the new width.
-        self._place()
+        # Re-place on every resize so the on-air band re-centres in the new width — except
+        # mid-drag, where a resize is the canvas GROWING under a pinned on-air (_live_expand):
+        # keep on-air put so the item under the cursor doesn't jump.
+        dragging = self._drag is not None and self._drag.get("moved")
+        self._place(keep_on=self._on if (dragging and hasattr(self, "_on")) else None)
         super().resizeEvent(e)
 
-    def _place(self) -> None:
+    def _place(self, keep_on: Optional[float] = None) -> None:
         """Position anchors + items for the current widget size: centre the on-air
         band horizontally, keep the tasks top-anchored, and pin the time axis to
-        the bottom (extra height opens a gap in the middle)."""
+        the bottom (extra height opens a gap in the middle). With `keep_on` (a previous
+        on-air x) the band is shifted to keep on-air THERE instead (clamped to the canvas)."""
         avail_w = max(self.width(), self._content_w)
-        mid0 = (self._c_on + self._c_off) / 2.0
-        shift = avail_w / 2.0 - mid0
-        shift = max(0.0, min(shift, max(0.0, avail_w - self._content_w)))
+        if self._content_w <= avail_w:
+            # Content fits: centre the band in the viewport (as before).
+            mid0 = (self._c_on + self._c_off) / 2.0
+            lo_shift, hi_shift = 0.0, max(0.0, avail_w - self._content_w)
+            fit_shift = max(lo_shift, min(avail_w / 2.0 - mid0, hi_shift))
+        else:
+            # Content is wider than the viewport: LEFT-anchor it so on-air sits near the
+            # left edge with only a small pre-roll gutter (no dead warm-up whitespace).
+            eff = self._eff()
+            offs = []
+            for it in self._items:
+                if it.kind == "bar":
+                    offs.append(float(getattr(it, "start_offset", 0.0)))
+                elif not tlm._is_hold(it):
+                    a, o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases, self._step_off_bases)
+                    if a == "start":
+                        offs.append(o)
+            preroll = max(0.0, -min(offs)) if offs else 0.0
+            target_on = tlm.EDGE_PAD + min(self._c_on - tlm.EDGE_PAD, (preroll + 16) * eff)
+            fit_shift = target_on - self._c_on      # <= 0: pull left, trimming empty warm-up
+            lo_shift, hi_shift = min(fit_shift, 0.0), 0.0
+        if keep_on is not None:
+            # Hold ON-AIR where it was (after a drag), within the range that keeps every item on
+            # the canvas — no tighter to the left than the left-anchored fit, no further right
+            # than the centred fit — so the band the operator just watched expand doesn't jump.
+            shift = max(lo_shift, min(hi_shift, keep_on - self._c_on))
+        else:
+            shift = fit_shift
         self._on = self._c_on + shift
         self._off = self._c_off + shift
-        # Tasks are laid out from the top (lane y's); the axis rides the widget
-        # bottom, so a taller widget grows the gap between them.
-        self._baseline = max(self._content_h, self.height()) - BASELINE_FROM_BOTTOM
+        # The axis rides directly under the last row (Gantt-style), not the widget bottom.
+        self._baseline = getattr(self, "_rows_bottom", LANES_TOP) + AXIS_GAP
+        self._set_hold_edges()
+        self._rebuild_geom()
 
+    def _set_hold_edges(self) -> None:
+        """Hold WINDOW edges + the merged flag (off-air floats to the resume edge when empty)."""
+        if self._hold_present:
+            self._enter_x = self._on + (self._hold_off or 0.0) * self._eff()
+            self._resume_x = self._enter_x + HOLD_BAND_PX
+            self._hold_merged = (self._off - self._resume_x) < 3.0
+        else:
+            self._enter_x = self._resume_x = None
+            self._hold_merged = False
+
+    def _live_expand(self) -> None:
+        """Mid-drag relayout with ON-AIR PINNED (owner v3 #9): the band / Hold window / off-air
+        re-measure from the live offsets — so an absolute window grows AS an item is dragged into
+        it, not on release — and every item re-places (dependents follow), while the rows stay put
+        and on-air doesn't move under the cursor. The canvas only ever grows during a drag."""
+        on0 = self._on
+        self._recompute_band()
+        self._on = on0
+        self._off = on0 + (self._c_off - self._c_on)
+        need_w = int(on0 - self._c_on + self._content_w)
+        if need_w > self.minimumWidth():
+            self.setMinimumWidth(need_w)
+            self.updateGeometry()
+        self._set_hold_edges()
+        self._rebuild_geom()
+
+    def _rebuild_geom(self) -> None:
+        """Place every item from the current anchors (_on / _off / the Hold edges)."""
         self._geom = {}
         for it in self._items:
             y = self._lane_y.get(self._lane_of.get(it.uid, 0), LANES_TOP)
@@ -459,25 +911,19 @@ class _TimelineCanvas(QWidget):
             if tlm._is_hold(it):
                 # The Hold marker is a vertical divider spanning the band, not a pill.
                 g["kind"] = "hold"
-                g["cx"] = self._run_cx(it)     # start-anchored at the hold offset
+                g["cx"] = self._run_cx(it)     # start-anchored at the hold offset (the ENTER edge)
             elif it.kind == "bar":
-                g["start_x"] = tlm.offset_to_x(*tlm.bar_start_placement(it, self._hold_off),
-                                               self._on, self._off, self._zoom)
-                g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off, self._zoom)
+                g["start_x"] = self._place_x(it, *tlm.bar_start_placement(it, self._hold_off, self._step_bases, self._step_off_bases))
+                g["stop_x"] = self._place_x(it, "stop", it.stop_offset)
             elif tlm._is_ramp(it):
                 # A ramp draws as a duration bar between its two anchored ends.
-                (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off)
-                g["start_x"] = tlm.offset_to_x(la, lo, self._on, self._off, self._zoom)
-                g["stop_x"] = tlm.offset_to_x(ra, ro, self._on, self._off, self._zoom)
-                g["ends"] = ((la, lo), (ra, ro))
+                g["start_x"], g["stop_x"], g["ends"], g["cut_x"] = self._ramp_edges(it)
             else:
                 g["cx"] = self._run_cx(it)
                 g["w"] = self._run_width(it)
-            if self._expanded(it):
-                g["panel"] = (self._item_left(it) + 2, y + LANE_H + CAPTION_H,
-                              self._panel_width(it), self._panel_height(it))
-            g["foot_h"] = self._foot_h(it)
+            g["foot_h"] = LANE_H
             self._geom[it.uid] = g
+        self._refresh_elapsed()                 # Hold-edit: re-classify what already happened
         self.update()
 
     # ── Painting ──────────────────────────────────────────────────────────────
@@ -485,45 +931,422 @@ class _TimelineCanvas(QWidget):
     def paintEvent(self, _e):  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._rmchip = None            # recomputed below when a step-anchored item is selected
+        self._rmchip_pos = None
         baseline = int(self._baseline)
         on_x, off_x = int(self._on), int(self._off)
+        top = LANES_TOP - 8
+        if self._hold_present:
+            # A Hold present: the Hold replaces the relative band as the one variable-length
+            # section, and everything after it is one off-air-styled window whose axis counts
+            # forward from resume (off-air floats to Proceed). Painted in its own path.
+            self._paint_hold_windows(p, top, baseline, on_x, off_x)
+        else:
+            def_x = int(self._def_x())
+            off_def_x = max(def_x, int(self._off_def_x()))   # left edge of the off-air window
 
-        # On-air band (the fixed, not-to-scale middle) — a faint fill so it reads
-        # as the "busiest" region.
-        p.fillRect(on_x, LANES_TOP - 10, off_x - on_x, baseline - (LANES_TOP - 10),
-                   QColor(Palette.ONLINE_SOFT))
+            # Defined ABSOLUTE windows — a whisper of tint: on-air green (left), off-air red (right).
+            gtint = QColor(Palette.ONLINE); gtint.setAlpha(11)
+            p.fillRect(QRectF(on_x, top, max(0, def_x - on_x), baseline - top), gtint)
+            rtint = QColor(Palette.CRASH); rtint.setAlpha(11)
+            p.fillRect(QRectF(off_def_x, top, max(0, off_x - off_def_x), baseline - top), rtint)
+            # Only the middle is truly RELATIVE (its length is set at arm) — diagonal hatch, no ticks.
+            self._paint_hatch(p, def_x, off_def_x, top, baseline)
+            if off_def_x - def_x > 6:
+                pen = QPen(QColor(Palette.BORDER_STRONG), 1)
+                pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
+                p.drawLine(def_x, top, def_x, baseline + 4)             # green | hatch boundary
+                p.drawLine(off_def_x, top, off_def_x, baseline + 4)     # hatch | red boundary
 
-        p.setPen(QPen(QColor(Palette.BORDER_STRONG), 2))
-        p.drawLine(tlm.EDGE_PAD // 2, baseline, self.width() - tlm.EDGE_PAD // 2, baseline)
+            self._paint_gridlines(p, top, baseline, on_x, def_x, off_x, off_def_x)
+            self._paint_anchor(p, on_x, top, baseline, "ON-AIR", Palette.ONLINE)
+            self._paint_anchor(p, off_x, top, baseline, "OFF-AIR", Palette.CRASH)
+            self._paint_axis(p, baseline, on_x, def_x, off_x, off_def_x)
 
-        tick_font = QFont(); tick_font.setPointSize(8)
-        p.setFont(tick_font)
-        self._paint_ticks(p, baseline, on_x, negative=True)
-        self._paint_ticks(p, baseline, off_x, negative=False)
-
-        self._paint_anchor(p, on_x, baseline, "ON-AIR", Palette.ONLINE)
-        self._paint_anchor(p, off_x, baseline, "OFF-AIR", Palette.CRASH)
-
-        cap_font = QFont(); cap_font.setPointSize(9); cap_font.setItalic(True)
-        p.setFont(cap_font)
-        p.setPen(QColor(Palette.TEXT_FAINT))
-        p.drawText(tlm.EDGE_PAD, 16, max(0, on_x - tlm.EDGE_PAD), 14,
-                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), "warm-up")
-        p.drawText(on_x, baseline + 26, off_x - on_x, 14,
-                   int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter), "· on air ·")
-        p.drawText(off_x, 16, max(0, self.width() - off_x - tlm.EDGE_PAD), 14,
-                   int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), "cool-down")
-
-        for it in self._items:
-            if tlm._is_hold(it):
-                self._paint_hold(p, it)
-            elif it.kind == "bar":
+        self._paint_connectors(p)
+        for it in self._rows:
+            if it.kind == "bar":
                 self._paint_bar(p, it)
             elif tlm._is_ramp(it):
                 self._paint_ramp(p, it)
             else:
-                self._paint_run(p, it)
+                self._paint_pin(p, it)
+        # Hold-edit: frost the elapsed window OVER its (already monochrome) steps, under the Hold's
+        # own edges so they stay crisp.
+        self._elapsed_ribbon = None
+        if self._lock_elapsed and self._hold_present and self._enter_x is not None:
+            self._paint_elapsed_wash(p, top, baseline)
+        for it in self._holds:
+            self._paint_hold(p, it)
+        self._paint_root_anchor_hint(p)
+        self._paint_selection(p)
+        if self._rmchip_pos is not None:
+            self._paint_remove_chip(p, *self._rmchip_pos)
+        self._paint_marquee(p)
+        self._paint_snap_guide(p)
+        self._paint_connect_drag(p)
+        self._paint_drag_readout(p)
         p.end()
+
+    # ── Redesign paint helpers ────────────────────────────────────────────────
+    @staticmethod
+    def _mmss(t: float) -> str:
+        sign = "−" if t < 0 else ""
+        t = abs(t); m, s = int(t // 60), int(round(t % 60))
+        return f"{sign}{m}:{s:02d}" if m else f"{sign}{s}s"
+
+    def _def_x(self) -> float:
+        """Rightmost on-air x that is actually pinned by an anchor/offset — the end of the
+        DEFINED (real-time) region. Beyond it the band is hatched 'relative'."""
+        x = float(self._on)
+        for it in self._rows:
+            g = self._geom.get(it.uid)
+            if not g:
+                continue
+            if it.kind == "bar":
+                x = max(x, g.get("start_x", x))            # start is on-air; stop is off-air
+            elif tlm._is_ramp(it):
+                if getattr(it, "anchor", "start") in ("start", "step", "enter"):
+                    x = max(x, g.get("stop_x", x))         # the ramp's end
+            else:
+                a, _o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases, self._step_off_bases)
+                if a == "start":
+                    x = max(x, g.get("cx", x))
+        return x
+
+    def _off_def_x(self) -> float:
+        """Leftmost off-air x pinned by a STOP-anchored step (one that fires BEFORE off-air with
+        a negative offset) — the LEFT edge of the DEFINED off-air region (red-tinted, ticked).
+        Off_x when nothing is off-air-anchored, so there is no off-air window then. A bar's own
+        stop IS off-air (offset 0), not content, so bars are ignored."""
+        x = float(self._off)
+        for it in self._rows:
+            g = self._geom.get(it.uid)
+            if not g or getattr(it, "kind", None) == "bar":
+                continue
+            if getattr(it, "anchor", "start") != "stop":
+                continue
+            if tlm._is_ramp(it):
+                x = min(x, g.get("start_x", x))       # the ramp's earliest edge (offset − dur)
+            else:
+                x = min(x, g.get("cx", x))
+        return x
+
+    def _hues(self, hexstr: str):
+        base = QColor(hexstr)
+        edge = QColor(hexstr); edge.setAlpha(125)
+        fa = QColor(hexstr); fa.setAlpha(42)
+        fb = QColor(hexstr); fb.setAlpha(13)
+        ink = base.darker(142)
+        return base, edge, fa, fb, ink
+
+    def _hue_for(self, it):
+        return self._hue.get(getattr(it, "task_name", "") or "")
+
+    def _item_colors(self, it):
+        """(base, edge, fa, fb, ink) for an item: its task hue when the task is known,
+        else the red 'unknown task' treatment (so a typo still reads as a problem)."""
+        if self.elapsed_kind(it) == "full":            # Hold-edit: already ran → monochrome
+            return self._elapsed_colors()
+        hexs = self._hue_for(it)
+        if self.task_known(getattr(it, "task_name", "")) and hexs:
+            return self._hues(hexs)
+        base = QColor(Palette.CRASH); edge = QColor(Palette.CRASH); edge.setAlpha(150)
+        fa = QColor(Palette.CRASH); fa.setAlpha(30); fb = QColor(Palette.CRASH); fb.setAlpha(10)
+        return base, edge, fa, fb, QColor(Palette.CRASH)
+
+    @staticmethod
+    def _elapsed_colors():
+        """The locked (already-ran) treatment: one neutral grey, no task hue."""
+        base = QColor(ELAPSED_HUE); edge = QColor(ELAPSED_HUE); edge.setAlpha(150)
+        fa = QColor(ELAPSED_HUE); fa.setAlpha(46); fb = QColor(ELAPSED_HUE); fb.setAlpha(16)
+        return base, edge, fa, fb, QColor(ELAPSED_INK)
+
+    def _paint_elapsed_wash(self, p, top, baseline):
+        """Hold-edit: FROST the elapsed window — everything left of the Hold's enter edge — with a
+        translucent wash + faint diagonal hairlines over the already-ran steps, and a ribbon on the
+        anchor row saying why it's locked (elided / dropped when the window is too narrow for it,
+        so it never runs into the ON-AIR pill or the Hold tab)."""
+        ex = float(self._enter_x)
+        if ex <= 0:
+            return
+        r = QRectF(0.0, float(top), ex, float(baseline - top))
+        wash = QColor(Palette.SURFACE); wash.setAlpha(120)
+        p.fillRect(r, wash)
+        p.save(); p.setClipRect(r)
+        hair = QColor(Palette.BORDER_STRONG); hair.setAlpha(70)
+        p.setPen(QPen(hair, 1))
+        h = float(baseline - top)
+        xx = -h
+        while xx < ex:                       # 135° hairlines — the opposite slant to the Hold hatch
+            p.drawLine(QPointF(xx, float(top)), QPointF(xx + h, float(baseline)))
+            xx += 6.0
+        p.restore()
+        # The ribbon sits on the anchor row between the ON-AIR pill and the Hold tab.
+        f = self._f(8, True); fm = QFontMetrics(f)
+        ft = QFont(); ft.setPointSize(8); ft.setBold(True)
+        tab_w = QFontMetrics(ft).horizontalAdvance(self._hold_tag) + 12
+        left = float(self._on) + fm.horizontalAdvance("ON-AIR") / 2.0 + 14.0
+        right = ex + HOLD_BAND_PX / 2.0 - tab_w / 2.0 - 8.0
+        for text in (ELAPSED_RIBBON, "✓ ELAPSED · locked", "✓ ELAPSED"):
+            w = fm.horizontalAdvance(text) + 16.0
+            if left + w <= right:
+                break
+        else:
+            return
+        rr = QRectF(left, float(top) - 11.0, w, 15.0)
+        p.setPen(QPen(QColor(ELAPSED_HUE), 1)); p.setBrush(QColor(Palette.SURFACE))
+        p.drawRoundedRect(rr, 7, 7)
+        p.setFont(f); p.setPen(QColor(ELAPSED_INK))
+        p.drawText(rr, int(Qt.AlignmentFlag.AlignCenter), text)
+        self._elapsed_ribbon = rr
+
+    def _paint_hatch(self, p, x0, x1, top, bot):
+        if x1 - x0 <= 0:
+            return
+        p.fillRect(QRectF(x0, top, x1 - x0, bot - top), QColor("#F4F6F9"))
+        p.save()
+        p.setClipRect(QRectF(x0, top, x1 - x0, bot - top))
+        p.setPen(QPen(QColor("#DFE4EA"), 1))
+        h = bot - top
+        xx = x0 - h
+        while xx < x1:
+            p.drawLine(int(xx), int(bot), int(xx + h), int(top))
+            xx += 7
+        p.restore()
+
+    def _paint_anchor(self, p, x, top, baseline, label, color, alpha: int = 255):
+        col = QColor(color); col.setAlpha(alpha)
+        p.setPen(QPen(col, 2)); p.drawLine(x, top - 2, x, baseline + 4)
+        f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPointSize(8); f.setBold(True)
+        p.setFont(f)
+        fm = QFontMetrics(f); tw = fm.horizontalAdvance(label) + 12
+        r = QRectF(x - tw / 2, top - 11, tw, 15)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(col); p.drawRoundedRect(r, 5, 5)
+        p.setPen(QColor("#FFFFFF")); p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), label)
+
+    def _paint_gridlines(self, p, top, baseline, on_x, def_x, off_x, off_def_x=None):
+        """Discreet vertical gridlines behind the rows, aligned to the axis's MAJOR ticks
+        (plus fainter half-ticks), so a step's x reads off a time. Drawn only where time is
+        ABSOLUTE — the warm-up, the defined on-air region, the defined off-air window
+        (off_def_x..off_x), and the cool-down; the truly-relative middle band (def_x..off_def_x,
+        length set at arm) is left clear. The on-air/off-air instants get their own strong
+        anchor lines, so they're skipped here."""
+        if off_def_x is None:
+            off_def_x = off_x
+        eff = self._eff(); tick_s = self._tick_interval()
+        # BORDER_STRONG (not the lighter BORDER) so the lines keep enough contrast over the
+        # green on-air tint too; a clear major/minor alpha split keeps the minors readable.
+        major = QColor(Palette.BORDER_STRONG); major.setAlpha(175)
+        minor = QColor(Palette.BORDER_STRONG); minor.setAlpha(95)
+        y0, y1 = int(top), int(baseline)
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        def vline(x, col):
+            p.setPen(QPen(col, 1))
+            p.drawLine(int(x), y0, int(x), y1)
+
+        # Defined (on-air) region — majors at each tick (skip t=0, the on-air anchor),
+        # minors at the half-ticks.
+        t = tick_s
+        while on_x + t * eff <= def_x + 1:
+            vline(on_x + t * eff, major); t += tick_s
+        if tick_s >= 2:
+            t = 0
+            while on_x + (t + tick_s / 2) * eff <= def_x + 1:
+                vline(on_x + (t + tick_s / 2) * eff, minor); t += tick_s
+        # Warm-up (left of on-air) and cool-down (right of off-air) — majors only.
+        t = tick_s
+        while on_x - t * eff >= 0:
+            vline(on_x - t * eff, major); t += tick_s
+        t = tick_s
+        while off_x + t * eff <= self.width():
+            vline(off_x + t * eff, major); t += tick_s
+        # Off-air-relative gridlines across the DEFINED off-air window (off_def_x..off_x), matching
+        # the axis's off-air ticks so a stop-anchored step aligns to a line too; they stop at
+        # off_def_x so the truly-relative middle band stays clear.
+        t = tick_s
+        while off_x - t * eff >= off_def_x - 1:
+            vline(off_x - t * eff, major); t += tick_s
+        if tick_s >= 2:
+            t = tick_s / 2.0
+            while off_x - t * eff >= off_def_x - 1:
+                vline(off_x - t * eff, minor); t += tick_s
+        p.restore()
+
+    def _paint_axis(self, p, baseline, on_x, def_x, off_x, off_def_x=None):
+        if off_def_x is None:
+            off_def_x = off_x
+        eff = self._eff(); tick_s = self._tick_interval()
+        f = QFont(Fonts.MONO.split(",")[0].strip('"')); f.setPointSize(8); p.setFont(f)
+        w = self.width()                    # ticks fill the whole canvas, edge to edge
+        center = int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+
+        def tick(x, label, major):
+            col = QColor(Palette.TEXT_FAINT if major else Palette.BORDER_STRONG)
+            p.setPen(QPen(col, 1))
+            p.drawLine(int(x), baseline, int(x), baseline + (7 if major else 4))
+            if major and label is not None and 30 <= x <= w - 30:   # skip labels that would clip
+                p.setPen(QColor(Palette.TEXT_MUTED))
+                p.drawText(int(x) - 30, baseline + 9, 60, 12, center, label)
+
+        # Real-time ticks across the defined (on-air) region — with minor half-ticks.
+        t = 0
+        while on_x + t * eff <= def_x + 1:
+            tick(on_x + t * eff, "0" if t == 0 else self._mmss(t), True)
+            if tick_s >= 2:
+                mid = on_x + (t + tick_s / 2) * eff
+                if mid <= def_x + 1:
+                    tick(mid, None, False)
+            t += tick_s
+        # Warm-up (negative) ticks all the way to the LEFT edge (relative to on-air).
+        t = tick_s
+        while on_x - t * eff >= 0:
+            tick(on_x - t * eff, self._mmss(-t), True)
+            t += tick_s
+        # Off-air anchor labelled '0' — the cool-down ticks read relative to it (its absolute
+        # time is chosen at arm; warm-up/cool-down ticks are ±M:SS around this zero).
+        if 30 <= off_x <= w - 30:
+            p.setPen(QColor(Palette.TEXT_MUTED))
+            p.drawText(int(off_x) - 30, baseline + 9, 60, 12, center, "0")
+        # Cool-down ticks all the way to the RIGHT edge (relative to the off-air instant, '+' prefix) —
+        # mirrors the warm-up so the axis fills and reads balanced at any zoom.
+        t = tick_s
+        while off_x + t * eff <= w:
+            tick(off_x + t * eff, "+" + self._mmss(t), True)
+            t += tick_s
+        # Off-air-relative ticks going LEFT across the DEFINED off-air window ('−M:SS'): a
+        # stop-anchored step fires at a fixed offset before off-air, so its time is absolute. They
+        # stop at off_def_x (the window's left edge) — the truly-relative middle band gets no ticks.
+        t = tick_s
+        while off_x - t * eff >= off_def_x - 1:
+            tick(off_x - t * eff, self._mmss(-t), True)
+            if tick_s >= 2:
+                mid = off_x - (t - tick_s / 2) * eff
+                if mid >= off_def_x - 1:
+                    tick(mid, None, False)
+            t += tick_s
+
+    # ── Hold-window painting ──────────────────────────────────────────────────
+    def _paint_hold_windows(self, p, top, baseline, on_x, off_x):
+        """The Hold layout: a green on-air window (on_x..enter), the Hold WINDOW itself
+        (enter..resume — hatched + amber, its length set at Proceed), and one off-air-styled
+        window after it (resume..off_x) whose axis counts FORWARD from resume. Off-air FLOATS
+        (dashed), and MERGES with the resume edge when nothing is anchored after the Hold."""
+        enter_x = int(self._enter_x); resume_x = int(self._resume_x); merged = self._hold_merged
+        # on-air (green) up to the Hold enter
+        gtint = QColor(Palette.ONLINE); gtint.setAlpha(11)
+        p.fillRect(QRectF(on_x, top, max(0, enter_x - on_x), baseline - top), gtint)
+        # the Hold WINDOW — diagonal hatch + a whisper of amber (variable length, like the old band)
+        self._paint_hatch(p, enter_x, resume_x, top, baseline)
+        atint = QColor(Palette.ARMED); atint.setAlpha(22)
+        p.fillRect(QRectF(enter_x, top, max(0, resume_x - enter_x), baseline - top), atint)
+        # the post-hold window (off-air style) — only when a step is actually anchored after the Hold
+        if not merged:
+            rtint = QColor(Palette.CRASH); rtint.setAlpha(11)
+            p.fillRect(QRectF(resume_x, top, max(0, off_x - resume_x), baseline - top), rtint)
+
+        self._paint_hold_gridlines(p, top, baseline, on_x, enter_x, resume_x, off_x, merged)
+        # Hold-edit: T0 is history, RESUME is the reference the editable window hangs off → dim.
+        self._paint_anchor(p, on_x, top, baseline, "ON-AIR", Palette.ONLINE,
+                           alpha=120 if self._lock_elapsed else 255)
+        self._paint_hold_axis(p, baseline, on_x, enter_x, resume_x, off_x, merged)
+        if not merged:                       # OFF-AIR floats past the post-hold content
+            self._paint_floating_offair(p, off_x, top, baseline)
+
+    def _paint_hold_axis(self, p, baseline, on_x, enter_x, resume_x, off_x, merged):
+        """On-air ticks forward from on-air (on_x..enter), then post-hold ticks forward from
+        RESUME (resume_x..off_x) — resume is the fixed T0 with a Hold, so the axis reads
+        elapsed-from-resume. The Hold band and (a floating) off-air get no ticks."""
+        eff = self._eff(); tick_s = self._tick_interval()
+        f = QFont(Fonts.MONO.split(",")[0].strip('"')); f.setPointSize(8); p.setFont(f)
+        w = self.width()
+        center = int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+
+        def tick(x, label, major):
+            col = QColor(Palette.TEXT_FAINT if major else Palette.BORDER_STRONG)
+            p.setPen(QPen(col, 1))
+            p.drawLine(int(x), baseline, int(x), baseline + (7 if major else 4))
+            if major and label is not None and 30 <= x <= w - 30:
+                p.setPen(QColor(Palette.TEXT_MUTED))
+                p.drawText(int(x) - 30, baseline + 9, 60, 12, center, label)
+
+        # on-air, forward from on-air, up to the Hold enter
+        t = 0
+        while on_x + t * eff <= enter_x + 1:
+            tick(on_x + t * eff, "0" if t == 0 else self._mmss(t), True)
+            if tick_s >= 2:
+                mid = on_x + (t + tick_s / 2) * eff
+                if mid <= enter_x + 1:
+                    tick(mid, None, False)
+            t += tick_s
+        # warm-up (negative) ticks to the left edge
+        t = tick_s
+        while on_x - t * eff >= 0:
+            tick(on_x - t * eff, self._mmss(-t), True); t += tick_s
+        # post-hold, forward from RESUME, up to off-air (skipped when merged)
+        if not merged:
+            t = 0
+            while resume_x + t * eff <= off_x + 1:
+                tick(resume_x + t * eff, "0" if t == 0 else self._mmss(t), True)
+                if tick_s >= 2:
+                    mid = resume_x + (t + tick_s / 2) * eff
+                    if mid <= off_x + 1:
+                        tick(mid, None, False)
+                t += tick_s
+
+    def _paint_hold_gridlines(self, p, top, baseline, on_x, enter_x, resume_x, off_x, merged):
+        """Gridlines behind the rows aligned to the Hold axis's major ticks — on-air
+        (on_x..enter) and post-hold (resume_x..off_x, forward from resume). The Hold band and
+        the anchor lines (on-air/off-air) are skipped."""
+        eff = self._eff(); tick_s = self._tick_interval()
+        major = QColor(Palette.BORDER_STRONG); major.setAlpha(175)
+        minor = QColor(Palette.BORDER_STRONG); minor.setAlpha(95)
+        y0, y1 = int(top), int(baseline)
+        p.save(); p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        def vline(x, col):
+            p.setPen(QPen(col, 1)); p.drawLine(int(x), y0, int(x), y1)
+
+        # on-air majors (skip t=0, the on-air anchor) + minors
+        t = tick_s
+        while on_x + t * eff <= enter_x + 1:
+            vline(on_x + t * eff, major); t += tick_s
+        if tick_s >= 2:
+            t = tick_s / 2.0
+            while on_x + t * eff <= enter_x + 1:
+                vline(on_x + t * eff, minor); t += tick_s
+        # warm-up majors
+        t = tick_s
+        while on_x - t * eff >= 0:
+            vline(on_x - t * eff, major); t += tick_s
+        # post-hold majors (skip t=0, the resume edge which gets its own dashed line) + minors
+        if not merged:
+            t = tick_s
+            while resume_x + t * eff <= off_x - 1:
+                vline(resume_x + t * eff, major); t += tick_s
+            if tick_s >= 2:
+                t = tick_s / 2.0
+                while resume_x + t * eff <= off_x - 1:
+                    vline(resume_x + t * eff, minor); t += tick_s
+        p.restore()
+
+    def _paint_floating_offair(self, p, off_x, top, baseline):
+        """The OFF-AIR marker when a Hold is present: a DASHED red line + pill + a small
+        'floats' caption (its absolute time isn't known until Proceed)."""
+        col = QColor(Palette.CRASH)
+        pen = QPen(col, 2); pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
+        p.drawLine(off_x, top - 2, off_x, baseline + 4)
+        f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPointSize(8); f.setBold(True)
+        p.setFont(f); fm = QFontMetrics(f); tw = fm.horizontalAdvance("OFF-AIR") + 12
+        r = QRectF(off_x - tw / 2, top - 11, tw, 15)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(col); p.drawRoundedRect(r, 5, 5)
+        p.setPen(QColor("#FFFFFF")); p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), "OFF-AIR")
+        fi = QFont(Fonts.SANS.split(",")[0].strip('"')); fi.setPointSize(7); fi.setItalic(True)
+        p.setFont(fi); p.setPen(QColor(Palette.TEXT_FAINT))
+        p.drawText(QRectF(off_x - 30, top - 24, 60, 11), int(Qt.AlignmentFlag.AlignHCenter),
+                   "floats")
 
     def _tick_interval(self) -> int:
         """Seconds between ticks — the smallest 'nice' value whose on-screen
@@ -552,15 +1375,6 @@ class _TimelineCanvas(QWidget):
             p.drawText(int(x) - 27, baseline + 6, 54, 12,
                        int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop), label)
             i += 1
-
-    def _paint_anchor(self, p, x, baseline, label, color):
-        p.setPen(QPen(QColor(color), 2))
-        p.drawLine(x, LANES_TOP - 12, x, baseline + 6)
-        f = QFont(); f.setPointSize(9); f.setBold(True)
-        p.setFont(f)
-        p.setPen(QColor(color))
-        p.drawText(x - 60, baseline + 8, 120, 16,
-                   int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop), label)
 
     def _paint_caret(self, p, it, g, color):
         """A small rounded chip that expands (▾) or collapses (▴) the arg panel."""
@@ -617,149 +1431,999 @@ class _TimelineCanvas(QWidget):
                        int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), vtext)
             row_y += ARG_ROW_H
 
+    def _f(self, px: int, bold: bool = False) -> QFont:
+        f = QFont(Fonts.SANS.split(",")[0].strip('"'))
+        f.setPixelSize(px)
+        f.setWeight(QFont.Weight(600 if bold else 500))
+        return f
+
+    def _capsule(self, p, rect, base, edge, fa, fb, rail=True):
+        grad = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        grad.setColorAt(0.0, fa); grad.setColorAt(1.0, fb)
+        # Opaque base first so nothing behind the capsule (gridlines, on-air tint) bleeds
+        # through the translucent hue gradient painted over it.
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(Palette.SURFACE))
+        p.drawRoundedRect(rect, BAR_R, BAR_R)
+        p.setPen(QPen(edge, 1)); p.setBrush(QBrush(grad))
+        p.drawRoundedRect(rect, BAR_R, BAR_R)
+        if rail:
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(base)
+            p.drawRoundedRect(QRectF(rect.left() + 3, rect.top() + 6, HUE_RAIL, rect.height() - 12),
+                              1.5, 1.5)
+
+    def _paint_edge_dot(self, p, x, cy, base, linked=False):
+        r = QRectF(x - 5, cy - 5, 10, 10)
+        if linked:
+            p.setPen(QPen(QColor("#FFFFFF"), 2)); p.setBrush(base)
+        else:
+            p.setPen(QPen(base, 2)); p.setBrush(QColor(Palette.SURFACE))
+        p.drawEllipse(r)
+
+    def _edge_linked(self, it, edge: str) -> bool:
+        """A ramp/bar edge dot draws FILLED when a connector attaches there: some step hangs off
+        this edge of `it` (it is a target), or it is the edge `it` itself is tied BY (a ramp tied
+        by its start or — `anchor_own_edge` — its end; a bar always by its start)."""
+        if tlm.is_step_source(it):
+            own = (getattr(it, "anchor_own_edge", "start") or "start") if tlm._is_ramp(it) else "start"
+            if own == edge:
+                return True
+        sid = getattr(it, "step_id", "") or ""
+        if not sid:
+            return False
+        return any(tlm.is_step_source(o) and tlm.step_source_ref(o) == (sid, edge)
+                   for o in self._rows)
+
+    @staticmethod
+    def _dep_offset(it) -> float:
+        """A step-anchor dependent's offset from the target edge as the operator sees it: a run's
+        `offset` (an end-tied ramp's is its END's), a bar's `start_offset`."""
+        if getattr(it, "kind", None) == "bar":
+            return float(getattr(it, "start_offset", 0.0))
+        return float(getattr(it, "offset", 0.0))
+
+    def _chip_w(self, dep) -> float:
+        """Width of a dependent's inline offset chip."""
+        return QFontMetrics(mono_font(10)).horizontalAdvance(
+            self._offset_chip_text(self._dep_offset(dep))) + 14.0
+
+    def _dep_entry(self, dep):
+        """(x2, entry_from_right, two_sided) for a step-anchor DEPENDENT: the x of its TIED edge
+        (a point's centre; a ramp's start — or its END when tied by the end; a bar's start) and the
+        side its connector enters from. A two-sided item (ramp/bar) is ALWAYS entered from OUTSIDE
+        its body: a start tie from the left, an end tie from the right. A point may be entered from
+        either side (it's decided against the anchor's x → None here)."""
+        g = self._geom.get(getattr(dep, "uid", None)) or {}
+        if not (tlm._is_ramp(dep) or getattr(dep, "kind", "") == "bar"):
+            return g.get("cx", 0.0), None, False
+        end_tied = tlm._is_ramp(dep) and (getattr(dep, "anchor_own_edge", "start") or "start") == "end"
+        if end_tied:
+            # Enter at the capsule's VISUAL right edge: a short ramp is padded out to RAMP_MIN_W
+            # (see _paint_ramp), so its true stop x can sit inside the capsule and a line ending
+            # there would bury its arrow + chip under the pill. (The tie's offset math still uses
+            # the true stop x — this is drawing only.)
+            sx = g.get("start_x", 0.0)
+            return max(g.get("stop_x", sx), sx + RAMP_MIN_W), True, True
+        return g.get("start_x", g.get("cx", 0.0)), False, True
+
+    def _point_exit_dir(self, tgt, dep) -> float:
+        """Which way a POINT target's connector to `dep` leaves the pin. Both sides of a pin are
+        free, so it leaves TOWARD the dependent's drop column (−1 left, +1 right, 0 = the column is
+        at the pin → a straight drop) — a dependent at/just after the pin, or before it, is reached
+        by a plain exit on that side instead of a wrap around the far side. A pin that is ITSELF a
+        dependent keeps the right-side exit (its own incoming line already claims a side; the
+        caption logic + the under-caption duck are built around a right exit there)."""
+        cx = self._geom[tgt.uid]["cx"]
+        dx, efr, _two = self._dep_entry(dep)
+        if efr is None:
+            efr = dx < cx - 1.0
+        if tlm.is_step_source(tgt) and not efr:
+            return 1.0                          # a dependent pin: right exit + duck (option C)
+        xd = self._drop_column(cx, dx, efr, self._chip_w(dep) + 24.0,
+                               self._intervening_obstacles(tgt.uid, dep.uid))
+        if abs(xd - cx) <= 1.0:
+            return 0.0
+        return 1.0 if xd > cx else -1.0
+
+    def _chip(self, p, cx, cy, text, border, ink, mono=True):
+        f = mono_font(10) if mono else self._f(10, True)
+        p.setFont(f); fm = QFontMetrics(f)
+        w = fm.horizontalAdvance(text) + 14
+        r = QRectF(cx - w / 2, cy - 9, w, 18)
+        p.setPen(QPen(border, 1)); p.setBrush(QColor(Palette.SURFACE))
+        p.drawRoundedRect(r, 9, 9)
+        p.setPen(ink); p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
+
     def _paint_bar(self, p, it):
         g = self._geom[it.uid]
         y, sx, px = g["y"], g["start_x"], g["stop_x"]
-        known = self.task_known(it.task_name)
-        border = QColor(Palette.ONLINE if known else Palette.CRASH)
-        left = min(sx, px)
-        rect = QRectF(left, y, max(HANDLE_W * 2.0, abs(px - sx)), LANE_H)
-        p.setPen(QPen(border, 2))
-        p.setBrush(QBrush(QColor(Palette.SURFACE)))
-        p.drawRoundedRect(rect, 9, 9)
-
-        # Two handle grips.
-        for hx in (sx, px):
-            hr = QRectF(hx - HANDLE_W / 2, y + 3, HANDLE_W, LANE_H - 6)
-            p.setBrush(QBrush(border))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawRoundedRect(hr, 4, 4)
-            p.setPen(QPen(QColor(Palette.SURFACE), 1))
-            for gx in (hx - 2, hx + 1):
-                p.drawLine(int(gx), int(y + 9), int(gx), int(y + LANE_H - 9))
-
-        # Centered label.
-        p.setFont(self._label_font)
-        p.setPen(QColor(Palette.TEXT if known else Palette.CRASH))
-        fm = QFontMetrics(self._label_font)
-        pad = HANDLE_W * 2 + 8 + (CARET_W if it.args else 0)
-        label = fm.elidedText(self._bar_label(it), Qt.TextElideMode.ElideRight,
-                              max(10, int(rect.width()) - pad))
-        p.drawText(rect.adjusted(HANDLE_W + 2, 0, -(HANDLE_W + 2 + (CARET_W if it.args else 0)), 0),
-                   int(Qt.AlignmentFlag.AlignCenter), label)
-        if it.args:
-            self._paint_caret(p, it, g, border)
-
-        # Timing chips under each handle (side is implied by the handle). A window-B bar's
-        # START is timed from the Hold's resume instant, so its chip reads on-resume/pre-hold.
-        cap_y = int(y + LANE_H + 1)
-        start_side = "hold" if getattr(it, "start_anchor", "start") == "hold" else "start"
-        self._paint_timing(p, sx, cap_y, _timing_text(it.start_offset, start_side, with_side=False))
-        self._paint_timing(p, px, cap_y, _timing_text(it.stop_offset, "stop", with_side=False))
-        self._paint_panel(p, it, g, border)
+        base, edge, fa, fb, ink = self._item_colors(it)
+        left = min(sx, px); w = max(HANDLE_W * 2.0, abs(px - sx))
+        rect = QRectF(left, y, w, LANE_H)
+        self._capsule(p, rect, base, edge, fa, fb)
+        p.setFont(self._f(12, True)); p.setPen(ink)
+        fm = QFontMetrics(self._f(12, True))
+        label = fm.elidedText(it.task_name or "(no task)", Qt.TextElideMode.ElideRight,
+                              max(10, int(w) - 26))
+        p.drawText(QRectF(left + 12, y, w - 22, LANE_H),
+                   int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), label)
+        cy = y + LANE_H / 2
+        # Hold-edit: a task RUNNING since before the pause — its elapsed stretch (start → the
+        # Hold's enter edge) is greyed, and the start grip / anchor dot are gone; only the stop
+        # (off-air, post-hold) keeps its grip + dot.
+        running = self.elapsed_kind(it) == "start" and self._enter_x is not None
+        if running:
+            clip = QPainterPath(); clip.addRoundedRect(rect, BAR_R, BAR_R)
+            p.save(); p.setClipPath(clip)
+            grey = QColor(ELAPSED_HUE); grey.setAlpha(95)
+            p.fillRect(QRectF(left, y, max(0.0, min(w, float(self._enter_x) - left)), LANE_H), grey)
+            p.restore()
+        # Resize GRIPS just inside each end (two hairlines) — distinct from the edge DOTS: the
+        # start dot is the bar's anchor handle (drag it onto a step / anchor line to hang the task
+        # off it), the grip resizes (owner v3 #5).
+        if w > 4 * HANDLE_W:
+            gpen = QPen(QColor(edge), 1.2); p.setPen(gpen)
+            grips = (left + w - 10.0, left + w - 13.0) if running else \
+                (left + 10.0, left + 13.0, left + w - 10.0, left + w - 13.0)
+            for gx in grips:
+                p.drawLine(QPointF(gx, y + 8.0), QPointF(gx, y + LANE_H - 8.0))
+        if not running:
+            self._paint_edge_dot(p, sx, cy, base, self._edge_linked(it, "start"))
+        self._paint_edge_dot(p, px, cy, base, self._edge_linked(it, "end"))
 
     def _paint_ramp(self, p, it):
-        """A ramp draws as a duration bar between its two anchored ends, with a
-        diagonal cue for direction and a timing chip under each end (so the anchor,
-        start and stop are all legible — like a duration task)."""
+        """A ramp draws as a capsule between its two anchored ends. Text (parent-task
+        badge · from→to range · duration) sits flush-left; a dedicated right END-CAP
+        holds the rising/falling slope mark, so the direction cue and the text can
+        never overlap (docs/ramp-pill-mockup.html · option B)."""
         g = self._geom[it.uid]
         y, sx, px = g["y"], g["start_x"], g["stop_x"]
-        known = self.task_known(it.task_name)
-        border = QColor(Palette.ACCENT if known else Palette.CRASH)
-        fill = QColor(Palette.ACCENT_SOFT if known else Palette.CRASH_SOFT)
-        left = min(sx, px)
-        rect = QRectF(left, y, max(RAMP_MIN_W, abs(px - sx)), LANE_H)
-        p.setPen(QPen(border, 2))
-        p.setBrush(QBrush(fill))
-        p.drawRoundedRect(rect, 9, 9)
-
-        # Diagonal direction cue: rises if the value increases, else falls.
+        base, edge, fa, fb, ink = self._item_colors(it)
+        left = min(sx, px); w = max(RAMP_MIN_W, abs(px - sx))
+        cy = y + LANE_H / 2
+        cut = g.get("cut_x")
+        if (cut is not None and self._resume_x is not None
+                and cut > left + 2.0 and px > self._resume_x + 2.0):
+            # A ramp crossing the Hold is FROZEN at the pause and resumes after it: two pieces
+            # flanking the Hold window (the run-up to the pause, then the remainder forward from
+            # resume), threaded across the band so it still reads as ONE ramp. Text lives in the
+            # first piece, the slope end-cap in the second (where the ramp actually ends).
+            rect = QRectF(left, y, max(RAMP_MIN_W / 2.0, cut - left), LANE_H)
+            cap_rect = QRectF(self._resume_x, y, max(RAMP_MIN_W / 2.0, px - self._resume_x), LANE_H)
+            self._capsule(p, rect, base, edge, fa, fb)
+            self._capsule(p, cap_rect, base, edge, fa, fb)
+            thread = QColor(base); thread.setAlpha(150)
+            tp = QPen(thread, 1.4); tp.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(tp); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawLine(QPointF(cut, cy), QPointF(self._resume_x, cy))
+        else:
+            rect = QRectF(left, y, w, LANE_H)
+            self._capsule(p, rect, base, edge, fa, fb)
+            cap_rect = rect
         r = dict(getattr(it, "ramp", None) or {})
         a, b = r.get("start"), r.get("stop")
         rising = (a is not None and b is not None and b >= a)
-        guide = QColor(border); guide.setAlpha(90)
-        p.setPen(QPen(guide, 1.5))
-        y0, y1 = ((rect.bottom() - 7, rect.top() + 7) if rising
-                  else (rect.top() + 7, rect.bottom() - 7))
-        p.drawLine(int(rect.left() + 7), int(y0), int(rect.right() - 7), int(y1))
 
-        # Centered label.
-        p.setFont(self._label_font)
-        p.setPen(QColor(Palette.ACCENT if known else Palette.CRASH))
-        fm = QFontMetrics(self._label_font)
-        label = fm.elidedText(_ramp_summary(r, it.anchor), Qt.TextElideMode.ElideRight,
-                              max(10, int(rect.width()) - 16))
-        p.drawText(rect.adjusted(8, 0, -8, 0), int(Qt.AlignmentFlag.AlignCenter), label)
-
-        # Timing chip under each end (its anchor tells start vs stop; a Hold-anchored ramp
-        # reads its ends on-resume/pre-hold, not on-air — see _ramp_end_side_off).
-        (la, lo), (ra, ro) = g.get("ends", (("start", 0.0), ("start", 0.0)))
-        s_side, s_off = _ramp_end_side_off(getattr(it, "anchor", "start"), la, lo, self._hold_off)
-        e_side, e_off = _ramp_end_side_off(getattr(it, "anchor", "start"), ra, ro, self._hold_off)
-        cap_y = int(y + LANE_H + 1)
-        self._paint_timing(p, sx, cap_y, _timing_text(s_off, s_side, with_side=True))
-        if abs(px - sx) > RAMP_MIN_W / 2:
-            self._paint_timing(p, px, cap_y, _timing_text(e_off, e_side, with_side=True))
-
-    def _paint_run(self, p, it):
-        g = self._geom[it.uid]
-        y, cx, w = g["y"], g["cx"], g["w"]
-        known = self.task_known(it.task_name)
-        is_live = getattr(it, "action", "run") in ("tune", "ramp")
-        if not known:
-            border, fill, text = Palette.CRASH, Palette.CRASH_SOFT, Palette.CRASH
-        elif is_live:                       # tune/ramp points read as a distinct accent
-            border, fill, text = Palette.ACCENT, Palette.ACCENT_SOFT, Palette.ACCENT
+        # ── right end-cap: a faint tinted zone (divider + slope mark) ─────────────
+        cap_w = RAMP_CAP_W if cap_rect.width() > RAMP_CAP_W + 22 else 0.0
+        if cap_w:
+            clip = QPainterPath(); clip.addRoundedRect(cap_rect, BAR_R, BAR_R)
+            p.save(); p.setClipPath(clip)
+            cap = QRectF(cap_rect.right() - cap_w, cap_rect.top(), cap_w, cap_rect.height())
+            fill = QColor(base); fill.setAlpha(26)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(fill); p.drawRect(cap)
+            div = QColor(base); div.setAlpha(75)
+            p.setPen(QPen(div, 1))
+            p.drawLine(QPointF(cap.left(), cap_rect.top() + 1.0),
+                       QPointF(cap.left(), cap_rect.bottom() - 1.0))
+            p.restore()
+            self._paint_slope(p, cap.center().x(), cap_rect.center().y(), rising, base)
         else:
-            border, fill, text = Palette.ARMED, Palette.ARMED_SOFT, Palette.TEXT
-        border = QColor(border)
-        rect = QRectF(cx - w / 2, y, w, LANE_H)
-        p.setPen(QPen(border, 2))
-        p.setBrush(QBrush(QColor(fill)))
-        p.drawRoundedRect(rect, LANE_H / 2, LANE_H / 2)
-        p.setFont(self._label_font)
-        p.setPen(QColor(text))
-        fm = QFontMetrics(self._label_font)
-        pad = 20 + (CARET_W if it.args else 0)
-        label = fm.elidedText(self._run_label(it), Qt.TextElideMode.ElideRight, max(10, int(w) - pad))
-        p.drawText(rect.adjusted(10, 0, -(6 + (CARET_W if it.args else 0)), 0),
-                   int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), label)
-        if it.args:
-            self._paint_caret(p, it, g, border)
-        # Timing chip under the pill (a run re-anchors, so keep the side label).
-        self._paint_timing(p, cx, int(y + LANE_H + 1),
-                           _timing_text(it.offset, it.anchor, with_side=True))
-        self._paint_panel(p, it, g, border)
+            # too narrow for a cap — a compact slope glyph tucked at the right edge
+            self._paint_slope(p, cap_rect.right() - 12, cap_rect.center().y(), rising, base, span=7.0)
 
-    def _paint_hold(self, p, it):
-        """The Hold marker — a dashed vertical divider across the on-air band at the
-        hold position, with a ⏸ HOLD tab at the top and its offset chip below. It is
-        the third anchor: window-A steps sit to its left, window-B (anchor="hold")
-        steps flow on from it to the right."""
+        # ── flush-left text: range · duration (no task badge — the row's hue/indent name the
+        #    parent task, owner v3 #3) — in the FIRST piece when the ramp is split at a Hold ──
+        text_r = rect.right() - ((cap_w if cap_rect is rect else 0.0) or 6.0) - 8.0
+        bx = left + 10
+        # duration, right-aligned just left of the cap divider
+        try:
+            dur = tlm._ramp_duration(r)
+        except Exception:  # noqa: BLE001
+            dur = 0.0
+        dw = 0.0
+        if dur and text_r - bx > 88:
+            f = mono_font(10); p.setFont(f); fm = QFontMetrics(f)
+            dt = self._mmss(dur); dw = fm.horizontalAdvance(dt)
+            p.setPen(ink)
+            p.drawText(QRectF(text_r - dw, y, dw, LANE_H),
+                       int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight), dt)
+            dw += 10.0
+        # from→to range, between the badge and the duration, when there's room. A --power ramp
+        # controlled in a view (a chirp's live density) reads its endpoints in THAT quantity.
+        if a is not None and b is not None:
+            f = mono_font(10); p.setFont(f); fm = QFontMetrics(f)
+            view = self._editor._ramp_power_display(it)
+            rng = f"{view[0]} → {view[1]}" if view else f"{fmt_value(a)} → {fmt_value(b)}"
+            avail = int(text_r - dw - bx)
+            if avail > 30:
+                p.setPen(ink)
+                p.drawText(QRectF(bx, y, avail, LANE_H),
+                           int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                           fm.elidedText(rng, Qt.TextElideMode.ElideRight, avail))
+
+        cy = y + LANE_H / 2
+        if self.elapsed_kind(it) is None:            # a locked (already-ran) ramp has no handles
+            self._paint_edge_dot(p, sx, cy, base, self._edge_linked(it, "start"))
+            self._paint_edge_dot(p, px, cy, base, self._edge_linked(it, "end"))
+
+    def _paint_slope(self, p, mx, my, rising, base, span=9.0):
+        """The rising/falling trend mark: a left→right stroke ending in a filled dot
+        at the destination level (up = ends high-right, down = ends low-right)."""
+        h = 6.0
+        x0, x1 = mx - span, mx + span
+        y_left = my + (h if rising else -h)
+        y_right = my - (h if rising else -h)
+        p.setPen(QPen(base, 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(QPointF(x0, y_left), QPointF(x1, y_right))
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(base)
+        p.drawEllipse(QPointF(x1, y_right), 2.4, 2.4)
+
+    def _paint_pin(self, p, it):
+        """A tune / one-shot is an INSTANT: a filled pin at the exact time. A tune's caption is a row
+        of recessed readout chips (docs/tune-pin-mockup.html · option B) — one per changed param, in
+        the task hue; the task name is dropped (the pin colour + row header already carry it). A
+        one-shot keeps its task name as the caption (the name IS its identity)."""
         g = self._geom[it.uid]
-        cx = int(g["cx"])
-        top = LANES_TOP - 12
-        baseline = int(self._baseline)
-        color = QColor(Palette.ARMED)
-        pen = QPen(color, 2)
+        y, cx = g["y"], g["cx"]
+        base, edge, fa, fb, ink = self._item_colors(it)
+        cy = y + LANE_H / 2
+        one_shot = getattr(it, "action", "run") == "run"
+        p.setPen(QPen(QColor("#FFFFFF"), 2.4)); p.setBrush(base)
+        if one_shot:
+            path = QPainterPath()
+            path.moveTo(cx, cy - 7); path.lineTo(cx + 7, cy)
+            path.lineTo(cx, cy + 7); path.lineTo(cx - 7, cy); path.closeSubpath()
+            p.drawPath(path)
+        else:
+            p.drawEllipse(QRectF(cx - 6.5, cy - 6.5, 13, 13))
+        # Caption side (docs/tune-pin-both-sides-mockup.html) — decided from the connector geometry
+        # (_pin_caption_side): a pin with a connector on its RIGHT but a clear LEFT flips its caption
+        # LEFT (a target whose dependents are to the right, OR a NEGATIVE-offset dependent entered from
+        # the right); a connector on BOTH sides keeps the caption RIGHT (wide gap) and the right-exit
+        # ducks under it (option C); otherwise caption RIGHT as normal.
+        side = self._pin_caption_side(it)
+        two_sided = side == "two_sided"
+        left = side == "left"
+        gap = PIN_CAP_GAP2 if two_sided else PIN_CAP_GAP
+        muted = self.elapsed_kind(it) == "full"      # Hold-edit: already ran → monochrome readout
+        if one_shot:
+            name = it.task_name or "(no task)"
+            p.setFont(self._f(12, True)); p.setPen(QColor(ELAPSED_INK if muted else Palette.TEXT))
+            if left:
+                tw = QFontMetrics(self._f(12, True)).horizontalAdvance(name)
+                p.drawText(QRectF(cx - PIN_CAP_GAP - tw, y, tw, LANE_H),
+                           int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight), name)
+            else:
+                p.drawText(QRectF(cx + gap, y, 260, LANE_H),
+                           int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), name)
+        else:
+            defs, total, fonts = self._tune_chip_defs(it)
+            tx = (cx - PIN_CAP_GAP - total) if left else (cx + gap)
+            self._paint_tune_chips(p, defs, fonts, tx, cy, base, muted=muted)
+
+    def _is_anchor_target(self, it) -> bool:
+        """True when some other step is anchored TO this item (a connector attaches on this pin) —
+        so the pin's caption may need to move to a clear side. See _pin_caption_side."""
+        sid = getattr(it, "step_id", "") or ""
+        if not sid:
+            return False
+        return any(tlm.is_step_source(d) and tlm.step_source_ref(d)[0] == sid for d in self._rows)
+
+    def _pin_conn_sides(self, it):
+        """(right_busy, left_busy): whether a step-anchor connector attaches on the pin's RIGHT
+        and/or LEFT side, from the SAME geometry the router uses. A DEPENDENT's incoming line enters
+        from the side its anchor sits on (a negative offset → the anchor is to the RIGHT → enters
+        from the right); an ANCHOR-TARGET's exit leaves toward each dependent's drop column
+        (`_point_exit_dir`), so the caption never sits on a side a line actually uses."""
+        g = self._geom.get(getattr(it, "uid", None))
+        if not g:
+            return (False, False)
+        cx = g.get("cx", g.get("start_x", 0.0))
+        right = left = False
+        by_sid = {getattr(o, "step_id", "") or "": o for o in self._rows
+                  if getattr(o, "step_id", "")}
+        # As a DEPENDENT: the line enters from the side of its anchor's edge.
+        if getattr(it, "anchor", "") == "step":
+            tgt = by_sid.get(getattr(it, "anchor_step_id", "") or "")
+            if tgt is not None and tgt.uid in self._geom:
+                tx = self._edge_x(tgt, getattr(it, "anchor_edge", "end") or "end")
+                if tx > cx + 1.0:
+                    right = True
+                else:
+                    left = True
+        # As an ANCHOR TARGET: an exit leaves toward each dependent's drop column.
+        sid = getattr(it, "step_id", "") or ""
+        if sid and "cx" in g:
+            for d in self._rows:
+                if not tlm.is_step_source(d) or tlm.step_source_ref(d)[0] != sid:
+                    continue
+                if getattr(d, "uid", None) not in self._geom:
+                    continue
+                ed = self._point_exit_dir(it, d)
+                if ed > 0:
+                    right = True
+                elif ed < 0:
+                    left = True
+        return (right, left)
+
+    def _pin_caption_side(self, it) -> str:
+        """Which side a pin's readout caption sits on so it clears its connector(s): "right"
+        (the default), "left" (flip to the clear side when the RIGHT has a connector and the left
+        doesn't), or "two_sided" (both sides carry a connector → keep the caption RIGHT with a wide
+        gap and let the right-exiting line duck under it, option C)."""
+        right_busy, left_busy = self._pin_conn_sides(it)
+        if right_busy and left_busy:
+            return "two_sided"
+        if right_busy:
+            return "left"
+        return "right"
+
+    def _pin_right_caption(self, it):
+        """(left_x, width) of a pin's RIGHT-side caption in canvas x, or None when the caption is
+        flipped LEFT (a target-only pin) or the item is not a pin. Used by the connector router to
+        duck a two-sided pin's exit line under its readout (option C)."""
+        g = self._geom.get(it.uid)
+        if not g or getattr(it, "kind", "") == "bar" or tlm._is_ramp(it):
+            return None
+        side = self._pin_caption_side(it)
+        if side == "left":
+            return None                                  # flipped LEFT → the right side is clear
+        cx = g.get("cx", 0.0)
+        gap = PIN_CAP_GAP2 if side == "two_sided" else PIN_CAP_GAP
+        if getattr(it, "action", "run") == "run":        # one-shot → task-name text
+            total = QFontMetrics(self._f(12, True)).horizontalAdvance(it.task_name or "(no task)")
+        else:                                            # tune → the readout-chip run
+            total = self._tune_chip_defs(it)[1]
+        return cx + gap, total
+
+    def _tune_parts(self, it) -> List[Tuple[str, str, str, bool]]:
+        """(name, value, unit, is_flag) per param a tune step changes. The controlled --power is shown
+        in its view quantity + unit (split from _pill_power_display); an on/off param becomes a flag;
+        every other value is formatted plainly. Unit is '' when there's none to show."""
+        overrides = self._editor._pill_power_display(it)
+        out: List[Tuple[str, str, str, bool]] = []
+        for k, v in (it.params or {}).items():
+            ov = overrides.get(k)
+            if ov is not None:                       # controlled --power: "value unit" (or value only)
+                val, _sp, unit = str(ov).partition(" ")
+                out.append((k, val, unit.strip(), False))
+            elif isinstance(v, bool):
+                out.append((k, "on" if v else "off", "", True))
+            elif isinstance(v, (int, float)):
+                out.append((k, fmt_value(v), "", False))
+            else:
+                out.append((k, str(v), "", False))
+        return out
+
+    def _tune_chip_defs(self, it):
+        """(defs, total_w, fonts) for a tune step's readout chips — measured once and shared by
+        _paint_tune_chips (draw) and _run_width (footprint) so they never drift. Each def carries the
+        pre-measured widths the paint needs."""
+        fnm = self._f(8, True)               # small uppercase param label
+        fval = mono_font(11)
+        funit = mono_font(9, 600)
+        fm_nm, fm_v, fm_u = QFontMetrics(fnm), QFontMetrics(fval), QFontMetrics(funit)
+        defs = []
+        for name, val, unit, is_flag in self._tune_parts(it):
+            nm = name.upper()
+            nmw = fm_nm.horizontalAdvance(nm)
+            vw = fm_v.horizontalAdvance(val)
+            if is_flag:                              # value drawn as a small state pill
+                valw = vw + 2 * TUCHIP_PAD
+                uw = 0.0
+                inner = nmw + TCHIP_NV_GAP + valw
+            elif unit:
+                uw = fm_u.horizontalAdvance(unit) + 2 * TUCHIP_PAD
+                inner = nmw + TCHIP_NV_GAP + vw + TCHIP_VU_GAP + uw
+            else:
+                uw = 0.0
+                inner = nmw + TCHIP_NV_GAP + vw
+            w = TCHIP_RAIL_INSET + inner + TCHIP_PAD_R
+            defs.append({"nm": nm, "val": val, "unit": unit, "flag": is_flag,
+                         "nmw": nmw, "vw": vw, "uw": uw, "w": w})
+        total = sum(d["w"] for d in defs) + TCHIP_SEP * max(0, len(defs) - 1)
+        return defs, total, (fnm, fval, funit)
+
+    @staticmethod
+    def _unit_chip_colors(unit: str):
+        """(fg, bg, border) for a unit chip, coloured by power-unit family — teal for a spectral
+        density (dBm/…), slate for an absolute dBm — matching param_form._family_chip."""
+        if (unit or "").strip().startswith("dBm/"):
+            return "#0D6B57", Palette.ONLINE_SOFT, "#C3E7DB"
+        return "#3B4A5C", "#EEF2F6", "#DFE6EE"
+
+    def _paint_tune_chips(self, p, defs, fonts, tx, cy, base, muted: bool = False):
+        """Draw a tune step's recessed readout chips left-to-right from tx (option B). ``defs`` and
+        ``fonts`` come pre-measured from _tune_chip_defs so the caller can left- or right-place them.
+        ``muted`` (Hold-edit, an already-ran step) drops every colour to the elapsed grey."""
+        fnm, fval, funit = fonts
+        x = tx
+        for d in defs:
+            r = QRectF(x, cy - TCHIP_H / 2, d["w"], TCHIP_H)
+            p.setPen(QPen(QColor(Palette.BORDER), 1)); p.setBrush(QColor(Palette.INSET))
+            p.drawRoundedRect(r, TCHIP_R, TCHIP_R)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(base)   # hue rail
+            p.drawRoundedRect(QRectF(r.left() + 3, r.top() + 5, 2.5, TCHIP_H - 10), 1.2, 1.2)
+            gx = r.left() + TCHIP_RAIL_INSET
+            p.setFont(fnm); p.setPen(QColor(Palette.TEXT_FAINT))
+            p.drawText(QRectF(gx, r.top(), d["nmw"] + 2, TCHIP_H),
+                       int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), d["nm"])
+            gx += d["nmw"] + TCHIP_NV_GAP
+            if d["flag"]:
+                on = d["val"] == "on" and not muted
+                fg = QColor("#0D6B57" if on else (ELAPSED_INK if muted else Palette.TEXT_MUTED))
+                bg = QColor(Palette.ONLINE_SOFT if on else Palette.INSET)
+                pr = QRectF(gx, cy - 8, d["vw"] + 2 * TUCHIP_PAD, 16)
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(bg); p.drawRoundedRect(pr, 4, 4)
+                p.setFont(fval); p.setPen(fg)
+                p.drawText(pr, int(Qt.AlignmentFlag.AlignCenter), d["val"])
+            else:
+                p.setFont(fval); p.setPen(QColor(ELAPSED_INK if muted else Palette.TEXT))
+                p.drawText(QRectF(gx, r.top(), d["vw"] + 2, TCHIP_H),
+                           int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), d["val"])
+                if d["unit"]:
+                    fg, bg, bd = ((ELAPSED_INK, Palette.INSET, Palette.BORDER) if muted
+                                  else self._unit_chip_colors(d["unit"]))
+                    ur = QRectF(gx + d["vw"] + TCHIP_VU_GAP, cy - 8, d["uw"], 16)
+                    p.setPen(QPen(QColor(bd), 1)); p.setBrush(QColor(bg))
+                    p.drawRoundedRect(ur, 4, 4)
+                    p.setFont(funit); p.setPen(QColor(fg))
+                    p.drawText(ur, int(Qt.AlignmentFlag.AlignCenter), d["unit"])
+            x += d["w"] + TCHIP_SEP
+
+    # ── Connectors (step-to-step anchors, rendered under the bars) ────────────
+    def _edge_x(self, tgt, edge: str) -> float:
+        g = self._geom.get(tgt.uid) or {}
+        if tgt.kind == "bar" or tlm._is_ramp(tgt):
+            return g.get("stop_x", g.get("start_x", 0.0)) if edge == "end" \
+                else g.get("start_x", 0.0)
+        return g.get("cx", 0.0)
+
+    def _paint_root_anchor_hint(self, p):
+        """When a ROOT-anchored (start/off-air/hold) step is SELECTED, draw a discreet tie from
+        the item to its anchor line with an offset chip — so the operator can SEE what it is
+        anchored to (step anchors already draw an always-on connector). Selected-only, so the
+        default view stays uncluttered (every step is anchored to something)."""
+        uid = self._selected
+        if uid is None or (self._selection and len(self._selection) > 1):
+            return
+        it = next((o for o in self._rows if o.uid == uid), None)
+        g = self._geom.get(uid) if it is not None else None
+        if it is None or g is None or tlm._is_hold(it) or tlm.is_step_source(it):
+            return                                  # step anchors (runs AND bars) have a connector
+        anchor = getattr(it, "anchor", "start")
+        if anchor not in ("start", "stop", "hold", "enter"):
+            return
+        if anchor in ("hold", "enter") and self._resume_x is None:
+            return
+        base_x = self._root_x(anchor)
+        if tlm._is_ramp(it):                     # the tied edge: the end for a stop/enter ramp
+            item_x = g.get("stop_x") if anchor in ("stop", "enter") else g.get("start_x")
+        else:
+            item_x = g.get("cx", g.get("start_x"))
+        if item_x is None:
+            return
+        y = int(g["y"] + LANE_H / 2)
+        col = QColor(Palette.ACCENT); col.setAlpha(150)
+        pen = QPen(col, 1.4); pen.setStyle(Qt.PenStyle.DashLine)
+        p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawLine(int(base_x), y, int(item_x), y)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(Palette.ACCENT))
+        p.drawEllipse(QPointF(float(base_x), float(y)), 3.4, 3.4)     # a dot on the anchor line
+        if self._drag is not None and self._drag.get("moved"):
+            return                              # the drag readout shows the offset — no second chip
+        root_name = {"start": "on-air", "stop": "off-air", "hold": "resume", "enter": "pause"}[anchor]
+        chip = f"{root_name} {self._offset_chip_text(float(getattr(it, 'offset', 0.0)))}"
+        self._paint_tag(p, (base_x + item_x) / 2.0, y - 15, chip, True)
+
+    def _paint_connectors(self, p):
+        by_sid = {getattr(it, "step_id", "") or "": it for it in self._rows
+                  if getattr(it, "step_id", "")}
+        conns = []
+        for it in self._rows:
+            if not tlm.is_step_source(it):          # a run/tune/ramp, or a bar via its START
+                continue
+            ref, edge = tlm.step_source_ref(it)
+            tgt = by_sid.get(ref)
+            gi = self._geom.get(it.uid)
+            if tgt is None or gi is None or tgt.uid not in self._geom:
+                continue
+            x1 = self._edge_x(tgt, edge)
+            y1 = self._geom[tgt.uid]["y"] + LANE_H / 2
+            # The dependent is entered at its TIED edge (a ramp tied by its end: at the end), from
+            # OUTSIDE its body for a ramp/bar; a point from the side its anchor sits on (a NEGATIVE
+            # offset → the anchor is to the right → enter from the right, arrow pointing left).
+            x2, entry_from_right, _dep_two = self._dep_entry(it)
+            y2 = gi["y"] + LANE_H / 2
+            if entry_from_right is None:
+                entry_from_right = x2 < x1 - 1.0
+            # Exit a two-sided anchor AWAY from its body along the time axis: an END edge (body to
+            # the left) exits right, a START edge (body to the right) exits left. A POINT is free on
+            # both sides, so it exits toward the dependent's drop column (_point_exit_dir).
+            two_sided = tlm._is_ramp(tgt) or getattr(tgt, "kind", "") == "bar"
+            if two_sided:
+                exit_dir = -1.0 if edge == "start" else 1.0
+            else:
+                exit_dir = self._point_exit_dir(tgt, it)
+            obstacles = self._intervening_obstacles(tgt.uid, it.uid)
+            base, _e, _fa, _fb, ink = self._item_colors(it)
+            sel = (it.uid == self._selected)
+            offset = self._dep_offset(it)
+            # If the anchor is a two-sided pin its readout sits on its RIGHT, in the exit's path;
+            # hand the router that span so the line ducks UNDER it (option C). Only meaningful for a
+            # left-entry line exiting right.
+            anchor_cap = None
+            if not two_sided and exit_dir > 0 and not entry_from_right:
+                rc = self._pin_right_caption(tgt)
+                if rc is not None:
+                    tx, total = rc
+                    anchor_cap = (tx, tx + total)
+            text = self._offset_chip_text(offset)
+            chip_w = self._chip_w(it)
+            pts = self._connector_points(x1, y1, x2, y2, exit_dir, obstacles, chip_w + 24.0,
+                                         anchor_cap, entry_from_right, two_sided=two_sided)
+            conns.append(dict(pts=pts, base=base, ink=ink, sel=sel, x2=x2, y2=y2,
+                              entry_from_right=entry_from_right, text=text, chip_w=chip_w))
+        # 1) draw every path first, so the lines sit UNDER every arrowhead + offset chip.
+        for c in conns:
+            self._draw_connector_path(p, c)
+        # 2) then each arrowhead + offset chip, backed off along its own entry run to the spot
+        #    closest to the dependent that is clear of the OTHER connectors' lines — so where
+        #    several lines meet a step, each arrow (and its label) unambiguously belongs to its
+        #    own line (owner request). See docs.
+        polylines = [c["pts"] for c in conns]
+        for i, c in enumerate(conns):
+            others = [polylines[j] for j in range(len(conns)) if j != i]
+            self._draw_connector_head(p, c, others)
+
+    @staticmethod
+    def _pt_seg_dist(px, py, ax, ay, bx, by) -> float:
+        """Shortest distance from point (px,py) to the segment (ax,ay)-(bx,by)."""
+        dx, dy = bx - ax, by - ay
+        if dx == 0.0 and dy == 0.0:
+            return math.hypot(px - ax, py - ay)
+        t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)
+        t = max(0.0, min(1.0, t))
+        return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+    def _span_clear(self, cx, y, half, others, clearance=7.0) -> bool:
+        """True iff the horizontal strip centred on (cx,y) of half-width `half` keeps at least
+        `clearance` px from every segment of every OTHER connector polyline — i.e. an arrowhead +
+        label there wouldn't touch another line."""
+        xs = (cx - half, cx - half / 2.0, cx, cx + half / 2.0, cx + half)
+        for pl in others:
+            for k in range(len(pl) - 1):
+                ax, ay = pl[k]; bx, by = pl[k + 1]
+                for sx in xs:
+                    if self._pt_seg_dist(sx, y, ax, ay, bx, by) < clearance:
+                        return False
+        return True
+
+    def _intervening_obstacles(self, anchor_uid, dep_uid):
+        """x-intervals [(lo,hi)] of the steps whose ROW sits strictly between the anchor's and
+        the dependent's — the third-party steps a connector must route AROUND (not through)."""
+        a = self._lane_of.get(anchor_uid); d = self._lane_of.get(dep_uid)
+        if a is None or d is None:
+            return []
+        lo_row, hi_row = sorted((a, d))
+        out = []
+        for it in self._rows:
+            r = self._lane_of.get(it.uid)
+            if r is None or not (lo_row < r < hi_row):
+                continue
+            g = self._geom.get(it.uid)
+            if not g:
+                continue
+            if "start_x" in g:
+                lo, hi = sorted((g["start_x"], g["stop_x"]))
+            else:
+                cx = g.get("cx", 0.0); lo, hi = cx - 8.0, cx + 8.0
+            out.append((lo, hi))
+        return out
+
+    def _ortho_path(self, pts, r: float = 6.0) -> QPainterPath:
+        """A rounded orthogonal path through axis-aligned waypoints (each segment is purely
+        horizontal or vertical)."""
+        path = QPainterPath(); path.moveTo(*pts[0])
+        for i in range(1, len(pts) - 1):
+            x0, y0 = pts[i - 1]; xc, yc = pts[i]; x1, y1 = pts[i + 1]
+            din = abs(xc - x0) + abs(yc - y0)        # one component is 0 → == segment length
+            dout = abs(x1 - xc) + abs(y1 - yc)
+            ri = min(r, din / 2.0, dout / 2.0)
+            if ri < 0.5 or din == 0 or dout == 0:
+                path.lineTo(xc, yc); continue
+            ix, iy = (xc - x0) / din, (yc - y0) / din
+            ox, oy = (x1 - xc) / dout, (y1 - yc) / dout
+            path.lineTo(xc - ix * ri, yc - iy * ri)
+            path.quadTo(xc, yc, xc + ox * ri, yc + oy * ri)
+        path.lineTo(*pts[-1])
+        return path
+
+    def _connector_points(self, x1, y1, x2, y2, exit_dir, obstacles, chip_run, anchor_cap=None,
+                          entry_from_right=False, two_sided=False):
+        """Waypoints for a connector that ENTERS the dependent HORIZONTALLY, with the drop column
+        chosen clear of any intervening third-party step. Normally the dependent sits at/right of
+        the anchor edge and is entered from the LEFT; when that column falls left of the anchor edge,
+        WRAP via a channel just outside the dependent's row so the entry stays horizontal.
+
+        ``entry_from_right`` — the dependent sits LEFT of the anchor edge (a NEGATIVE step offset),
+        so the line enters from the RIGHT (the side facing the anchor) with the arrow pointing left:
+        exit the anchor, run to a drop column just RIGHT of the dependent (clear of obstacles), drop,
+        and run left into the dependent.
+
+        ``anchor_cap`` = (lo, hi) is the x-span of the anchor pin's RIGHT-side readout (a two-sided
+        pin, option C): the exit then leaves HORIZONTALLY, ducks into a channel just past the caption
+        (in the dependent's direction), runs UNDER the readout, and carries on — so the line never
+        runs through the text. (anchor_cap is not applied to a right-entry line.)"""
+        STUB = 16.0
+        sgn = 1.0 if y2 >= y1 else -1.0
+        # A two-sided target (ramp/bar) must exit AWAY from its body: an END edge (body to the left)
+        # exits right, a START edge (body to the right) exits left. When the dependent sits on the
+        # BODY side (an end edge with the dependent to its left, or a start edge with it to the
+        # right — a dependent between the two sides) AND is entered from the side that stub faces,
+        # a straight run to the dependent would go back OVER the bar: exit a stub the other way
+        # first, drop to the dependent's row, then run in (owner #9). The entry stays horizontal, so
+        # the arrow/chip placement is unaffected. (A dependent entered from the OTHER side — a ramp
+        # tied by its start, sitting left of an end edge — takes the general wrap below instead, so
+        # the line never enters it through its own body.)
+        if two_sided and ((exit_dir > 0 and x2 < x1 - 1.0 and entry_from_right)
+                          or (exit_dir < 0 and x2 > x1 + 1.0 and not entry_from_right)):
+            xe = x1 + STUB * exit_dir
+            return [(x1, y1), (xe, y1), (xe, y2), (x2, y2)]
+        xd = self._drop_column(x1, x2, entry_from_right, chip_run, obstacles)
+        if not two_sided and entry_from_right:
+            # A point target with a right-entry dependent (a negative offset — the dependent, or an
+            # end-tied ramp's end, sits left of the pin): both sides of a pin are free, so leave
+            # straight toward the drop column, never around the far side.
+            exit_dir = 1.0 if xd > x1 + 1.0 else -1.0
+        pre = []
+        if anchor_cap and exit_dir > 0 and not entry_from_right:
+            cap_lo, cap_hi = anchor_cap
+            if x2 > cap_hi + 10.0:                  # dependent clearly past the readout → duck under it
+                drop = cap_lo - 6.0                 # drop the exit just BEFORE the caption's left edge
+                yd = y1 + sgn * (LANE_H / 2.0 + 6.0)  # a channel just below/above the readout
+                pre = [(x1, y1), (drop, y1), (drop, yd)]
+                x1, y1 = drop, yd                   # resume routing from the under-channel, past the pin
+        if abs(xd - x1) <= 1.0:                     # the column is AT the anchor x: drop straight, run in
+            pts = [(x1, y1), (x1, y2), (x2, y2)]
+        elif exit_dir == 0.0 or (xd - x1) * exit_dir > 0:
+            # The column lies on the exit side → leave toward it, drop, run in (the common case; a
+            # point target's exit was chosen toward the column, so it never wraps).
+            pts = [(x1, y1), (xd, y1), (xd, y2), (x2, y2)]
+        else:
+            # The column is on the BODY side of the (resumed) anchor edge → wrap: stub out, run a
+            # channel just outside the dependent's row back to xd, drop, run in.
+            xe = x1 + STUB * exit_dir
+            ch = y2 - (LANE_H / 2.0 + LANE_VGAP / 2.0) * sgn
+            pts = [(x1, y1), (xe, y1), (xe, ch), (xd, ch), (xd, y2), (x2, y2)]
+        return pre + pts[1:] if pre else pts        # pts[0] == pre[-1] (the resume point)
+
+    @staticmethod
+    def _drop_column(x1, x2, entry_from_right, chip_run, obstacles) -> float:
+        """The x a connector drops along to reach the dependent at x2, on its ENTRY side, leaving
+        `chip_run` of horizontal entry run for the inline chip and pushed clear of any intervening
+        third-party step (`obstacles` = x-intervals on the rows in between). A left entry drops
+        LEFT of x2 (pushed further left past an obstacle); a right entry drops RIGHT of x2 —
+        preferring the column BETWEEN the dependent and an anchor that sits to its right (pushed
+        toward the dependent past an obstacle, else away from it)."""
+        GAP = 14.0
+        if entry_from_right:
+            if x1 > x2 + 1.0:
+                xd = min(x2 + chip_run, max(x2 + 20.0, x1 - GAP))
+            else:                                   # anchor at/left of the dependent → run past it
+                xd = x2 + chip_run
+            for _ in range(len(obstacles) + 2):
+                hit = next(((lo, hi) for (lo, hi) in obstacles if lo - 6.0 <= xd <= hi + 6.0), None)
+                if hit is None:
+                    break
+                xd = hit[0] - GAP if hit[0] - GAP >= x2 + 12.0 else hit[1] + GAP
+            return max(xd, x2 + 12.0)
+        xd = x2 - chip_run                          # leave room for the chip inline on the entry run
+        for _ in range(len(obstacles) + 2):         # push left of any obstacle the drop lands in
+            hit = next(((lo, hi) for (lo, hi) in obstacles if lo - 6.0 <= xd <= hi + 6.0), None)
+            if hit is None:
+                break
+            xd = hit[0] - GAP
+        return min(xd, x2 - 20.0)
+
+    def _offset_chip_text(self, offset: float) -> str:
+        """The connector's offset label. `_mmss` already prints a leading − for a negative
+        offset (the dependent fires BEFORE its target's edge), so add a + only for ≥ 0."""
+        return ("+" if offset >= 0 else "") + self._mmss(offset)
+
+    def _draw_connector_path(self, p, c):
+        """Stroke one connector's rounded-orthogonal path (drawn before any arrowhead/chip so the
+        lines sit under them). Records the chosen stroke colour on the descriptor for the head."""
+        stroke = QColor(Palette.ACCENT) if c["sel"] else c["base"]
+        c["stroke"] = stroke
+        path = self._ortho_path(c["pts"], 6.0)
+        if c["sel"]:                                   # soft under-glow when selected
+            halo = QColor(Palette.ACCENT); halo.setAlpha(55)
+            gpen = QPen(halo, 7); gpen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            gpen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(gpen); p.setBrush(Qt.BrushStyle.NoBrush); p.drawPath(path)
+        pen = QPen(stroke, 2.4 if c["sel"] else 2); pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush); p.drawPath(path)
+
+    def _draw_connector_head(self, p, c, others):
+        """The arrowhead (pointing AT the dependent) + the offset chip, placed along the entry run
+        as close to the dependent as possible while the whole annotation stays clear of every OTHER
+        connector's line — so at a junction each arrow/label unambiguously belongs to its own line.
+        `others` are the other connectors' waypoint polylines."""
+        pts, x2, y2 = c["pts"], c["x2"], c["y2"]
+        stroke, ink, sel, chip_w = c["stroke"], c["ink"], c["sel"], c["chip_w"]
+        prev_x = pts[-2][0] if len(pts) >= 2 else x2       # the entry run is horizontal at y2
+        back_dir = 1.0 if c["entry_from_right"] else -1.0  # away from the dependent along the run
+        seg_len = abs(prev_x - x2)
+        ann = 6.0 + 6.0 + chip_w                           # arrow + gap + chip, along the run
+        HEAD_STANDOFF = 10.0                               # keep the tip just off the dependent dot
+        d = HEAD_STANDOFF
+        while d <= seg_len - 1.0:
+            # centre of the annotation (arrow tip → chip far edge) at this back-off
+            cxc = x2 + back_dir * (d + ann / 2.0)
+            if self._span_clear(cxc, y2, ann / 2.0 + 4.0, others):
+                break
+            d += 3.0
+        d = max(HEAD_STANDOFF, min(d, seg_len))
+        nose = x2 + back_dir * d            # the pointy end, backed off from the dependent…
+        wing = nose + back_dir * 6.0        # …the open-V wings sit further from the dependent
+        pen = QPen(stroke, 2.4 if sel else 2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap); pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        # arrowhead: an open V whose point (nose) sits TOWARD the dependent along the entry run.
+        p.drawLine(int(wing), int(y2 - 4), int(nose), int(y2))
+        p.drawLine(int(wing), int(y2 + 4), int(nose), int(y2))
+        # offset chip just BEYOND the arrow (further from the dependent), on the entry run
+        chip_cx = nose + back_dir * (6.0 + 6.0 + chip_w / 2.0)
+        self._chip(p, chip_cx, y2, c["text"], stroke, stroke if sel else ink)
+        if sel:                                            # "Remove anchor" sits below the chip
+            self._rmchip_pos = (chip_cx, y2 + 15.0)
+
+    # ── Selection / drag affordances (drawn on top of the items) ──────────────
+    def _paint_selection(self, p):
+        """An accent ring around every selected item (bar / ramp capsule or a pin dot)."""
+        accent = QColor(Palette.ACCENT)
+        halo = QColor(Palette.ACCENT); halo.setAlpha(45)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for it in self._rows:
+            if it.uid not in self._selection:
+                continue
+            g = self._geom.get(it.uid)
+            if not g:
+                continue
+            y = g["y"]
+            if it.kind == "bar" or tlm._is_ramp(it):
+                sx, px = g.get("start_x", 0.0), g.get("stop_x", 0.0)
+                wmin = HANDLE_W * 2.0 if it.kind == "bar" else RAMP_MIN_W
+                rect = QRectF(min(sx, px) - 2.5, y - 2.5, max(wmin, abs(px - sx)) + 5, LANE_H + 5)
+                p.setPen(QPen(halo, 6)); p.drawRoundedRect(rect, BAR_R + 2, BAR_R + 2)
+                p.setPen(QPen(accent, 2)); p.drawRoundedRect(rect, BAR_R + 2, BAR_R + 2)
+            else:
+                cx, cy = g.get("cx", 0.0), y + LANE_H / 2
+                p.setPen(QPen(halo, 6)); p.drawEllipse(QPointF(cx, cy), 11.0, 11.0)
+                p.setPen(QPen(accent, 2)); p.drawEllipse(QPointF(cx, cy), 11.0, 11.0)
+
+    def _paint_marquee(self, p):
+        if self._marquee is None:
+            return
+        mq = self._marquee
+        r = QRectF(QPointF(mq["x0"], mq["y0"]), QPointF(mq["x1"], mq["y1"])).normalized()
+        fill = QColor(Palette.ACCENT); fill.setAlpha(28)
+        p.setPen(QPen(QColor(Palette.ACCENT), 1)); p.setBrush(fill)
+        p.drawRect(r)
+
+    def _paint_remove_chip(self, p, cx, cy):
+        """The clickable '✕ Remove anchor' pill on a selected connector. Records its hit
+        rect in self._rmchip so a press detaches the anchor (no dialog)."""
+        text = "Remove anchor"
+        f = self._f(9, True); p.setFont(f); fm = QFontMetrics(f)
+        w = fm.horizontalAdvance(text) + 32
+        r = QRectF(cx - w / 2, cy - 10, w, 20)
+        r.moveLeft(max(2.0, min(r.left(), self.width() - w - 2)))
+        col = QColor(Palette.CRASH)
+        p.setPen(QPen(col, 1)); p.setBrush(QColor(Palette.SURFACE))
+        p.drawRoundedRect(r, 10, 10)
+        gx, gy = r.left() + 13, r.center().y()
+        p.setPen(QPen(col, 1.6))
+        p.drawLine(QPointF(gx - 3, gy - 3), QPointF(gx + 3, gy + 3))
+        p.drawLine(QPointF(gx - 3, gy + 3), QPointF(gx + 3, gy - 3))
+        p.setPen(col)
+        p.drawText(QRectF(r.left() + 20, r.top(), r.width() - 22, r.height()),
+                   int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), text)
+        self._rmchip = r
+
+    def _paint_connect_drag(self, p):
+        """The live rubber-band while dragging an anchor from a source handle to a target
+        edge, plus a readout of the resulting offset."""
+        if self._connect is None or not self._connect.get("moved"):
+            return
+        src = next((o for o in self._rows if o.uid == self._connect["src"]), None)
+        g = self._geom.get(self._connect["src"]) if src is not None else None
+        if not g:
+            return
+        if self._connect.get("from_edge") == "end":
+            x1 = g.get("stop_x", g.get("start_x", g.get("cx", 0.0)))
+        else:
+            x1 = g.get("start_x", g.get("cx", 0.0))
+        y1 = g["y"] + LANE_H / 2
+        cur = self._connect["cursor"]; x2, y2 = cur.x(), cur.y()
+        tgt = self._connect["target"]
+        ok = tgt is not None
+        is_root = ok and tgt[0] == "__root__"
+        col = QColor(Palette.ACCENT) if ok else QColor(Palette.TEXT_FAINT)
+        if is_root:
+            x2 = self._root_x(tgt[1])            # snap the end to the root line; y2 stays at cursor
+            p.setPen(QPen(QColor("#FFFFFF"), 2)); p.setBrush(QColor(Palette.ACCENT))
+            p.drawEllipse(QPointF(x2, y2), 6.0, 6.0)
+        elif ok:
+            t, edge = tgt
+            x2 = self._edge_x(t, edge); y2 = self._geom[t.uid]["y"] + LANE_H / 2
+            p.setPen(QPen(QColor("#FFFFFF"), 2)); p.setBrush(QColor(Palette.ACCENT))
+            p.drawEllipse(QPointF(x2, y2), 6.0, 6.0)
+        pen = QPen(col, 2.2)
+        pen.setStyle(Qt.PenStyle.SolidLine if ok else Qt.PenStyle.DashLine)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen); p.setBrush(Qt.BrushStyle.NoBrush)
+        path = QPainterPath(); path.moveTo(x1, y1)
+        path.cubicTo(x1 + (x2 - x1) * 0.5, y1, x1 + (x2 - x1) * 0.5, y2, x2, y2)
+        p.drawPath(path)
+        p.setPen(QPen(QColor("#FFFFFF"), 2)); p.setBrush(col)
+        p.drawEllipse(QPointF(x1, y1), 5.5, 5.5)
+        if is_root:
+            root_name = {"start": "on-air", "stop": "off-air", "hold": "resume",
+                         "enter": "the pause"}[tgt[1]]
+            label = f"anchor to {root_name}"
+        elif ok:
+            t, edge = tgt
+            # Offset measured from the GRABBED edge x1 — the edge that will be tied (a ramp grabbed
+            # by its end is tied by its end), matching `_make_anchor`. Any clock.
+            off = tlm._snap((x1 - self._edge_x(t, edge)) / self._eff())
+            edge_word = "start" if edge == "start" else "end"
+            what = "its end " if (self._connect.get("from_edge") == "end" and tlm._is_ramp(src)) else ""
+            label = f"{what}{self._offset_chip_text(off)} after {t.task_name or '?'} · {edge_word}"
+        else:
+            label = "drop on a step edge or an anchor line"
+        self._paint_tag(p, x2, y2 - 16, label, ok)
+
+    def _paint_snap_guide(self, p):
+        """A thin dashed accent line at the x a dragged edge is snapping to."""
+        if self._snap_guide is None:
+            return
+        x = float(self._snap_guide)
+        pen = QPen(QColor(Palette.ACCENT), 1.4)
         pen.setStyle(Qt.PenStyle.DashLine)
         p.setPen(pen)
-        p.drawLine(cx, top, cx, baseline + 6)
-        # A small filled tab so the divider reads as an anchor (like ON-AIR/OFF-AIR).
-        f = QFont(); f.setPointSize(8); f.setBold(True)
-        p.setFont(f)
-        fm = QFontMetrics(f)
-        text = "⏸ HOLD"
-        tw = fm.horizontalAdvance(text) + 12
-        r = QRectF(cx - tw / 2, top - 3, tw, 15)
+        p.drawLine(int(x), int(LANES_TOP - 10), int(x), int(self._baseline + 4))
+
+    @staticmethod
+    def _end_tied(it) -> bool:
+        """A ramp positioned by its END: stop-/enter-anchored, or step-anchored by its end."""
+        if not tlm._is_ramp(it):
+            return False
+        anc = getattr(it, "anchor", "start")
+        return anc in ("stop", "enter") or (
+            anc == "step" and (getattr(it, "anchor_own_edge", "start") or "start") == "end")
+
+    def _paint_drag_readout(self, p):
+        """While moving an item, a floating tag shows its new OFFSET — the time only. The canvas
+        already shows WHAT it is measured from (the anchor line, the Hold edge, or the connector
+        to its target), so the tag never doubles the root-anchor hint nor mislabels a step-anchored
+        offset as 'on-air' (owner v3 #1/#6)."""
+        if self._drag is None or not self._drag.get("moved"):
+            return
+        it, part = self._drag["item"], self._drag["part"]
+        g = self._geom.get(it.uid)
+        if not g:
+            return
+        y = g["y"]
+        if part == "bar_stop":
+            label = _fmt_offset(float(getattr(it, "stop_offset", 0.0)))
+            x = g.get("stop_x", 0.0)
+        elif part in ("bar_start", "bar_body"):
+            label = _fmt_offset(float(getattr(it, "start_offset", 0.0)))
+            x = g.get("start_x", 0.0)
+        elif part == "hold_body":
+            label = "Hold · " + _fmt_offset(float(getattr(it, "offset", 0.0)))
+            x = g.get("cx", 0.0)
+        elif part == "ramp_body":
+            label = _fmt_offset(float(getattr(it, "offset", 0.0)))
+            x = g.get("stop_x", 0.0) if self._end_tied(it) else g.get("start_x", 0.0)
+        else:                                   # run_body (a tune / one-shot pin)
+            label = _fmt_offset(float(getattr(it, "offset", 0.0)))
+            x = g.get("cx", 0.0)
+        self._paint_tag(p, x, y - 13, label, True)
+
+    def _paint_tag(self, p, cx, cy, text, strong=True):
+        """A compact floating tag (accent when strong, muted otherwise), clamped on-canvas."""
+        f = mono_font(10); p.setFont(f); fm = QFontMetrics(f)
+        w = fm.horizontalAdvance(text) + 16
+        r = QRectF(cx - w / 2, cy - 10, w, 20)
+        r.moveLeft(max(2.0, min(r.left(), max(2.0, self.width() - w - 2))))
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(color))
-        p.drawRoundedRect(r, 7, 7)
-        p.setPen(QColor(Palette.SURFACE))
+        p.setBrush(QColor(Palette.ACCENT) if strong else QColor(Palette.TEXT_MUTED))
+        p.drawRoundedRect(r, 6, 6)
+        p.setPen(QColor("#FFFFFF"))
         p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
-        # Offset chip below the band (its position is start-anchored, from on-air).
-        self._paint_timing(p, cx, baseline + 8,
-                           _timing_text(getattr(it, "offset", 0.0), "start", with_side=False))
+
+    def row_layout(self):
+        """[{item, y, hue, child, row_h}] for the row-header column, in row order."""
+        out = []
+        for i, it in enumerate(self._rows):
+            out.append({
+                "item": it, "y": self._lane_y.get(i, LANES_TOP),
+                "hue": self._hue_for(it),
+                "child": getattr(it, "action", "run") in ("tune", "ramp"),
+                "row_h": LANE_H,
+            })
+        return out
+
+    def _paint_hold(self, p, it):
+        """The Hold WINDOW — two dashed edges (enter + resume) with the amber-hatched band
+        between them, a ⏸ HOLD tab centred in the band, and its offset chip below. It is the
+        third anchor: window-A steps sit to its left, window-B (anchor="hold") steps flow on
+        from the resume edge to the right. Drawn AFTER the rows so its edges cross a duration
+        bar that runs through the Hold (the bar stays visible). When nothing is anchored after
+        the Hold, the resume edge IS off-air, so a combined ⏸ HOLD │ OFF-AIR marker is drawn
+        (the two labels would otherwise collide)."""
+        g = self._geom[it.uid]
+        enter_x = int(g["cx"])
+        resume_x = int(self._resume_x) if self._resume_x is not None else enter_x
+        merged = self._hold_merged
+        top = LANES_TOP - 12
+        baseline = int(self._baseline)
+        amber = QColor(Palette.ARMED)
+        # the two dashed edges: enter (amber) and resume (amber, or red when it IS off-air).
+        pen = QPen(amber, 2); pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
+        p.drawLine(enter_x, top, enter_x, baseline + 6)
+        rpen = QPen(QColor(Palette.CRASH) if merged else amber, 2)
+        rpen.setStyle(Qt.PenStyle.DashLine); p.setPen(rpen)
+        p.drawLine(resume_x, top, resume_x, baseline + 6)
+        if merged:
+            self._paint_merged_marker(p, resume_x, top - 3, self._hold_tag)
+            fi = QFont(Fonts.SANS.split(",")[0].strip('"')); fi.setPointSize(7); fi.setItalic(True)
+            p.setFont(fi); p.setPen(QColor(Palette.TEXT_FAINT))
+            p.drawText(QRectF(resume_x - 30, top - 15, 60, 11),
+                       int(Qt.AlignmentFlag.AlignHCenter), "floats")
+        else:
+            # A ⏸ HOLD tab centred in the band so it reads as an anchor (like ON-AIR/OFF-AIR) —
+            # "⏸ HOLDING" in the Hold-edit dialog, where the Hold is NOW.
+            f = QFont(); f.setPointSize(8); f.setBold(True); p.setFont(f)
+            fm = QFontMetrics(f); text = self._hold_tag; tw = fm.horizontalAdvance(text) + 12
+            cxh = (enter_x + resume_x) / 2
+            r = QRectF(cxh - tw / 2, top - 3, tw, 15)
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(amber)); p.drawRoundedRect(r, 7, 7)
+            p.setPen(QColor(Palette.SURFACE)); p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
+        # (No below-axis offset chip: the enter edge + the on-air axis already read the Hold's
+        # position, and a chip there would crowd the resume '0' tick / the hold band.)
+
+    def _paint_merged_marker(self, p, seam_x, top_y, tag: str = "⏸ HOLD"):
+        """A combined ⏸ HOLD │ OFF-AIR marker straddling one line — used when nothing is
+        anchored after the Hold, so its resume edge and off-air are the same instant."""
+        f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPointSize(8); f.setBold(True)
+        p.setFont(f); fm = QFontMetrics(f)
+        h = 15
+        hw = fm.horizontalAdvance(tag) + 12
+        ow = fm.horizontalAdvance("OFF-AIR") + 12
+        rl = QRectF(seam_x - 1 - hw, top_y, hw, h)
+        rr = QRectF(seam_x + 1, top_y, ow, h)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(Palette.ARMED)); p.drawRoundedRect(rl, 5, 5)
+        p.setBrush(QColor(Palette.CRASH)); p.drawRoundedRect(rr, 5, 5)
+        p.setPen(QColor("#FFFFFF"))
+        p.drawText(rl, int(Qt.AlignmentFlag.AlignCenter), tag)
+        p.drawText(rr, int(Qt.AlignmentFlag.AlignCenter), "OFF-AIR")
 
     # ── Hit-testing ───────────────────────────────────────────────────────────
 
@@ -771,15 +2435,58 @@ class _TimelineCanvas(QWidget):
             return right - HANDLE_W - CARET_W / 2 - 2
         return g["cx"] + g["w"] / 2 - CARET_W / 2 - 6
 
+    def _pin_footprint(self, it, g) -> Tuple[float, float]:
+        """The drawn x-extent (x_lo, x_hi) of a tune/one-shot pin — the dot PLUS its caption/chips
+        on whichever side `_paint_pin` places them — so hit-testing matches what's drawn (the whole
+        readout is clickable, and the empty space on the dot's other side is not a false hit)."""
+        cx = g["cx"]
+        lo, hi = cx - 7.5, cx + 7.5                     # the dot / diamond
+        side = self._pin_caption_side(it)
+        gap = PIN_CAP_GAP2 if side == "two_sided" else PIN_CAP_GAP
+        if getattr(it, "action", "run") == "run":       # one-shot: task-name caption
+            tw = QFontMetrics(self._f(12, True)).horizontalAdvance(it.task_name or "(no task)")
+            span = tw
+        else:                                           # tune: measured chip run
+            span = self._tune_chip_defs(it)[1]
+        if side == "left":
+            lo = min(lo, cx - PIN_CAP_GAP - span)
+        else:
+            hi = max(hi, cx + gap + span)
+        return lo, hi
+
     def _hit(self, x: float, y: float) -> Optional[Tuple[object, str]]:
-        # The Hold divider spans the whole band, so a wide bar body overlaps its x —
-        # test holds first so a click on the divider grabs it, not the bar underneath.
+        """(item, part) under (x, y). In the Hold-edit (locked) mode a part of an item that has
+        ALREADY HAPPENED comes back as "locked" — no drag, no anchor handle, no edit — except a
+        running task's STOP grip (its stop is post-hold and still editable)."""
+        res = self._hit_free(x, y)
+        if res is None or not self._lock_elapsed:
+            return res
+        it, part = res
+        k = self.elapsed_kind(it)
+        if k is None or (k == "start" and part in ("bar_stop", "caret")):
+            return res
+        return it, "locked"
+
+    def _hit_free(self, x: float, y: float) -> Optional[Tuple[object, str]]:
+        # The Hold WINDOW spans the whole band, so a wide bar body overlaps it — test holds
+        # first so a click anywhere on the band (enter edge → resume edge) grabs it, not the
+        # bar underneath.
         for it in self._items:
             if not tlm._is_hold(it):
                 continue
             g = self._geom.get(it.uid)
-            if g and abs(x - g["cx"]) <= HOLD_HIT and (LANES_TOP - 14) <= y <= self._baseline + 20:
+            if not g or not ((LANES_TOP - 14) <= y <= self._baseline + 20):
+                continue
+            lo = g["cx"] - HOLD_HIT
+            hi = (self._resume_x if self._resume_x is not None else g["cx"]) + HOLD_HIT
+            if lo <= x <= hi:
                 return it, "hold_body"
+        # Connection handles (ramp edge dots / a pin's dot) win over the body so a press on
+        # a handle starts a drag-to-anchor, not a move/edit.
+        edge = self._edge_at(x, y)
+        if edge is not None:
+            it, side = edge
+            return it, "edge_" + side
         for it in self._items:
             g = self._geom.get(it.uid)
             if not g or g.get("kind") == "hold":
@@ -790,9 +2497,11 @@ class _TimelineCanvas(QWidget):
                 if it.args and abs(x - self._caret_center(it, g)) <= CARET_W / 2:
                     return it, "caret"
                 if g["kind"] == "bar":
-                    if abs(x - g["start_x"]) <= HANDLE_HIT:
+                    # Resize GRIPS: from just outside each edge to the grip glyph inside the capsule
+                    # (the start DOT itself is the anchor handle — taken by _edge_at above).
+                    if -HANDLE_HIT <= x - g["start_x"] <= HANDLE_W + 8:
                         return it, "bar_start"
-                    if abs(x - g["stop_x"]) <= HANDLE_HIT:
+                    if -(HANDLE_W + 8) <= x - g["stop_x"] <= HANDLE_HIT:
                         return it, "bar_stop"
                     if min(g["start_x"], g["stop_x"]) <= x <= max(g["start_x"], g["stop_x"]):
                         return it, "bar_body"
@@ -800,8 +2509,10 @@ class _TimelineCanvas(QWidget):
                     lo, hi = sorted((g["start_x"], g["stop_x"]))
                     if lo - RAMP_MIN_W / 2 <= x <= hi + RAMP_MIN_W / 2:
                         return it, "ramp_body"
-                elif abs(x - g["cx"]) <= g["w"] / 2:
-                    return it, "run_body"
+                else:
+                    lo, hi = self._pin_footprint(it, g)
+                    if lo <= x <= hi:
+                        return it, "run_body"
             # Caption + inline-panel rows below: a click there opens the editor.
             if top + LANE_H < y <= top + g.get("foot_h", LANE_H) + 2:
                 if "panel" in g:
@@ -810,25 +2521,185 @@ class _TimelineCanvas(QWidget):
                         return it, "open"
         return None
 
+    # ── Drag-to-anchor (connection handles) ───────────────────────────────────
+    def _edge_at(self, x: float, y: float) -> Optional[Tuple[object, str]]:
+        """The (item, edge) of a connection handle under (x, y): a ramp's start/end edge
+        dot, a pin's dot, or a duration task's START dot (its stop is off-air's — a resize grip
+        only). The Hold carries no connect handle. Returns None away from every dot."""
+        for it in self._rows:
+            g = self._geom.get(it.uid)
+            if not g:
+                continue
+            cy = g["y"] + LANE_H / 2
+            if abs(y - cy) > PIN_HIT + 3:
+                continue
+            if tlm._is_ramp(it):
+                if abs(x - g.get("start_x", -1e9)) <= PIN_HIT:
+                    return it, "start"
+                if abs(x - g.get("stop_x", -1e9)) <= PIN_HIT:
+                    return it, "end"
+            elif it.kind == "bar":
+                # The bar's START dot is its anchor handle (only the start anchors — the stop stays
+                # off-air); the resize grips sit just inside the capsule (see _hit / _paint_bar).
+                if abs(x - g.get("start_x", -1e9)) <= BAR_DOT_HIT:
+                    return it, "start"
+            elif not tlm._is_hold(it):
+                if abs(x - g.get("cx", -1e9)) <= PIN_HIT:
+                    return it, "start"
+        return None
+
+    def _is_anchor_source(self, it) -> bool:
+        """An item that can be a step-anchor DEPENDENT (dragged onto a target): a point
+        (tune / one-shot), a ramp, or a duration task by its START dot. The Hold cannot."""
+        if tlm._is_hold(it):
+            return False
+        if getattr(it, "kind", None) == "bar":
+            return True
+        return getattr(it, "action", "run") in ("run", "tune", "ramp")
+
+    def _drop_edge_at(self, x: float, y: float) -> Optional[Tuple[object, str]]:
+        """Like `_edge_at`, but ALSO offers a duration task's (bar's) STOP dot (and its start dot
+        over the wider grip reach) as a DROP target: a bar can begin an anchor only by its start
+        (`_edge_at`), but another step may anchor TO its on-air start OR its off-air stop edge.
+        Used only while resolving a connect-drag's target, never for a press."""
+        hit = self._edge_at(x, y)
+        if hit is not None:
+            return hit
+        for it in self._rows:
+            if getattr(it, "kind", None) != "bar":
+                continue
+            g = self._geom.get(it.uid)
+            if not g:
+                continue
+            cy = g["y"] + LANE_H / 2
+            if abs(y - cy) > PIN_HIT + 3:
+                continue
+            if abs(x - g.get("start_x", -1e9)) <= HANDLE_HIT:
+                return it, "start"
+            if abs(x - g.get("stop_x", -1e9)) <= HANDLE_HIT:
+                return it, "end"
+        return None
+
+    def _drop_target(self, x: float, y: float, src_uid: int) -> Optional[Tuple[object, str]]:
+        """The (target, edge) a connect drag from `src_uid` would land on at (x, y): an edge
+        handle of an ELIGIBLE step target (a point/ramp on either clock, or a bar's start/stop),
+        OR one of the ROOT anchor lines (on-air / off-air / the Hold resume edge), returned as
+        ("__root__", "start"|"stop"|"hold"). Never the source itself."""
+        hit = self._drop_edge_at(x, y)
+        if hit is not None:
+            tgt, edge = hit
+            # Hold-edit: nothing may hang off an edge that already happened (a step anchored to
+            # window A resolves before the pause — it would never fire).
+            k = self.elapsed_kind(tgt)
+            elapsed = k in ("full", "hold") or (k == "start" and edge == "start")
+            if (not elapsed and getattr(tgt, "uid", None) != src_uid
+                    and tgt in tlm.eligible_step_targets(self._items, src_uid)):
+                return tgt, edge
+        src = next((o for o in self._items if o.uid == src_uid), None)
+        for_end = (src is not None and tlm._is_ramp(src)
+                   and (self._connect or {}).get("from_edge") == "end")
+        root = self._root_anchor_at(x, for_end=for_end)
+        if root is not None:
+            if self._lock_elapsed and root in ("start", "enter"):
+                return None                       # on-air / the pause are history while holding
+            return "__root__", root
+        return None
+
+    def _root_anchor_at(self, x: float, for_end: bool = False) -> Optional[str]:
+        """Which root anchor line (if any) x is over: 'start' (on-air), 'stop' (off-air), 'hold'
+        (the Hold's RESUME edge) or 'enter' (the Hold's ENTER edge — the pause's start). A drag
+        from a ramp's END (`for_end`) may land on the pause's start or off-air (the ramp then
+        FINISHES there); a start / a tune lands on on-air, the resume edge or off-air (owner v3
+        #4). None away from all of them."""
+        if not for_end and abs(x - self._on) <= ROOT_SNAP:
+            return "start"
+        if abs(x - self._off) <= ROOT_SNAP:
+            return "stop"
+        if self._resume_x is not None:
+            if for_end:
+                if self._enter_x is not None and abs(x - self._enter_x) <= ROOT_SNAP:
+                    return "enter"
+            elif abs(x - self._resume_x) <= ROOT_SNAP:
+                return "hold"
+        return None
+
+    def _root_x(self, kind: str) -> float:
+        """The x of a root anchor line ('start'→on-air, 'stop'→off-air, 'hold'→resume edge,
+        'enter'→the Hold's enter edge)."""
+        if kind == "stop":
+            return float(self._off)
+        if kind == "hold" and self._resume_x is not None:
+            return float(self._resume_x)
+        if kind == "enter" and self._enter_x is not None:
+            return float(self._enter_x)
+        return float(self._on)
+
     # ── Mouse ─────────────────────────────────────────────────────────────────
 
     def mousePressEvent(self, e):  # noqa: N802
         if e.button() != Qt.MouseButton.LeftButton:
             return
         pos = e.position()
+        additive = bool(e.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                                         | Qt.KeyboardModifier.ShiftModifier))
+        # "Remove anchor" chip on the selected connector wins over everything under it.
+        if self._rmchip is not None and self._rmchip.contains(pos):
+            self._detach_anchor(self._selected)
+            return
+        self.setFocus()                      # so Ctrl+Z / Delete reach the canvas
         hit = self._hit(pos.x(), pos.y())
         if hit is None:
-            self._drag = None
+            # Empty press → drag a marquee to select a region (additive keeps the current set).
+            self._drag = None; self._connect = None
+            self._marquee = {"x0": pos.x(), "y0": pos.y(), "x1": pos.x(), "y1": pos.y(),
+                             "additive": additive, "base": set(self._selection), "moved": False}
             return
         it, part = hit
+        if part == "locked":
+            # Hold-edit: this already happened — no selection, no drag, just say so.
+            self._drag = None; self._connect = None
+            self._lock_notice(it, e.globalPosition().toPoint())
+            return
         if part == "caret":
             self._drag = None
             self._toggle_collapsed(it)
             return
+        if additive:                         # ctrl / shift click toggles this item's membership
+            self._toggle_select(it.uid)
+            self._drag = None; self._connect = None
+            self.update()
+            return
+        # A press on EITHER connection handle of an anchorable item starts a drag-to-anchor. A
+        # ramp offers both a start and an end dot (a point only a start); dragging from either
+        # anchors the source (a ramp is still positioned by its start), so the operator can grab
+        # whichever end is nearer the target.
+        if part.startswith("edge_") and self._is_anchor_source(it):
+            self._select_only(it.uid); self.update()
+            self._connect = {"src": it.uid, "cursor": pos, "target": None,
+                             "moved": False, "press_x": pos.x(),
+                             "from_edge": "end" if part == "edge_end" else "start"}
+            self._drag = None
+            return
+        # Plain click: select just this item, UNLESS it's already part of a multi-selection
+        # (then keep the set so the drag moves the whole group; collapse on release-if-not-moved).
+        # Hold-edit: the running task's live stop grip resizes it but never SELECTS it — a
+        # selection would expose Delete / Ctrl+D / the menu on a task that already launched.
+        if self.elapsed_kind(it) is not None:
+            self._clear_selection(); self.update()
+        elif it.uid not in self._selection:
+            self._select_only(it.uid); self.update()
+        self._connect = None
+        group = (set(self._selection) if part in ("bar_body", "run_body")
+                 and len(self._selection) > 1 and it.uid in self._selection else None)
         self._drag = {
             "item": it, "part": part, "press_x": pos.x(), "moved": False,
             "start0": getattr(it, "start_offset", 0.0),
             "stop0": getattr(it, "stop_offset", 0.0),
+            "off0": getattr(it, "offset", 0.0),
+            "undo0": self._snapshot(),       # pre-drag state, pushed only if the drag commits
+            "collapse": it.uid if len(self._selection) > 1 else None,
+            "group": group,
+            "group0": self._group_bases(group) if group else {},
         }
 
     def _toggle_collapsed(self, it) -> None:
@@ -840,14 +2711,42 @@ class _TimelineCanvas(QWidget):
 
     def mouseMoveEvent(self, e):  # noqa: N802
         pos = e.position()
+        # A marquee (rubber-band) selection from an empty-canvas press.
+        if self._marquee is not None:
+            if not (e.buttons() & Qt.MouseButton.LeftButton):
+                return
+            self._marquee["x1"] = pos.x(); self._marquee["y1"] = pos.y()
+            self._marquee["moved"] = True
+            self._apply_marquee()
+            self.update()
+            return
+        # A live drag-to-anchor: rubber-band from the source handle to the cursor, snapping
+        # onto an eligible target edge under the pointer.
+        if self._connect is not None:
+            if not (e.buttons() & Qt.MouseButton.LeftButton):
+                return
+            if not self._connect["moved"] and abs(pos.x() - self._connect["press_x"]) < DRAG_THRESHOLD:
+                return
+            self._connect["moved"] = True
+            self._connect["cursor"] = pos
+            self._connect["target"] = self._drop_target(pos.x(), pos.y(), self._connect["src"])
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            self.update()
+            return
         if self._drag is None:
+            self._snap_guide = None
             hit = self._hit(pos.x(), pos.y())
-            if hit and hit[1] in ("bar_start", "bar_stop"):
+            if hit and hit[1] == "locked":
+                self.setCursor(Qt.CursorShape.ForbiddenCursor)
+            elif hit and hit[1].startswith("edge_"):
+                self.setCursor(Qt.CursorShape.CrossCursor)
+            elif hit and hit[1] in ("bar_start", "bar_stop"):
                 self.setCursor(Qt.CursorShape.SizeHorCursor)
             elif hit:
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
             else:
                 self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._update_tooltip(hit[0] if hit else None, e.globalPosition().toPoint())
             return
         if not (e.buttons() & Qt.MouseButton.LeftButton):
             return
@@ -858,68 +2757,331 @@ class _TimelineCanvas(QWidget):
         self._drag["moved"] = True
         it, part = self._drag["item"], self._drag["part"]
         x = pos.x()
-        if part in ("run_body", "hold_body"):
-            # A one-shot (or the Hold marker) keeps its anchor (changed only in the
-            # editor); dragging only moves the offset, measured to scale from that fixed
-            # anchor — so the seconds scale with the distance to the anchor and never jump.
-            # A window-B (anchor="hold") one-shot is placed from the Hold's position, so its
-            # offset is measured from the hold divider, not from off-air.
-            anchor_x = self._anchor_base_x(it)
-            it.offset = self._clamp_tune_offset(it, tlm._snap((x - anchor_x) / self._eff()))
-            self._live_relayout(it)
-            return
-        mid = tlm.midpoint(self._on, self._off)
         eff = self._eff()
+        mid = tlm.midpoint(self._on, self._off)
+        self._snap_guide = None
+        # Group move: dragging any selected item's body shifts every selected item by the same
+        # on-air delta (snapping the primary's leading edge).
+        if self._drag.get("group"):
+            self._group_move(x, eff, mid)
+            return
+        # Snap the dragged edge to a nearby step edge / anchor / tick (exact when snapped, else
+        # the 1 s grid). `sx` is the snap target x (None when nothing is near).
+        sx = self._snap_cursor(x, it.uid)
+        if part == "hold_body":
+            # The Hold divider is a line grabbed on itself — drag it to scale from its anchor.
+            anchor_x = self._anchor_base_x(it)
+            if sx is not None:
+                off = (sx - anchor_x) / eff; self._snap_guide = sx
+            else:
+                off = tlm._snap((x - anchor_x) / eff)
+            it.offset = self._clamp_tune_offset(it, off)
+            self._live_move(it)
+            return
+        if part == "run_body":
+            # A tune / one-shot pin: MOVE by the drag DELTA from where it sat when grabbed, not
+            # snap the dot under the cursor — its caption/chips sit beside the dot, so grabbing the
+            # text and dragging must not jump the dot to the mouse (owner #11). Snap the dot's new
+            # position, and it keeps its anchor (changed only in the editor).
+            anchor_x = self._anchor_base_x(it)
+            ref0_x = anchor_x + self._drag["off0"] * eff          # the dot's x at press
+            sbx = self._snap_cursor(ref0_x + (x - self._drag["press_x"]), it.uid)
+            if sbx is not None:
+                off = (sbx - anchor_x) / eff; self._snap_guide = sbx
+            else:
+                off = tlm._snap(self._drag["off0"] + (x - self._drag["press_x"]) / eff)
+            it.offset = self._clamp_for_dependents(it, self._clamp_tune_offset(it, off))
+            self._live_move(it)
+            return
+        if part == "ramp_body":
+            # A ramp is MOVED along the timeline (its offset shifts) but never resized — its
+            # duration is fixed, so only the offset changes. A window-filling ("both") ramp
+            # spans on-air→off-air, so it has no free offset to move; leave it be.
+            if getattr(it, "anchor", "start") == "both":
+                return
+            base_x = self._anchor_base_x(it)
+            ref0_x = base_x + self._drag["off0"] * eff        # the ramp's anchored edge at press
+            sbx = self._snap_cursor(ref0_x + (x - self._drag["press_x"]), it.uid)
+            if sbx is not None:
+                off = (sbx - base_x) / eff; self._snap_guide = sbx
+            else:
+                off = tlm._snap(self._drag["off0"] + (x - self._drag["press_x"]) / eff)
+            it.offset = self._clamp_for_dependents(it, self._clamp_tune_offset(it, off))
+            self._live_move(it)
+            return
         if part == "bar_start":
-            if getattr(it, "start_anchor", "start") == "hold" and self._hold_off is not None:
-                # A window-B bar's start is measured from the Hold divider (resume), never
-                # before it, so it can't be dragged into window A.
-                hold_x = self._on + self._hold_off * eff
-                it.start_offset = max(0.0, tlm._snap((x - hold_x) / eff))
+            if getattr(it, "start_anchor", "start") == "step":
+                # A bar whose START hangs off another step: its start offset is measured from
+                # that step's edge (any clock), like a step-anchored run's body drag.
+                base_x = self._anchor_base_x(it)
+                if sx is not None:
+                    it.start_offset = (sx - base_x) / eff; self._snap_guide = sx
+                else:
+                    it.start_offset = tlm._snap((x - base_x) / eff)
+            elif getattr(it, "start_anchor", "start") == "hold" and self._hold_off is not None:
+                # A window-B bar's start is measured from the Hold RESUME edge, never before it.
+                hold_x = self._on + self._hold_off * eff + HOLD_BAND_PX
+                if sx is not None and sx >= hold_x - 0.5:
+                    it.start_offset = max(0.0, (sx - hold_x) / eff); self._snap_guide = sx
+                else:
+                    it.start_offset = max(0.0, tlm._snap((x - hold_x) / eff))
+            elif sx is not None and sx <= mid:            # on-air side only
+                it.start_offset = (sx - self._on) / eff; self._snap_guide = sx
             else:
                 it.start_offset = tlm.resolve_bar_start(x, self._on, self._off, self._zoom)
         elif part == "bar_stop":
-            it.stop_offset = tlm.resolve_bar_stop(x, self._on, self._off, self._zoom)
+            if sx is not None and sx >= mid:              # off-air side only
+                it.stop_offset = (sx - self._off) / eff; self._snap_guide = sx
+            else:
+                it.stop_offset = tlm.resolve_bar_stop(x, self._on, self._off, self._zoom)
         elif part == "bar_body":
-            ds = tlm._snap((x - self._drag["press_x"]) / eff)
+            # Snap the START edge as the bar shifts (the STOP follows by the same delta).
+            start0_x = self._on + self._drag["start0"] * eff
+            sbx = self._snap_cursor(start0_x + (x - self._drag["press_x"]), it.uid)
+            if sbx is not None:
+                ds = (sbx - self._on) / eff - self._drag["start0"]; self._snap_guide = sbx
+            else:
+                ds = tlm._snap((x - self._drag["press_x"]) / eff)
             it.start_offset = min(self._drag["start0"] + ds, (mid - self._on) / eff)
             it.stop_offset = max(self._drag["stop0"] + ds, (mid - self._off) / eff)
-        self._live_relayout(it)
+        self._live_move(it)
 
     def _anchor_base_x(self, it) -> float:
         """The x a one-shot's offset is measured from while dragging: on-air for a start
-        anchor, off-air for a stop anchor, and the Hold divider for a window-B (anchor='hold')
-        one-shot (placed at hold_offset + its offset)."""
-        if getattr(it, "anchor", "start") == "hold" and self._hold_off is not None:
-            return self._on + self._hold_off * self._eff()
-        return self._on if it.anchor == "start" else self._off
+        anchor, off-air for a stop anchor, the Hold's RESUME edge for a window-B (anchor='hold')
+        one-shot (its offset is measured forward from resume — where the post-hold axis reads 0),
+        and — for a step-anchored (anchor='step') item — its TARGET's referenced edge (so a
+        body-drag adjusts the offset relative to the target, not off-air; the target edge is
+        resolved independently of this item's live offset so it's stable across the drag)."""
+        anchor = getattr(it, "anchor", "start")
+        eff = self._eff()
+        if tlm.is_step_source(it):                  # a run, or a bar via its START anchor
+            ref, aedge = tlm.step_source_ref(it)
+            tgt = next((o for o in self._items if (getattr(o, "step_id", "") or "") == ref and ref), None)
+            if tgt is not None and tgt.uid in self._geom:
+                # The target's DRAWN edge: clock-agnostic (an off-air-rooted target too) and stable
+                # across this item's drag (a target never depends on its own dependent — acyclic).
+                return self._edge_x(tgt, aedge)
+            e = tlm.step_edge_offset(self._items, ref, aedge, self._hold_off)
+            x = self._on + (e * eff if e is not None else 0.0)
+            # a target resolved past the hold sits in the post-hold window (shifted by the band)
+            if self._hold_present and e is not None and e > (self._hold_off or 0.0) + 1e-6:
+                x += HOLD_BAND_PX
+            return x
+        if anchor == "hold" and self._hold_off is not None:
+            return self._on + self._hold_off * eff + HOLD_BAND_PX     # the RESUME edge
+        if anchor == "enter" and self._hold_off is not None:
+            return self._on + self._hold_off * eff                    # the ENTER edge (the pause)
+        return self._on if anchor == "start" else self._off
+
+    # ── Drag snapping (to nearby step edges / anchors / ticks) ─────────────────
+    def _snap_targets(self, exclude):
+        """Meaningful x positions a dragged edge can snap to: the on-air / off-air anchors,
+        the Hold divider, every OTHER item's edges (a bar/ramp's start+stop, a pin's centre),
+        and the major axis ticks. `exclude` is a set of uids to skip (the moving item(s))."""
+        xs = [self._on, self._off]
+        if self._resume_x is not None:
+            xs.append(self._resume_x)        # the Hold resume edge (post-hold content's 0)
+        for h in self._holds:
+            g = self._geom.get(h.uid)
+            if g:
+                xs.append(g["cx"])
+        for it in self._rows:
+            if it.uid in exclude:
+                continue
+            g = self._geom.get(it.uid)
+            if not g:
+                continue
+            if "start_x" in g:
+                xs.append(g["start_x"]); xs.append(g["stop_x"])
+            elif "cx" in g:
+                xs.append(g["cx"])
+        eff = self._eff(); tick_s = self._tick_interval()
+        if tick_s > 0 and eff > 0:
+            k = 0
+            while self._on + k * tick_s * eff <= self._off + 1.0:
+                xs.append(self._on + k * tick_s * eff); k += 1
+            k = 1
+            while self._on - k * tick_s * eff >= tlm.EDGE_PAD:
+                xs.append(self._on - k * tick_s * eff); k += 1
+        return xs
+
+    def _snap_cursor(self, x, exclude):
+        """The nearest snap target x within SNAP_PX of `x`, or None. `exclude` is a uid or a
+        set of uids (the moving item(s)) whose own edges are not snap targets."""
+        excl = exclude if isinstance(exclude, (set, frozenset)) else {exclude}
+        best, best_d = None, SNAP_PX + 1e-6
+        for tx in self._snap_targets(excl):
+            d = abs(x - tx)
+            if d < best_d:
+                best_d, best = d, tx
+        return best
+
+    def _group_bases(self, uids):
+        """{uid: (kind, start0, stop0, offset0)} — starting offsets for a group move."""
+        out = {}
+        for u in uids or ():
+            itu = next((o for o in self._items if o.uid == u), None)
+            if itu is None:
+                continue
+            out[u] = (getattr(itu, "kind", ""), float(getattr(itu, "start_offset", 0.0)),
+                      float(getattr(itu, "stop_offset", 0.0)), float(getattr(itu, "offset", 0.0)))
+        return out
+
+    def _group_move(self, x, eff, mid):
+        """Shift every item in the drag's group by one on-air delta (snapping the primary's
+        leading edge to a nearby anchor/edge/tick that is NOT part of the moving group)."""
+        drag = self._drag; it0 = drag["item"]; group = drag["group"]
+        if it0.kind == "bar":
+            ref0_x = self._on + drag["start0"] * eff
+        else:
+            ref0_x = self._anchor_base_x(it0) + drag["group0"].get(it0.uid, ("", 0, 0, 0))[3] * eff
+        sbx = self._snap_cursor(ref0_x + (x - drag["press_x"]), group)
+        if sbx is not None:
+            ds = (sbx - ref0_x) / eff; self._snap_guide = sbx
+        else:
+            ds = tlm._snap((x - drag["press_x"]) / eff)
+        # A step-anchored item whose TARGET is also moving in this group already follows the
+        # target (its offset is relative to the target's edge), so shifting its offset by ds too
+        # would double-move it — leave those offsets alone; everything else shifts by ds.
+        by_sid = {getattr(o, "step_id", "") or "": o.uid
+                  for o in self._items if getattr(o, "step_id", "")}
+        for u, (kind, s0, e0, o0) in drag["group0"].items():
+            itu = next((o for o in self._items if o.uid == u), None)
+            if itu is None:
+                continue
+            if tlm.is_step_source(itu) and by_sid.get(tlm.step_source_ref(itu)[0]) in group:
+                # Follows its (also-moving) target — don't shift. A step-anchored BAR's stop is
+                # still off-air, so it shifts like any bar's stop.
+                if kind == "bar":
+                    itu.stop_offset = max(e0 + ds, (mid - self._off) / eff)
+            elif kind == "bar":
+                itu.start_offset = min(s0 + ds, (mid - self._on) / eff)
+                itu.stop_offset = max(e0 + ds, (mid - self._off) / eff)
+            else:
+                itu.offset = self._clamp_tune_offset(itu, o0 + ds)
+        # Re-place the moved group AND every step-anchored dependent from the live offsets, so a
+        # dependent of a moving target follows it in real time (not only on release).
+        self._live_expand()
+
+    def _apply_marquee(self):
+        """Set the selection to the items intersecting the marquee rect (added to the base set
+        when the drag started additively)."""
+        mq = self._marquee
+        r = QRectF(QPointF(mq["x0"], mq["y0"]), QPointF(mq["x1"], mq["y1"])).normalized()
+        hit = set()
+        for it in self._rows:
+            g = self._geom.get(it.uid)
+            if not g or self.elapsed_kind(it) is not None:   # locked items never select
+                continue
+            if it.kind == "bar" or tlm._is_ramp(it):
+                ix0, ix1 = sorted((g.get("start_x", 0.0), g.get("stop_x", 0.0)))
+            else:
+                cx = g.get("cx", 0.0); ix0, ix1 = cx - 7.0, cx + 7.0
+            if r.intersects(QRectF(ix0, g["y"], max(1.0, ix1 - ix0), LANE_H)):
+                hit.add(it.uid)
+        self._selection = (mq["base"] | hit) if mq["additive"] else set(hit)
+        self._selected = next(iter(self._selection), None)
+
+    def _task_range(self, it):
+        """The offset range [lo, hi] (on the item's own anchor clock) that keeps a tune / ramp
+        inside the on-air span of the task it acts on — BOTH ends (owner v3 #8): a
+        start-anchored step can't precede the task's on-air start nor pass its drawn end (the
+        stop edge is off-air-relative, so the end is read from the current geometry); a
+        stop-anchored one can't pass the stop nor precede the drawn start. A ramp keeps its
+        whole extent inside (a start-tied ramp by its start, a stop-tied one by its end). None
+        when the item isn't range-bound (a one-shot, a window-B / step / pause-anchored step —
+        timed against another point — or a task without a duration bar)."""
+        act = getattr(it, "action", "run")
+        if act not in ("tune", "ramp") or it.anchor not in ("start", "stop"):
+            return None
+        bar = next((b for b in self._items if getattr(b, "kind", None) == "bar"
+                    and b.task_name == it.task_name), None)
+        g = self._geom.get(bar.uid) if bar is not None else None
+        if not g:
+            return None
+        eff = self._eff()
+        dur = tlm._ramp_duration(dict(getattr(it, "ramp", None) or {})) if act == "ramp" else 0.0
+        sx, px = g["start_x"], g["stop_x"]
+        if it.anchor == "start":
+            lo, hi = (sx - self._on) / eff, (px - self._on) / eff - dur
+        else:
+            lo, hi = (sx - self._off) / eff + dur, (px - self._off) / eff
+        return (lo, hi) if lo <= hi else (lo, lo)
 
     def _clamp_tune_offset(self, it, offset: float) -> float:
-        """Keep a tune point inside the on-air span of the task it acts on: a
-        start-anchored tune can't be dragged before the task's on-air start, a
-        stop-anchored one can't pass its off-air stop. One-shots (not tunes), and window-B
-        (anchor='hold') tunes — timed at proceed, not against the on-air window — act on
-        their own task, so they're free to sit anywhere."""
-        if getattr(it, "action", "run") != "tune" or it.anchor not in ("start", "stop"):
+        """Keep a tune / ramp inside its task's on-air span (see _task_range) — both ends. A
+        pause-anchored (anchor='enter') step can't reach INTO the pause. Everything else is free."""
+        anc = getattr(it, "anchor", "start")
+        if anc == "enter":
+            return min(offset, 0.0)
+        if self._lock_elapsed and self._resume_x is not None:
+            # Hold-edit: nothing editable may be dragged back INTO the past — a window-B step
+            # stays at/after resume, an off-air step no earlier than the resume edge.
+            if anc == "hold":
+                offset = max(offset, 0.0)
+            elif anc == "stop":
+                offset = max(offset, (float(self._resume_x) - float(self._off)) / self._eff())
+        rng = self._task_range(it)
+        if rng is None:
             return offset
-        spans = [(b.start_offset, b.stop_offset) for b in self._items
-                 if getattr(b, "kind", None) == "bar" and b.task_name == it.task_name]
-        if not spans:
+        lo, hi = rng
+        return min(max(offset, lo), hi)
+
+    def _dependents_of(self, uid: int):
+        """Every item hanging off `uid` (anchor='step'), transitively."""
+        out, frontier = [], [next((o for o in self._items if o.uid == uid), None)]
+        seen = {uid}
+        while frontier:
+            tgt = frontier.pop()
+            sid = getattr(tgt, "step_id", "") or "" if tgt is not None else ""
+            if not sid:
+                continue
+            for o in self._items:
+                if o.uid in seen or not tlm.is_step_source(o) or tlm.step_source_ref(o)[0] != sid:
+                    continue
+                seen.add(o.uid); out.append(o); frontier.append(o)
+        return out
+
+    def _clamp_for_dependents(self, it, offset: float) -> float:
+        """Narrow a TARGET's drag so every tune / ramp hanging off it (transitively) stays inside
+        ITS task too (owner v3 #8): a dependent moves rigidly with its target, so its own range
+        translates into a range for the target's offset. Uses the bases resolved at the current
+        (pre-move) offset to find each dependent's fixed distance from the target."""
+        deps = [d for d in self._dependents_of(it.uid)
+                if getattr(d, "kind", None) != "bar" and getattr(d, "action", "run") in ("tune", "ramp")]
+        if not deps:
             return offset
-        if it.anchor == "start":
-            return max(offset, min(s for s, _ in spans))
-        return min(offset, max(e for _, e in spans))
+        cur = float(getattr(it, "offset", getattr(it, "start_offset", 0.0)))
+        lo, hi = -float("inf"), float("inf")
+        for d in deps:
+            base = self._step_bases.get(d.uid)
+            bar = next((b for b in self._items if getattr(b, "kind", None) == "bar"
+                        and b.task_name == d.task_name), None)
+            g = self._geom.get(bar.uid) if bar is not None else None
+            if base is None or not g:
+                continue
+            eff = self._eff()
+            dur = tlm._ramp_duration(dict(getattr(d, "ramp", None) or {})) if tlm._is_ramp(d) else 0.0
+            dlo, dhi = (g["start_x"] - self._on) / eff, (g["stop_x"] - self._on) / eff - dur
+            const = base - cur                      # the dependent's START sits const after the target
+            lo, hi = max(lo, dlo - const), min(hi, dhi - const)
+        if lo > hi:
+            return offset
+        return min(max(offset, lo), hi)
 
     def _live_relayout(self, it) -> None:
-        """Update just the dragged item's geometry without resizing the canvas
-        (keeps anchors fixed mid-drag so the item tracks the cursor smoothly)."""
+        """Update just this item's geometry without resizing the canvas (keeps anchors fixed
+        mid-drag so the item tracks the cursor smoothly). Reads the LIVE `_step_bases`, so a
+        step-anchored item re-places off its target's current position."""
         g = self._geom.get(it.uid)
         if not g:
             return
         if it.kind == "bar":
-            g["start_x"] = tlm.offset_to_x(*tlm.bar_start_placement(it, self._hold_off),
-                                           self._on, self._off, self._zoom)
-            g["stop_x"] = tlm.offset_to_x("stop", it.stop_offset, self._on, self._off, self._zoom)
+            g["start_x"] = self._place_x(it, *tlm.bar_start_placement(it, self._hold_off, self._step_bases, self._step_off_bases))
+            g["stop_x"] = self._place_x(it, "stop", it.stop_offset)
+        elif tlm._is_ramp(it):
+            g["start_x"], g["stop_x"], g["ends"], g["cut_x"] = self._ramp_edges(it)
         else:
             # _run_cx maps a window-B (anchor='hold') item to the Hold's side, so the pill
             # tracks the cursor correctly instead of jumping to the off-air anchor.
@@ -928,16 +3090,539 @@ class _TimelineCanvas(QWidget):
             g["panel"] = (self._item_left(it) + 2, g["panel"][1], g["panel"][2], g["panel"][3])
         self.update()
 
+    def _live_move(self, it) -> None:
+        """Re-place the dragged item AND every step-anchored dependent in REAL TIME, with the band
+        re-measured (on-air pinned) so the windows expand as the drag goes — dragging a TARGET moves
+        its dependents (and their chains) as it moves, and a dragged dependent itself tracks the
+        cursor — instead of snapping into place only on release."""
+        self._live_expand()
+
     def mouseReleaseEvent(self, e):  # noqa: N802
-        if e.button() != Qt.MouseButton.LeftButton or self._drag is None:
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._snap_guide = None
+        if self._marquee is not None:
+            mq = self._marquee
+            self._marquee = None
+            if not mq["moved"] and not mq["additive"]:   # a plain empty click clears the selection
+                self._clear_selection()
+            self.update()
+            return
+        if self._connect is not None:
+            conn = self._connect
+            self._connect = None
+            if conn["moved"] and conn["target"] is not None:
+                tgt, edge = conn["target"]
+                if tgt == "__root__":
+                    self._make_root_anchor(conn["src"], edge)
+                else:
+                    self._make_anchor(conn["src"], tgt, edge, conn.get("from_edge", "start"))
+            else:
+                self.update()          # cancelled — clear the rubber-band
+            return
+        if self._drag is None:
             return
         drag = self._drag
         self._drag = None
         if drag["moved"]:
+            self._undo.append(drag["undo0"])   # commit the pre-drag snapshot for undo
+            del self._undo[:-100]
+            self._redo.clear()
+            if drag["part"] in ("bar_start", "bar_stop", "bar_body"):
+                self._auto_rf_gate(drag["item"])   # part of the same undo entry as the drag
+            self.relayout(keep_on=True)
+            self.changed.emit()
+        elif drag.get("collapse") is not None:  # click (no drag) on a multi-selection → keep just it
+            self._select_only(drag["collapse"])
+            self.update()
+        # A non-moved press only selects; double-click opens the editor.
+
+    def mouseDoubleClickEvent(self, e):  # noqa: N802
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        hit = self._hit(e.position().x(), e.position().y())
+        if hit is not None and hit[1] == "locked":
+            self._lock_notice(hit[0], e.globalPosition().toPoint())   # Hold-edit: no editor
+            return
+        if hit is not None and hit[1] != "caret":
+            self.edit_item(hit[0])
+
+    def keyPressEvent(self, e):  # noqa: N802
+        mods = e.modifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        key = e.key()
+        if ctrl and key == Qt.Key.Key_Z and not shift:
+            self.undo(); e.accept(); return
+        if (ctrl and key == Qt.Key.Key_Y) or (ctrl and shift and key == Qt.Key.Key_Z):
+            self.redo(); e.accept(); return
+        if ctrl and key == Qt.Key.Key_A and self._rows:      # select all (never a locked item)
+            self._selection = {it.uid for it in self._rows if self.elapsed_kind(it) is None}
+            self._selected = next(iter(self._selection), None)
+            self.update(); e.accept(); return
+        if ctrl and key == Qt.Key.Key_D and self._selected is not None:
+            it = next((o for o in self._items if o.uid == self._selected), None)
+            if it is not None:
+                self._duplicate_item(it)
+            e.accept(); return
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self._selection:
+            self._delete_selection()
+            e.accept(); return
+        super().keyPressEvent(e)
+
+    # ── Hover tooltip ─────────────────────────────────────────────────────────
+    def _update_tooltip(self, it, global_pt) -> None:
+        uid = getattr(it, "uid", None) if it is not None else None
+        if uid == self._hover_uid:
+            if it is not None:
+                QToolTip.showText(global_pt, self._tooltip_text(it), self)
+            return
+        self._hover_uid = uid
+        if it is None:
+            QToolTip.hideText()
+        else:
+            QToolTip.showText(global_pt, self._tooltip_text(it), self)
+
+    def _tooltip_text(self, it) -> str:
+        """A rich, multi-line description of an item for hover (task, what it does, when it
+        fires, and its anchor if step-anchored)."""
+        if tlm._is_hold(it):
+            if self.elapsed_kind(it) == "hold":
+                return ("<b>Hold</b> · holding now<br>the run is parked here — it can't be moved"
+                        "<br><i>resume with Proceed</i>")
+            return (f"<b>Hold</b><br>pauses the run at on-air "
+                    f"{self._mmss(float(getattr(it, 'offset', 0.0)))}<br>"
+                    f"<i>resume with Proceed</i>")
+        act = getattr(it, "action", "run")
+        lines: List[str] = []
+        k = self.elapsed_kind(it)                # Hold-edit: say up front that this already happened
+        if k == "full":
+            lines.append("<b>Locked</b> · already ran before the Hold")
+        elif k == "start":
+            lines.append("<b>Running</b> · started before the Hold — only its stop can change")
+        # A tune/ramp's parent task is obvious from its row (indent, hue), so the header names the
+        # STEP, not the task (owner v3 #3); a duration task / one-shot IS its task.
+        if it.kind == "bar":
+            lines.append(f"<b>{it.task_name or '(no task)'}</b> · duration task")
+        elif act == "ramp":
+            lines.append("<b>Ramp</b> · " + _ramp_summary(getattr(it, "ramp", None),
+                                                         getattr(it, "anchor", "start")))
+        elif act == "tune":
+            overrides = self._editor._pill_power_display(it)
+            changes = ", ".join(f"{k}={overrides.get(k, v)}" for k, v in (it.params or {}).items())
+            lines.append("<b>Tune</b>" + (f" · {changes}" if changes else ""))
+        else:
+            lines.append(f"<b>{it.task_name or '(no task)'}</b> · one-shot")
+        if tlm.is_step_source(it):
+            # "X before/after the anchor's edge" — the anchor itself is visible (the connector), so
+            # its name is left out (owner v3 #2).
+            _ref, aedge = tlm.step_source_ref(it)
+            off = self._dep_offset(it)
+            end_tied = tlm._is_ramp(it) and (getattr(it, "anchor_own_edge", "start") or "start") == "end"
+            what = "its end " if end_tied else ("its start " if it.kind == "bar" else "")
+            rel = ("at" if abs(off) < 1e-9
+                   else f"{fmt_duration(abs(off))} {'after' if off > 0 else 'before'}")
+            lines.append(f"⚓ {what}{rel} the anchor's {aedge}")
+        lines.extend(self._absolute_timing_lines(it))
+        return "<br>".join(lines)
+
+    def _absolute_timing_lines(self, it) -> List[str]:
+        """Where the item sits in ABSOLUTE terms, resolved through its anchor chain: after on-air
+        (or after RESUME, past a Hold), before off-air, or before the pause. With a Hold the
+        post-hold window is fully characterised (off-air floats to its content), so a post-hold
+        item reads BOTH its time after resume AND its time before off-air (owner v3 #2)."""
+        def rel(t: float, base: str) -> str:
+            if abs(t) < 1e-9:
+                return f"at {base}"
+            return f"{fmt_duration(abs(t))} {'after' if t > 0 else 'before'} {base}"
+
+        h = self._hold_off
+        out: List[str] = []
+        if it.kind == "bar":
+            a, o = tlm.bar_start_placement(it, h, self._step_bases, self._step_off_bases)
+            if a == "start":
+                out.append("starts " + (rel(o - h, "resume") if (h is not None and o > h + 1e-6)
+                                        else rel(o, "on-air")))
+            else:
+                out.append("starts " + rel(o, "off-air"))
+            out.append("stops " + rel(float(getattr(it, "stop_offset", 0.0)), "off-air"))
+            return out
+        ramp = tlm._is_ramp(it)
+        end_tied = self._end_tied(it)
+        verb = "ends" if end_tied else ("starts" if ramp else "fires")
+        if ramp:
+            (la, lo), (ra, ro) = tlm.ramp_span(it, h, self._step_bases, self._step_off_bases)
+            a, o = (ra, ro) if end_tied else (la, lo)
+            cross = tlm.ramp_hold_cross(it, h, self._step_bases, self._step_off_bases)
+            if cross is not None:
+                # A ramp crossing the Hold: frozen at the pause (the level reached holds), the
+                # remainder resumes after Proceed — its end is a fixed time after RESUME.
+                lo_t, hi_t = cross
+                out.append("starts " + rel(lo_t, "on-air"))
+                lvl = tlm.ramp_level_at_pause(it, h)
+                held = f", holding {fmt_value(lvl)}" if lvl is not None else ""
+                out.append(f"pauses {fmt_duration(h - lo_t)} in{held}")
+                out.append("ends " + rel(hi_t - h, "resume"))
+                fwd, bwd = self._post_hold_extents()
+                if fwd > 0 or bwd > 0:
+                    out.append("ends " + rel((hi_t - h) - (fwd + bwd), "off-air"))
+                return out
+        else:
+            a, o = tlm.effective_anchor_offset(it, h, self._step_bases, self._step_off_bases)
+        anchor = getattr(it, "anchor", "start")
+        if anchor == "both":
+            return ["fills the on-air window"]
+        if anchor == "enter" and h is not None:
+            out.append(f"{verb} " + rel(o - h, "the pause"))
+            out.append(f"{verb} " + rel(o, "on-air"))
+            return out
+        if a == "start":
+            out.append(f"{verb} " + (rel(o - h, "resume") if (h is not None and o > h + 1e-6)
+                                     else rel(o, "on-air")))
+        else:
+            out.append(f"{verb} " + rel(o, "off-air"))
+        # Past a Hold, off-air floats to just past the post-hold content (the resume-forward group
+        # then the off-air-backward group — the canvas's window, WITHOUT its pixel breathing pad),
+        # so BOTH distances are fixed: read them in time, not off the drawn geometry.
+        if h is not None and self._hold_present:
+            fwd, bwd = self._post_hold_extents()
+            t_off = fwd + bwd                       # off-air, in seconds after resume
+            if (fwd > 0 or bwd > 0):
+                if a == "start" and o > h + 1e-6:
+                    out.append(f"{verb} " + rel((o - h) - t_off, "off-air"))
+                elif a == "stop":
+                    out.append(f"{verb} " + rel(t_off + o, "resume"))
+        return out
+
+    def leaveEvent(self, e):  # noqa: N802
+        self._hover_uid = None
+        QToolTip.hideText()
+        super().leaveEvent(e)
+
+    # ── Anchor create / detach (100% UI, no forms) ─────────────────────────────
+    def _make_anchor(self, src_uid: int, tgt, edge: str, from_edge: str = "start") -> None:
+        """Anchor the source item to `tgt`'s `edge` (a drag-to-anchor drop) by the edge it was
+        GRABBED by: a point by its instant, a ramp by its start — or by its END when the drag began
+        on its end dot (`from_edge="end"`; the ramp's end then sits at the target edge + offset and
+        the ramp runs backward from it). Keeps the source visually in place — the offset is the
+        current pixel gap between that tied edge and the TARGET EDGE, read straight off the
+        geometry, so it works whatever CLOCK the target sits on (on-air, off-air, resume) and for a
+        bar edge as readily as a point/ramp. The offset may be NEGATIVE (the tied edge sits before
+        the target edge, like a start/stop anchor's lead-in); the save/arm gate enforces the
+        negative capability."""
+        src = next((it for it in self._items if it.uid == src_uid), None)
+        if src is None or not self._is_anchor_source(src):
+            self.update()
+            return
+        if tgt not in tlm.eligible_step_targets(self._items, src_uid):
+            self.update()
+            return
+        sid = tlm.ensure_step_id(tgt)
+        if not sid:
+            self.update()
+            return
+        eff = self._eff()
+        tgt_x = self._edge_x(tgt, edge)
+        g = self._geom.get(src_uid) or {}
+        end_tied = tlm._is_ramp(src) and from_edge == "end"
+        src_x = g.get("stop_x", g.get("start_x")) if end_tied else g.get("start_x", g.get("cx"))
+        if src_x is None:
+            src_x = tgt_x
+        off = tlm._snap((src_x - tgt_x) / eff)   # keep the tied edge's pixel position, any clock
+        self._record()          # snapshot AFTER the early-returns, so no dead no-op undo entry
+        if getattr(src, "kind", None) == "bar":  # a duration task hangs its START off the step
+            src.start_anchor = "step"
+            src.start_anchor_step_id = sid
+            src.start_anchor_edge = edge
+            src.start_offset = off
+        else:
+            src.anchor = "step"
+            src.anchor_step_id = sid
+            src.anchor_edge = edge
+            src.anchor_own_edge = "end" if end_tied else "start"
+            src.offset = off
+        self._select_only(src_uid)
+        self.relayout()
+        self.changed.emit()
+
+    def _make_root_anchor(self, src_uid: int, kind: str) -> None:
+        """Anchor the source to a ROOT line (on-air='start', off-air='stop', Hold resume='hold')
+        by a drag-to-anchor drop onto that line — keeping the source visually in place (its offset
+        becomes the current gap from that line). Replaces any step anchor it had."""
+        src = next((it for it in self._items if it.uid == src_uid), None)
+        if src is None or tlm._is_hold(src):
+            self.update()
+            return
+        if kind in ("hold", "enter") and self._resume_x is None:
+            self.update()
+            return
+        eff = self._eff(); base_x = self._root_x(kind)
+        g = self._geom.get(src_uid) or {}
+        if getattr(src, "kind", None) == "bar":
+            # A duration task's START re-roots on-air or at the Hold's resume edge (its stop is
+            # always off-air, so off-air / the pause are not start anchors).
+            if kind not in ("start", "hold"):
+                self.update()
+                return
+            cur_x = g.get("start_x", base_x)
+            off = (cur_x - base_x) / eff
+            self._record()
+            src.start_anchor = kind
+            src.start_anchor_step_id = ""
+            src.start_anchor_edge = "end"
+            src.start_offset = max(0.0, off) if kind == "hold" else off
+            self._select_only(src_uid)
             self.relayout()
             self.changed.emit()
+            return
+        if tlm._is_ramp(src):
+            # off-air and the pause tie a ramp by its END; on-air / resume by its start
+            cur_x = g.get("stop_x", g.get("start_x")) if kind in ("stop", "enter") else g.get("start_x")
         else:
-            self.edit_item(drag["item"])
+            cur_x = g.get("cx")
+        if cur_x is None:
+            cur_x = base_x
+        off = (cur_x - base_x) / eff          # exact — keep the source visually in place
+        self._record()
+        src.anchor = kind
+        src.anchor_step_id = ""
+        src.anchor_edge = "end"
+        src.anchor_own_edge = "start"
+        src.offset = self._clamp_tune_offset(src, off)
+        self._select_only(src_uid)
+        self.relayout()
+        self.changed.emit()
+
+    def _revert_to_root(self, it) -> None:
+        """Drop `it`'s step anchor, re-rooting it at the instant it currently resolves to so it
+        stays put: on-air (`start`) at its resolved on-air base, or — when its chain roots
+        off-air — off-air (`stop`) at its off-air base (a ramp's stop offset is its END's). A bar
+        re-roots its start on-air (its only root option; an off-air-rooted bar keeps its raw
+        start offset)."""
+        uid = getattr(it, "uid", None)
+        base = self._step_bases.get(uid)
+        obase = self._step_off_bases.get(uid)
+        if getattr(it, "kind", None) == "bar":
+            it.start_offset = base if base is not None else float(getattr(it, "start_offset", 0.0))
+            it.start_anchor = "start"
+            it.start_anchor_step_id = ""
+            it.start_anchor_edge = "end"
+            return
+        if base is not None:
+            it.anchor, it.offset = "start", base
+        elif obase is not None:
+            dur = tlm._ramp_duration(dict(getattr(it, "ramp", None) or {})) if tlm._is_ramp(it) else 0.0
+            it.anchor, it.offset = "stop", obase + dur
+        else:
+            it.anchor, it.offset = "start", tlm.step_wire_offset(it)
+        it.anchor_step_id = ""
+        it.anchor_edge = "end"
+        it.anchor_own_edge = "start"
+
+    def _detach_anchor(self, uid: Optional[int]) -> None:
+        """Remove a step anchor (the "Remove anchor" chip / a UI detach): revert the item (a
+        run, or a bar anchored by its start) to a plain root anchor at the instant it currently
+        resolves to, so it stays put."""
+        it = next((o for o in self._items if o.uid == uid), None)
+        if it is None or not tlm.is_step_source(it):
+            return
+        self._record()
+        self._revert_to_root(it)
+        self.relayout()
+        self.changed.emit()
+
+    # ── RF auto-gating on a duration-task drag (owner v3 #7) ────────────────────
+    def _auto_rf_gate(self, bar) -> bool:
+        """A duration task whose script declares an RF gate (`ui.rf_gate`), dragged to START
+        BEFORE on-air, launches MUTED (its args set the gate OFF) and gets a tune turning the gate
+        ON at on-air; dragged back to on-air or later, that tune goes away and the launch gate is
+        restored ON. Dragged to STOP PAST off-air, it gets a tune turning the gate OFF at off-air;
+        back, it goes. The auto tunes are ordinary tunes recognised by their SHAPE (gate-only, at
+        the anchor instant), so nothing needs a marker and a reloaded sequence behaves the same.
+        Returns True when anything changed."""
+        from . import rf_gate
+        try:
+            params = self._editor.task_param_specs(bar.task_name)
+        except Exception:  # noqa: BLE001 — no spec → nothing to gate
+            return False
+        gp = rf_gate.gate(params)
+        if gp is None:
+            return False
+        dest = gp.get("dest") or gp.get("name")
+        on_tok, off_tok = rf_gate.gate_tokens(gp)
+
+        def find(anchor: str, on: bool):
+            for o in self._items:
+                if (getattr(o, "kind", None) != "bar" and getattr(o, "action", "run") == "tune"
+                        and o.task_name == bar.task_name and getattr(o, "anchor", "") == anchor
+                        and abs(float(getattr(o, "offset", 0.0))) < 1e-9
+                        and set((o.params or {}).keys()) == {dest}
+                        and rf_gate.is_on(o.params.get(dest)) == on):
+                    return o
+            return None
+
+        changed = False
+        before = (getattr(bar, "start_anchor", "start") == "start"
+                  and float(getattr(bar, "start_offset", 0.0)) < 0)
+        rf_on = find("start", True)
+        if self.elapsed_kind(bar) == "start":
+            pass                        # Hold-edit: the launch already happened — leave its gate be
+        elif before:
+            if rf_gate.gate_arg_state(bar.args, gp) is not False:
+                bar.args = rf_gate.set_gate_arg(list(bar.args or []), gp, False); changed = True
+            if rf_on is None:
+                self._items.append(tlm.RunItem(task_name=bar.task_name, action="tune", anchor="start",
+                                               offset=0.0, params={dest: on_tok}))
+                changed = True
+        elif rf_on is not None:
+            self._items.remove(rf_on)
+            bar.args = rf_gate.set_gate_arg(list(bar.args or []), gp, True); changed = True
+        after = float(getattr(bar, "stop_offset", 0.0)) > 0
+        rf_off = find("stop", False)
+        if after and rf_off is None:
+            self._items.append(tlm.RunItem(task_name=bar.task_name, action="tune", anchor="stop",
+                                           offset=0.0, params={dest: off_tok}))
+            changed = True
+        elif not after and rf_off is not None:
+            self._items.remove(rf_off); changed = True
+        return changed
+
+    def _duplicate_item(self, it) -> None:
+        """Clone an item (a fresh uid + no step_id — the copy is not a reference target),
+        nudged a little so it doesn't sit exactly on the original, and select it. A Hold is
+        unique per sequence, so it isn't duplicable."""
+        if tlm._is_hold(it) or self.elapsed_kind(it) is not None:
+            return                                # (Hold-edit: nothing already-happened is cloned)
+        clone = copy.deepcopy(it)
+        clone.uid = next(tlm._ids)
+        clone.step_id = ""
+        nudge = 15.0
+        if clone.kind == "bar":
+            clone.start_offset = float(getattr(clone, "start_offset", 0.0)) + nudge
+        else:
+            clone.offset = float(getattr(clone, "offset", 0.0)) + nudge
+        self.add_item(clone)
+        self._select_only(clone.uid)
+        self.update()
+
+    def _reanchor_deps(self, target, skip=()):
+        """Re-anchor every step anchored to `target` to a plain on-air `start` at the time it
+        currently resolves to (so it stays put), skipping deps whose uid is in `skip` (also
+        being deleted)."""
+        sid = getattr(target, "step_id", "") or ""
+        if not sid:
+            return
+        for dep in self._items:
+            if dep is target or not tlm.is_step_source(dep):
+                continue
+            if tlm.step_source_ref(dep)[0] != sid or dep.uid in skip:
+                continue
+            self._revert_to_root(dep)
+
+    def _cascade_uids(self, uids: set) -> set:
+        """Deleting a DURATION task also deletes that task's tunes and ramps — they retune the
+        running task and cannot exist without it (validate() rejects them as orphans). A one-shot
+        of the same task is an independent launch and stays (owner rule)."""
+        out = set(uids)
+        tasks = {o.task_name for o in self._items
+                 if o.uid in uids and getattr(o, "kind", None) == "bar"}
+        if tasks:
+            out |= {o.uid for o in self._items
+                    if getattr(o, "kind", None) != "bar"
+                    and getattr(o, "action", "run") in ("tune", "ramp")
+                    and o.task_name in tasks}
+        return out
+
+    def _delete_uids(self, uids: set) -> None:
+        """Delete a set of items in ONE undo step: a bar takes its tunes/ramps with it, and every
+        dependent of a deleted item that is NOT itself deleted is re-rooted at its fire time."""
+        # Hold-edit: what already happened can't be deleted — not a locked step, not the running
+        # task (its cascade would take its post-hold tunes/ramps with it), not the Hold.
+        uids = {u for u in uids if self.elapsed_kind(self._item(u)) is None}
+        uids = self._cascade_uids(set(uids))
+        if not uids:
+            return
+        self._record()
+        for u in list(uids):
+            target = next((o for o in self._items if o.uid == u), None)
+            if target is not None:
+                self._reanchor_deps(target, skip=uids)
+        self._items = [o for o in self._items if o.uid not in uids]
+        for u in uids:
+            self._collapsed.discard(u)
+        self._prune_selection()
+        self.relayout()
+        self.changed.emit()
+
+    def _delete_with_reanchor(self, uid: Optional[int]) -> None:
+        """Delete an item (a bar together with its tunes/ramps), re-anchoring any dependents so
+        they stay at their fire time."""
+        if any(o.uid == uid for o in self._items):
+            self._delete_uids({uid})
+
+    def _delete_selection(self) -> None:
+        """Delete every selected item (a bar's tunes/ramps included; dependents re-anchored to
+        their fire time) in one undo step; a dependent that is itself being deleted is not
+        re-anchored."""
+        if self._selection:
+            self._delete_uids(set(self._selection))
+
+    # ── Right-click context menu ──────────────────────────────────────────────
+    def contextMenuEvent(self, e):  # noqa: N802
+        hit = self._hit(e.pos().x(), e.pos().y())
+        if hit is None:
+            e.ignore()
+            return
+        it = hit[0]
+        # Hold-edit: nothing to do to what already happened — a locked part, or the running
+        # task reached through its live stop grip (no Edit… / Duplicate / Delete on it either).
+        if hit[1] == "locked" or self.elapsed_kind(it) is not None:
+            self._lock_notice(it, e.globalPos())
+            e.accept()
+            return
+        if it.uid not in self._selection:      # right-click outside the selection re-selects it
+            self._select_only(it.uid)
+        self.update()
+        self._open_context_menu(it, e.globalPos())
+        e.accept()
+
+    def _context_menu_spec(self, it) -> List[str]:
+        """Labels for the right-click menu on `it`, in order ('—' = a separator)."""
+        multi = len(self._selection) > 1
+        if multi:                              # a multi-selection menu acts on the whole set
+            return ["Delete selected"]
+        spec = ["Edit…"]
+        if not tlm._is_hold(it):
+            spec.append("Duplicate")
+        if tlm.is_step_source(it):                 # a run, or a bar anchored by its start
+            spec.append("Remove anchor")
+        spec += ["—", "Delete"]
+        return spec
+
+    def _run_context_action(self, it, label: str) -> None:
+        if label == "Edit…":
+            self.edit_item(it)
+        elif label == "Duplicate":
+            self._duplicate_item(it)
+        elif label == "Remove anchor":
+            self._detach_anchor(it.uid)
+        elif label == "Delete":
+            self._delete_with_reanchor(it.uid)
+        elif label == "Delete selected":
+            self._delete_selection()
+
+    def _open_context_menu(self, it, global_pos) -> None:
+        menu = QMenu(self)
+        actions = {}
+        for label in self._context_menu_spec(it):
+            if label == "—":
+                menu.addSeparator()
+            else:
+                actions[menu.addAction(label)] = label
+        chosen = menu.exec(global_pos)
+        if chosen in actions:
+            self._run_context_action(it, actions[chosen])
 
     # ── Zoom (Ctrl+wheel on a mouse; pinch on a touchpad) ─────────────────────
 
@@ -1009,15 +3694,33 @@ class _TimelineCanvas(QWidget):
         return StepEditorDialog(item, self._editor, new=new, parent=self)
 
     def edit_item(self, item) -> None:
+        if self.elapsed_kind(item) is not None:   # Hold-edit: no editor for what already happened
+            self._lock_notice(item, QCursor.pos())
+            return
         dlg = self._dialog_for(item, new=False)
         r = dlg.exec()
         if r == dlg.REMOVE:
-            self.remove_item(item.uid)
+            self._delete_with_reanchor(item.uid)   # a bar takes its tunes/ramps; deps re-rooted
         elif r == QDialog.DialogCode.Accepted and dlg.result_item is not None:
             self.replace_item(item.uid, dlg.result_item)
 
-    def add_new(self, kind: str) -> None:
+    def _seed_item(self, kind: str):
+        """The item a '+ <kind>' button starts the editor with. In the Hold-edit (locked) mode a new
+        step is seeded in the POST-HOLD window (anchored to the Hold's resume edge) — on-air is
+        history there."""
         default_task = self._editor.available_tasks()[0] if self._editor.available_tasks() else ""
+        anchor = "hold" if (self._lock_elapsed and self._hold_off is not None) else "start"
+        if kind == "bar":
+            return tlm.BarItem(task_name=default_task, start_offset=0.0, stop_offset=0.0,
+                               start_anchor=anchor)
+        if kind == "tune":
+            return tlm.RunItem(task_name=default_task, action="tune", anchor=anchor, offset=0.0)
+        if kind == "ramp":
+            return tlm.RunItem(task_name=default_task, action="ramp", anchor=anchor,
+                               offset=0.0, ramp={})
+        return tlm.RunItem(task_name=default_task, anchor=anchor, offset=0.0)
+
+    def add_new(self, kind: str) -> None:
         if kind == "hold":
             # One Hold per sequence (docs/sequence-hold-step.md §5.1). Seed its position
             # after the furthest window-A on-air point so it reads as "pause at the top".
@@ -1028,19 +3731,14 @@ class _TimelineCanvas(QWidget):
                 return
             item = tlm.RunItem(task_name="", action="hold", anchor="start",
                                offset=self._default_hold_offset())
-        elif kind == "bar":
-            item = tlm.BarItem(task_name=default_task, start_offset=0.0, stop_offset=0.0)
-        elif kind == "tune":
-            item = tlm.RunItem(task_name=default_task, action="tune", anchor="start", offset=0.0)
-        elif kind == "ramp":
-            item = tlm.RunItem(task_name=default_task, action="ramp", anchor="start",
-                               offset=0.0, ramp={})
         else:
-            item = tlm.RunItem(task_name=default_task, anchor="start", offset=0.0)
+            item = self._seed_item(kind)
         dlg = self._dialog_for(item, new=True)
         r = dlg.exec()
         if r == QDialog.DialogCode.Accepted and dlg.result_item is not None:
             self.add_item(dlg.result_item)
+            self._select_only(dlg.result_item.uid)
+            self.update()
 
     def _default_hold_offset(self) -> float:
         """A sensible starting position for a new Hold: just past the furthest on-air
@@ -1054,11 +3752,11 @@ class _TimelineCanvas(QWidget):
                 latest = max(latest, float(getattr(it, "start_offset", 0.0)))
             elif tlm._is_ramp(it):
                 # A ramp's furthest on-air moment is its right (start-anchored) end.
-                for anchor, off in tlm.ramp_span(it, self._hold_off):
+                for anchor, off in tlm.ramp_span(it, self._hold_off, self._step_bases, self._step_off_bases):
                     if anchor == "start":
                         latest = max(latest, off)
-            elif getattr(it, "anchor", "start") == "start":
-                _a, o = tlm.effective_anchor_offset(it, self._hold_off)
+            elif getattr(it, "anchor", "start") in ("start", "step"):
+                _a, o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases, self._step_off_bases)
                 latest = max(latest, o)
         return round(latest, 1) if latest > 0 else 60.0
 
@@ -1146,13 +3844,39 @@ class StepEditorDialog(QDialog):
         self._type.currentIndexChanged.connect(self._sync_type)
         form.addRow("Type", self._type)
 
-        # Duration START anchor: on-air (the usual case) or the Hold — the latter makes
-        # this a window-B duration task that only starts once the operator proceeds (its
-        # STOP stays off-air). Offered only when a Hold exists (or the bar already uses it).
+        # Step-to-step targets (agent ≥ 1.24.0): the eligible steps THIS item may hang off (no
+        # cycle). Computed up front so both a point's Anchor picker and a bar's Start-anchor
+        # picker can offer "after another step…". A bar hangs off a step via its START anchor, so
+        # `step_targets_for_edit` (which reads the point `anchor`) can't preserve a bar's stored
+        # target — build the bar list directly and re-add its stored target if it's gone stale.
+        if self._editor.has_hold():
+            self._step_targets: List = []
+        elif item.kind == "bar":
+            self._step_targets = list(
+                tlm.eligible_step_targets(self._editor.items(), getattr(item, "uid", None)))
+            if getattr(item, "start_anchor", "") == "step":
+                want = getattr(item, "start_anchor_step_id", "") or ""
+                if want and not any((getattr(t, "step_id", "") or "") == want
+                                    for t in self._step_targets):
+                    stored = next(
+                        (o for o in self._editor.items()
+                         if (getattr(o, "step_id", "") or "") == want
+                         and getattr(o, "uid", None) != getattr(item, "uid", None)), None)
+                    if stored is not None:
+                        self._step_targets.append(stored)
+        else:
+            self._step_targets = tlm.step_targets_for_edit(self._editor.items(), item)
+
+        # Duration START anchor: on-air (the usual case), the Hold (a window-B duration task that
+        # only starts once the operator proceeds — its STOP stays off-air), or hung off ANOTHER
+        # step (only the START anchors; the STOP is always off-air). The Hold option shows when a
+        # Hold exists; the step option when there's an eligible target (or the bar already uses one).
         self._start_anchor = Dropdown()
         self._start_anchor.addItem("on-air (T0)", "start")
         if self._editor.has_hold() or getattr(item, "start_anchor", "") == "hold":
             self._start_anchor.addItem("at Hold (resume)", "hold")
+        if self._step_targets or getattr(item, "start_anchor", "") == "step":
+            self._start_anchor.addItem("after another step…", "step")
         self._start_anchor.currentIndexChanged.connect(self._sync_start_anchor)
         self._row_start_anchor = self._add_row(form, "Start anchor", self._start_anchor)
 
@@ -1170,8 +3894,28 @@ class StepEditorDialog(QDialog):
         self._anchor.addItem("off-air", "stop")
         if self._editor.has_hold() or getattr(item, "anchor", "") == "hold":
             self._anchor.addItem("hold (after Hold)", "hold")
+        if self._editor.has_hold() or getattr(item, "anchor", "") == "enter":
+            self._anchor.addItem("hold start (before the pause)", "enter")
+        # Step-to-step anchoring (agent ≥ 1.24.0): fire this step relative to ANOTHER step's
+        # start/end edge, so editing that step moves this one. Offered when there's an eligible
+        # target (no cycle), or when the step already uses it; saving to an agent that can't
+        # resolve it is blocked at save-time (the _blocks_on_step_anchor gate). The window-B
+        # Hold path and a step anchor are mutually exclusive (Phase 1). `_step_targets` is
+        # computed above (shared with the bar's Start-anchor picker).
+        if self._step_targets or getattr(item, "anchor", "") == "step":
+            self._anchor.addItem("after another step…", "step")
         self._run_off = DurationSpinBox()
         self._row_anchor = self._add_row(form, "Anchor", self._anchor)
+
+        # Target step + edge pickers (shown only when anchor == "step").
+        self._anchor_target = Dropdown()
+        for tgt in self._step_targets:
+            self._anchor_target.addItem(tlm._target_label(tgt), getattr(tgt, "uid", None))
+        self._anchor_edge = Dropdown()
+        self._anchor_edge.addItem("its end", "end")
+        self._anchor_edge.addItem("its start", "start")
+        self._row_anchor_target = self._add_row(form, "Anchor to", self._anchor_target)
+        self._row_anchor_edge = self._add_row(form, "Relative to", self._anchor_edge)
         self._row_run = self._add_row(form, "Offset — from anchor", self._run_off)
 
         # Prefill offset widgets from the source item.
@@ -1180,10 +3924,33 @@ class StepEditorDialog(QDialog):
             self._start_anchor.setCurrentIndex(sai if sai >= 0 else 0)
             self._start_off.setValue(float(item.start_offset))
             self._stop_off.setValue(float(item.stop_offset))
+            if getattr(item, "start_anchor", "") == "step":
+                # A bar hung off a step: select its stored target + edge in the shared pickers.
+                want = getattr(item, "start_anchor_step_id", "") or ""
+                for tgt in self._step_targets:
+                    if (getattr(tgt, "step_id", "") or "") == want:
+                        ti = self._anchor_target.findData(getattr(tgt, "uid", None))
+                        if ti >= 0:
+                            self._anchor_target.setCurrentIndex(ti)
+                        break
+                ei = self._anchor_edge.findData(getattr(item, "start_anchor_edge", "end") or "end")
+                self._anchor_edge.setCurrentIndex(ei if ei >= 0 else 0)
         else:
             ai = self._anchor.findData(getattr(item, "anchor", "start"))
             self._anchor.setCurrentIndex(ai if ai >= 0 else 0)
             self._run_off.setValue(float(item.offset))
+            if getattr(item, "anchor", "") == "step":
+                # Select the target whose step_id matches, and the stored edge.
+                want = getattr(item, "anchor_step_id", "") or ""
+                for tgt in self._step_targets:
+                    if (getattr(tgt, "step_id", "") or "") == want:
+                        ti = self._anchor_target.findData(getattr(tgt, "uid", None))
+                        if ti >= 0:
+                            self._anchor_target.setCurrentIndex(ti)
+                        break
+                ei = self._anchor_edge.findData(getattr(item, "anchor_edge", "end") or "end")
+                self._anchor_edge.setCurrentIndex(ei if ei >= 0 else 0)
+        self._anchor.currentIndexChanged.connect(self._sync_anchor)
 
         outer.addLayout(form)
 
@@ -1276,12 +4043,41 @@ class StepEditorDialog(QDialog):
             widget._row_label.setVisible(visible)
 
     def _sync_start_anchor(self) -> None:
-        """Relabel a bar's START-offset row to match its anchor: measured from ON-AIR
-        (T0) normally, or from the Hold's resume instant for a window-B duration task."""
-        hold = self._start_anchor.currentData() == "hold"
+        """Relabel a bar's START-offset row to match its anchor and show the target/edge pickers
+        when the start hangs off another step. On-air (T0) normally; the Hold's resume instant for
+        a window-B duration task; or another step's edge (only the START anchors — the STOP stays
+        off-air)."""
+        data = self._start_anchor.currentData()
+        is_step = data == "step"
+        # A bar reuses the shared step target/edge pickers (only when its start hangs off a step).
+        if self._type.currentData() == "bar":
+            self._set_row_visible(self._anchor_target, is_step)
+            self._set_row_visible(self._anchor_edge, is_step)
         lbl = getattr(self._start_off, "_row_label", None)
         if lbl is not None:
-            lbl.setText("Start — from Hold (resume)" if hold else "Start — from ON-AIR")
+            if is_step:
+                lbl.setText("Start — from the step")     # neutral: may be negative (before the edge)
+            elif data == "hold":
+                lbl.setText("Start — from Hold (resume)")
+            else:
+                lbl.setText("Start — from ON-AIR")
+
+    def _sync_anchor(self) -> None:
+        """Show the target + edge pickers only when anchoring to another step, and relabel
+        the offset row to match (from the anchor, or from the chosen step's edge)."""
+        is_step = self._anchor.currentData() == "step"
+        self._set_row_visible(self._anchor_target, is_step)
+        self._set_row_visible(self._anchor_edge, is_step)
+        lbl = getattr(self._run_off, "_row_label", None)
+        if lbl is not None:
+            # Direction-neutral: the offset runs from the referenced edge and may be negative
+            # (fire before it), like a start/stop-anchored warm-up lead-in.
+            if is_step:
+                lbl.setText("Offset — from the step")
+            elif self._anchor.currentData() == "enter":
+                lbl.setText("Offset — before the pause (≤ 0)")
+            else:
+                lbl.setText("Offset — from anchor")
 
     def _is_tune(self) -> bool:
         return self._type.currentData() == "tune"
@@ -1327,7 +4123,9 @@ class StepEditorDialog(QDialog):
         self._set_row_visible(self._anchor, not is_bar)   # a point (run/tune) has one anchor
         self._set_row_visible(self._run_off, not is_bar)
         if is_bar:
-            self._sync_start_anchor()
+            self._sync_start_anchor()          # manages the shared target/edge pickers for a bar
+        else:
+            self._sync_anchor()
         # Tune sends live-parameter values, not CLI args.
         self._extra_row.setVisible(not is_tune)
         self._hint.setText(
@@ -1542,7 +4340,19 @@ class StepEditorDialog(QDialog):
         if self._is_tune() or self._type.currentData() == "ramp":
             anchor = self._anchor.currentData() or "start"
             off = round(self._run_off.value(), 1)
-            return tlm.carry_order_key(anchor, off, tlm.hold_offset(self._editor.items()))
+            items = list(self._editor.items())
+            h_off = tlm.hold_offset(items)
+            if anchor == "step":
+                # Order at the RESOLVED base (target edge + offset) using the LIVE pickers, so
+                # carried state reflects only the steps that genuinely precede this one.
+                tgt = next((it for it in items
+                            if getattr(it, "uid", None) == self._anchor_target.currentData()), None)
+                if tgt is not None:
+                    e = tlm.step_edge_offset(items, getattr(tgt, "step_id", "") or "",
+                                             self._anchor_edge.currentData() or "end", h_off)
+                    if e is not None:
+                        return (0, e + off)
+            return tlm.carry_order_key(anchor, off, h_off)
         return (0, 0.0)                                  # a bar / run starts the task
 
     def _carried_values(self, task: str, script: str, specs: list) -> dict:
@@ -1660,30 +4470,72 @@ class StepEditorDialog(QDialog):
                 return
             anchor = self._anchor.currentData()
             offset = round(self._run_off.value(), 1)
+            sa = self._resolve_step_anchor(anchor, offset)
+            if sa is False:
+                return
             spans_getter = getattr(self._editor, "task_spans", None)
-            # A window-B (Hold-anchored) tune is timed relative to the resume instant,
-            # which isn't known until proceed — so its window fit can't be checked here.
-            if spans_getter is not None and anchor != "hold":
+            # A window-B (Hold-anchored) tune, a pause-anchored one, OR a step-anchored tune is
+            # timed relative to another event (resume / the pause / the target step), not a fixed
+            # on-air offset — so its fixed-window fit can't be checked here.
+            if spans_getter is not None and anchor not in ("hold", "step", "enter"):
                 err = tlm.step_within_task_error(spans_getter(task), anchor, offset, kind="tune")
                 if err:
                     self._set_status(err, error=True)
                     return
             self.result_item = tlm.RunItem(
                 task_name=task, action="tune", params=params,
-                anchor=anchor, offset=offset, uid=uid, power_view=pview)
+                anchor=anchor, offset=offset, uid=uid, power_view=pview,
+                step_id=getattr(self._src, "step_id", "") or "", **sa)
         elif mode == "bar":
+            start_anchor = self._start_anchor.currentData() or "start"
+            start_off = round(self._start_off.value(), 1)
+            # A bar hangs its START off another step via the SHARED target/edge pickers (only
+            # the start anchors; the stop is always off-air). _resolve_step_anchor validates +
+            # assigns the target a stable id, returning {} for a non-step anchor.
+            sa = self._resolve_step_anchor(start_anchor, start_off)
+            if sa is False:
+                return
+            step_kw = {}
+            if start_anchor == "step":
+                step_kw = {"start_anchor_step_id": sa.get("anchor_step_id", ""),
+                           "start_anchor_edge": sa.get("anchor_edge", "end")}
             self.result_item = tlm.BarItem(
                 task_name=task, args=self._build_args(), replace_args=True,
-                start_offset=round(self._start_off.value(), 1),
+                start_offset=start_off,
                 stop_offset=round(self._stop_off.value(), 1),
-                start_anchor=self._start_anchor.currentData() or "start",
-                uid=uid, power_view=pview)
+                start_anchor=start_anchor,
+                step_id=getattr(self._src, "step_id", "") or "",   # keep it a valid anchor target
+                uid=uid, power_view=pview, **step_kw)
         else:
+            anchor = self._anchor.currentData()
+            offset = round(self._run_off.value(), 1)
+            sa = self._resolve_step_anchor(anchor, offset)
+            if sa is False:
+                return
             self.result_item = tlm.RunItem(
                 task_name=task, args=self._build_args(), replace_args=True,
-                anchor=self._anchor.currentData(),
-                offset=round(self._run_off.value(), 1), uid=uid, power_view=pview)
+                anchor=anchor, offset=offset, uid=uid, power_view=pview,
+                step_id=getattr(self._src, "step_id", "") or "", **sa)
         self.accept()
+
+    def _resolve_step_anchor(self, anchor: str, offset: float):
+        """For a step-anchored point: validate + return {anchor_step_id, anchor_edge} (assigning
+        the target a stable id). Returns {} for any non-step anchor, or False (after showing an
+        error) when the step anchor is invalid — so _accept can bail.
+
+        A NEGATIVE offset is allowed (the dependent fires before its target's edge, like a
+        start/stop-anchored warm-up lead-in); the save/arm gate (sequence_editor /
+        sequences_panel) enforces the sequence-step-anchor-negative capability."""
+        if anchor != "step":
+            return {}
+        tgt_uid = self._anchor_target.currentData()
+        target = next((it for it in self._editor.items()
+                       if getattr(it, "uid", None) == tgt_uid), None)
+        if target is None:
+            self._set_status("pick a step to anchor to", error=True)
+            return False
+        return {"anchor_step_id": tlm.ensure_step_id(target),
+                "anchor_edge": self._anchor_edge.currentData() or "end"}
 
     def _disconnect(self) -> None:
         if self._editor._hub is None:
@@ -1761,6 +4613,226 @@ class HoldEditorDialog(QDialog):
         self.accept()
 
 
+class _RowHeader(QWidget):
+    """The Gantt-style row-header column, left of the canvas: one row per timeline item
+    (a task's tunes/ramps indented beneath it in the task's hue), aligned to the canvas
+    rows. Reads the canvas's row_layout() so it always tracks the same order/positions."""
+
+    HDR_W = 210
+
+    def __init__(self, canvas: "_TimelineCanvas"):
+        super().__init__()
+        self._canvas = canvas
+        self.setFixedWidth(self.HDR_W)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(self.HDR_W, getattr(self._canvas, "_content_h", 200))
+
+    def refresh(self) -> None:
+        self.setMinimumHeight(getattr(self._canvas, "_content_h", 200))
+        self.update()
+
+    def _meta(self, it):
+        """(name, sub, type_label) for a row header entry."""
+        name, sub, typ = self._meta_free(it)
+        k = self._canvas.elapsed_kind(it)           # Hold-edit: say what already happened
+        if k == "full":
+            sub = f"{sub} · ran" if sub else "ran"
+        elif k == "start":
+            sub = "runs through the Hold"           # started before the pause, still running
+        return name, sub, typ
+
+    def _meta_free(self, it):
+        act = getattr(it, "action", "run")
+        if getattr(it, "kind", None) == "bar":
+            return it.task_name or "(no task)", "on-air → off-air", "Duration"
+        if act == "ramp":
+            r = dict(getattr(it, "ramp", None) or {})
+            a, b = r.get("start"), r.get("stop")
+            # A --power ramp controlled in a view shows its from→to in THAT quantity (not the base).
+            view = self._canvas._editor._ramp_power_display(it)
+            if view:
+                rng = f"{view[0]} → {view[1]}"
+            else:
+                rng = f"{fmt_value(a)} → {fmt_value(b)}" if a is not None and b is not None else ""
+            return f"{r.get('param') or 'param'} ramp", rng, "Ramp"
+        if act == "tune":
+            # A calibrated --power set in a view (a chirp's live density) shows THAT quantity, not base.
+            # Named by WHAT it tunes, not its task (the row's indent + hue already say that).
+            overrides = self._canvas._editor._pill_power_display(it)
+            summ = ", ".join(f"{k}={overrides.get(k, v)}" for k, v in (it.params or {}).items())
+            what = ", ".join(str(k) for k in (it.params or {})) or "param"
+            return f"{what} tune", summ, "Tune"
+        return it.task_name or "(no task)", "one-shot", "One-shot"
+
+    def paintEvent(self, _e):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.fillRect(self.rect(), QColor(Palette.SURFACE))
+        p.setPen(QPen(QColor(Palette.HAIRLINE if hasattr(Palette, "HAIRLINE") else Palette.BORDER), 1))
+        p.drawLine(self.width() - 1, 0, self.width() - 1, self.height())
+        # caption
+        f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPixelSize(10); f.setBold(True)
+        p.setFont(f); p.setPen(QColor(Palette.TEXT_FAINT))
+        p.drawText(16, 6, self.width() - 24, 12,
+                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                   "TASKS & STEPS")
+        for row in self._canvas.row_layout():
+            it, y, hue, child = row["item"], row["y"], row["hue"], row["child"]
+            known = self._canvas.task_known(getattr(it, "task_name", ""))
+            base = QColor(hue) if (hue and known) else QColor(Palette.CRASH)
+            cy = y + LANE_H / 2
+            name, sub, typ = self._meta(it)
+            locked = self._canvas.elapsed_kind(it) == "full"     # Hold-edit: already ran
+            if locked:
+                base = QColor(ELAPSED_HUE)
+                known = True                                     # grey, never the red "unknown"
+            if child:
+                # indent + a small kin elbow in the task hue
+                kin = QColor(base); kin.setAlpha(120)
+                p.setPen(QPen(kin, 1.5)); p.setBrush(Qt.BrushStyle.NoBrush)
+                path = QPainterPath(); path.moveTo(22, y - 6); path.lineTo(22, cy)
+                path.lineTo(30, cy)
+                p.drawPath(path)
+                nx = 34
+            else:
+                p.setPen(Qt.PenStyle.NoPen); p.setBrush(base)
+                p.drawRoundedRect(QRectF(14, cy - 4.5, 9, 9), 2.5, 2.5)
+                nx = 30
+            # name (top) + sub (bottom), or centred if no sub
+            fn = QFont(Fonts.SANS.split(",")[0].strip('"')); fn.setPixelSize(12)
+            fn.setWeight(QFont.Weight(600 if not child else 500))
+            fm = QFontMetrics(fn)
+            badge_w = self._type_badge(p, typ, base, known, y)   # draws + returns width
+            if locked:                                           # a small padlock before the badge
+                self._paint_lock(p, self.width() - badge_w - 24, cy, QColor(ELAPSED_INK))
+                badge_w += 18
+            avail = self.width() - nx - badge_w - 16
+            if sub:
+                p.setFont(fn)
+                p.setPen(QColor(ELAPSED_INK if locked else (Palette.TEXT if known else Palette.CRASH)))
+                p.drawText(nx, int(y + 3), avail, 15,
+                           int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                           fm.elidedText(name, Qt.TextElideMode.ElideRight, avail))
+                fs = QFont(Fonts.SANS.split(",")[0].strip('"')); fs.setPixelSize(10)
+                p.setFont(fs); p.setPen(QColor(Palette.TEXT_FAINT))
+                fms = QFontMetrics(fs)
+                p.drawText(nx, int(y + LANE_H - 14), avail, 12,
+                           int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                           fms.elidedText(sub, Qt.TextElideMode.ElideRight, avail))
+            else:
+                p.setFont(fn); p.setPen(QColor(Palette.TEXT if known else Palette.CRASH))
+                p.drawText(nx, int(y), avail, LANE_H,
+                           int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                           fm.elidedText(name, Qt.TextElideMode.ElideRight, avail))
+        p.end()
+
+    def _type_badge(self, p, text, base, known, y) -> int:
+        f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPixelSize(8); f.setBold(True)
+        p.setFont(f); fm = QFontMetrics(f)
+        w = fm.horizontalAdvance(text) + 10
+        r = QRectF(self.width() - w - 12, y + (LANE_H - 14) / 2, w, 14)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(Palette.INSET))
+        p.drawRoundedRect(r, 4, 4)
+        p.setPen(QColor(Palette.TEXT_MUTED))
+        p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
+        return w + 12
+
+    @staticmethod
+    def _paint_lock(p, x, cy, col) -> None:
+        """A small padlock (shackle + body) — the Hold-edit 'already ran' marker on a row."""
+        p.setPen(QPen(col, 1.4)); p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(QRectF(x + 2.0, cy - 7.5, 6.0, 7.0), 0, 180 * 16)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(col)
+        p.drawRoundedRect(QRectF(x, cy - 3.0, 10.0, 8.0), 2.0, 2.0)
+
+
+class _Minimap(QWidget):
+    """A compact overview strip under the timeline: the whole sequence scaled to fit, with
+    on-air/off-air guides, a task-hued segment per row, and a viewport rectangle showing the
+    visible slice. Click / drag it to scroll the main canvas."""
+    _PAD = 8.0
+
+    def __init__(self, editor: "TimelineEditor"):
+        super().__init__()
+        self._editor = editor
+        self._canvas = editor._canvas
+        self.setFixedHeight(34)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._dragging = False
+
+    def _track(self) -> QRectF:
+        return QRectF(self._PAD, 5.0, max(1.0, self.width() - 2 * self._PAD), self.height() - 10.0)
+
+    def _scale(self, track):
+        return track.width() / max(1.0, float(self._canvas.width()))
+
+    def paintEvent(self, _e):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        track = self._track()
+        p.setPen(QPen(QColor(Palette.BORDER), 1)); p.setBrush(QColor("#FFFFFF"))
+        p.drawRoundedRect(track, 6, 6)
+        p.save(); p.setClipRect(track)
+        scale = self._scale(track)
+        def X(cx):
+            return track.left() + cx * scale
+        # on-air / off-air guides
+        for cx, col in ((self._canvas._on, Palette.ONLINE), (self._canvas._off, Palette.CRASH)):
+            p.setPen(QPen(QColor(col), 1))
+            p.drawLine(int(X(cx)), int(track.top()), int(X(cx)), int(track.bottom()))
+        # one task-hued segment per row (stacked to fit the strip height)
+        rows = self._canvas._rows
+        step = min(4.0, (track.height() - 6.0) / max(1, len(rows)))
+        for i, it in enumerate(rows):
+            g = self._canvas._geom.get(it.uid)
+            if not g:
+                continue
+            if "start_x" in g:
+                x1, x2 = sorted((g["start_x"], g["stop_x"]))
+            else:
+                cx = g.get("cx", 0.0); x1, x2 = cx - 4.0, cx + 4.0
+            hue = self._canvas._hue_for(it)
+            col = QColor(hue) if (hue and self._canvas.task_known(getattr(it, "task_name", ""))) \
+                else QColor(Palette.CRASH)
+            if getattr(it, "action", "") in ("tune", "ramp"):
+                col.setAlpha(180)
+            y = track.top() + 3.0 + i * step
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(col)
+            p.drawRoundedRect(QRectF(X(x1), y, max(3.0, (x2 - x1) * scale), max(2.0, step - 1.0)),
+                              1.5, 1.5)
+        # viewport rectangle (the slice currently visible in the scroll area)
+        sc = getattr(self._canvas, "_scroll", None)
+        if sc is not None:
+            vx = X(sc.horizontalScrollBar().value())
+            vw = max(6.0, sc.viewport().width() * scale)
+            r = QRectF(vx, track.top() + 1.0, vw, track.height() - 2.0)
+            fill = QColor(Palette.ACCENT); fill.setAlpha(24)
+            p.setPen(QPen(QColor(Palette.ACCENT), 1.5)); p.setBrush(fill)
+            p.drawRoundedRect(r, 5, 5)
+        p.restore(); p.end()
+
+    def _scroll_to(self, x):
+        sc = getattr(self._canvas, "_scroll", None)
+        if sc is None:
+            return
+        track = self._track(); scale = self._scale(track)
+        cx = (x - track.left()) / scale
+        sc.horizontalScrollBar().setValue(int(cx - sc.viewport().width() / 2))
+
+    def mousePressEvent(self, e):  # noqa: N802
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._scroll_to(e.position().x())
+
+    def mouseMoveEvent(self, e):  # noqa: N802
+        if self._dragging:
+            self._scroll_to(e.position().x())
+
+    def mouseReleaseEvent(self, e):  # noqa: N802
+        self._dragging = False
+
+
 # ── Public editor: toolbar + scrollable canvas ────────────────────────────────
 
 class TimelineEditor(QWidget):
@@ -1802,16 +4874,20 @@ class TimelineEditor(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(8)
 
+        _chip = (f"QPushButton {{ border:1px solid {Palette.BORDER}; border-radius:999px; "
+                 f"padding:5px 12px; background:{Palette.SURFACE}; color:{Palette.TEXT_MUTED}; "
+                 f"font-weight:600; font-size:12px; }} "
+                 f"QPushButton:hover {{ color:{Palette.TEXT}; border-color:{Palette.BORDER_STRONG}; }}")
         bar = QHBoxLayout()
-        self._add_bar = QPushButton("+ Duration")
+        self._add_bar = QPushButton("Duration")
         self._add_bar.setToolTip("A task that runs across the on-air window (start + stop)")
-        self._add_run = QPushButton("+ One-shot")
+        self._add_run = QPushButton("One-shot")
         self._add_run.setToolTip("A task that fires once and exits (many allowed)")
-        self._add_tune = QPushButton("+ Tune")
+        self._add_tune = QPushButton("Tune")
         self._add_tune.setToolTip("Change a running duration task's live parameters at a set time")
-        self._add_ramp = QPushButton("+ Ramp")
+        self._add_ramp = QPushButton("Ramp")
         self._add_ramp.setToolTip("Sweep a running duration task's live parameter over time")
-        self._add_hold = QPushButton("+ Hold")
+        self._add_hold = QPushButton("Hold")
         self._add_hold.setToolTip("Pause the run here and await the operator (the Hold step); "
                                   "post-hold steps anchor to it. Library / operator-present runs "
                                   "only — the schedule runs straight through it.")
@@ -1820,27 +4896,61 @@ class TimelineEditor(QWidget):
         self._add_tune.clicked.connect(lambda: self._canvas.add_new("tune"))
         self._add_ramp.clicked.connect(lambda: self._canvas.add_new("ramp"))
         self._add_hold.clicked.connect(lambda: self._canvas.add_new("hold"))
-        bar.addWidget(self._add_bar)
-        bar.addWidget(self._add_run)
-        bar.addWidget(self._add_tune)
-        bar.addWidget(self._add_ramp)
-        bar.addWidget(self._add_hold)
+        for b, kind in ((self._add_bar, "bar"), (self._add_run, "run"), (self._add_tune, "tune"),
+                        (self._add_ramp, "ramp"), (self._add_hold, "hold")):
+            b.setStyleSheet(_chip)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setIcon(_tool_icon(kind)); b.setIconSize(QSize(15, 15))
+            bar.addWidget(b)
         bar.addStretch(1)
         # Minimum on-air duration the current steps require (ramps at both ends etc).
         self._mindur = QLabel("")
         self._mindur.setStyleSheet(f"font-size: 11px; color: {Palette.ACCENT};")
         bar.addWidget(self._mindur)
-        self._hint = QLabel("Drag handles to set timing · click to edit")
+        self._hint = QLabel("Drag a bar to move it · click to select, double-click to edit")
         self._hint.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         bar.addWidget(self._hint)
-        # Zoom readout — Ctrl+wheel / pinch to zoom; click to reset to 100%.
-        self._zoom_btn = QPushButton("100%")
-        self._zoom_btn.setFixedWidth(52)
-        self._zoom_btn.setFlat(True)
-        self._zoom_btn.setToolTip("Horizontal zoom — Ctrl+scroll or pinch. Click to reset.")
-        self._zoom_btn.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_MUTED};")
-        self._zoom_btn.clicked.connect(lambda: self._canvas.reset_zoom())
-        bar.addWidget(self._zoom_btn)
+        # Undo / redo.
+        self._undo_btn = QPushButton("Undo")
+        self._undo_btn.setToolTip("Undo (Ctrl+Z)")
+        self._redo_btn = QPushButton("Redo")
+        self._redo_btn.setToolTip("Redo (Ctrl+Y / Ctrl+Shift+Z)")
+        self._undo_btn.clicked.connect(lambda: self._canvas.undo())
+        self._redo_btn.clicked.connect(lambda: self._canvas.redo())
+        for b in (self._undo_btn, self._redo_btn):
+            b.setStyleSheet(_chip)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setEnabled(False)
+            bar.addWidget(b)
+        # Fit-to-view + zoom readout.
+        self._fit_btn = QPushButton("Fit")
+        self._fit_btn.setStyleSheet(_chip)
+        self._fit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fit_btn.setToolTip("Fit the whole sequence to the view")
+        self._fit_btn.clicked.connect(self._fit)
+        bar.addWidget(self._fit_btn)
+        # Segmented zoom control: [ − | 100% | + ].
+        zoomw = QFrame(); zoomw.setObjectName("zoomseg")
+        zoomw.setStyleSheet(
+            f"#zoomseg {{ border:1px solid {Palette.BORDER}; border-radius:999px; "
+            f"background:{Palette.SURFACE}; }} "
+            f"#zoomseg QPushButton {{ border:none; background:transparent; "
+            f"color:{Palette.TEXT_MUTED}; padding:2px 10px; font-size:15px; }} "
+            f"#zoomseg QPushButton:hover {{ color:{Palette.TEXT}; }} "
+            f"#zoomseg QLabel {{ color:{Palette.TEXT_MUTED}; font-size:11px; "
+            f"border-left:1px solid {Palette.BORDER}; border-right:1px solid {Palette.BORDER}; "
+            f"padding:2px 6px; }}")
+        zh = QHBoxLayout(zoomw); zh.setContentsMargins(0, 0, 0, 0); zh.setSpacing(0)
+        zo = QPushButton("−"); zi = QPushButton("+")
+        zo.setCursor(Qt.CursorShape.PointingHandCursor); zi.setCursor(Qt.CursorShape.PointingHandCursor)
+        zo.clicked.connect(lambda: self._canvas._apply_zoom(1 / 1.15, self._canvas._viewport_center_x()))
+        zi.clicked.connect(lambda: self._canvas._apply_zoom(1.15, self._canvas._viewport_center_x()))
+        self._zoom_btn = QLabel("100%")
+        self._zoom_btn.setToolTip("Horizontal zoom — Ctrl+scroll or pinch")
+        self._zoom_btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._zoom_btn.setFixedWidth(44)
+        zh.addWidget(zo); zh.addWidget(self._zoom_btn); zh.addWidget(zi)
+        bar.addWidget(zoomw)
         outer.addLayout(bar)
 
         # Sequence-level POWER ACHIEVABILITY warning (warn, never block): a ramp point that the
@@ -1871,27 +4981,110 @@ class TimelineEditor(QWidget):
         self._canvas.changed.connect(self._update_mindur)
         self._canvas.changed.connect(self._update_achievability)
         self._canvas.changed.connect(self._sync_hold_button)
+        self._canvas.changed.connect(self._sync_undo_buttons)
         self._sync_hold_button()
+        self._sync_undo_buttons()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)   # canvas stretches to fill a wider window
         scroll.setWidget(self._canvas)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setMinimumHeight(240)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setStyleSheet(
-            f"QScrollArea {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER}; "
-            f"border-radius: 8px; }}")
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(f"QScrollArea {{ background: {Palette.SURFACE}; border: none; }}")
         self._canvas.set_scroll_area(scroll)
-        outer.addWidget(scroll, stretch=1)
+
+        # Task-colour legend + the parent-inheritance caption (the mockup's row).
+        self._legend = _Legend(self._canvas)
+        self._canvas.changed.connect(self._legend.update)
+        outer.addWidget(self._legend)
+
+        # Gantt-style row-header column, left of the canvas; both wrapped in one bordered
+        # "stage" frame so they read as a single panel (the mockup layout).
+        self._rowhdr = _RowHeader(self._canvas)
+        self._canvas.changed.connect(self._rowhdr.refresh)
+        stage = QFrame(); stage.setObjectName("tlStage")
+        stage.setStyleSheet(
+            f"#tlStage {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER}; "
+            f"border-radius: 10px; }}")
+        srow = QHBoxLayout(stage); srow.setContentsMargins(0, 0, 0, 0); srow.setSpacing(0)
+        srow.addWidget(self._rowhdr)
+        srow.addWidget(scroll, stretch=1)
+        outer.addWidget(stage, stretch=1)
+
+        # Overview minimap: the whole sequence scaled to fit + a draggable viewport rectangle.
+        self._minimap = _Minimap(self)
+        self._canvas.changed.connect(self._minimap.update)
+        sb = scroll.horizontalScrollBar()
+        sb.valueChanged.connect(self._minimap.update)
+        sb.rangeChanged.connect(lambda *_: self._minimap.update())
+        mmrow = QHBoxLayout(); mmrow.setContentsMargins(2, 0, 2, 0); mmrow.setSpacing(10)
+        mmcap = QLabel("OVERVIEW")
+        mmcap.setStyleSheet(f"font-size:10px; font-weight:700; letter-spacing:0.7px; "
+                            f"color:{Palette.TEXT_FAINT};")
+        mmrow.addWidget(mmcap)
+        mmrow.addWidget(self._minimap, stretch=1)
+        outer.addLayout(mmrow)
+
+    def showEvent(self, e):  # noqa: N802
+        super().showEvent(e)
+        # Open framed to the whole sequence (like the mockup), once, after layout settles.
+        if not getattr(self, "_did_autofit", False) and self._canvas.items():
+            self._did_autofit = True
+            QTimer.singleShot(0, self._fit)
 
     def _sync_zoom(self) -> None:
         self._zoom_btn.setText(f"{round(self._canvas._zoom * 100)}%")
+
+    def _fit(self) -> None:
+        """Zoom so the whole sequence fits the viewport width."""
+        c = self._canvas
+        vp = c._scroll.viewport().width() if c._scroll is not None else self.width()
+        nat = c._content_w / max(c._zoom, 1e-6)     # content width at zoom 1
+        if nat <= 0 or vp <= 0:
+            return
+        z = max(ZOOM_MIN, min(1.5, (vp - 6) / nat))
+        if abs(z - c._zoom) > 1e-4:
+            c._zoom = z
+            c.relayout()
+            self._sync_zoom()
 
     def set_hold_authoring(self, enabled: bool) -> None:
         """Show/hide the '+ Hold' button. Hidden on surfaces where a Hold has no
         effect (the plan editor: a plan's Hold is compiled out for the schedule)."""
         self._hold_authoring = bool(enabled)
         self._sync_hold_button()
+
+    # ── Hold-edit: the elapsed window is read-only ───────────────────────────
+    LOCKED_HINT = ("Steps before the Hold already ran and are locked · edit the post-hold "
+                   "steps · double-click to edit · Ctrl+Z undo")
+
+    def set_elapsed_locked(self, locked: bool) -> None:
+        """Edit-while-holding (docs/hold-edit-elapsed-mockup.html, option A): every step that
+        already RAN — at/before the Hold — and the Hold itself are read-only: frosted, monochrome,
+        no handles, no drag / anchor / edit / delete; a click just says so. New steps seed in the
+        post-hold window. The canvas decides what's elapsed (`elapsed_kind`)."""
+        self._elapsed_locked = bool(locked)
+        self._canvas.set_elapsed_locked(locked)
+        if locked:
+            self._hint.setText(self.LOCKED_HINT)
+        self._canvas.changed.emit()                  # row header / legend / minimap re-read
+
+    def elapsed_locked(self) -> bool:
+        return bool(getattr(self, "_elapsed_locked", False))
+
+    def elapsed_kind(self, item) -> Optional[str]:
+        """"full" / "start" / "hold" / None — see _TimelineCanvas.elapsed_kind."""
+        return self._canvas.elapsed_kind(item)
+
+    def _sync_undo_buttons(self) -> None:
+        cv = getattr(self, "_canvas", None)
+        if cv is None:
+            return
+        if getattr(self, "_undo_btn", None) is not None:
+            self._undo_btn.setEnabled(cv.can_undo())
+        if getattr(self, "_redo_btn", None) is not None:
+            self._redo_btn.setEnabled(cv.can_redo())
 
     def _sync_hold_button(self) -> None:
         # One Hold per sequence: once one exists, disable '+ Hold' (edit/remove the
@@ -2054,6 +5247,12 @@ class TimelineEditor(QWidget):
     def param_cache(self) -> Dict[str, list]:
         return self._param_specs
 
+    def task_param_specs(self, task: str) -> list:
+        """The cached argspec parameter dicts of `task`'s script ([] when unknown / not yet
+        fetched) — e.g. for recognising the script's RF gate."""
+        script, _args = self.script_for_task(task)
+        return list(self._param_specs.get(script) or []) if script else []
+
     def cache_script_meta(self, script: str, result) -> None:
         """Populate ALL per-script caches from one get_script_params result, so whichever dialog
         (step or ramp) fetches a script FIRST leaves the caches COMPLETE — the params, the
@@ -2073,8 +5272,11 @@ class TimelineEditor(QWidget):
         self._tasks = list(names)
         if not self._tasks:
             self._hint.setText("no tasks on this unit — define one in the Tasks tab first")
+        elif self.elapsed_locked():
+            self._hint.setText(self.LOCKED_HINT)
         else:
-            self._hint.setText("Drag handles to set timing · click to edit")
+            self._hint.setText("Drag an edge dot to anchor · click / shift-click / drag a box to "
+                               "select · double-click to edit · right-click for more · Ctrl+Z undo")
         self._canvas.relayout()
 
     def available_tasks(self) -> List[str]:
@@ -2152,14 +5354,41 @@ class TimelineEditor(QWidget):
                 return spec
         return None
 
+    def _view_delta_for(self, item, info, pv) -> Optional[Tuple[float, str]]:
+        """(view_delta_db, unit) for a step whose --power is controlled in the ``pv`` view — the offset
+        added to the base --power to read the operator's SET quantity, with the view's unit. A bw-KEYED
+        view (a chirp's live density) folds its delta through the params CARRIED to this item's fire
+        position; a CONSTANT-offset view (full-bandwidth total power) has no bridge param and uses the
+        law's own representative delta. None when there's no such view law. The (best-effort) callers
+        wrap this, so it may raise — they fall back to the raw base."""
+        spec = (info.get("view_laws") or {}).get(pv)
+        law = tlm._view_law_of(spec)
+        if law is None:
+            return None
+        if law.params():
+            specs = info.get("specs") or []
+            _items = self._canvas.items()
+            _hoff = tlm.hold_offset(_items)
+            carried = tlm.sequence_effective_values(
+                _items, getattr(item, "task_name", None), info.get("base_args") or [], specs,
+                getattr(item, "uid", None),
+                target_key=tlm._carry_order_key(
+                    item, _hoff, tlm.resolve_step_offsets(_items, _hoff)))
+            from state.power_fold import resolve_keyed_values
+            keyed = resolve_keyed_values(specs, carried, law.params())
+            delta = law.delta_db(keyed) if keyed else law.rep_delta_db()
+        else:
+            delta = law.rep_delta_db()
+        return delta, str(spec.get("unit") or "").strip()
+
     def _pill_power_display(self, item) -> Dict[str, str]:
-        """Override text for a tune step's canvas pill: when the step controls --power in a non-base
-        view, the pill shows the quantity the operator SET (base + view_delta) with its unit — not the
-        raw base it is sent in. Covers a bw-KEYED view (a chirp's live density → base + view_delta at
-        the carried bw) AND a CONSTANT-offset view (full-bandwidth total power → base + a fixed delta,
-        no bridge param). Returns ``{power_dest: 'value unit'}`` to replace that param's pill value, or
-        ``{}`` to show the raw params. Best-effort — any gap (no view, params not cached, unresolvable
-        carried bw) falls back to the raw base, so the label helper never breaks the canvas."""
+        """Override text for a tune step's canvas pill / row header: when the step controls --power in
+        a non-base view, it shows the quantity the operator SET (base + view_delta) with its unit — not
+        the raw base it is sent in. Covers a bw-KEYED view (a chirp's live density → base + view_delta
+        at the carried bw) AND a CONSTANT-offset view (full-bandwidth total power → base + a fixed
+        delta, no bridge param). Returns ``{power_dest: 'value unit'}`` to replace that param's value,
+        or ``{}`` to show the raw params. Best-effort — any gap (no view, params not cached,
+        unresolvable carried bw) falls back to the raw base, so the label helper never breaks."""
         pv = getattr(item, "power_view", None)
         params = getattr(item, "params", None) or {}
         task = getattr(item, "task_name", None)
@@ -2174,28 +5403,48 @@ class TimelineEditor(QWidget):
             base = params.get(power_dest)
             if not isinstance(base, (int, float)) or isinstance(base, bool):
                 return {}
-            spec = (info.get("view_laws") or {}).get(pv)
-            law = tlm._view_law_of(spec)
-            if law is None:
+            dv = self._view_delta_for(item, info, pv)
+            if dv is None:
                 return {}
-            # A bw-keyed view (density) folds its delta through the carried bridge params; a
-            # constant-offset view (total power) has none and uses the law's own (representative)
-            # delta — either way the pill shows what the operator set, not the base.
-            if law.params():
-                specs = info.get("specs") or []
-                carried = tlm.sequence_effective_values(
-                    self._canvas.items(), task, info.get("base_args") or [], specs,
-                    getattr(item, "uid", None),
-                    target_key=tlm._carry_order_key(item, tlm.hold_offset(self._canvas.items())))
-                from state.power_fold import resolve_keyed_values
-                keyed = resolve_keyed_values(specs, carried, law.params())
-                delta = law.delta_db(keyed) if keyed else law.rep_delta_db()
-            else:
-                delta = law.rep_delta_db()
-            unit = str(spec.get("unit") or "").strip()
+            delta, unit = dv
             return {power_dest: f"{base + delta:.2f}{(' ' + unit) if unit else ''}"}
         except Exception:                          # noqa: BLE001 — a label helper must never break
             return {}
+
+    def _ramp_power_display(self, item) -> Optional[Tuple[str, str]]:
+        """(from_str, to_str) for a --power ramp shown in the view quantity the operator SET — each
+        base endpoint + the view_delta at the carried bw, with the view's unit — or None to show the
+        raw base. The ramp analogue of ``_pill_power_display``: a ramp swept in a chirp's live density
+        reads its from→to in dBm/MHz, not the raw base it is sent in. A ramp on any OTHER parameter, or
+        with no control view, returns None (raw range). Best-effort — any gap falls back to raw."""
+        pv = getattr(item, "power_view", None)
+        task = getattr(item, "task_name", None)
+        r = dict(getattr(item, "ramp", None) or {})
+        a, b = r.get("start"), r.get("stop")
+        if not pv or not task or a is None or b is None:
+            return None
+        try:
+            resolve = self._achievability_resolver()
+            info = resolve(task) if resolve else None
+            if not info:
+                return None
+            # The ramp records the param it sweeps by its display name-or-dest (ramp_editor._pname);
+            # accept either so a power spec with a distinct name still matches.
+            power_dest = info.get("power_dest")
+            pspec = next((s for s in (info.get("specs") or []) if s.get("dest") == power_dest), None)
+            if (r.get("param") or "") not in {power_dest, (pspec or {}).get("name")}:
+                return None                        # a non-power ramp keeps its raw range
+            if isinstance(a, bool) or isinstance(b, bool) \
+                    or not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+                return None
+            dv = self._view_delta_for(item, info, pv)
+            if dv is None:
+                return None
+            delta, unit = dv
+            u = (" " + unit) if unit else ""
+            return f"{a + delta:.2f}{u}", f"{b + delta:.2f}{u}"
+        except Exception:                          # noqa: BLE001 — a label helper must never break
+            return None
 
     def _update_achievability(self) -> None:
         """Refresh the sequence-level power-achievability warning. Best-effort: a task whose params
@@ -2287,6 +5536,13 @@ class TimelineEditor(QWidget):
                 "ramp": (ramp.model_dump() if hasattr(ramp, "model_dump")
                          else dict(ramp)) if ramp else None,
                 "power_view": getattr(s, "power_view", None),
+                # Step-to-step anchoring: carry the stable id + the anchor target/edge so a
+                # step-anchored step survives load (else it reloads anchor="step" with no target
+                # and the editor falls back to the wrong step).
+                "id": getattr(s, "id", "") or "",
+                "anchor_step_id": getattr(s, "anchor_step_id", "") or "",
+                "anchor_edge": getattr(s, "anchor_edge", "end") or "end",
+                "anchor_own_edge": getattr(s, "anchor_own_edge", "start") or "start",
                 # power_hold_dest is deliberately NOT carried onto the canvas item — the injected
                 # --power was just stripped, so the authored item is clean and re-derived on save.
             })
@@ -2316,7 +5572,13 @@ class TimelineEditor(QWidget):
                 params=dict(d.get("params") or {}),
                 ramp=m.RampSpec(**ramp) if ramp else None,
                 power_view=d.get("power_view"),
-                power_hold_dest=d.get("power_hold_dest")))
+                power_hold_dest=d.get("power_hold_dest"),
+                # Step-to-step anchoring: preserve the stable id + target/edge onto the wire step
+                # (items_to_steps emits them only when present, so a plain step stays unchanged).
+                id=d.get("id", "") or "",
+                anchor_step_id=d.get("anchor_step_id", "") or "",
+                anchor_edge=d.get("anchor_edge", "end") or "end",
+                anchor_own_edge=d.get("anchor_own_edge", "start") or "start"))
         return out
 
     # ── Validation (mirrors the agent's _validate_steps) ─────────────────────

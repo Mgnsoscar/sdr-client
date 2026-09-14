@@ -202,3 +202,179 @@ def test_the_base_quantity_stays_bandwidth_invariant():
     assert not fold.param_dependent
     assert fold.bounds_at(1575.42e6, {"bw": 10})["max_power_dbm"] == pytest.approx(-7.38, abs=1e-6)
     assert fold.bounds_at(1575.42e6, {"bw": 20})["max_power_dbm"] == pytest.approx(-7.38, abs=1e-6)
+
+
+def _ramp_item(offset=10.0, view="psd_live", param="power", start=-30.0, stop=-12.0):
+    return tlm.RunItem(task_name="chirp", action="ramp", anchor="start", offset=offset,
+                       ramp={"param": param, "start": start, "stop": stop, "step": 1.0, "hold_s": 5.0},
+                       power_view=view)
+
+
+def test_ramp_power_display_shows_the_controlled_density_not_the_base():
+    # Owner report: a ramp swept in a chirp's live spectral density showed its from→to in the raw base
+    # --power. With a control view its endpoints now read in that quantity, at the carried bandwidth
+    # (view_delta(20) = −10·log10(2) ≈ −3.01, so −30 → −33.01 and −12 → −15.01 dBm/MHz).
+    ramp = _ramp_item()
+    ed = _editor([_bar(10), _set_bw(20, 5.0), ramp])
+    _app.processEvents()
+    disp = ed._ramp_power_display(ramp)
+    assert disp is not None
+    frm, to = (s.replace("−", "-") for s in disp)
+    assert "dBm/MHz" in frm and "dBm/MHz" in to
+    assert "-33.01" in frm and "-15.01" in to
+    assert "-30" not in frm and "-12" not in to     # not the raw base
+
+
+def test_ramp_power_display_is_none_without_a_view_or_for_a_non_power_ramp():
+    ed = _editor([_bar(10)])
+    _app.processEvents()
+    assert ed._ramp_power_display(_ramp_item(view=None)) is None          # no control view → raw
+    assert ed._ramp_power_display(_ramp_item(param="bw")) is None         # a --bw ramp keeps raw
+
+
+def test_row_header_shows_the_controlled_power_for_a_ramp_and_a_tune():
+    # The LEFT-side row header (TASKS & STEPS) sub-line reads the controlled quantity too, matching the
+    # canvas — both a --power ramp's from→to and a --power tune step's value show the density SET, not
+    # the raw base sent on the wire.
+    ramp = _ramp_item()
+    tune = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=20.0,
+                       params={"power": -7.49}, power_view="psd_live")
+    ed = _editor([_bar(10), _set_bw(20, 5.0), ramp, tune])
+    _app.processEvents()
+
+    _name, sub, typ = ed._rowhdr._meta(ramp)
+    sub = sub.replace("−", "-")
+    assert typ == "Ramp" and "dBm/MHz" in sub
+    assert "-33.01" in sub and "-15.01" in sub
+
+    _name, sub, typ = ed._rowhdr._meta(tune)
+    sub = sub.replace("−", "-")
+    assert typ == "Tune" and "dBm/MHz" in sub
+    assert "-10.5" in sub and "-7.49" not in sub
+
+
+# ── canvas tune-step readout chips (docs/tune-pin-mockup.html · option B) ──────
+def test_tune_chip_parts_split_power_view_and_flags():
+    # A tune's chips split into (name, value, unit, is_flag): the controlled --power shows its view
+    # value + unit; a bool becomes an on/off flag; a plain number is formatted, no unit.
+    ed = _editor([])
+    dens = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=10.0,
+                       params={"power": -7.49}, power_view="psd_live")
+    ed._canvas.set_items([_bar(10), _set_bw(20, 5.0), dens])
+    _app.processEvents()
+    assert ed._canvas._tune_parts(dens) == [("power", "-10.50", "dBm/MHz", False)]
+    rf = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=12.0,
+                     params={"rf": True, "bw": 20})
+    ed._canvas.set_items([_bar(10), rf])
+    _app.processEvents()
+    assert ed._canvas._tune_parts(rf) == [("rf", "on", "", True), ("bw", "20", "", False)]
+
+
+def test_tune_chip_defs_one_chip_per_param_with_widths():
+    from ui.timeline_editor import TCHIP_SEP
+    ed = _editor([])
+    two = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=10.0,
+                      params={"bw": 20, "power": -12.74}, power_view="fbw_power")
+    ed._canvas.set_items([_bar(10), two])
+    _app.processEvents()
+    defs, total, _fonts = ed._canvas._tune_chip_defs(two)
+    assert len(defs) == 2 and all(d["w"] > 0 for d in defs)
+    assert total == pytest.approx(defs[0]["w"] + defs[1]["w"] + TCHIP_SEP)   # one separator
+    assert defs[1]["unit"] == "dBm"                                          # total power → dBm chip
+
+
+def test_anchor_target_pin_flips_its_caption_to_the_left():
+    # A tune step some other step is anchored TO has its connector exit to the RIGHT (a point exits
+    # right); its caption must move LEFT so it doesn't collide with that line. A plain pin (no
+    # dependents) keeps its caption on the right.
+    ed = _editor([])
+    target = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=60.0,
+                         params={"power": -7.49}, power_view="psd_live", step_id="tgt1")
+    dep = tlm.RunItem(task_name="chirp", action="ramp", anchor="step", offset=90.0,
+                      anchor_step_id="tgt1", anchor_edge="start",
+                      ramp={"param": "power", "start": -30.0, "stop": -12.0,
+                            "step": 1.0, "hold_s": 5.0})
+    plain = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=140.0,
+                        params={"bw": 20})
+    ed._canvas.set_items([_bar(10), target, dep, plain])
+    ed.resize(1000, 300)
+    _app.processEvents()
+    ed.grab()                                        # force a layout/paint → _rows populated
+    assert ed._canvas._is_anchor_target(target) is True
+    assert ed._canvas._is_anchor_target(plain) is False
+    # a pin with a step_id that nobody references is NOT a target
+    orphan = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=10.0,
+                         params={"bw": 20}, step_id="unref")
+    ed._canvas.set_items([_bar(10), orphan])
+    _app.processEvents(); ed.grab()
+    assert ed._canvas._is_anchor_target(orphan) is False
+
+
+def test_unit_chip_colours_differ_by_family_and_pin_paints():
+    ed = _editor([])
+    dens_bg = ed._canvas._unit_chip_colors("dBm/MHz")[1]
+    abs_bg = ed._canvas._unit_chip_colors("dBm")[1]
+    assert dens_bg != abs_bg                                                 # teal density / slate dBm
+    t = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=10.0,
+                    params={"power": -7.49, "rf": True}, power_view="psd_live")
+    ed._canvas.set_items([_bar(10), _set_bw(20, 5.0), t])
+    ed.resize(900, 240)
+    _app.processEvents()
+    ed.grab()                                                               # paints the chips — no raise
+
+
+def test_two_sided_pin_keeps_caption_right_with_a_wide_gap():
+    # A pin that is BOTH a target and a dependent (A -> mid -> C) has a connector off both sides, so
+    # the left-flip has no free side: its caption stays on the RIGHT with a wider gap (option C).
+    from ui.timeline_editor import PIN_CAP_GAP2
+    ed = _editor([])
+    A = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=20.0,
+                    params={"power": -7.49}, power_view="psd_live", step_id="A")
+    mid = tlm.RunItem(task_name="chirp", action="tune", anchor="step", anchor_step_id="A",
+                      anchor_edge="end", offset=15.0, params={"bw": 20}, step_id="mid")
+    C = tlm.RunItem(task_name="chirp", action="tune", anchor="step", anchor_step_id="mid",
+                    anchor_edge="end", offset=15.0, params={"sidelobes": 5})
+    ed._canvas.set_items([_bar(10), A, mid, C])
+    ed.resize(1100, 320); _app.processEvents(); ed.grab()
+    c = ed._canvas
+    span = c._pin_right_caption(mid)                                         # two-sided → right span
+    assert span is not None
+    assert span[0] == pytest.approx(c._geom[mid.uid]["cx"] + PIN_CAP_GAP2)   # right side, wide gap
+    # A is target-only with `mid` only 15 s after it — too close for the offset chip on the right —
+    # so its exit leaves LEFT toward mid's drop column and the caption stays on the clear RIGHT.
+    assert c._point_exit_dir(A, mid) < 0
+    assert c._pin_conn_sides(A) == (False, True) and c._pin_caption_side(A) == "right"
+    assert c._pin_right_caption(A) is not None
+
+
+def test_negative_dependent_that_is_also_a_target_flips_its_caption_left():
+    # The owner's case: a pin anchored to a LATER step (a negative offset → its incoming line enters
+    # from the RIGHT) that is ALSO an anchor for steps to its right (exits RIGHT) has BOTH connectors
+    # on the right, so its readout flips to the clear LEFT side — not the two-sided right-duck.
+    ed = _editor([])
+    s1 = tlm.RunItem(task_name="chirp", action="tune", anchor="start", offset=180.0,
+                     params={"bw": 12}, step_id="s1")
+    s2 = tlm.RunItem(task_name="chirp", action="tune", anchor="step", anchor_step_id="s1",
+                     anchor_edge="start", offset=-180.0, params={"bw": 12}, step_id="s2")
+    s3 = tlm.RunItem(task_name="chirp", action="tune", anchor="step", anchor_step_id="s2",
+                     anchor_edge="start", offset=90.0, params={"bw": 12})
+    ed._canvas.set_items([_bar(10), s1, s2, s3])
+    ed.resize(1200, 320); _app.processEvents(); ed.grab()
+    c = ed._canvas
+    assert c._pin_conn_sides(s2) == (True, False)     # both connectors on the RIGHT
+    assert c._pin_caption_side(s2) == "left"          # → flip the caption to the clear LEFT side
+    assert c._pin_right_caption(s2) is None           # …so the right side is free for the arrow
+    assert c._pin_caption_side(s3) == "right"         # a positive dependent enters from the left
+
+
+def test_connector_ducks_under_a_two_sided_pins_caption():
+    # The router routes an exit HORIZONTALLY out of the anchor, then into a channel below the readout
+    # (option C), so the line never runs through the text.
+    ed = _editor([]); ed.grab()
+    c = ed._canvas
+    plain = c._connector_points(100.0, 50.0, 400.0, 92.0, 1.0, [], 40.0)
+    assert all(y in (50.0, 92.0) for _x, y in plain)                        # no duck without a caption
+    ducked = c._connector_points(100.0, 50.0, 400.0, 92.0, 1.0, [], 40.0, anchor_cap=(120.0, 260.0))
+    assert ducked[0] == (100.0, 50.0)                                        # exits the anchor at y1
+    assert any(50.0 < y < 92.0 for _x, y in ducked)                         # ducks into a channel below
+    assert any(abs(x - 114.0) < 1.0 for x, _y in ducked)                    # drops just before the caption

@@ -33,7 +33,7 @@ Operation labels (parsed back in _on_task_done):
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 
@@ -49,14 +49,18 @@ from config import UNIT_TYPE_LABELS, DEFAULT_UNIT_TYPE
 from .arm_dialog import ArmDialog
 from .param_form import fmt_duration
 from .qt_adapter import DataHub
+from . import run_conflict
 from .scope_selector import scope_chip, confirm_delete
 from .sequence_editor import SequenceEditorDialog
 from .sequence_log_dialog import SequenceLogDialog
 from .theme import Palette
 from .hold_edit_dialog import HoldEditDialog
+from . import timeline_model as tlm
 from .timeline_model import (
     SEQUENCE_HOLD_CAPABILITY, SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY,
-    SEQUENCE_LOG_TABLE_CAPABILITY, hold_runtime_supported)
+    SEQUENCE_LOG_TABLE_CAPABILITY, hold_runtime_supported, hold_enter_supported,
+    hold_ramp_pause_supported, ramp_crosses_hold_steps,
+    step_anchor_supported, step_anchor_negative_supported)
 from .widgets import StatusPill, natural_key
 
 _SEQ_FILTER_ALL = "__all__"
@@ -373,6 +377,10 @@ class SequencesPanel(QWidget):
         self._wb_edits: dict = {}
         self._seq_loaded = False
         self._runs_pending = False
+        # Sequences awaiting the running-task pre-check / stop, keyed by sequence id — so two
+        # arms started in quick succession can't cross-wire (a single slot would let seq A's
+        # pre-check result arm the last seq B stored).
+        self._pending_arm: Dict[str, m.Sequence] = {}
         self._export_path: Optional[str] = None
         self._build()
         self.hub.task_done.connect(self._on_task_done)
@@ -489,10 +497,60 @@ class SequencesPanel(QWidget):
                         seq.name or seq.id, parent=self.window()).exec()
 
     def _on_start(self, seq: m.Sequence) -> None:
+        # Re-validate at arm — catches a step conflict / out-of-task step / duplicate task bar in
+        # a sequence saved before these rules existed (the editor's Save gate blocks new ones). The
+        # unknown-task check is skipped (known_tasks omitted); only structural conflicts matter here.
+        try:
+            step_dicts = [s.model_dump(mode="json") for s in seq.steps]
+            conflict = tlm.validate(tlm.steps_to_items(step_dicts))
+        except Exception:  # noqa: BLE001 — a validation helper must never block arming on its own bug
+            conflict = None
+        if conflict:
+            QMessageBox.warning(
+                self, "Cannot arm sequence",
+                f"“{seq.name or seq.id}” can’t be armed:\n\n{conflict}\n\nEdit the sequence to fix it.")
+            self._set_status("arm blocked — invalid sequence", error=True)
+            return
         hold_off = _hold_offset_of(seq)
         if hold_off is not None:
             self._arm_hold_aware(seq, hold_off)
             return
+        # Safety gate: a step-to-step anchor needs an agent that can resolve it (≥ 1.24.0);
+        # an older agent would reject or mis-fire the arm. Block with a clear message.
+        if any(getattr(s, "anchor", "") == "step" for s in seq.steps) \
+                and not self._step_anchor_ok():
+            QMessageBox.warning(
+                self, "Step anchoring not supported here",
+                f"“{seq.name or seq.id}” anchors a step to another step, but "
+                f"{self.hostname}'s agent doesn't support it (needs sequence-step-anchor, "
+                f"agent ≥ 1.24.0). Update the unit’s agent, or re-anchor those steps.")
+            self._set_status("arm blocked — step anchoring unsupported")
+            return
+        # A NEGATIVE step offset (fire before the target) needs agent ≥ 1.25.0 on top of that.
+        if any(getattr(s, "anchor", "") == "step" and float(getattr(s, "offset_s", 0.0)) < 0
+               for s in seq.steps) and not self._step_anchor_negative_ok():
+            QMessageBox.warning(
+                self, "Negative step offset not supported here",
+                f"“{seq.name or seq.id}” anchors a step to fire BEFORE another step (a negative "
+                f"offset), but {self.hostname}'s agent doesn't support it (needs "
+                f"sequence-step-anchor-negative, agent ≥ 1.25.0). Update the unit’s agent, or set "
+                f"those offsets to 0 or more.")
+            self._set_status("arm blocked — negative step offset unsupported")
+            return
+        # Guard: don't silently collide with a task already transmitting on this unit (the
+        # agent refuses such an arm anyway). Pre-check its tasks; if any are running, offer to
+        # stop them and arm. The result routes back through _on_task_done ("seq_precheck").
+        self._pending_arm[seq.id] = seq
+        self._set_status("checking…")
+        client = self.hub.fleet.get(self.hostname)
+        wanted = run_conflict.sequence_task_names(seq.steps)
+        self.hub.run_async(
+            f"seq_precheck:{self.hostname}:{seq.id}",
+            lambda: run_conflict.running_task_names(client.list_tasks(), wanted),
+        )
+
+    def _arm_flow(self, seq: m.Sequence) -> None:
+        """Pick the on-air time and arm (reached once the running-task pre-check is clear)."""
         # Pick the on-air time (and optional stop) the same way plans are armed.
         min_dur = _ramp.min_on_air_duration(seq.steps)
         default_dur = min_dur if min_dur > 0 else DEFAULT_STOP_DURATION_S
@@ -511,6 +569,32 @@ class SequencesPanel(QWidget):
             lambda: _arm_at(client, seq, t0, duration_s),
         )
 
+    def _offer_stop_and_arm(self, seq: m.Sequence, conflicts: List[str]) -> None:
+        """One or more of the sequence's tasks are already running — offer to stop them and arm."""
+        names = ", ".join(f"“{t}”" for t in conflicts)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Task already running")
+        box.setText(f"{names} {'is' if len(conflicts) == 1 else 'are'} already running on "
+                    f"{self.hostname}.")
+        box.setInformativeText(
+            "A sequence can't arm over a task that's already transmitting on this unit. "
+            "Stop it and arm the sequence?")
+        stop_arm = box.addButton("Stop && arm", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(stop_arm)
+        box.exec()
+        if box.clickedButton() is not stop_arm:
+            self._set_status("arm cancelled")
+            return
+        self._pending_arm[seq.id] = seq
+        client = self.hub.fleet.get(self.hostname)
+        self._set_status("stopping task(s)…")
+        self.hub.run_async(
+            f"seq_stoptasks:{self.hostname}:{seq.id}",
+            lambda: [client.stop_task(t) for t in conflicts],
+        )
+
     def _arm_hold_aware(self, seq: m.Sequence, hold_off: float) -> None:
         """Arm a Hold-bearing sequence from the Library/operator-present surface: the
         run pauses at the Hold and awaits Proceed. Gated on the unit's agent running the
@@ -525,6 +609,28 @@ class SequencesPanel(QWidget):
                 f"{self.hostname}'s agent doesn't support it (needs the sequence-hold "
                 f"capability, agent 1.17+). Update the unit's agent, or remove the Hold.")
             self._set_status("arm blocked — agent lacks sequence-hold", error=True)
+            return
+        # A step anchored to the Hold's START (anchor="enter") needs agent ≥ 1.26.0 (a safety
+        # gate: an older agent rejects the anchor value). The schedule/plan path compiles the
+        # Hold out and never sends it.
+        if any(getattr(s, "anchor", "") == "enter" for s in seq.steps) and not self._hold_enter_ok():
+            QMessageBox.warning(
+                self, "Hold-start anchor not supported here",
+                f"“{seq.name or seq.id}” anchors a step to the Hold's start (before the pause), "
+                f"but {self.hostname}'s agent doesn't support it (needs sequence-hold-enter, "
+                f"agent ≥ 1.26.0). Update the unit's agent, or anchor that step to on-air.")
+            self._set_status("arm blocked — agent lacks sequence-hold-enter", error=True)
+            return
+        # A ramp that CROSSES the Hold needs agent ≥ 1.27.0 to pause it there (a safety gate: an
+        # older agent keeps it in window A and delays the pause until the ramp finishes).
+        if ramp_crosses_hold_steps(seq.steps) and not self._hold_ramp_pause_ok():
+            QMessageBox.warning(
+                self, "Ramp across the Hold not supported here",
+                f"“{seq.name or seq.id}” has a ramp that runs across the Hold, but "
+                f"{self.hostname}'s agent can't pause it there (needs sequence-hold-ramp-pause, "
+                f"agent ≥ 1.27.0). Update the unit's agent, or end the ramp at the pause and "
+                f"continue it from resume.")
+            self._set_status("arm blocked — agent lacks sequence-hold-ramp-pause", error=True)
             return
         wa = fmt_duration(round(max(0.0, hold_off + _lead_in(seq))))
         dlg = ArmDialog(
@@ -652,6 +758,41 @@ class SequencesPanel(QWidget):
         except Exception:  # noqa: BLE001
             return False
         return hold_runtime_supported(client)
+
+    def _hold_enter_ok(self) -> bool:
+        """True iff this unit's agent resolves a step anchored to the Hold's START
+        (sequence-hold-enter + >= 1.26.0)."""
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001
+            return False
+        return hold_enter_supported(client)
+
+    def _hold_ramp_pause_ok(self) -> bool:
+        """True iff this unit's agent pauses a ramp that crosses the Hold
+        (sequence-hold-ramp-pause + >= 1.27.0)."""
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001
+            return False
+        return hold_ramp_pause_supported(client)
+
+    def _step_anchor_ok(self) -> bool:
+        """True iff this unit's agent resolves a step-to-step anchor (sequence-step-anchor + >= 1.24.0)."""
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001
+            return False
+        return step_anchor_supported(client)
+
+    def _step_anchor_negative_ok(self) -> bool:
+        """True iff this unit's agent accepts a NEGATIVE step offset (sequence-step-anchor-negative
+        + >= 1.25.0) — a step anchored to fire before its target."""
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001
+            return False
+        return step_anchor_negative_supported(client)
 
     def _on_stop(self, seq: m.Sequence) -> None:
         run_ids = [r.id for r in self._runs
@@ -841,6 +982,26 @@ class SequencesPanel(QWidget):
             if not isinstance(result, Exception):
                 self._runs = result if isinstance(result, list) else []
                 self._rebuild()
+        elif op == "seq_precheck":
+            seq_id = ":".join(parts[2:]) if len(parts) > 2 else ""
+            seq = self._pending_arm.pop(seq_id, None)
+            if seq is None:
+                return
+            conflicts = result if isinstance(result, list) else []
+            if isinstance(result, Exception) or not conflicts:
+                self._arm_flow(seq)          # can't check / nothing running → arm (agent backstops)
+            else:
+                self._offer_stop_and_arm(seq, conflicts)
+        elif op == "seq_stoptasks":
+            seq_id = ":".join(parts[2:]) if len(parts) > 2 else ""
+            seq = self._pending_arm.pop(seq_id, None)
+            if seq is None:
+                return
+            if isinstance(result, Exception):
+                self._set_status("stop failed", error=True)
+                QMessageBox.warning(self, "Could not stop the running task", str(result))
+                return
+            self._arm_flow(seq)              # tasks stopped → proceed to arm
         elif op == "seq_arm":
             if isinstance(result, Exception):
                 self._set_status("arm failed", error=True)

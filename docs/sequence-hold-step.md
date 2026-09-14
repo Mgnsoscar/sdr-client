@@ -222,6 +222,37 @@ stays HOLDING longer than `max_hold_s`, the runner **auto-aborts** (RF off, task
 one field and one comparison in `_tick`. Ships in v1. The Proceed dialog surfaces the remaining
 allowance ("auto-stops in 04:12") so a long receiver restart doesn't get silently cut off.
 
+### 5.7 A ramp across the pause (agent 1.27.0, `sequence-hold-ramp-pause`)
+
+A window-A ramp may START before the Hold and END after it. The Hold means "time stops and the
+state is frozen", so such a ramp is **paused**, not rejected and not run through (DECIDED with the
+owner): at arm, `_split_fires_at_hold` keeps the ramp's points at or before the hold instant in
+window A and DEFERS the rest as `SequenceRun.paused_fires` (anchor `"hold"`, `offset_s` = seconds
+after the pause). The level reached at the pause holds through it exactly like any other window-A
+state. At **proceed** the deferred points are re-based to `T_resume + offset_s` (the ramp resumes
+where it left off, shifted by the pause's length) and count toward the post-hold content that fixes
+`on_air_end`. Since agent 1.27.1 that content is the WHOLE post-hold picture the client draws: off-air =
+`T_resume` + the forward extent of the hold-anchored work (a ramp's full span, its last level's dwell
+included — the level is held, not merely touched, before off-air; a resumed point carries its dwell as
+`StepFire.dwell_s`) + the backward extent of the stop-anchored (off-air) work, so a stop-anchored
+down-ramp lands after the resumed content instead of resolving before `T_resume`. (`PATCH …/on-air-end`
+refuses a Hold run — its off-air is set here and only here.) Edit-while-holding re-derives the
+remainder from the EDITED window A, so retargeting
+the ramp's top while holding takes effect. **Fast-forward** ("Hold now") follows a jump-the-clock
+rule: what would have fired before the pause is skipped (as today), what comes after it stays
+deferred and resumes. The scheduled/plan path compiles the Hold out, so the ramp simply runs through.
+A pre-1.27 agent kept the whole ramp in window A and silently DELAYED the pause until it finished,
+hence the client gate. Client: the canvas draws such a ramp as two pieces flanking the Hold window
+(threaded across the band), its end on the resume axis, and the tooltip reads "pauses X in, holding
+<level> · ends Y after resume". **Edit-while-holding** (DECIDED with the owner): the Hold-edit dialog
+loads a crossing ramp SPLIT (`api.models.split_ramps_at_hold`) — its run-up (the points at/before the
+pause, already fired) stays a window-A ramp, and its not-yet-fired remainder becomes its OWN post-hold
+(`anchor="hold"`) ramp whose start/stop/dwell/offset default to exactly what resuming would have
+produced (the first deferred level → the original stop, at the first deferred point's time after the
+pause). The operator retargets that remainder like any window-B step; left alone it reproduces the
+agent's paused remainder, and since the run-up no longer crosses, the agent derives no second remainder
+from the edited window A. A lone point on either side is presented as the single tune it is.
+
 ## 6. Client / UI design
 
 ### 6.1 Timeline authoring (the third anchor)
@@ -269,7 +300,15 @@ mechanism (`ArmSequenceRequest.steps`, `arm(...:471)`) — the stored sequence i
 this run's window B is replaced. This is the flexibility that makes the test method work: you discover
 the receiver lost lock at −50 dBm, you retarget the down-ramp to −50 dBm, then proceed.
 
-Window A (already executed) is immutable.
+Window A (already executed) is immutable — and the client SHOWS it that way (DECIDED with the owner;
+mockup `docs/hold-edit-elapsed-mockup.html`, option A without fired clock times): in the Hold-edit
+dialog everything at or before the Hold paints monochrome under a frosted wash with a
+"✓ ELAPSED — ran before the Hold · locked" ribbon; those steps take no drag, anchor handle,
+double-click editor, delete or duplicate (a click just says "already ran"), a task running since
+before the pause keeps only its stop editable, the Hold itself reads "⏸ HOLDING" and can't move, and
+new steps seed in the post-hold window. As a backstop the dialog refuses to return a step list whose
+window A differs from the one it loaded. The agent side needs nothing: `proceed` ignores window A
+regardless.
 
 ### 6.5 Achievability warnings across the hold
 

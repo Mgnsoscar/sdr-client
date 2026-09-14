@@ -1,0 +1,236 @@
+<title>Anchor Role Cues</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ground:#EEF0F3; --surface:#FFFFFF; --surface-alt:#FAFBFC; --inset:#F1F4F7;
+  --border:#E2E5EA; --border-strong:#CDD2DA; --hairline:#ECEEF1;
+  --text:#1E2530; --muted:#5C6675; --faint:#8A93A2;
+  --accent:#2C6E9B; --accent-ink:#1F5476; --ok:#1D9E75; --warn:#BA7517; --bad:#C23B3B;
+  --teal:#1E8FA3; --teal-ink:#12707F; --teal-soft:#E4F2F3;
+  --violet:#6D5AC4; --violet-ink:#54449B; --violet-soft:#ECE8F8;
+  --conn:#5C8AA6; --band:#F7F9FB;
+  --sans:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --mono:"IBM Plex Mono","DejaVu Sans Mono",ui-monospace,monospace;
+  --shadow-sm:0 1px 2px rgba(22,32,48,.06), 0 1px 3px rgba(22,32,48,.05);
+}
+:root:not([data-theme="light"]){
+  @media (prefers-color-scheme: dark){
+    --ground:#14181E; --surface:#1B2129; --surface-alt:#20272F; --inset:#232B34;
+    --border:#2C353F; --border-strong:#3A4552; --hairline:#262E37;
+    --text:#E7ECF2; --muted:#A2ADBB; --faint:#727E8C;
+    --accent:#5FA8D6; --accent-ink:#9BCBE8; --ok:#3FBE93; --warn:#D69A46; --bad:#E06A6A;
+    --teal:#37B7CC; --teal-ink:#8FE0EC; --teal-soft:#183038;
+    --violet:#9A88E4; --violet-ink:#C6BBF3; --violet-soft:#241F3A;
+    --conn:#6E96AF; --band:#191F26;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.28);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#14181E; --surface:#1B2129; --surface-alt:#20272F; --inset:#232B34;
+  --border:#2C353F; --border-strong:#3A4552; --hairline:#262E37;
+  --text:#E7ECF2; --muted:#A2ADBB; --faint:#727E8C;
+  --accent:#5FA8D6; --accent-ink:#9BCBE8; --ok:#3FBE93; --warn:#D69A46; --bad:#E06A6A;
+  --teal:#37B7CC; --teal-ink:#8FE0EC; --teal-soft:#183038;
+  --violet:#9A88E4; --violet-ink:#C6BBF3; --violet-soft:#241F3A;
+  --conn:#6E96AF; --band:#191F26;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.28);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--text);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;padding:30px 20px 56px}
+.wrap{max-width:980px;margin:0 auto}
+h1{font-size:21px;font-weight:600;letter-spacing:-.2px;margin:0 0 5px;text-wrap:balance}
+.lede{color:var(--muted);font-size:13px;line-height:1.65;margin:0 0 8px;max-width:74ch}
+.lede b{color:var(--text);font-weight:600}
+.lede code{font-family:var(--mono);font-size:11.5px;background:var(--inset);padding:1px 5px;border-radius:4px;color:var(--text)}
+
+.legend{display:flex;flex-wrap:wrap;gap:8px 20px;margin:14px 0 24px;padding:12px 16px;
+  background:var(--surface-alt);border:1px solid var(--border);border-radius:12px;font-size:12.5px;color:var(--muted)}
+.legend .k{display:inline-flex;align-items:center;gap:8px}
+.legend b{color:var(--text)}
+.legend svg{flex:none}
+
+.opt{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+  box-shadow:var(--shadow-sm);padding:16px 18px 14px;margin-bottom:15px}
+.opt.pick{border-color:color-mix(in srgb,var(--teal) 55%,var(--border));
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--teal) 16%,transparent), var(--shadow-sm)}
+.opt.now{border-color:color-mix(in srgb,var(--bad) 40%,var(--border))}
+.ohead{display:flex;align-items:baseline;gap:10px;margin-bottom:3px;flex-wrap:wrap}
+.otag{font-size:11px;font-weight:700;letter-spacing:.5px;color:#fff;background:var(--faint);border-radius:6px;padding:2px 8px}
+.opt.pick .otag{background:var(--teal)} .opt.now .otag{background:var(--bad)}
+.oname{font-size:15px;font-weight:600}
+.rec{margin-left:auto;font-size:10.5px;font-weight:700;letter-spacing:.4px;color:var(--teal-ink);
+  background:color-mix(in srgb,var(--teal) 15%,transparent);border-radius:999px;padding:3px 10px}
+.orat{color:var(--muted);font-size:12.5px;line-height:1.6;margin:5px 0 12px;max-width:76ch}
+.orat b{color:var(--text)}
+.stage{width:360px;max-width:100%;height:132px;background:var(--band);border:1px solid var(--hairline);
+  border-radius:10px;overflow:hidden}
+.stage svg{display:block;width:100%;height:100%}
+
+/* SVG classes */
+.conn{stroke:var(--conn);stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.pinring{fill:var(--band)} .pindot{fill:var(--teal)} .pindot.v{fill:var(--violet)}
+.pinhollow{fill:var(--band);stroke:var(--teal);stroke-width:2.4} .pinhollow.v{stroke:var(--violet)}
+.arrow{stroke:var(--conn);stroke-width:2;fill:none;stroke-linecap:round}
+.plug{fill:var(--conn)}
+.lbl{fill:var(--muted);font-family:var(--mono);font-size:10.5px}
+.lbl.s{fill:var(--faint);font-size:9px}
+.chip-bg{fill:var(--surface);stroke:var(--border);stroke-width:1}
+.chip-tx{fill:var(--muted);font-family:var(--mono);font-size:9px}
+.badge-a{fill:var(--teal)} .badge-a.v{fill:var(--violet)}
+.badge-ic{stroke:#fff;stroke-width:1.4;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.badge-ic-f{fill:#fff}
+.socket{fill:var(--band);stroke:var(--conn);stroke-width:2}
+.rolepill{font-family:var(--sans);font-size:8.5px;font-weight:700;letter-spacing:.4px}
+.hdr{fill:var(--surface)} .hdrline{stroke:var(--border);stroke-width:1}
+.hcap{fill:var(--faint);font-family:var(--sans);font-size:8px;font-weight:700;letter-spacing:.5px}
+.hname{fill:var(--text);font-family:var(--sans);font-size:11px;font-weight:600}
+.hsub{fill:var(--faint);font-family:var(--sans);font-size:9px}
+
+footer{color:var(--faint);font-size:12px;margin-top:22px;line-height:1.65;max-width:78ch}
+footer b{color:var(--muted)} footer code{font-family:var(--mono);font-size:11px}
+</style>
+
+<div class="wrap">
+  <h1>Anchor role cues</h1>
+  <p class="lede">A connector shows two steps are linked, but not <b>which is which</b>: the
+  <b>anchor</b> (the target others hang off — move it and the rest follow) versus the <b>anchorer</b>
+  (the dependent that points at it, <code>anchor="step"</code>). The arrowhead hints direction, but the
+  role of each step isn't legible at a glance. Below: the current line, then ways to mark each end. One
+  task hue shown; a middle step in a chain (<code>A → B → C</code>) is BOTH, so the cues compose.</p>
+
+  <div class="legend">
+    <span class="k"><svg width="26" height="20" viewBox="0 0 26 20">
+      <circle class="badge-a" cx="13" cy="10" r="8"/>
+      <g class="badge-ic"><circle cx="13" cy="6.5" r="1.6"/><path d="M13 8.3 V14"/><path d="M9.6 11 H16.4"/><path d="M9 12.4 Q13 16 17 12.4"/></g></svg>
+      <b>anchor</b> — others depend on it</span>
+    <span class="k"><svg width="26" height="20" viewBox="0 0 26 20">
+      <circle class="badge-a" cx="13" cy="10" r="8"/>
+      <g class="badge-ic"><path d="M10 6 V11.5 H16"/></g><path class="badge-ic-f" d="M15 9.4 L18 11.5 L15 13.6 Z"/></svg>
+      <b>anchorer</b> — it points at the anchor</span>
+  </div>
+
+  <div id="opts"></div>
+
+  <footer>Reuses the editor's per-task hue and connector styling. Marks live at the two connected edges,
+  so they read together with the line; a chain step carries both. Pick one (they combine — e.g. glyphs
+  on the canvas + a row-header marker) and I'll wire it into <code>_paint_connectors</code> /
+  <code>_paint_pin</code> and the <code>_RowHeader</code>.</footer>
+</div>
+
+<script>
+// scene geometry (viewBox 0 0 360 132): anchor pin top-left, dependent pin lower-right
+const A = {x:112, y:40}, D = {x:250, y:92};
+
+function pin(pt, cls){ return `<circle class="pinring" cx="${pt.x}" cy="${pt.y}" r="9"/>` +
+  `<circle class="${cls}" cx="${pt.x}" cy="${pt.y}" r="6.5"/>`; }
+function lbl(x, y, t, cls){ return `<text class="lbl ${cls||''}" x="${x}" y="${y+3.5}">${t}</text>`; }
+function rlbl(x, y, t){ return `<text class="lbl" x="${x}" y="${y+3.5}" text-anchor="end">${t}</text>`; }
+
+// connector A -> D with an arrowhead into D and an offset chip on the entry run
+function connector(arrow, chip){
+  const path = `<path class="conn" d="M${A.x} ${A.y} L172 ${A.y} Q178 ${A.y} 178 ${A.y+6} L178 ${D.y-6} Q178 ${D.y} 184 ${D.y} L${D.x-9} ${D.y}"/>`;
+  const head = arrow==='plug'
+    ? `<path class="plug" d="M${D.x-9} ${D.y-4.5} L${D.x-1} ${D.y} L${D.x-9} ${D.y+4.5} Z"/>`
+    : `<path class="arrow" d="M${D.x-15} ${D.y-4} L${D.x-9} ${D.y}"/><path class="arrow" d="M${D.x-15} ${D.y+4} L${D.x-9} ${D.y}"/>`;
+  let c = '';
+  if (chip){
+    const w = chip.length*5.6 + 12, cx = 214;
+    c = `<rect class="chip-bg" x="${cx-w/2}" y="${D.y-8}" width="${w}" height="15" rx="4"/>` +
+        `<text class="chip-tx" x="${cx}" y="${D.y+3}" text-anchor="middle">${chip}</text>`;
+  }
+  return path + c + head;
+}
+
+function anchorBadge(pt, v){ return `<circle class="badge-a ${v||''}" cx="${pt.x+8}" cy="${pt.y-8}" r="7"/>` +
+  `<g class="badge-ic" transform="translate(${pt.x+8},${pt.y-8}) scale(0.62)">` +
+  `<circle cx="0" cy="-3.6" r="1.6"/><path d="M0 -1.9 V4.4"/><path d="M-3.4 0.4 H3.4"/><path d="M-4 1.9 Q0 5.6 4 1.9"/></g>`; }
+function depBadge(pt, v){ return `<circle class="badge-a ${v||''}" cx="${pt.x-8}" cy="${pt.y-8}" r="7"/>` +
+  `<g transform="translate(${pt.x-8},${pt.y-8}) scale(0.62)"><path class="badge-ic" d="M-3 -4 V1.5 H3"/>` +
+  `<path class="badge-ic-f" d="M2 -0.4 L5 1.5 L2 3.4 Z"/></g>`; }
+
+function svg(inner){ return `<svg viewBox="0 0 360 132" preserveAspectRatio="xMidYMid meet">${inner}</svg>`; }
+
+// ── options ──────────────────────────────────────────────────────────────
+const NOW = () => svg(
+  connector('arrow','+2:00') + pin(A,'pindot') + pin(D,'pindot') +
+  rlbl(A.x-13,A.y,'BW 20') + `<text class="lbl" x="${D.x+12}" y="${D.y+3.5}">POWER</text>`);
+
+const GLYPH = () => svg(
+  connector('arrow','+2:00') + pin(A,'pindot') + pin(D,'pindot') +
+  rlbl(A.x-13,A.y,'BW 20') + `<text class="lbl" x="${D.x+12}" y="${D.y+3.5}">POWER</text>` +
+  anchorBadge(A) + depBadge(D));
+
+const SOCKET = () => svg(
+  connector('plug',null) +
+  // anchor end = a hollow socket ring; dependent keeps the solid plug arrow
+  `<circle class="pinring" cx="${A.x}" cy="${A.y}" r="9"/><circle class="socket" cx="${A.x}" cy="${A.y}" r="6"/>` +
+  pin(D,'pindot') +
+  rlbl(A.x-13,A.y,'BW 20') + `<text class="lbl" x="${D.x+12}" y="${D.y+3.5}">POWER</text>` +
+  `<text class="lbl s" x="${A.x}" y="${A.y+22}" text-anchor="middle">socket</text>` +
+  `<text class="lbl s" x="${D.x}" y="${D.y+22}" text-anchor="middle">plug</text>`);
+
+const LABELS = () => svg(
+  connector('arrow','+2:00') + pin(A,'pindot') + pin(D,'pindot') +
+  rlbl(A.x-13,A.y,'BW 20') + `<text class="lbl" x="${D.x+12}" y="${D.y+3.5}">POWER</text>` +
+  // an "ANCHOR" pill above the target
+  `<rect x="${A.x-22}" y="${A.y-26}" width="44" height="14" rx="7" fill="var(--teal-soft)"/>` +
+  `<text class="rolepill" x="${A.x}" y="${A.y-16}" text-anchor="middle" fill="var(--teal-ink)">ANCHOR</text>` +
+  `<path class="conn" style="stroke:var(--teal);stroke-dasharray:2 2" d="M${A.x} ${A.y-12} L${A.x} ${A.y-7}"/>` +
+  // the anchorer names WHICH step it follows, under its pin
+  `<text class="lbl s" x="${D.x}" y="${D.y+22}" text-anchor="middle" style="fill:var(--teal-ink)">↳ after BW tune</text>`);
+
+const HEADER = () => svg(
+  // a mini row-header column on the left + the canvas scene on the right
+  `<rect class="hdr" x="0" y="0" width="150" height="132"/><line class="hdrline" x1="150" y1="0" x2="150" y2="132"/>` +
+  `<text class="hcap" x="14" y="18">TASKS &amp; STEPS</text>` +
+  // anchor row
+  anchorBadge({x:20,y:52}) + `<text class="hname" x="34" y="49">BW tune</text>` +
+  `<text class="hsub" x="34" y="61">anchor · used by 1</text>` +
+  // dependent row
+  depBadge({x:20,y:92}) + `<text class="hname" x="34" y="89">POWER tune</text>` +
+  `<text class="hsub" x="34" y="101">↳ after BW · +2:00</text>` +
+  // small connected scene on the right half
+  `<g transform="translate(-40,0)"><path class="conn" d="M212 40 L250 40 Q256 40 256 46 L256 86 Q256 92 262 92 L300 92"/>` +
+  `<path class="arrow" d="M294 88 L300 92"/><path class="arrow" d="M294 96 L300 92"/>` +
+  `<circle class="pinring" cx="212" cy="40" r="9"/><circle class="pindot" cx="212" cy="40" r="6.5"/>` +
+  `<circle class="pinring" cx="300" cy="92" r="9"/><circle class="pindot" cx="300" cy="92" r="6.5"/></g>`);
+
+const CHAIN = () => svg(
+  // A -> B -> C : B is BOTH (anchor for C, anchorer of A) → both badges
+  `<path class="conn" d="M70 40 L104 40 Q110 40 110 46 L110 60 Q110 66 116 66 L150 66"/>` +
+  `<path class="arrow" d="M144 62 L150 66"/><path class="arrow" d="M144 70 L150 66"/>` +
+  `<path class="conn" d="M170 66 L214 66 Q220 66 220 72 L220 86 Q220 92 226 92 L262 92"/>` +
+  `<path class="arrow" d="M256 88 L262 92"/><path class="arrow" d="M256 96 L262 92"/>` +
+  pin({x:60,y:40},'pindot') + pin({x:160,y:66},'pindot') + pin({x:272,y:92},'pindot') +
+  lbl(24,40,'A','') + lbl(176,66,'B','') + lbl(284,92,'C','') +
+  anchorBadge({x:60,y:40}) +                               // A: anchor only
+  anchorBadge({x:160,y:66}) + depBadge({x:160,y:66}) +      // B: both
+  depBadge({x:272,y:92}));                                  // C: anchorer only
+
+const OPTIONS = [
+  {tag:'NOW', name:'Current — a bare line', now:true, build:NOW,
+   note:'A connector + arrowhead + offset chip. You can infer direction from the arrow, but nothing on the steps says which one is the anchor and which hangs off it.'},
+  {tag:'A', name:'Role glyphs at each edge', pick:true, rec:'Recommended', build:GLYPH,
+   note:'A small ⚓ badge on the anchor and a ↳ badge on the anchorer, at their connected edges — language-light and instant. A chain step (below) carries both.'},
+  {tag:'B', name:'Socket → plug endpoints', build:SOCKET,
+   note:'No badges: the anchor end becomes a hollow socket ring, the dependent end a solid plug arrow. The line visibly plugs out of the anchor into the anchorer — role from geometry alone, but a convention to learn.'},
+  {tag:'C', name:'Endpoint labels + parent name', build:LABELS,
+   note:'Most explicit: an ANCHOR pill on the target, and the offset chip names the parent — ↳ after BW · +2:00 — so the anchorer also tells you WHICH step it follows. More text on the canvas.'},
+  {tag:'D', name:'Row-header markers', build:HEADER,
+   note:'Put the cue in the left TASKS & STEPS column instead of (or with) the canvas: the anchor row shows ⚓ · used by 1, the anchorer shows ↳ after BW · +2:00. Always visible, even when the canvas is busy.'},
+];
+
+const host = document.getElementById('opts');
+host.innerHTML = OPTIONS.map(o => `
+  <div class="opt ${o.pick?'pick':''} ${o.now?'now':''}">
+    <div class="ohead"><span class="otag">${o.tag}</span><span class="oname">${o.name}</span>
+      ${o.rec?`<span class="rec">${o.rec}</span>`:''}</div>
+    <div class="orat">${o.note}</div>
+    <div class="stage">${o.build()}</div>
+    ${o.pick?`<div class="orat" style="margin:10px 0 2px"><b>Chain — a middle step is both:</b></div>
+      <div class="stage" style="height:120px">${CHAIN()}</div>`:''}
+  </div>`).join('');
+</script>

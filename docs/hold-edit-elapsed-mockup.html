@@ -1,0 +1,368 @@
+<title>Hold Edit Elapsed Window</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  color-scheme: light;
+  --ground:#EEF0F3; --surface:#FFFFFF; --surface-alt:#FAFBFC; --inset:#F1F4F7;
+  --border:#E2E5EA; --border-strong:#CDD2DA; --hairline:#ECEEF1;
+  --text:#1E2530; --muted:#5C6675; --faint:#8A93A2;
+  --accent:#2C6E9B; --accent-soft:#E8F0F6; --accent-ink:#1F5476;
+  --online:#1D9E75; --armed:#BA7517; --armed-soft:#FAEEDA; --crash:#C23B3B;
+  --teal:#1E8FA3; --teal-ink:#12707F;
+  --elapsed:#9AA3B0; --elapsed-ink:#6B7482; --elapsed-wash:#EEF0F3;
+  --sans:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --mono:"IBM Plex Mono","DejaVu Sans Mono",ui-monospace,monospace;
+  --r:14px; --r-sm:9px;
+  --shadow-md:0 2px 6px rgba(22,32,48,.07), 0 8px 24px rgba(22,32,48,.09);
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:radial-gradient(1100px 460px at 12% -8%, #F6F8FB, transparent 60%), var(--ground);
+  color:var(--text); font-family:var(--sans); -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  padding-block:26px; min-height:100vh;
+}
+.wrap{max-width:1180px; margin:0 auto; padding-inline:20px}
+.lede{margin:0 0 16px}
+.lede h1{font-size:19px; font-weight:600; letter-spacing:.2px; margin:0 0 5px; text-wrap:balance}
+.lede p{margin:0; color:var(--muted); font-size:13.5px; line-height:1.5; max-width:78ch}
+
+.app{background:var(--surface); border:1px solid var(--border); border-radius:var(--r); box-shadow:var(--shadow-md); overflow:hidden}
+.title{display:flex; align-items:center; gap:12px; padding:11px 16px; border-bottom:1px solid var(--hairline); background:linear-gradient(180deg,#FFFFFF,#FCFDFE)}
+.title .dot-grp{display:flex; gap:7px}
+.title .wd{width:11px;height:11px;border-radius:50%}
+.wd.r{background:#F0655C}.wd.y{background:#F4C24C}.wd.g{background:#5FC26B}
+.title h2{font-size:12.5px; font-weight:600; margin:0; color:var(--muted)}
+.title h2 b{color:var(--text)}
+.title .sp{flex:1}
+.title .cap{font-size:11px; color:var(--faint)}
+.holding{display:inline-flex; align-items:center; gap:6px; font-family:var(--mono); font-size:11px; font-weight:600; color:#fff; background:var(--armed); border-radius:999px; padding:3px 9px}
+.holding i{width:7px;height:7px;border-radius:50%;background:#fff;animation:blink 1.4s infinite}
+@keyframes blink{50%{opacity:.25}}
+@media (prefers-reduced-motion: reduce){ .holding i{animation:none} }
+
+.note{margin:12px 14px 6px; font-size:11.5px; color:var(--accent-ink); background:var(--accent-soft); border:1px solid #cfe0ee; border-radius:8px; padding:7px 10px; line-height:1.45}
+.note b{font-weight:600}
+.stage{padding:6px 10px 2px}
+svg{display:block; width:100%; height:auto}
+.status{display:flex; align-items:center; gap:14px; padding:6px 16px 12px; font-size:11px; color:var(--faint)}
+.status .sp{flex:1}
+.btn{font-family:var(--sans); font-size:12px; font-weight:600; border-radius:8px; padding:6px 14px; border:1px solid var(--border); background:var(--surface); color:var(--muted)}
+.btn.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+
+.controls{display:flex; flex-wrap:wrap; align-items:flex-start; gap:16px 34px; padding:14px 18px; border-top:1px solid var(--hairline); background:var(--surface-alt)}
+.ctl{display:flex; flex-direction:column; gap:9px; min-width:0}
+.ctl > .lbl{font-size:10.5px; font-weight:600; letter-spacing:.6px; text-transform:uppercase; color:var(--faint)}
+.seg{display:inline-flex; background:var(--inset); border:1px solid var(--border); border-radius:999px; padding:3px}
+.seg button{appearance:none; border:0; background:transparent; cursor:pointer; font-family:var(--sans); font-size:12px; font-weight:500; color:var(--muted); padding:5px 12px; border-radius:999px; line-height:1}
+.seg button.on{background:var(--surface); color:var(--accent-ink); box-shadow:0 1px 2px rgba(22,32,48,.10); font-weight:600}
+.seg button:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+.toggles{display:flex; gap:22px; flex-wrap:wrap}
+.switch{display:inline-flex; align-items:center; gap:9px; cursor:pointer; user-select:none; font-size:12.5px; color:var(--muted)}
+.switch input{position:absolute; opacity:0; width:0; height:0}
+.switch .track{width:34px; height:19px; border-radius:999px; background:var(--border-strong); position:relative; transition:background .15s}
+.switch .track::after{content:""; position:absolute; top:2px; left:2px; width:15px; height:15px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(22,32,48,.28); transition:transform .15s}
+.switch input:checked + .track{background:var(--teal)}
+.switch input:checked + .track::after{transform:translateX(15px)}
+.switch input:focus-visible + .track{outline:2px solid var(--accent); outline-offset:2px}
+
+.rules{display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:16px}
+.rule{background:var(--surface); border:1px solid var(--border); border-radius:var(--r-sm); padding:13px 15px}
+.rule h3{margin:0 0 6px; font-size:12.5px; font-weight:600; display:flex; align-items:center; gap:8px}
+.rule p{margin:0; font-size:12.5px; line-height:1.5; color:var(--muted)}
+.rule code{font-family:var(--mono); font-size:11.5px; background:var(--inset); padding:1px 5px; border-radius:4px; color:var(--accent-ink)}
+.swatch{width:13px;height:13px;border-radius:4px;flex:none}
+.sw-el{background:repeating-linear-gradient(135deg,#E6E9EE 0 3px,#F4F6F9 3px 6px); border:1px solid var(--elapsed)}
+.sw-now{background:var(--armed)}
+.sw-ok{background:linear-gradient(90deg,rgba(30,143,163,.25),rgba(194,59,59,.16)); border:1px solid var(--teal)}
+.opts{display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:14px}
+.opt{background:var(--surface); border:1px solid var(--border); border-radius:var(--r-sm); padding:12px 14px; font-size:12.5px; color:var(--muted); line-height:1.5}
+.opt h3{margin:0 0 4px; font-size:12.5px; font-weight:600; color:var(--text)}
+.opt.rec{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
+.opt .tag{display:inline-block; font-size:10px; font-weight:700; letter-spacing:.5px; text-transform:uppercase; color:var(--accent-ink); background:var(--accent-soft); border-radius:999px; padding:2px 7px; margin-left:6px; vertical-align:middle}
+.foot{margin-top:14px; font-size:12px; color:var(--faint); line-height:1.5}
+@media (max-width:760px){ .rules,.opts{grid-template-columns:1fr} }
+</style>
+
+<div class="wrap">
+  <div class="lede">
+    <h1>Editing while holding: the elapsed window</h1>
+    <p>While a run is parked at its Hold, the edit dialog shows the whole sequence for context — but
+      everything left of the Hold has <b>already happened</b>. It should read as elapsed at a glance and
+      refuse edits outright: no drag handles, no double-click editor, no delete; a click just tells you when
+      it ran. The Hold itself is <b>now</b> and can’t move either. Only the post-hold window (the resumed
+      remainder of a crossing ramp, the down-ramp, the cool-down) stays live. Three treatments below —
+      switch between them; the first is the recommendation.</p>
+  </div>
+
+  <div class="app">
+    <div class="title">
+      <div class="dot-grp"><span class="wd r"></span><span class="wd y"></span><span class="wd g"></span></div>
+      <h2><b>Edit post-hold steps</b> · LoL test · rpi-gnss-07</h2>
+      <span class="holding"><i></i>HOLDING 04:12</span>
+      <span class="sp"></span>
+      <span class="cap">proposal — not yet built</span>
+    </div>
+    <div class="note">Edit the steps <b>after the Hold</b>. Everything before it has already run and is locked
+      (greyed). A ramp that ran across the Hold shows its remaining part as its own post-hold ramp, pre-filled
+      as if simply resumed — retarget it here if you like.</div>
+
+    <div class="stage"><div id="canvas"></div></div>
+
+    <div class="status"><span id="statusline">ready — edit the post-hold steps, then Use these steps</span>
+      <span class="sp"></span><span class="btn">Cancel</span><span class="btn primary">Use these steps</span></div>
+
+    <div class="controls">
+      <div class="ctl">
+        <span class="lbl">Elapsed window treatment</span>
+        <div class="seg" id="segMode" role="group" aria-label="Elapsed treatment">
+          <button data-m="frosted" class="on">A · Frosted &amp; locked</button>
+          <button data-m="ghost">B · Ghosted outlines</button>
+          <button data-m="collapsed">C · Collapsed strip</button>
+        </div>
+      </div>
+      <div class="ctl">
+        <span class="lbl">Details</span>
+        <div class="toggles">
+          <label class="switch"><input type="checkbox" id="times" checked><span class="track"></span>
+            <span>show when each elapsed step <b>actually fired</b></span></label>
+          <label class="switch"><input type="checkbox" id="click" checked><span class="track"></span>
+            <span>a click on an elapsed step → <b>“ran at …”</b> notice</span></label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="opts">
+    <div class="opt rec"><h3>A · Frosted &amp; locked<span class="tag">recommended</span></h3>
+      The elapsed window keeps its full geometry (you still see what led to the hold) under a frosted wash;
+      its steps go monochrome, lose their handles, and each carries a <b>✓ ran</b> mark with the real clock
+      time. A ribbon at the top says why it’s locked. Nothing else changes, so the post-hold window looks
+      exactly like the normal editor.</div>
+    <div class="opt"><h3>B · Ghosted outlines</h3>
+      Lighter touch: no wash, the elapsed steps become dashed outlines with faint labels and the ✓ marks.
+      Cleaner, but a ghosted ramp can still look “pending” rather than “done”, and the boundary between locked
+      and editable relies on the Hold edge alone.</div>
+    <div class="opt"><h3>C · Collapsed strip</h3>
+      The elapsed window folds into a narrow summary (“4 steps ran · 1:45”) with an expand chevron, giving
+      the editable window the whole canvas. Best when window A is long, but you lose the at-a-glance context
+      of what the signal was doing when it paused.</div>
+  </div>
+
+  <div class="rules">
+    <div class="rule">
+      <h3><span class="swatch sw-el"></span>Elapsed = read-only, everywhere</h3>
+      <p>Hit-testing ignores elapsed steps for drag, resize, anchor handles, double-click and Delete; the
+        context menu shows only <code>Ran at 12:04:31</code>. The row header greys them and adds a lock. A
+        crossing ramp’s run-up is elapsed; its remainder (right of the Hold) is not.</p>
+    </div>
+    <div class="rule">
+      <h3><span class="swatch sw-now"></span>The Hold is <em>now</em></h3>
+      <p>The enter edge carries a live <code>⏸ HOLDING 04:12</code> tag instead of the offset chip, and the
+        marker can’t be dragged or removed (the dialog already refuses a Hold-less edit). The on-air pill dims:
+        T0 is history, <b>resume</b> is the reference the editable window hangs off.</p>
+    </div>
+    <div class="rule">
+      <h3><span class="swatch sw-ok"></span>Post-hold = the normal editor</h3>
+      <p>Right of the resume edge everything works as today: the resumed remainder is its own ramp
+        (pre-filled), the down-ramp and cool-down drag, anchor and edit; validation and the Ready pill apply
+        only to this window.</p>
+    </div>
+  </div>
+
+  <p class="foot">Real behaviour behind the picture: the elapsed set is <i>every step whose fires all sit at or
+    before the Hold instant</i> (the agent’s window A), which the client already knows from the run’s
+    <code>hold_at_offset_s</code>; the canvas needs a “locked before x” mode and the hit-test/paint gates —
+    no wire or agent change.</p>
+</div>
+
+<script>
+const S={ mode:"frosted", times:true, click:true };
+
+const VW=1140, VH=432;
+const headerW=190, laneTop=100, pitch=40, rowH=28, axisY=388, bandTop=62;
+const rowY=i=>laneTop+i*pitch;
+const C={ text:"#1E2530",muted:"#5C6675",faint:"#8A93A2",border:"#E2E5EA",bstrong:"#CDD2DA",
+  accent:"#2C6E9B",accentInk:"#1F5476",online:"#1D9E75",crash:"#C23B3B",armed:"#BA7517",
+  teal:"#1E8FA3",tealInk:"#12707F", el:"#9AA3B0", elInk:"#6B7482", elFill:"#D9DDE3" };
+
+const A=o=>Object.entries(o).map(([k,v])=>`${k}="${v}"`).join(" ");
+const line=(x1,y1,x2,y2,o={})=>`<line ${A({x1,y1,x2,y2,...o})}/>`;
+const rect=(x,y,w,h,o={})=>`<rect ${A({x,y,width:w,height:h,...o})}/>`;
+const txt=(x,y,s,o={})=>`<text ${A({x,y,...o})}>${s}</text>`;
+const circ=(cx,cy,r,o={})=>`<circle ${A({cx,cy,r,...o})}/>`;
+const mm=t=>{ t=Math.round(t); const m=(t/60|0),ss=t%60; return m?`${m}:${String(ss).padStart(2,"0")}`:`${ss}s`; };
+const clock=(base,off)=>{ const t=base+off; const h=(t/3600|0)%24, m=(t/60|0)%60, s=t%60;
+  return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`; };
+const T0=12*3600+4*60+1;   // 12:04:01 — the run's on-air instant (for the fired clock times)
+
+function chip(cx,cy,label,color,o={}){ const w=label.length*6.6+16,h=19;
+  return rect(cx-w/2,cy-h/2,w,h,{rx:9,fill:o.fill||"#FFFFFF",stroke:o.stroke||C.border,"stroke-dasharray":o.dash||"none"})+
+    txt(cx,cy+4,label,{"text-anchor":"middle","font-family":"var(--mono)","font-size":11,"font-weight":600,fill:color}); }
+function chipSide(x,cy,label,color,side,o){ const w=label.length*6.6+16; return chip(side==="l"?x-w/2:x+w/2,cy,label,color,o); }
+function pill(cx,topY,label,color,op=1){ const w=label.length*6.6+16,h=17;
+  return rect(cx-w/2,topY,w,h,{rx:5,fill:color,opacity:op})+txt(cx,topY+12,label,{"text-anchor":"middle","font-family":"var(--sans)","font-size":10,"font-weight":700,fill:"#FFFFFF","letter-spacing":.4,opacity:op}); }
+function ranMark(x,cy,fired){                       // ✓ + the real clock time, in the elapsed grey
+  let g=txt(x,cy+4,"✓",{"text-anchor":"middle","font-family":"var(--sans)","font-size":11,"font-weight":700,fill:C.elInk});
+  if(S.times) g+=txt(x+7,cy+4,fired,{"font-family":"var(--mono)","font-size":9.5,fill:C.faint});
+  return g;
+}
+
+// ── item painters (state: "live" | "elapsed") ─────────────────────────────────
+function pin(cx,cy,label,side,state,fired,shape="dot"){
+  const live=state==="live", ghost=S.mode==="ghost"&&!live;
+  const color=live?C.teal:(ghost?C.el:C.el);
+  let g = shape==="diamond"
+    ? `<rect ${A({x:cx-5,y:cy-5,width:10,height:10,rx:2,fill:ghost?"#fff":color,stroke:ghost?C.el:"#FFFFFF","stroke-width":ghost?1.4:2,"stroke-dasharray":ghost?"2 2":"none",transform:`rotate(45 ${cx} ${cy})`})}/>`
+    : circ(cx,cy,5.4,{fill:ghost?"#fff":color,stroke:ghost?C.el:"#FFFFFF","stroke-width":ghost?1.4:2,"stroke-dasharray":ghost?"2 2":"none"});
+  const lc = live?C.tealInk:C.elInk;
+  g += chipSide(side==="l"?cx-13:cx+13, cy, label, lc, side, live?{}:{stroke:C.el,fill:ghost?"#fff":"#F6F7F9",dash:ghost?"3 2":"none"});
+  if(!live){ const w=label.length*6.6+16; const mx = side==="l" ? cx-13-w-12 : cx+13+w+12; g+=ranMark(mx,cy,fired); }
+  return g;
+}
+function ramp(x0,x1,y,label,state,fired,o={}){
+  const live=state==="live", ghost=S.mode==="ghost"&&!live;
+  const base=live?C.teal:C.el, ink=live?C.tealInk:C.elInk;
+  let g = rect(x0,y+4,x1-x0,rowH-8,{rx:6,fill:ghost?"#fff":base,opacity:live?.2:(ghost?1:.28),stroke:base,"stroke-width":1,"stroke-opacity":.7,"stroke-dasharray":ghost?"4 3":"none"});
+  g += txt(x0+8,y+17,label,{"font-family":"var(--mono)","font-size":10,"font-weight":600,fill:ink});
+  const rising=!o.down;
+  g += line(x1-24,y+(rising?rowH-8:8),x1-8,y+(rising?8:rowH-8),{stroke:ink,"stroke-width":1.6,"stroke-linecap":"round"})+circ(x1-8,y+(rising?8:rowH-8),2.4,{fill:ink});
+  if(live){ g+=circ(x0,y+rowH/2,4.5,{fill:"#FFFFFF",stroke:C.teal,"stroke-width":2})+circ(x1,y+rowH/2,4.5,{fill:"#FFFFFF",stroke:C.teal,"stroke-width":2}); } // handles: live only
+  else g+=ranMark(x1+14,y+rowH/2,fired);
+  return g;
+}
+
+function render(){
+  const collapsed=S.mode==="collapsed";
+  // geometry: window A is 105 s (1:45) long; collapsed → a 92 px strip
+  const eff = 3.4;
+  const on_x = headerW+16;
+  const ex = collapsed ? on_x+92 : on_x+105*eff;   // hold ENTER edge (= now)
+  const holdW=58, rx=ex+holdW;
+  const off_x = rx+140*eff;
+  // rows: in the collapsed treatment the elapsed rows fold away and the live rows pack up under the bar
+  const dispY = i => collapsed ? rowY(i===0 ? 0 : i-3) : rowY(i);
+  const s={g:""};
+  s.g+=`<defs>
+    <pattern id="hatch" width="7" height="7" patternUnits="userSpaceOnUse">
+      <rect width="7" height="7" fill="#F4F6F9"/><path d="M-1,6 l7,-7 M0,7 l7,-7 M6,7 l1,-1" stroke="#DFE4EA" stroke-width="1"/></pattern>
+    <pattern id="frost" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(135)">
+      <rect width="6" height="6" fill="#EEF0F3"/><line x1="0" y1="0" x2="0" y2="6" stroke="#E2E5EA" stroke-width="1.2"/></pattern>
+  </defs>`;
+
+  // ── row header ──
+  const rows=[
+    ["gps_ca","duration · running",true,"live"],
+    ["rf tune","rf=on · ran",false,"el"],
+    ["sidelobes tune","sidelobes=7 · ran",false,"el"],
+    ["power ramp","−90 → −58 · ran to the Hold",false,"el"],
+    ["power ramp","−58 → −50 · resumed remainder",false,"live"],
+    ["power ramp","−50 → −90 · down-ramp",false,"live"],
+    ["rf tune","rf=off",false,"live"],
+  ];
+  s.g+=rect(0,0,headerW,VH,{fill:"#FBFCFD"})+line(headerW,0,headerW,VH,{stroke:C.border});
+  s.g+=txt(14,24,"TASKS &amp; STEPS",{"font-family":"var(--sans)","font-size":9.5,"font-weight":700,"letter-spacing":1,fill:C.faint});
+  rows.forEach((r,i)=>{ const [name,sub,isTask,st]=r, el=st==="el";
+    if(collapsed&&el) return;                      // the collapsed strip has no rows for elapsed steps
+    const y=dispY(i)+rowH/2;
+    s.g+=rect(14,y-6.5,9,13,{rx:3,fill:isTask?C.teal:"none",stroke:isTask?"none":(el?C.el:C.bstrong),"stroke-width":isTask?0:1});
+    s.g+=txt(32,y-1,name,{"font-family":"var(--sans)","font-size":12,"font-weight":isTask?600:500,fill:el?C.elInk:C.text});
+    s.g+=txt(32,y+11,sub,{"font-family":"var(--sans)","font-size":9.5,fill:C.faint});
+    if(el) s.g+=txt(headerW-16,y+4,"🔒",{"text-anchor":"end","font-size":10,opacity:.8});
+  });
+  const liveRowY = dispY;
+
+  // ── windows (behind) ──
+  const bh=axisY-(bandTop+2);
+  if(collapsed){
+    s.g+=rect(on_x,bandTop+2,ex-on_x,bh,{fill:"url(#hatch)"})+rect(on_x,bandTop+2,ex-on_x,bh,{fill:"#F2F3F5",opacity:.6});
+  } else {
+    s.g+=rect(on_x,bandTop+2,ex-on_x,bh,{fill:C.online,opacity:S.mode==="frosted"?.03:.055});
+  }
+  s.g+=rect(ex,bandTop+2,rx-ex,bh,{fill:"url(#hatch)"})+rect(ex,bandTop+2,rx-ex,bh,{fill:C.armed,opacity:.10});
+  s.g+=rect(rx,bandTop+2,off_x-rx,bh,{fill:C.crash,opacity:.05});
+  // axis + ticks
+  s.g+=line(headerW,axisY,VW,axisY,{stroke:C.border});
+  if(!collapsed) for(let t=0;t<=90;t+=30){ const x=on_x+t*eff;
+    s.g+=line(x,axisY,x,axisY+6,{stroke:C.faint})+txt(x,axisY+18,t?mm(t):"0",{"text-anchor":"middle","font-family":"var(--mono)","font-size":10,fill:C.faint});
+    if(t) s.g+=line(x,bandTop+2,x,axisY,{stroke:C.bstrong,opacity:.3}); }
+  for(let t=0;t<=120;t+=30){ const x=rx+t*eff;
+    s.g+=line(x,axisY,x,axisY+6,{stroke:C.faint})+txt(x,axisY+18,t?mm(t):"0",{"text-anchor":"middle","font-family":"var(--mono)","font-size":10,fill:C.muted});
+    if(t) s.g+=line(x,bandTop+2,x,axisY,{stroke:C.bstrong,opacity:.42}); }
+
+  // ── the duration task: runs through the hold; its elapsed stretch is greyed ──
+  const by=liveRowY(0);
+  s.g+=rect(on_x-10*eff*(collapsed?0:1),by,off_x-(on_x-10*eff*(collapsed?0:1)),rowH,{rx:8,fill:"#FFFFFF"});
+  s.g+=rect(on_x-10*eff*(collapsed?0:1),by,off_x-(on_x-10*eff*(collapsed?0:1)),rowH,{rx:8,fill:C.teal,opacity:.12,stroke:C.teal,"stroke-width":1,"stroke-opacity":.5});
+  s.g+=rect(on_x-10*eff*(collapsed?0:1),by,ex-(on_x-10*eff*(collapsed?0:1)),rowH,{rx:8,fill:C.elFill,opacity:S.mode==="ghost"?.35:.6});
+  s.g+=rect(ex,by,rx-ex,rowH,{fill:C.armed,opacity:.13});
+  s.g+=rect(on_x-10*eff*(collapsed?0:1)+3,by+5,3,rowH-10,{rx:1.5,fill:C.teal});
+  s.g+=txt(on_x-10*eff*(collapsed?0:1)+14,by+18,"gps_ca",{"font-family":"var(--sans)","font-size":12,"font-weight":600,fill:C.tealInk});
+  s.g+=circ(off_x,by+rowH/2,4.5,{fill:"#FFFFFF",stroke:C.teal,"stroke-width":2});   // only the stop edge keeps a handle
+
+  // ── elapsed steps (window A) ──
+  if(!collapsed){
+    s.g+=pin(on_x, rowY(1)+rowH/2, "on-air · RF on", "r", "el", clock(T0,0));
+    s.g+=pin(on_x+40*eff, rowY(2)+rowH/2, "sidelobes 7", "r", "el", clock(T0,40));
+    s.g+=ramp(on_x+45*eff, ex, rowY(3), "−90→−58 · 1:00", "el", clock(T0,45));
+  }
+  // ── frosted wash + ribbon over window A ──
+  if(S.mode==="frosted"){
+    s.g+=rect(headerW+1,bandTop+2,ex-headerW-1,bh,{fill:"url(#frost)",opacity:.55});
+    const rw=250; s.g+=rect(on_x+8,bandTop+8,rw,18,{rx:9,fill:"#FFFFFF",stroke:C.el});
+    s.g+=txt(on_x+8+rw/2,bandTop+21,"✓ ELAPSED — ran before the Hold · locked",{"text-anchor":"middle","font-family":"var(--sans)","font-size":10,"font-weight":700,"letter-spacing":.3,fill:C.elInk});
+  } else if(S.mode==="ghost"){
+    s.g+=txt(on_x+10,bandTop+20,"✓ elapsed · locked",{"font-family":"var(--sans)","font-size":10,"font-weight":700,"letter-spacing":.3,fill:C.elInk});
+  } else {
+    // the collapsed strip's summary sits under the bar (rotated text is hard to read — two short lines)
+    const sx=(on_x+ex)/2;
+    s.g+=txt(sx,rowY(1)+12,"4 steps ran",{"text-anchor":"middle","font-family":"var(--sans)","font-size":10.5,"font-weight":600,fill:C.elInk});
+    s.g+=txt(sx,rowY(1)+27,"1:45 · locked",{"text-anchor":"middle","font-family":"var(--mono)","font-size":9.5,fill:C.faint});
+    s.g+=chip(sx,rowY(2)+18,"▸ expand",C.accentInk);
+  }
+
+  // ── live steps (post-hold): the offset chips read from RESUME (the axis's 0) ──
+  s.g+=ramp(rx+15*eff, rx+45*eff, liveRowY(4), "−58→−50 · 0:30", "live");
+  s.g+=chipSide(rx+15*eff, liveRowY(4)+rowH/2, "+0:15", C.tealInk, "l");
+  s.g+=ramp(rx+60*eff, rx+120*eff, liveRowY(5), "−50→−90 · 1:00", "live", null, {down:true});
+  s.g+=chipSide(rx+60*eff, liveRowY(5)+rowH/2, "+1:00", C.tealInk, "l");
+  s.g+=pin(off_x-10*eff, liveRowY(6)+rowH/2, "off-air −0:10 · RF off", "l", "live");
+
+  // ── the Hold: NOW. Edges + a live tag instead of the offset chip ──
+  s.g+=line(ex,bandTop,ex,axisY+4,{stroke:C.armed,"stroke-width":2,"stroke-dasharray":"5 4"});
+  s.g+=line(rx,bandTop,rx,axisY+4,{stroke:C.armed,"stroke-width":2,"stroke-dasharray":"5 4"});
+  const cxh=(ex+rx)/2, tw=118;
+  s.g+=rect(cxh-tw/2,bandTop-13,tw,18,{rx:9,fill:C.armed})+txt(cxh,bandTop-0.5,"⏸ HOLDING · 04:12",{"text-anchor":"middle","font-family":"var(--mono)","font-size":10,"font-weight":700,fill:"#FFFFFF","letter-spacing":.4});
+  s.g+=txt(rx+4,axisY-6,"resume",{"font-family":"var(--sans)","font-size":9,"font-style":"italic",fill:C.armed});
+  // on-air (dimmed — history) / off-air
+  s.g+=line(on_x,bandTop-2,on_x,axisY+4,{stroke:C.online,"stroke-width":2,opacity:.45})+pill(on_x,bandTop-14,"ON-AIR",C.online,.55);
+  s.g+=line(off_x,bandTop-2,off_x,axisY+4,{stroke:C.crash,"stroke-width":2,"stroke-dasharray":"2 3"})+pill(off_x,bandTop-14,"OFF-AIR",C.crash);
+  s.g+=txt(off_x,bandTop-19,"floats",{"text-anchor":"middle","font-family":"var(--sans)","font-size":8.5,"font-style":"italic",fill:C.faint});
+
+  // ── the click notice on an elapsed step ──
+  if(S.click && !collapsed){
+    // the click point on the elapsed ramp gets a "not allowed" cursor cue; the notice hangs under it,
+    // kept left of the resume edge so it never covers the live remainder on the row below
+    const px=on_x+45*eff+40, py=rowY(3)+rowH/2;
+    s.g+=circ(px,py,6,{fill:"#FFFFFF",stroke:C.elInk,"stroke-width":1.6})+line(px-4,py+4,px+4,py-4,{stroke:C.elInk,"stroke-width":1.6,"stroke-linecap":"round"});
+    const tx=on_x-8, ty=rowY(3)+rowH+8, w=300, h=40;
+    s.g+=rect(tx,ty,w,h,{rx:8,fill:"#1E2530",opacity:.94});
+    s.g+=txt(tx+12,ty+16,"Ran 12:04:46 → 12:05:46 — already happened.",{"font-family":"var(--sans)","font-size":11,"font-weight":600,fill:"#FFFFFF"});
+    s.g+=txt(tx+12,ty+31,"Edit its remaining part right of the Hold instead.",{"font-family":"var(--sans)","font-size":10.5,fill:"#C9D1DB"});
+    s.g+=`<path d="M${px-6},${ty} l6,-7 l6,7 z" fill="#1E2530" opacity=".94"/>`;
+  }
+
+  document.getElementById("canvas").innerHTML =
+    `<svg viewBox="0 0 ${VW} ${VH}" role="img" aria-label="The Hold-edit dialog while holding: the elapsed window before the Hold is greyed and locked with fired times, the Hold edge reads HOLDING with the live pause length, and the post-hold window stays editable">${s.g}</svg>`;
+  document.getElementById("statusline").textContent =
+    S.mode==="collapsed" ? "ready — 4 elapsed steps folded away · edit the post-hold steps, then Use these steps"
+                         : "ready — elapsed steps are locked (click one to see when it ran) · edit the post-hold steps";
+}
+
+document.getElementById("segMode").addEventListener("click",e=>{ const b=e.target.closest("button"); if(!b) return;
+  S.mode=b.dataset.m; [...e.currentTarget.children].forEach(x=>x.classList.toggle("on",x===b)); render(); });
+document.getElementById("times").addEventListener("change",e=>{ S.times=e.target.checked; render(); });
+document.getElementById("click").addEventListener("change",e=>{ S.click=e.target.checked; render(); });
+render();
+</script>

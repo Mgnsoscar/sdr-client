@@ -1,0 +1,146 @@
+<title>Arrow Placement at a Hub</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ground:#EEF0F3; --surface:#FFFFFF; --surface-alt:#FAFBFC; --inset:#F1F4F7;
+  --border:#E2E5EA; --border-strong:#CDD2DA; --hairline:#ECEEF1;
+  --text:#1E2530; --muted:#5C6675; --faint:#8A93A2;
+  --accent:#2C6E9B; --accent-ink:#1F5476; --ok:#1D9E75; --warn:#BA7517; --bad:#C23B3B;
+  --teal:#1E8FA3; --teal-ink:#12707F; --teal-soft:#E4F2F3;
+  --conn:#4E86A6; --band:#F7F9FB;
+  --sans:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --mono:"IBM Plex Mono","DejaVu Sans Mono",ui-monospace,monospace;
+  --shadow-sm:0 1px 2px rgba(22,32,48,.06), 0 1px 3px rgba(22,32,48,.05);
+}
+:root:not([data-theme="light"]){
+  @media (prefers-color-scheme: dark){
+    --ground:#14181E; --surface:#1B2129; --surface-alt:#20272F; --inset:#232B34;
+    --border:#2C353F; --border-strong:#3A4552; --hairline:#262E37;
+    --text:#E7ECF2; --muted:#A2ADBB; --faint:#727E8C;
+    --accent:#5FA8D6; --accent-ink:#9BCBE8; --ok:#3FBE93; --warn:#D69A46; --bad:#E06A6A;
+    --teal:#37B7CC; --teal-ink:#8FE0EC; --teal-soft:#183038; --conn:#6E9BB6; --band:#191F26;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.28);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#14181E; --surface:#1B2129; --surface-alt:#20272F; --inset:#232B34;
+  --border:#2C353F; --border-strong:#3A4552; --hairline:#262E37;
+  --text:#E7ECF2; --muted:#A2ADBB; --faint:#727E8C;
+  --accent:#5FA8D6; --accent-ink:#9BCBE8; --ok:#3FBE93; --warn:#D69A46; --bad:#E06A6A;
+  --teal:#37B7CC; --teal-ink:#8FE0EC; --teal-soft:#183038; --conn:#6E9BB6; --band:#191F26;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.28);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--text);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;padding:30px 20px 48px}
+.wrap{max-width:1000px;margin:0 auto}
+h1{font-size:21px;font-weight:600;letter-spacing:-.2px;margin:0 0 5px;text-wrap:balance}
+.lede{color:var(--muted);font-size:13px;line-height:1.65;margin:0 0 4px;max-width:80ch}
+.lede b{color:var(--text);font-weight:600} .lede .m{font-family:var(--mono)}
+
+.scene-legend{margin:14px 0 22px;padding:12px 16px;background:var(--surface-alt);border:1px solid var(--border);
+  border-radius:12px;font-size:12.5px;line-height:1.7;color:var(--muted);max-width:82ch}
+.scene-legend b{color:var(--text)} .scene-legend .m{font-family:var(--mono);color:var(--text)}
+
+.panels{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:660px){.panels{grid-template-columns:1fr}}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow-sm);padding:15px 16px 14px}
+.panel.pick{border-color:color-mix(in srgb,var(--teal) 55%,var(--border));box-shadow:0 0 0 3px color-mix(in srgb,var(--teal) 16%,transparent),var(--shadow-sm)}
+.panel.bad{border-color:color-mix(in srgb,var(--bad) 40%,var(--border))}
+.phead{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}
+.ptag{font-size:10.5px;font-weight:700;letter-spacing:.4px;color:#fff;border-radius:5px;padding:2px 7px;background:var(--faint)}
+.panel.pick .ptag{background:var(--teal)} .panel.bad .ptag{background:var(--bad)}
+.pname{font-size:14px;font-weight:600}
+.stage{height:270px;background:var(--band);border:1px solid var(--hairline);border-radius:10px;overflow:hidden}
+.stage svg{display:block;width:100%;height:100%}
+.pcap{color:var(--muted);font-size:12px;line-height:1.55;margin-top:9px}
+.pcap b{color:var(--text)}
+
+/* svg */
+.wire{stroke:var(--conn);stroke-width:2.2;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.arw{fill:var(--conn)} .arw.hot{fill:var(--bad)} .arw.good{fill:var(--teal-ink)}
+.pinring{fill:var(--band)} .pindot{fill:var(--teal)}
+.num{fill:#fff;font-family:var(--sans);font-size:9px;font-weight:700}
+.plab{fill:var(--muted);font-family:var(--mono);font-size:9px}
+.olab{fill:var(--conn);font-family:var(--mono);font-size:9.5px}
+.axis{stroke:var(--border);stroke-width:1;stroke-dasharray:2 3}
+.tlab{fill:var(--faint);font-family:var(--mono);font-size:9px}
+.halo{fill:none;stroke:var(--bad);stroke-width:1.4;stroke-dasharray:3 3}
+.callout{fill:var(--teal-ink);font-family:var(--sans);font-size:9px;font-weight:600}
+
+footer{color:var(--faint);font-size:12px;margin-top:22px;line-height:1.6;max-width:82ch}
+footer b{color:var(--muted)} footer .m{font-family:var(--mono)}
+</style>
+
+<div class="wrap">
+  <h1>Arrow placement at a hub</h1>
+  <p class="lede">Your 4-step case: <b>②</b> is anchored to <b>①</b> but fires <b>0:30 before</b> it
+  (<span class="m">−0:30</span>), so ② sits to the <b>left</b>; and <b>③ &amp; ④</b> are anchored to ②,
+  firing <span class="m">+0:30</span> after (to the right). So all three of ②'s lines meet on its right —
+  one arriving (① → ②) and two leaving (② → ③, ② → ④). Every arrow points at its <b>anchorer</b>.</p>
+  <div class="scene-legend">The only tricky arrow is <b>① → ②</b> — it points at ②, the hub. Right at ②'s
+  pin it lands in the shared trunk where all three lines overlap, so you can't tell which line it belongs to.
+  Placed just past the branch, on the segment that's <b>② → ①'s alone</b>, it's unmistakable — and still as
+  close to ② as it can get.</div>
+
+  <div class="panels">
+    <div class="panel bad">
+      <div class="phead"><span class="ptag">NAIVE</span><span class="pname">Arrow at the pin</span></div>
+      <div class="stage" id="naive"></div>
+      <div class="pcap">The <b>① → ②</b> arrowhead sits at ②, inside the cluster where the trunk and both
+      branches meet — it could belong to any of the three lines.</div>
+    </div>
+    <div class="panel pick">
+      <div class="phead"><span class="ptag">PROPOSED</span><span class="pname">Backed off to the clear run</span></div>
+      <div class="stage" id="prop"></div>
+      <div class="pcap">The arrow slides back along <b>① → ②</b> only until it clears the branch — on that
+      line's own run — pointing left at ②. Closest unambiguous spot to the anchorer.</div>
+    </div>
+  </div>
+
+  <footer>Same rule for every connector: the head points at the anchorer and sits as close to it as
+  possible <b>without entering another line's space</b>. On a plain (right-of-anchor) dependent that's just
+  at its pin, as today; only a hub pulls it back. Needs negative step-offsets enabled (like the on-/off-air
+  anchors already are) + routing that lets a dependent sit left of its anchor.</footer>
+</div>
+
+<script>
+// scene geometry (viewBox 0 0 460 270)
+const P2={x:96,y:150}, P1={x:378,y:150}, P3={x:378,y:66}, P4={x:378,y:234}, J=170;
+function pin(pt,n){ return `<circle class="pinring" cx="${pt.x}" cy="${pt.y}" r="10"/>`+
+  `<circle class="pindot" cx="${pt.x}" cy="${pt.y}" r="7.5"/>`+
+  `<text class="num" x="${pt.x}" y="${pt.y+3.2}" text-anchor="middle">${n}</text>`; }
+function arwR(x,y,cls){ return `<path class="arw ${cls||''}" d="M${x-8} ${y-5} L${x} ${y} L${x-8} ${y+5} Z"/>`; }
+function arwL(x,y,cls){ return `<path class="arw ${cls||''}" d="M${x+8} ${y-5} L${x} ${y} L${x+8} ${y+5} Z"/>`; }
+
+function scene(arrowX, bad){
+  // outgoing: 2 -> 3 (up) and 2 -> 4 (down), sharing the trunk 2..J
+  const up   = `<path class="wire" d="M${P2.x+9} ${P2.y} L${J-6} ${P2.y} Q${J} ${P2.y} ${J} ${P2.y-6} L${J} ${P3.y+6} Q${J} ${P3.y} ${J+6} ${P3.y} L${P3.x-9} ${P3.y}"/>`;
+  const down = `<path class="wire" d="M${P2.x+9} ${P2.y} L${J-6} ${P2.y} Q${J} ${P2.y} ${J} ${P2.y+6} L${J} ${P4.y-6} Q${J} ${P4.y} ${J+6} ${P4.y} L${P4.x-9} ${P4.y}"/>`;
+  // incoming: 1 -> 2, straight along the shared row; its OWN run is J..1
+  const inc  = `<path class="wire" d="M${P1.x-9} ${P1.y} L${P2.x+9} ${P2.y}"/>`;
+  const axis = `<line class="axis" x1="${P2.x}" y1="30" x2="${P2.x}" y2="248"/>`+
+    `<line class="axis" x1="${P1.x}" y1="30" x2="${P1.x}" y2="248"/>`+
+    `<text class="tlab" x="${P2.x}" y="262" text-anchor="middle">0:00</text>`+
+    `<text class="tlab" x="${P1.x}" y="262" text-anchor="middle">0:30</text>`;
+  const olab = `<text class="olab" x="288" y="${P2.y-9}" text-anchor="middle">−0:30</text>`+
+    `<text class="olab" x="${J+26}" y="${P3.y+22}">+0:30</text>`+
+    `<text class="olab" x="${J+26}" y="${P4.y-12}">+0:30</text>`;
+  const labels = `<text class="plab" x="${P2.x-15}" y="${P2.y+3.5}" text-anchor="end">fires 0:00</text>`+
+    `<text class="plab" x="${P1.x+15}" y="${P1.y+3.5}">anchor</text>`+
+    `<text class="plab" x="${P3.x+15}" y="${P3.y+3.5}">fires 0:30</text>`+
+    `<text class="plab" x="${P4.x+15}" y="${P4.y+3.5}">fires 0:30</text>`;
+  // the three arrowheads: 3 & 4 at their pins (right-pointing); 1->2 points left, at arrowX
+  const heads = arwR(P3.x-9,P3.y) + arwR(P4.x-9,P4.y) + arwL(arrowX,P2.y, bad?'hot':'good');
+  const mark = bad
+    ? `<circle class="halo" cx="${arrowX}" cy="${P2.y}" r="26"/>`
+    : `<text class="callout" x="${arrowX+2}" y="${P2.y-13}" text-anchor="middle">① → ②</text>`;
+  return `<svg viewBox="0 0 460 270" preserveAspectRatio="xMidYMid meet">`+
+    axis + up + down + inc + olab + heads + mark +
+    pin(P2,'2')+pin(P1,'1')+pin(P3,'3')+pin(P4,'4') + labels + `</svg>`;
+}
+document.getElementById('naive').innerHTML = scene(P2.x+11, true);   // arrow jammed at ②'s pin
+document.getElementById('prop').innerHTML  = scene(J+12, false);     // arrow just past the branch, on ①→②'s run
+</script>

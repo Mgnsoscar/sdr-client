@@ -71,6 +71,821 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — Hold-edit: the ELAPSED window is frosted + LOCKED (option A): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Owner ask: while a run is HOLDING, the edit dialog should grey out the already-elapsed window and make
+it impossible to even try to edit those steps. Mockup `docs/hold-edit-elapsed-mockup.html` (published
+Artifact; three treatments) — owner picked **A · Frosted & locked, WITHOUT the fired clock times**.
+Client-only (no wire/agent/capability change; drift-guarded files untouched):
+- **Canvas mode** (`ui/timeline_editor.py`, `_TimelineCanvas.set_elapsed_locked(True)`): `elapsed_kind(it)`
+  says what already happened — `"full"` (every fire at/before the pause: a window-A tune / one-shot /
+  ramp incl. an `enter` step — a ramp with a point still to fire after the pause is NOT full, but the
+  dialog loads a crossing ramp split so its run-up is), `"start"` (a duration task RUNNING since before
+  the pause — its stop is post-hold and stays editable), `"hold"` (the marker: it is NOW), None (window
+  B / off-air / a window-B bar). Always None when not locked.
+- **Gates.** `_hit` wraps `_hit_free`: a locked part returns `"locked"` (a running bar keeps `bar_stop`) →
+  `mousePressEvent` / `mouseDoubleClickEvent` / `contextMenuEvent` show only `_lock_notice` (a
+  `QToolTip`: "Already ran…" / "Running since before the Hold…" / "The Hold is now…"), no selection,
+  no drag, no editor; the hover cursor is Forbidden. Ctrl+A / the marquee skip locked items; `_drop_target`
+  refuses an elapsed edge, a running bar's START edge and the on-air / pause root lines; `_clamp_tune_
+  offset` keeps a window-B step ≥ 0 from resume and an off-air step no earlier than the resume edge;
+  `_auto_rf_gate` leaves a running task's launch gate alone (only the stop-side auto tune applies);
+  `_seed_item` (the `+ Tune/Ramp/One-shot/Duration` buttons) seeds new steps in the POST-HOLD window
+  (`anchor="hold"` / `start_anchor="hold"`).
+- **Paint.** `_item_colors` → one grey (`ELAPSED_HUE`/`ELAPSED_INK`) for a full item; no edge dots on a
+  locked ramp, none on a running bar's start (its elapsed stretch start→enter is greyed, only the stop
+  grip stays); tune chips / one-shot names muted; `_paint_elapsed_wash` (after the rows, under the Hold's
+  edges) frosts `0..enter_x` with a translucent wash + 135° hairlines and paints the
+  `✓ ELAPSED — ran before the Hold · locked` ribbon on the anchor row (elided to `✓ ELAPSED · locked` /
+  `✓ ELAPSED`, dropped when it can't clear the ON-AIR pill + Hold tab; `_elapsed_ribbon` for tests); the
+  Hold tab reads `⏸ HOLDING` (`_hold_tag`, merged marker too); the ON-AIR pill dims (`_paint_anchor(alpha)`).
+  Row header (`_RowHeader`): grey name/swatch + a padlock (`_paint_lock`) and `… · ran` for a full item;
+  `runs through the Hold` for the running task. Tooltip prefixes `Locked · already ran before the Hold` /
+  `Running · started before the Hold`; the Hold's reads `holding now`.
+- **Dialog** (`ui/hold_edit_dialog.py`): `set_elapsed_locked(True)` right after the split load; the banner
+  says window A is locked; `TimelineEditor.set_elapsed_locked` swaps the hint (`LOCKED_HINT`, kept by
+  `set_tasks`). Backstop: `_window_a_signature()` = the raw canvas items' wire dicts whose anchor isn't
+  `hold`/`stop` (incl. the Hold), order-independent, no deploy-time power precompute (so calibration
+  arriving later can't change it) — `_accept` refuses when it differs from the one taken at load.
+- **`/code-review` follow-ups.** (1) The lock held only per gesture: a press on the running task's LIVE
+  stop grip selected the whole bar, after which Delete / Ctrl+D / the right-click menu / the editor's
+  Remove acted on it. Now the MUTATION layer refuses what already happened — `_delete_uids` drops
+  elapsed uids before cascading, `_duplicate_item` / `edit_item` bail (the editor shows the notice),
+  `contextMenuEvent` treats any elapsed-kind item as locked — and a live-grip press on the running bar
+  never selects it (`mousePressEvent` clears the selection instead). (2) `_window_a_signature` returned
+  `[]` on a probe failure, which two failures would falsely match; it now returns None and `_accept`
+  refuses an unsignable window A. (3) `elapsed_kind` re-derived a ramp's point list on every paint /
+  hover / header row; it is now cached per geometry rebuild (`_refresh_elapsed` in `_rebuild_geom` +
+  `set_elapsed_locked`, `_elapsed_kind_of` does the work, a not-yet-laid-out item is derived on demand).
+  The agent-side findings (proceed's off-air landing on the last fire; stop-anchored window-B content
+  resolving before resume; PATCH on-air-end dropping hold fires) are fixed in `sdr-agent` 1.27.1.
+Tests: `tests/test_hold_edit_locked.py` (15: classification incl. enter / window-B bar / crossing vs.
+at-pause ramp / unlocked; hit-testing incl. the live stop grip + the Hold band; press/dbl-click → notice
+only; Ctrl+A + marquee; drop targets; drag clamps; the RF gate left alone; post-hold seeding; paint —
+grey/hue, ribbon placement, header meta, unlocked has no ribbon; tooltips; the dialog locks on load,
+accepts a window-B edit, refuses a window-A change; the running task is untouchable through its stop
+grip at the mutation layer; the classification cache follows edits + un/re-locking; an unsignable
+window A is refused). Suite 1059 → 1074 offscreen. Verified by a headless render
+(`tools/hold_edit_shot.py`, a committed dev harness like `tools/_seqshot.py`).
+
+## Current state — a ramp ACROSS the Hold is PAUSED there and resumes after Proceed: COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo)
+Owner question: a ramp could be placed with its middle inside the Hold window, and its hover
+duration / end time read wrong. Decision (owner-approved): ALLOW it — the Hold freezes the ramp at
+the level it has reached, and it continues after Proceed shifted by the pause's length (design
+`docs/sequence-hold-step.md` §5.7; agent `1.27.0`, capability `sequence-hold-ramp-pause` — a ≤1.26
+agent silently DELAYED the pause until the ramp finished, hence the gate). Client side:
+- **Model** (`ui/timeline_model.py`): `ramp_hold_cross(it, h_off, …)` → the on-air `(start, end)` of a
+  window-A ramp that starts at/before the pause and ends after it (hold/enter/'both' ramps never
+  cross); `ramp_crosses_hold(items)`; the wire-level `ramp_crosses_hold_steps(steps)` (stored
+  SequenceSteps or dicts, for the arm gates); `ramp_level_at_pause(it, h_off)` = the last point fired
+  at/before the pause (the level held). Gate `hold_ramp_pause_supported(client)` (cap + ≥ 1.27.0).
+- **Canvas** (`ui/timeline_editor.py`): `_resume_shift(it, offset)` now also shifts any on-air-clock
+  time PAST the pause by `HOLD_BAND_PX` (via `_place_x`), so a crossing ramp's END lands on the RESUME
+  side at `resume_x + (end − h_off)·eff` — the geometry and the axis agree again. `_rebuild_geom` /
+  `_live_relayout` stamp `g["cut_x"]` (= `_enter_x`, via `_ramp_cut_x`) for a crossing ramp, and
+  `_paint_ramp` draws it as TWO capsule pieces flanking the Hold window — the run-up ending at the
+  enter edge (text: range · the ramp's OWN duration) and the remainder starting at the resume edge
+  (the slope end-cap) — threaded by a dashed line across the band. `_post_hold_extents` already
+  floats off-air past the resumed end. Tooltip (`_absolute_timing_lines`): `starts X after on-air ·
+  pauses Y in, holding L · ends Z after resume` (+ the off-air line). Drag: the split is derived, so a
+  ramp dragged into / out of the Hold splits / rejoins live.
+- **Gates**: `sequence_editor._hold_ramp_pause_block` (save + Ready pill), `sequences_panel.
+  _hold_ramp_pause_ok` (hold-aware arm), `plans_tab._arm_hold_aware_plan` — all on
+  `ramp_crosses_hold(_steps)`; the schedule/plan collapse path runs the ramp straight through.
+- **Crossing is defined by FIRES, not extent** (matches the agent's split): `ramp_hold_cross` /
+  `ramp_crosses_hold_steps` require a POINT after the pause (`_ramp_fires_after`); a window-A ramp
+  whose last level's hold merely spills past the pause is absorbed by it — `_ramp_edges` draws it
+  ending AT the enter edge, `_post_hold_extents` ignores its tail, nothing is split.
+- **Edit-while-holding presents the remainder as its OWN post-hold ramp** (owner ask):
+  `api/models.split_ramps_at_hold(steps)` (wire-level, via the drift-guarded `api.ramp`) turns a
+  crossing ramp into its run-up (a window-A ramp over exactly the points at/before the pause, the
+  original `id` kept) + its remainder as a NEW `anchor="hold"` ramp with `offset_s` = the first
+  deferred point's time after the pause, start = that level, stop = the original stop, the original
+  dwell (steps = points − 1, duration = points × hold), `power_view` carried, `id` cleared; a lone
+  point on either side becomes the single tune it is (a run-mode ramp's → the one-shot run). Unedited,
+  its fires equal the agent's paused remainder exactly; since the run-up no longer crosses, the agent
+  derives no second remainder from the edited window A. `HoldEditDialog` loads
+  `split_ramps_at_hold(sequence.steps)` (its banner says so). Needed a conflict-rule refinement:
+  `_spans_overlap` now treats a ramp as `[lo, hi)` (its last hold ENDS at hi, so a same-control step at
+  exactly hi follows it; two points at one instant / a step at a ramp's start still collide) — the two
+  pieces touch at the pause boundary and were falsely flagged as "same time".
+Tests: `tests/test_hold_ramp_pause.py` (detection incl. a ramp starting AT the pause; the held level;
+wire-level detection on models + dicts; the gate; geometry end-on-resume-side + two capsules that
+flank the band; live drag splits/rejoins; tooltip lines; `split_ramps_at_hold` fire-equality / lone
+points / non-crossing untouched; the Hold-edit dialog loads split + accepts), `tests/test_step_
+conflicts.py` (a step at a ramp's exact end follows it). Suite 1046 → 1059 offscreen; agent 491 → 496.
+
+## Current state — owner-testing round 3 (readouts · tooltips · task-name-free rows · Hold-START anchor · bar anchor handle · RF auto-gating · drag clamps · live band): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo)
+A third Word doc (`Issues_and_wishes_v3`, 9 items). Suite 1019 → 1046 offscreen; agent 485 → 491 (`1.26.0`).
+- **#1/#6 Drag readout = the OFFSET only.** `_paint_drag_readout` shows just `±M:SS` (via `_fmt_offset`) for
+  every part (pin / ramp body / bar start·stop / Hold) — the canvas already shows WHAT it's measured from
+  (the anchor line, the Hold edge, the connector), so no `· on-air` suffix and never "on-air" for a
+  step-anchored pin. `_paint_root_anchor_hint` (the selected tie chip `on-air +0:35`) skips its chip while
+  a drag is in progress, so the two never double up.
+- **#2 Tooltip.** `_tooltip_text` header names the STEP (`<b>Ramp</b> · power −50→−90 · 6 s`, `<b>Tune</b> ·
+  bw=12`; a duration task / one-shot keeps its task), a step-anchored item reads `⚓ [its end ]X after|before|
+  at the anchor's start|end` (the anchor is visible, so it's not named), then `_absolute_timing_lines`:
+  `fires/starts/ends X after on-air` (or `after resume` past a Hold) / `before off-air` / `before the pause`
+  — and past a Hold BOTH `after resume` and `before off-air` (off-air floats to `fwd + bwd` s after resume,
+  the canvas's post-hold window without its pixel pad; an off-air-anchored step reads both too).
+- **#3 No task names on tune/ramp rows.** `_RowHeader._meta` → `bw tune` / `power ramp` (the indent + hue
+  say the task); `_paint_ramp` dropped the parent-task badge.
+- **#4 The Hold's START edge — `anchor="enter"`** (cross-repo; agent `1.26.0`, capability
+  `sequence-hold-enter`). A ramp's END (never a start / a tune) may tie to the LEFT edge of the Hold window
+  (the pause's start); a start / a tune ties to the resume edge as before. `offset` is the END's offset from
+  the pause (≤ 0 — nothing may reach INTO the pause; `validate()` + `_clamp_tune_offset` enforce it), the
+  ramp runs backward from it (`ramp_span` → `("start", h_off+off−dur)..("start", h_off+off)`), window A
+  on the on-air clock (`effective_anchor_offset`, `carry_order_key` (0, …), `_ANCHOR_ON_AIR`). Canvas:
+  `_root_anchor_at(x, for_end)` returns `"enter"` only for a drag from a ramp's END over the enter edge
+  (`"hold"` only for a start over the resume edge); `_make_root_anchor("enter")` ties the END; `_root_x`,
+  `_anchor_base_x`, `_def_x`, `_end_tied`, `_paint_root_anchor_hint` (`pause −0:10`), the connect-drag label
+  (`the pause`), `_timing_text(side="enter")` → `at pause` / `X · before pause`, `_ramp_end_side_off`.
+  Dialogs: StepEditor "hold start (before the pause)" + ramp editor "Hold start (ends at the pause)"
+  (offered with a Hold; window-fit check skipped; `_ft_sublabels` "the pause"). Wire: `SequenceStep.anchor`
+  accepts `"enter"`; `collapse_hold` compiles it out to `start` at `hold_off + offset` (a ramp by its START:
+  minus its resolved duration via `api.ramp`), so the schedule/plan path never sends the anchor. Gates:
+  `hold_enter_supported(client)` (cap + agent ≥ 1.26.0) / `uses_hold_enter(items)`; `sequence_editor.
+  _hold_enter_block` (save + Ready pill), `sequences_panel._hold_enter_ok` (hold-aware arm), `plans_tab.
+  _arm_hold_aware_plan` (direct plan arm).
+- **#5 A duration task's START dot is its ANCHOR handle** (`_edge_at` → `(bar, "start")` within
+  `BAR_DOT_HIT` = 6 px; `_is_anchor_source` True for bars; `_make_anchor` sets `start_anchor="step"` +
+  `start_anchor_step_id/edge` + `start_offset` = the pixel gap; `_make_root_anchor` re-roots a bar on-air /
+  at resume). The RESIZE grips sit just inside the capsule (`_hit`: `bar_start` from −HANDLE_HIT to
+  HANDLE_W+8 inside; the stop dot stays a resize grip) and are painted as two hairlines at each end
+  (`_paint_bar`) so the two are visually distinct.
+- **#7 RF auto-gating** (`ui/rf_gate.py`, the client mirror of `paramkit/rf.py` + `gate_tokens` /
+  `gate_flag` / `gate_arg_state` / `set_gate_arg`). On a bar drag's RELEASE (`mouseReleaseEvent` →
+  `_auto_rf_gate`, in the same undo step): a task whose script declares an RF gate (`is_rf` marker or the
+  `--rf` on/off convention, via `TimelineEditor.task_param_specs`) dragged to START BEFORE on-air gets its
+  launch args set to the gate's OFF token + a tune turning it ON at on-air `0`; dragged back the tune goes
+  and the launch gate is restored ON. STOP PAST off-air adds a gate-OFF tune at off-air `0`; back, it goes.
+  The auto tunes are recognised by SHAPE (gate-only tune at the anchor instant) — no marker field, a
+  reloaded sequence behaves the same. No gate → no-op.
+- **#8 Drag clamps.** `_task_range(it)` bounds a start-/stop-anchored tune or ramp to its task's DRAWN
+  span on both ends (a ramp keeps its whole extent inside); `_clamp_tune_offset` applies it (an `enter`
+  step is capped at 0). `_clamp_for_dependents(target, offset)` narrows a TARGET's drag so every tune/ramp
+  hanging off it (transitively, `_dependents_of`) stays inside ITS task (the dependent's fixed distance
+  translates its range onto the target). Wired into the `run_body` / `ramp_body` drags.
+- **#9 Live band expansion.** `relayout` split into `_recompute_band` (Hold + step bases + `compute_anchors`
+  + the floating Hold band) and placement; `_live_expand()` (called by `_live_move` / `_group_move` on
+  every drag move) re-measures the band from the live offsets with ON-AIR PINNED (`_on` kept, `_off =
+  _on + band`, the canvas min-width only GROWS), then `_set_hold_edges` + `_rebuild_geom` — so the on-air /
+  off-air / Hold windows expand AS you drag. On release `relayout(keep_on=True)` holds on-air where it was
+  (`_place(keep_on)` clamps the shift to the range that keeps every item on-canvas) and keeps the grown
+  width; `resizeEvent` pins on-air mid-drag too.
+Tests: `tests/test_owner_v3.py` (all nine, 27 tests) + `tests/test_timeline_step_anchor_ui.py` (three
+expectations updated: the bar start dot is a handle; tooltip wording); agent `tests/test_sequence_hold_enter.py`.
+Verified by a headless render (`scratchpad/v3_issues.py`): muted launch + auto RF tunes, an END-tied
+pause ramp with its `pause −10s` tie, task-name-free rows/ramps, grip hairlines on the bar.
+
+## Current state — owner-testing round 2 (connector exit sides · END-tied ramps · delete cascade · bar-source connectors): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo)
+A second Word doc (3 issues + the bar-source gap from #6). Suite 1006 → 1019 offscreen; agent 483 → 485.
+- **Connector exit side / ramp entry (owner images).** A ramp anchored to a TUNE at +0 s had the tune's
+  line exit RIGHT and wrap around; a ramp anchored at a NEGATIVE offset was entered from the right
+  THROUGH its own capsule. Router (`_TimelineCanvas._connector_points` + new `_drop_column`,
+  `_dep_entry`, `_point_exit_dir`, `_chip_w`, `_dep_offset`): a POINT target (both sides free) now
+  exits TOWARD the dependent's drop column (left when the dependent starts at/just after/before the
+  pin — no room for the chip on the right; right when it fits), except a pin that is ITSELF a
+  dependent keeps the right exit + under-caption duck (option C) for a left-entry dependent. A
+  TWO-SIDED dependent (ramp/bar) is always entered from OUTSIDE its body — a start tie from the left,
+  an end tie from the right — never through the capsule; the #9 stub route applies only when the
+  entry side faces the stub, else the general wrap. `_pin_conn_sides` uses the SAME decision, so a
+  pin's caption never sits on a side a line uses. The router honours a given `exit_dir` and wraps
+  when the column is on the body side; a point target with a right-entry dependent leaves straight
+  toward the column (the old validated route).
+- **A ramp dragged by its END is tied by its END (#C).** New `RunItem.anchor_own_edge`
+  ("start"|"end", ramps only) + `SequenceStep.anchor_own_edge` on BOTH wire models (agent `1.25.3`
+  carries it through; the runtime never reads it). An end-tied ramp's END sits at `target edge +
+  offset` and the ramp runs BACKWARD from it; `offset` is the END's. The wire `offset_s` is ALWAYS
+  the START's offset (`step_wire_offset` = offset − duration), so the agent places it unchanged — an
+  older agent drops the field and the ramp reloads start-tied at identical timing. Model:
+  `own_edge_shift`, `step_wire_offset`, `_ramp_item_offset` (load), `is_step_source`/`step_source_ref`
+  (a run via `anchor_*`, a bar via `start_anchor_*` — used everywhere a step source is detected).
+  Canvas: `_make_anchor(…, from_edge)` ties the grabbed edge (offset = its pixel gap), the connector
+  enters at the END from the right (at the capsule's VISUAL right edge — a short ramp is padded to
+  `RAMP_MIN_W`, so the true stop x sits inside it), `_edge_linked` fills the tied dot, tooltip says
+  "its end", detach/`_reanchor_deps` go through `_revert_to_root` (on-air at the resolved START, or
+  OFF-AIR at the off-air base for an off-air-rooted chain; resets the tie). Ramp editor: a **Tie**
+  picker ("the ramp's start" / "the ramp's end") under Anchor to / Relative to, relabels the offset
+  row, `_ft_sublabels` reads "ramp start" / "the step ±X". `TimelineEditor.steps()/set_steps()` +
+  `sequence_editor._step_anchor_block` (negative check on the WIRE offset) carry it.
+- **Deleting a duration task deletes its tunes/ramps (#D).** `_delete_uids` (shared by
+  `_delete_with_reanchor`, `_delete_selection`, the editor's Remove button via `edit_item`) expands a
+  bar to its task's tunes/ramps (`_cascade_uids`; one-shots of the task are independent launches and
+  stay), re-roots every surviving dependent of a deleted item at its fire time, ONE undo step.
+- **Bar-source connectors.** A bar whose START hangs off a step (#6) drew no connector and had no
+  Remove-anchor: `_paint_connectors`, `_is_anchor_target`, `_pin_conn_sides`, `_edge_linked`,
+  `_reanchor_deps`, `_detach_anchor`, `_context_menu_spec`, `_tooltip_text`, `_anchor_base_x` (now the
+  target's DRAWN edge — clock-agnostic), the `bar_start` drag, `_group_move`/`_live_move`, and
+  `_paint_root_anchor_hint` all key on `tlm.is_step_source`.
+Tests: `tests/test_timeline_step_anchor.py` (end-tied resolve/wire/helpers), `tests/test_timeline_
+step_anchor_ui.py` (exit-left for a +0 / negative ramp, far dependent still exits right, end-tie
+drag keeps the end in place + connector from the right + detach, steps() round-trip, ramp-editor
+Tie picker, delete cascade single + selection, bar-source connector/detach), `tests/test_step_editor_
+carried_bw.py` (a near dependent → left exit, caption stays right); agent `tests/test_sequence_step_
+anchor.py` (field round-trips/defaults; an end-tied ramp fires exactly like a start-tied one). Verified
+live: the owner's two layouts + an end-tied ramp + a bar source render as asked (`validate` clean).
+
+## Current state — sequence-editor owner-testing fixes (all 13 done): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Owner testing surfaced 13 issues (a 10-issue Word doc + 3 follow-ups). All shipped, client-only;
+drift-guarded files untouched. Suite 976 → 1006 offscreen. The final anchoring-expansion
+(off-air/bar targets + bar sources + ramp-end drag) is at the bottom of this note.
+- **#2 Ramps drag to MOVE (never resize).** A ramp body is now a `ramp_body` drag part that shifts the
+  ramp's `offset` (its duration is fixed; a window-filling "both" ramp has no free offset and stays put);
+  its start/end dots remain anchor handles. `_live_relayout` now updates a ramp's `start_x`/`stop_x`
+  (previously only bars + pins). `mousePressEvent` stores `off0`.
+- **#5 Step-anchor dependents move in REAL TIME.** New `_live_move(it)` recomputes `_step_bases` from the
+  live offsets and re-places every step-anchored dependent (and chains) as a target is dragged (and a
+  dragged dependent now tracks the cursor too) — not just on release. Wired into the single drag +
+  `_group_move`.
+- **#3 A ramp END-handle drag gets a NOTICE, not silence.** Dragging from a ramp's end dot (which can't
+  begin an anchor — a ramp is positioned by its start) shows a brief non-interrupting `QToolTip`
+  (`_edge_notice`, naming the already-anchored start side when anchored).
+- **#8 Validity pill "Needs a fix" → "Needs correction"** (`sequence_editor._revalidate`).
+- **#4 A step-anchored dependent that resolves BEFORE its task's on-air start is blocked.** `validate()`
+  Rule A now also checks a step-anchored tune/ramp at its RESOLVED on-air time (via the anchor chain);
+  before-on-air → rejected with a clear message (Save/arm blocked). Only the on-air lower bound is
+  checkable at authoring (off-air floats); an off-air-rooted chain stays the agent's runtime check.
+- **#10 Drag-anchor to the ROOT lines + a selected tie.** `_drop_target` returns `("__root__",
+  "start"|"stop"|"hold")` over the on-air/off-air/Hold-resume line (`_root_anchor_at`/`ROOT_SNAP`);
+  `_make_root_anchor` sets that anchor keeping the item in place. A SELECTED root-anchored step draws a
+  discreet dashed tie to its anchor line + an "on-air/off-air/resume +M:SS" chip
+  (`_paint_root_anchor_hint`, selected-only so the default view stays uncluttered).
+- **#9 A two-sided target's connector exits AWAY from its body.** `_connector_points` gained a
+  `two_sided` flag: for a ramp/bar target whose dependent sits on the BODY side (an end edge with the
+  dependent to its left, a start edge with it to the right — between the two sides), it exits a stub the
+  other way first (end→right, start→left), drops to the dependent's row, and runs in — never behind the
+  bar. Entry stays horizontal (arrow/chip placement unchanged).
+- **#11 A tune/one-shot pin drags by DELTA, not to the cursor.** `run_body` is now delta-based like the
+  bar/ramp body (grabbing the caption beside the dot no longer jumps the dot under the mouse).
+Tests: `tests/test_timeline_step_anchor_ui.py` (ramp body moves without resizing; `_live_move`
+repositions a dependent + a chain; the ramp-end notice; root drop targets + `_make_root_anchor` + selected
+hint; #9 two-sided exit; #11 delta drag), `tests/test_timeline_step_anchor.py` (#4 before-on-air block).
+Suite → 1000 offscreen.
+**Bar-anchoring MODEL groundwork** (`tests/test_timeline_step_anchor.py`): `BarItem` gains
+`step_id` + `start_anchor="step"`/`start_anchor_step_id`/`start_anchor_edge`; a bar flattens to two wire
+steps with distinct ids (start = the bar id, stop = id + `BAR_STOP_SUFFIX`) so a dependent can anchor to
+either edge; `items_to_steps`/`steps_to_items` encode/decode (`_encode_anchor_ref`/`_decode_anchor_ref`),
+`resolve_step_offsets`/`_item_edge_offset`/`step_edge_offset`/`bar_start_placement`/`compute_anchors` resolve
+a bar as source + target. Backward-compatible (a plain sequence's wire is byte-identical).
+
+**Off-air-clock resolution (the shared groundwork for #1/#6/#7/#12/#13).** A step-anchored item now
+resolves to a **(clock, offset)** — `_resolve_step_clocked` returns `'start'` (on-air) or `'stop'`
+(off-air), so a chain rooted at a stop step / a bar's off-air stop edge draws relative to off-air (its
+absolute time set at arm). `resolve_step_offsets` (on-air) is unchanged for its ~15 float consumers;
+a parallel `resolve_step_offsets_off` (off-air) feeds `effective_anchor_offset`/`ramp_span`/
+`bar_start_placement` an `off_bases` dict, threaded through the canvas as `self._step_off_bases`.
+`eligible_step_targets` now admits off-air steps AND bars (start/stop edges), excluding only self /
+the Hold / a window-filling 'both' ramp; `validate()` accepts a chain resolving on EITHER clock.
+
+**Canvas + dialog wiring (the anchoring-expansion feature).** Client-only; no agent/scripts/capability
+change; drift-guarded files untouched.
+- **Off-air + bar edges as drag targets (#1/#7/#12).** `_make_anchor` computes the drop offset from
+  the canvas GEOMETRY (the pixel gap between the source's start and the target edge, snapped) instead
+  of `step_drop_offset`, so a drop keeps the source in place whatever CLOCK the target sits on and works
+  for a bar's start/stop edge as readily as a point/ramp. New `_drop_edge_at` offers a bar's start/stop
+  dot as a DROP target (its dots are resize handles → bars stay out of `_edge_at`; a step still anchors
+  TO them). The connect-drag readout is geometry-based too.
+- **Drag-anchor from a ramp's END dot (#13).** The mousePress gate begins a connect-drag from EITHER
+  ramp edge (the ramp is still positioned by its start); the rubber-band starts from the grabbed edge
+  (`from_edge`). The old #3 edge-end "notice" is superseded (`_edge_notice` removed).
+- **A bar's START hung off another step (#6 — "only the start anchors"; the stop stays off-air).** The
+  step editor offers "after another step…" in the bar's Start-anchor picker when an eligible target
+  exists (hidden with a Hold), reuses the shared target/edge pickers (`_sync_start_anchor` reveals them),
+  and `_accept` persists `start_anchor_step_id`/`start_anchor_edge` (and now preserves the bar's own
+  `step_id` so editing it doesn't orphan its dependents). The save/arm gate `_step_anchor_block`
+  (`sequence_editor`) now detects a bar source (`start_anchor="step"`, offset = `start_offset`).
+Tests: `tests/test_timeline_step_anchor_ui.py` (bar-edge / off-air / ramp-end drops keep the source in
+place via the geometry gap; `_drop_edge_at`/`_drop_target` find a bar edge + an off-air tune; the
+ramp-end press begins a connect-drag; the bar Start-anchor picker offers + saves a start step anchor).
+Verified live: a scene with a ramp-end dependent, an off-air-tune dependent, a probe dropped on a bar's
+stop edge, and a bar whose start hangs off a lead tune all resolve + draw correctly (`validate` clean).
+
+## Current state — Hold step rendered as a WINDOW + a forward-from-resume post-hold axis: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Owner ask (mockup `docs/sequence-hold-step-mockup.html`, published Artifact): present the Hold not as a
+single divider but as a **two-edged tinted WINDOW** (like the relative band), make a task that runs
+THROUGH the Hold stay visible (not hidden behind it), and make the whole region after the Hold **one
+off-air-styled window** whose time axis counts **forward from resume** (resume is a Hold's fixed T0),
+with off-air **floating** to Proceed and MERGING with the resume edge when nothing follows. Implemented
+in **`ui/timeline_editor.py`** (`_TimelineCanvas`), fully gated on `has_hold` so the non-hold path +
+`_PlanCanvas` are byte-identical; **no model/agent/scripts/capability change** (drift-guarded files
+untouched). Only the STEP visuals (pins/chips/ramps/anchoring) were left as-is per the owner — this is
+the Hold-rendering + window/axis handling only.
+- **Fixed-width Hold window.** New `HOLD_BAND_PX = 48`: with a Hold present, a constant-width hatched +
+  amber band is inserted at the hold (`enter_x` = the hold's on-air x, `resume_x = enter_x + HOLD_BAND_PX`),
+  and resume-side content is shifted right of it. `_place_x(it, anchor, offset)` adds the band to a
+  resume-side START x (`_resume_shift`: HOLD_BAND for a window-B `anchor="hold"` step/ramp, a window-B bar,
+  or a step-anchored item resolved past the hold; 0 for the Hold marker + window-A + off-air content, which
+  rides `self._off`). Routed through `_run_cx`/`_item_left`/`_span`/`_place`/`_live_relayout`.
+- **Off-air FLOATS + MERGES.** `relayout` overrides `_c_off` for the hold case: `off_x = resume_x +
+  (fwd+bwd)·eff + POST_HOLD_PAD` where `_post_hold_extents()` returns the furthest resume-forward
+  (window-B) and off-air-backward times; **0/0 ⇒ off_x == resume_x** (the merged case, `_hold_merged`).
+  The bar's stop (off-air) rides the floated `off_x`, so a duration task runs visibly THROUGH the Hold.
+- **Paint** (`_paint_hold_windows`): green on-air (`on_x..enter_x`), hatch+amber Hold (`enter_x..resume_x`),
+  red off-air-styled post-hold (`resume_x..off_x`); `_paint_hold_axis` draws on-air ticks forward from
+  on-air then post-hold ticks **forward from resume** (0 at resume); `_paint_hold_gridlines` matches;
+  `_paint_floating_offair` is a DASHED red OFF-AIR + "floats". `_paint_hold` now draws the two dashed band
+  edges + a centred ⏸ HOLD tab ON TOP of the bar (so a held bar stays visible), or — when merged — a
+  combined **⏸ HOLD │ OFF-AIR** marker (`_paint_merged_marker`) so the two labels never collide.
+- **Interaction.** `_anchor_base_x` for a window-B (`anchor="hold"`) item / a past-hold step target now
+  returns the **resume edge** (offset measured forward from resume, where the axis reads 0); the window-B
+  bar-start drag + drag snapping (`_snap_targets` gains `resume_x`) match. `_hit` grabs the Hold anywhere
+  across the band (enter→resume). Tests: `tests/test_timeline_hold_phase2.py` (fixed-width window +
+  floating off-air, merge-when-empty, window-B sits right of the band, bar runs through the hold, band-wide
+  hit, non-hold geometry unchanged, full + merged paint; the window-B drag test updated to the resume-edge
+  contract). Suite 976 → 983 offscreen.
+
+## Current state — timeline axis: separate on-air / relative / off-air windows: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Owner ask: the RELATIVE band should be ONLY where time is actually relative. A STOP-anchored (off-air)
+step with a negative offset fires at a FIXED offset before off-air (its time IS absolute), so it belongs
+in an ABSOLUTE off-air window — tinted RED (mirroring the green on-air window) with real ticks — and the
+hatched relative band (length set at arm) should carry NO ticks. Fix (`ui/timeline_editor.py`, paint-only),
+splitting the canvas into THREE regions:
+- **`_off_def_x()`** (new, mirrors `_def_x()`): the LEFTMOST off-air x pinned by a stop-anchored step
+  (a point's `cx`, a ramp's `start_x` = its `offset − dur`); `off_x` when nothing is off-air-anchored (a
+  bar's own stop is off-air itself, not content — bars ignored). `paintEvent` computes
+  `off_def_x = max(def_x, _off_def_x())`.
+- **Three windows** in `paintEvent`: on-air ABSOLUTE `on_x..def_x` (green tint, `Palette.ONLINE` α11),
+  the truly-RELATIVE middle `def_x..off_def_x` (diagonal hatch, dashed boundary at BOTH edges, the
+  "relative — length set at arm" badge centred on it), and off-air ABSOLUTE `off_def_x..off_x` (red tint,
+  `Palette.CRASH` α11).
+- **`_paint_axis`** (gained `off_def_x`): the off-air-relative `−M:SS` ticks now stop at `off_def_x`
+  (`off_x - t·eff >= off_def_x - 1`) — they fill the red window, NOT the relative band. On-air ticks/
+  warm-up/cool-down unchanged.
+- **`_paint_gridlines`** (gained `off_def_x`): off-air-relative gridlines likewise bounded to
+  `off_def_x`, so the relative middle stays clear.
+Backward-compatible: with no stop-anchored step `off_def_x == off_x`, so the red window vanishes and the
+hatch runs `def_x..off_x` exactly as before (no off-air ticks). No geometry/model/serialisation change;
+drift-guarded files untouched. Tests: `tests/test_timeline_step_anchor_ui.py::
+test_paint_gridlines_cover_both_windows_not_the_relative_band` (a stop-anchored −60 s tune opens the
+off-air window; gridlines fill both absolute windows, the relative middle stays clear, all vertical).
+Suite still 976 offscreen.
+**Relative band: no label at all.** Owner: the "relative — length set at arm" text pill cluttered the
+band (and a trial SPRING motif was rejected). Both removed — `_paint_rel_badge` is deleted and nothing is
+drawn in the relative band beyond the existing diagonal hatch + the dashed boundary at each edge. The
+three-region contrast (green ticked window / hatched gap / red ticked window) carries the meaning on its
+own. Paint-only; still 976.
+
+## Current state — timeline canvas: discreet vertical gridlines: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Owner ask: discreet but informative gridlines. New **`_TimelineCanvas._paint_gridlines`** (`ui/timeline_editor.py`),
+called from `paintEvent` right after the on-air tint + hatch and BEFORE the anchors/axis/rows (so it
+sits behind everything). Faint vertical lines (`Palette.BORDER`, alpha 150 major / 70 minor) span the
+row band `top..baseline`, aligned to the axis's MAJOR ticks (`_paint_axis`'s own loops: defined region,
+warm-up, cool-down) with fainter half-tick minors in the defined region only. Drawn only where time is
+REAL — the on-air anchor (t=0) and off-air get their own strong lines and are skipped, and the hatched
+"relative" band (`def_x..off_x`, length set at arm) is left clear. Antialiasing off for crisp 1-px
+hairlines (save/restore around it). Colour `Palette.BORDER_STRONG` (NOT the lighter `BORDER`) at
+alpha 175 major / 95 minor: pixel-measured, the light `BORDER` washed out under the green on-air tint
+(contrast ~6 major / ~3 minor → minors invisible, and the low contrast is what made a phone downscaler
+drop some lines and thicken others — the reported "double lines"); `BORDER_STRONG` restores a clear
+split (~18 major / ~10 minor over the tint) with both readable. Bars + ramps stopped the gridlines
+bleeding THROUGH them: `_capsule` now paints an OPAQUE `Palette.SURFACE` rounded-rect under the
+translucent hue gradient, so a duration/ramp capsule hides whatever is behind it (gridlines, the on-air
+tint). Paint-only; no geometry/model/serialisation change; drift-guarded files untouched. Tests:
+`tests/test_timeline_step_anchor_ui.py::
+test_paint_gridlines_are_vertical_and_skip_the_hatch_band` (a stub painter records the drawn x's: every
+line vertical, none inside the hatch band, a defined-region tune pins a major there). Suite 975 → 976
+offscreen.
+
+## Current state — Gantt rows: ramps above tunes; one-shots stand alone at the bottom: COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Two owner asks about `timeline_model.display_order` row grouping/ordering:
+- **Ramps above tunes under a task** — the within-group sort keys on a new `_row_kind_rank(it)` FIRST
+  (bar 0 → ramp 1 → tune 2), with `_row_fire` (resolved fire time) breaking ties inside each kind — so a
+  task's ramps always sit directly under its bar, above the tunes, regardless of authored order or
+  cross-kind fire time.
+- **One-shot runs are NOT grouped under a duration task, and sink to the BOTTOM** — a one-shot `run`
+  launches a task once; it does not modify a running duration task (a tune/ramp does), so it stands on
+  its own row rather than nest under a bar. New `_is_oneshot(it)` (`action=="run"` and not a bar) +
+  `_group_key_of(it)`: a one-shot gets a unique per-item group key (`("\x00oneshot", uid)`) so it never
+  merges into a bar's group — even a bar that happens to share its `task_name`. In `display_order`'s
+  group-ordering key a `band` field (0 = duration-task group, 1 = one-shot) puts ALL one-shots after
+  every duration-task group; within each band, earliest fire (then first-seen) decides. So the duration
+  tasks + their ramps/tunes render first and the one-shots collect at the bottom in fire-time order,
+  never interleaved. Tunes/ramps still group under their parent task (`task_name`). The row header
+  already rendered a one-shot as a top-level row (`child` is only true for tune/ramp), so this is
+  ordering-only.
+Duration-task group ordering by earliest fire is unchanged; pure, non-mutating, never used for
+serialisation. Client-only; drift-guarded files untouched. Tests: `tests/test_timeline_redesign_model.py`
+(ramps before tunes even when a tune fires first; bar→ramp→tune ranks; a one-shot sharing a task_name
+stays its own group; an early one-shot still sinks below its task group; all one-shots collect at the
+bottom in fire order; two one-shots on one task are separate rows). Suite 970 → 975 offscreen.
+
+## Current state — sequence step-conflict validation (in-task / same-control): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+Owner ask: block invalid sequences at save/arm — a tune/ramp outside its parent task, two tunes setting
+the same param at the same time, and a power/gain tune where a ramp already controls power/gain; plus
+(owner-chosen extras) ramp-vs-ramp on the same control, and a task started more than once. Enforcement:
+**save & arm gate only** (no live canvas hard-block). All in **`timeline_model.validate()`** (which already
+gates the editor Save button + Ready pill), via new `_step_conflict_error(items)`:
+- **Rule A (in-task)** — a `start`/`stop`/`both`-anchored tune/ramp must fire inside its task's on-air
+  span (reuses `step_within_task_error` per the task's bar window). Hold/step-anchored steps are timed
+  relative to another point (off-air/cross-clock), left to the agent's runtime check.
+- **Rule B (tune·tune)** / **C (tune·ramp)** / **D (ramp·ramp)** — one pairwise check per task: any two
+  tune/ramp steps whose CONTROL KEYS intersect AND whose time spans overlap conflict. `_controlled_keys`
+  = a tune's changed params / a ramp's swept param, normalised by `_control_key` so **`power` and `gain`
+  collapse to one `"level"` key** (either drives the output level). `_step_time_span` returns
+  `(clock, lo, hi)` on the on-air clock (start/hold/step), the off-air clock (stop), or `"both"` (a
+  window-filling ramp overlaps everything); `_spans_overlap` treats different clocks as non-comparable
+  (the honest authoring limit — the agent is the arm-time backstop for cross-clock cases).
+- **Rule E (one bar/task)** — a duration task may have at most one bar (can't run one task twice; two
+  bars would share the on-air window, and "overlap" isn't computable until the window is fixed at arm, so
+  a second bar is refused outright — retune with a tune/ramp instead of restarting).
+Also a belt-and-suspenders **arm-time re-check** in `sequences_panel._on_start` (`steps_to_items` on the
+stored `model_dump`ed steps → `validate()`), so a sequence saved BEFORE these rules is caught at arm too
+(fail-open on any converter error). Client-only; no agent/scripts/capability change; drift-guarded files
+untouched. Tests: `tests/test_step_conflicts.py` (all five rules + power/gain level equivalence + the
+arm-time wire round-trip); one existing paint test fixture updated to use distinct params (it had three
+tunes on `bw` at one instant — a real conflict the new rule now flags). Suite 954 → 970 offscreen.
+**Deliberately NOT blocked** (owner): a tune param the task doesn't accept (editor already restricts the
+picker), and a duplicate no-op tune.
+
+## Current state — sequence editor `/code-review` round 2 (6 findings): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+A second `/code-review` of the full sequence-editor branch surfaced 6 findings; all fixed client-only
+(no agent/scripts/capability change; drift-guarded files untouched). Suite 949 → 954 offscreen.
+- **#1 (correctness) — dragging a step-anchored pin's BODY corrupted its offset.** `_anchor_base_x`
+  returned off-air (`self._off`) for `anchor="step"` (it only handled start/stop/hold), so a body-drag
+  set `it.offset = (x − off_air)/eff` — a large wrong value that then armed/saved. Fixed: for a
+  step-anchored item `_anchor_base_x` returns its TARGET's referenced edge x (via `tlm.step_edge_offset`,
+  resolved independently of the item's live offset so it's stable across the drag), so the offset is
+  measured from the target edge and the pin lands where dropped.
+- **#2 (correctness) — group-move double-shifted a step-anchored dependent.** When a selection held
+  BOTH a target and a dependent anchored to it, `_group_move` shifted the dependent's offset by `ds`
+  while the target edge also moved `ds` → the dependent moved 2·ds (gap grew). Fixed: a step-anchored
+  member whose target is also in the moving group is skipped (it follows the target); fix #1 also
+  corrects `ref0_x` when the dragged primary is step-anchored.
+- **#3 (display) — a negative step offset read "+−M:SS".** The connect-drag readout and the hover
+  tooltip prepended a literal "+" to `_mmss` (which already prints "−" for negatives). Both now use
+  `_offset_chip_text` (the same helper the connector chip uses).
+- **#4 (UX gate) — the plan / scheduled arm bypassed the step-anchor capability gate.** Library
+  save/arm gate step anchoring, but `plans_tab._finish_arm_preflight` and `timeline_tab._finish_preflight`
+  didn't, so arming a step-anchored plan/scheduled sequence to a < 1.24.0 (or a negative offset to a
+  < 1.25.0) agent hit a raw 400. New shared `plans_tab._step_anchor_block_lines(items_steps, fleet)`
+  (mirrors the Library gate) is now called by both interactive arm paths, blocking with a clear message.
+- **#5 (perf) — `_step_anchor_block` ran the full `steps()` fold on every keystroke.** `_revalidate`
+  called it on each name/canvas change and it called `steps()` (folding calibration per task) BEFORE the
+  LIBRARY_HOST / any-step-anchor short-circuits. Now it short-circuits on LIBRARY_HOST and checks the
+  raw `items()` for a step anchor (its `offset` == the `offset_s` that would be sent) before ever
+  folding — no `steps()` for a plain sequence.
+- **#6 (hit-testing) — a tune pin's hit region was a symmetric band while its chips draw to one side.**
+  `_hit` used `abs(x − cx) ≤ w/2`, so far chips were unclickable and the empty space on the dot's other
+  side was a false hit. New `_pin_footprint(it, g)` returns the real drawn extent (dot + chips/caption on
+  the `_pin_caption_side`), and `_hit` uses it.
+Tests: `tests/test_timeline_step_anchor_ui.py` (`_anchor_base_x` uses the target edge; group-move doesn't
+double-shift; negative offset has no doubled sign; `_pin_footprint` matches the chips; the plan gate
+`_step_anchor_block_lines` blocks an old agent). Files: `ui/timeline_editor.py`, `ui/sequence_editor.py`,
+`ui/plans_tab.py`, `ui/timeline_tab.py`.
+
+## Current state — window-filling ("both") ramp holds its LAST level before off-air: COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo, drift-guarded)
+Owner ask: a dual-anchor ("both") ramp filling the on-air window reached its top exactly AT off-air with
+0 hold. Now it holds the last level one dwell before off-air (like a single-anchor / "stop" ramp). Fix
+is in the **drift-guarded** `api/ramp.py::resolve_ramp` window branch — the window is divided by LEVELS
+(`hold = D/N`), so the last value fires at `D − hold` and is held to off-air; `place_ramp` and
+`duration_s` (= the full window `D`) are unchanged, so `ramp_span` still draws the "both" bar across the
+window and the discrete last-point timing (which the canvas doesn't show for "both") is the only thing
+that moved — **no client UI change**. Mirrored byte-identically to `sdr-agent/agent/ramp.py` (agent
+`1.25.2`); drift guard green. Tests: agent side (see `sdr-agent/CLAUDE.md`); no client test asserted the
+old "both" timing.
+
+## Current state — sequence editor `/code-review` fixes (7 findings): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
+A `/code-review` of the sequence editor surfaced 7 findings; all fixed client-only (no agent/scripts/
+capability change; drift-guarded files untouched). Suite 945 → 949 offscreen.
+- **#2 — the reported save-blocker: a step anchored to an OFF-AIR target gave a cryptic error.** A step
+  anchored (directly or via a chain) to a `stop`/`both`-anchored target can't be timed on the on-air
+  clock (off-air time is only fixed at arm — a deliberate Phase-1 limit), so `validate()` rejected it
+  with a catch-all "step-to-step anchors form a cycle, or a step anchors to one that can't be timed" —
+  the "needed a step even though everything looked correct" report. New **`timeline_model.step_anchor_
+  fault(item, by_sid)`** walks the item's single anchor chain to its root and returns a SPECIFIC,
+  actionable message naming the offending step + reason: a cycle/loop, a deleted target, or an off-air
+  root (`"… anchors to an off-air step (Ramp · chirp), whose time isn't known until the sequence is
+  armed — anchor it to an on-air step instead"`). `validate()`'s unresolved-step branch now returns it.
+- **#3 — editing a step whose target left the eligible set SILENTLY re-pointed it.** The StepEditor /
+  ramp-editor target combo was built from `eligible_step_targets` only; if the stored target had since
+  become ineligible (edited to off-air/a bar, or now reads as a cycle) the combo fell to index 0 and
+  saved a DIFFERENT target with no warning. New **`timeline_model.step_targets_for_edit(items, item)`**
+  = eligible targets PLUS the item's stored target (when it still exists), so editing never swaps the
+  anchor behind the operator's back; `validate()`/the agent stay the backstop for a target that
+  genuinely can't be timed. Both dialogs (`ui/timeline_editor.py` StepEditorDialog, `ui/ramp_editor.py`)
+  now use it.
+- **#1 — client/agent ramp END edge divergence (RESOLVED at duration-end, agent fixed to match — see
+  the ramp-end-hold note below).** A step anchored to a ramp's `end` was placed at `start + duration_s`
+  on the client but `start + (duration_s − hold_s)` (the last tune fire) on the agent. The FIRST fix
+  aligned the client DOWN to the agent's last-fire; owner testing then clarified the correct semantics —
+  the ramp's final level must be HELD its full dwell before the ramp is "finished", so a dependent
+  anchored to the end fires at `start + duration_s` (after the final hold). So the client keeps
+  `_ramp_duration` at the three END-edge sites (`resolve_step_offsets`/`step_edge_offset`/
+  `_item_edge_offset`) and the **AGENT was fixed** to `last fire + hold` (agent `1.25.1`); both now
+  agree at the ramp's full-duration end. `ramp_span` already spanned the full duration for the visual
+  bar, so a dependent draws at the ramp bar's right edge.
+- **#4 — a rapid double-arm armed the WRONG sequence.** `sequences_panel._pending_arm` was a single slot
+  resolved by op name, so arming seq B before seq A's running-task pre-check returned made A's result
+  arm B. Now a **`Dict[str, Sequence]` keyed by sequence id** (the async label already carries the id);
+  the `seq_precheck`/`seq_stoptasks` handlers `pop(seq_id)`.
+- **#5 — the Ready pill could say "Ready" while Save would refuse.** `sequence_editor._revalidate`
+  checked only `_current_error()`; `_on_save` also checks `_step_anchor_block()` (the ≥1.24/≥1.25 agent
+  capability gate). `_revalidate` now includes it, so the pill matches Save.
+- **#6 — the Gantt ordered step-anchored rows by RAW offset-from-edge.** `display_order`/`_row_fire` now
+  order a step-anchored item by its RESOLVED base (`resolve_step_offsets`), so a `+5 s` dependent of a
+  `200 s` step sits after it, not at the top of the group.
+- **#7 — `_make_anchor` pushed a dead no-op undo entry** when `ensure_step_id` early-returned; `_record()`
+  moved after the early-returns.
+Tests: `tests/test_timeline_step_anchor.py` (off-air actionable message + `step_anchor_fault`;
+`step_targets_for_edit` preserves an ineligible stored target / matches eligible otherwise; ramp end =
+last fire), `tests/test_timeline_step_anchor_ui.py` (make/detach/delete use the last-fire edge),
+`tests/test_timeline_redesign_model.py` (`display_order` by resolved time), `tests/test_run_conflict_ui.py`
+(pending arm keyed by id). #5 is a one-line consistency fix (no fleet-stub harness exists) verified by
+inspection.
+
+## Current state — step anchors accept a NEGATIVE offset + arrow-placement / caption-flip: COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo)
+Owner ask (a 4-step sketch): a step anchored to another step should be able to fire BEFORE its target's
+edge (a negative offset — the warm-up lead-in the owner already uses with on-/off-air anchors), and the
+connector ARROWS should point at the dependent (the "anchorer"), placed as close to it as possible
+WITHOUT colliding with other lines so at a junction it's unambiguous which line an arrow belongs to.
+**Agent side** (`sdr-agent` 1.25.0, capability `sequence-step-anchor-negative`): the `offset_s < 0`
+rejection is removed; the graph must still be acyclic. **Client side** (this):
+- **Negatives end-to-end** — `timeline_model.validate()` no longer blocks a negative step offset;
+  `step_drop_offset` returns the (possibly negative) gap unclamped so a drag-to-anchor drop keeps a
+  source that sits BEFORE the edge in place; the StepEditor (`_resolve_step_anchor`) and ramp editor
+  (`_accept`) accept a negative offset (offset spinboxes already ranged ±100000); the offset-row labels
+  are direction-neutral ("Offset — from the step"). New gate `step_anchor_negative_supported(client)`
+  (cap + agent ≥ 1.25.0); the **save gate** (`sequence_editor._step_anchor_block`) and **arm gate**
+  (`sequences_panel._on_start` + `_step_anchor_negative_ok`) block a negative-offset sequence on a
+  < 1.25.0 unit (the library holds only a definition, never blocked; the agent stays the backstop).
+- **Arrow placement** (`ui/timeline_editor.py`) — `_paint_connectors` is now two-pass: compute every
+  connector's waypoints + draw all PATHS first (lines under everything), then draw each arrowhead + offset
+  chip via `_draw_connector_head`, backed off along its own entry run to the spot CLOSEST to the dependent
+  that keeps the whole annotation clear of the OTHER connectors' polylines (`_span_clear`/`_pt_seg_dist`)
+  — so at a junction each arrow (and its label) unambiguously belongs to its line, and the arrow is no
+  longer hidden under the pin. The arrowhead is an open V whose point sits TOWARD the dependent.
+- **Right-entry routing** — a dependent placed LEFT of its anchor (a negative offset) is entered from the
+  RIGHT (arrow points left): `_connector_points` gained `entry_from_right` (drop column just right of the
+  dependent, clear of obstacles); byte-identical for the common x2 ≥ x1 case (the wrap/duck/obstacle tests
+  unchanged). Offset chip text is signed (`_offset_chip_text`: `+` for ≥ 0, the `−` that `_mmss` already
+  prints for negatives, never `+−`).
+- **Caption side from geometry** (`_pin_caption_side`/`_pin_conn_sides`) — a pin's readout flips to the
+  side its connectors DON'T occupy: a connector on the RIGHT with a clear LEFT (an anchor target whose
+  dependents are to the right, OR a negative-offset dependent entered from the right) → caption LEFT;
+  both sides busy → the two-sided right-duck (option C, unchanged); else RIGHT. This fixes the owner's
+  case (a pin that is BOTH a negative dependent AND a target — connectors on both right-sides — flips its
+  caption to the clear left, so the incoming left-pointing arrow + `−M:SS` chip are visible).
+Client-only beyond the agent gate; drift-guarded files untouched. Tests: `tests/test_timeline_step_anchor.py`
+(negative resolves before the edge; `step_drop_offset` keeps a source negative; `step_anchor_negative_supported`
+gate), `tests/test_timeline_step_anchor_ui.py` (dialog accepts a negative; right-entry routing; signed
+chip; `_span_clear`; a 4-step negative layout paints), `tests/test_ramp_view_fold.py` (ramp `_accept`
+takes a negative step offset), `tests/test_step_editor_carried_bw.py` (the two-sided negative dependent
+flips its caption left). Suite 900 → 945 offscreen. **Verified LIVE cross-repo** on the owner's exact
+4-step layout (Step1@0:30, Step2 −0:30→0:00, Step3&4 +0:30→0:30): resolves and paints exactly as sketched.
+
+## Current state — sequence editor REDESIGN, Phase 1 (visual + Gantt layout): IN PROGRESS (branch `claude/step-to-step-anchoring`, client-only)
+Owner ask: redesign the sequence timeline editor to look **exactly** like the approved mockup
+(`docs/sequence-editor-mockup.html`, published Artifact) — compact/modern, per-task colour, real-time
+axis, connectors. Phased build: **visual redesign → drag/drop → connectors (interactive) → context menu
+→ time axis**. **Phase 1 (this) = the visual + layout overhaul**, verified offscreen against the mockup
+(dev harness `tools/_seqshot.py`, headless Chromium/Qt grab). Shipped:
+- **`ui/timeline_model.py`** (pure, tested): `TASK_HUES` + `task_hue_map(items)` (each duration task a
+  stable hue distinct from the reserved green/amber/red; tunes/ramps inherit their parent task's hue via
+  shared `task_name`); `display_order(items)` → (rows, holds) grouping a task's tunes/ramps directly
+  under it, groups ordered by earliest fire time. Tests: `tests/test_timeline_redesign_model.py`.
+- **`ui/timeline_editor.py`** — the canvas (`_TimelineCanvas`) is now **one row per item** (Gantt),
+  panels/captions dropped. New paint language: capsule bars with a hue rail + vertical gradient + edge
+  connection dots; ramps with a rising/falling slope motif + parent-task badge + duration; **tunes/one-
+  shots as PINS** (filled circle / diamond) + borderless caption (never a capsule → no false duration);
+  the **Hold** divider; on-air/off-air **pills**; a **REAL-TIME axis** — concrete mm:ss ticks across the
+  anchored/defined span (`_def_x`), then a **hatched "relative" region** to off-air (length set at arm);
+  step-to-step **connectors** drawn as orthogonal rounded SVG-style paths with an always-on `+M:SS`
+  offset chip (`_paint_connectors`/`_draw_connector`). Layout LEFT-anchors (small pre-roll gutter, no dead
+  warm-up), the axis rides under the rows, and the editor **auto-fits on open** (`_fit`, `showEvent`).
+  New **`_RowHeader`** column ("TASKS & STEPS"): task swatch / indented kin-line for children, name + sub
+  + type badge, in the task hue — the parent-task encoding shown three ways (position, colour, badge).
+  Toolbar restyled to pill chips WITH line icons (`_tool_icon`) + a segmented `− %  +` zoom + Fit, and a
+  task-colour **legend** row (`_Legend`). The hosting **`ui/sequence_editor.py` header** was restyled to
+  match the mockup: a SEQUENCE NAME label + large borderless name field, a unit/scope chip, ghost Cancel +
+  primary Save-sequence buttons, and a **Ready / Needs-a-fix validity pill** (`_set_ready`). Kept the
+  tested surface (`_run_label`, `_place`, `render`,
+  `_geom`, `_hit`, `_lane_of`, `_default_hold_offset`, `has_hold`, `set_items`) so the whole suite (904)
+  stays green. `docs/sequence-editor-mockup.html` is the visual spec.
+- **Ramp pill (option B, `docs/ramp-pill-mockup.html`):** a ramp capsule's rising/falling slope moved off
+  the text into a dedicated right **end-cap** (`RAMP_CAP_W`; faint tinted zone + hairline divider + a
+  slope mark ending in a dot at the destination level); the badge · from→to range · duration sit
+  flush-left, elided to the space before the divider. `_paint_ramp` + `_paint_slope`.
+- **Phase 2 — interactive selection + drag-to-anchor + drag readout (COMPLETE):** anchoring is now
+  100% on-canvas, no forms.
+  - **Click-to-select + highlight** — the canvas holds `_selected` (a uid); a single click selects (accent
+    ring around the bar/ramp capsule or the pin dot), a click on empty deselects, and **double-click**
+    opens the editor (was single-click; `mouseDoubleClickEvent`). A newly-added item is auto-selected.
+  - **Remove anchor (UI)** — a selected step-anchored item paints a clickable red **"✕ Remove anchor"**
+    pill on the lower leg of its (accent-highlighted) connector; a press detaches via `_detach_anchor`
+    (reverts to a plain on-air `start` anchor at the offset it currently resolves to, so it stays put) —
+    no dialog. The chip's hit rect is `_rmchip` (recomputed each paint, position recorded in
+    `_paint_connectors`).
+  - **Drag-to-anchor** — every ramp edge dot + pin dot is a connection handle (`_edge_at`; bars/Hold are
+    not Phase-1 participants). Pressing a source handle (a ramp/point's START) begins a connect-drag
+    (`_connect`); `mouseMove` rubber-bands to the cursor and snaps onto an eligible target edge
+    (`_drop_target` → `tlm.eligible_step_targets`), `mouseRelease` creates the anchor via `_make_anchor`
+    (`tlm.step_drop_offset` → offset = the current gap, clamped ≥ 0 so the source stays in place +
+    honours the ordering invariant; `tlm.ensure_step_id` stamps the target). `_paint_connect_drag`.
+  - **Live time readout while dragging** — `_paint_drag_readout` floats an accent tag (`_paint_tag`) at
+    the dragged edge showing the resolved time (`_timing_text`, e.g. `+45 s · on-air`, `off-air −0:30`,
+    `Hold · on-resume`); the connect-drag readout reads `+M:SS after <task> · <edge>`.
+  - **Right-click context menu** (`contextMenuEvent` → `_open_context_menu`) — **Edit…** (`edit_item`),
+    **Duplicate** (`_duplicate_item`: deep-copy + fresh `tlm._ids` uid + cleared `step_id` so the copy
+    isn't a reference target, nudged +15 s, then selected; a Hold is unique so it's excluded), **Remove
+    anchor** (only when `anchor=="step"` → `_detach_anchor`), and **Delete** (`_delete_with_reanchor`).
+    Menu contents come from the pure `_context_menu_spec(it)` (tested) + `_run_context_action`.
+  - **Delete re-anchors dependents** — `_delete_with_reanchor` deletes the item, but first, for every
+    DIRECT dependent (anchor="step", anchor_step_id == the deleted item's step_id), re-anchors it to a
+    plain on-air `start` at the offset it currently resolves to (`_step_bases[dep.uid]`, captured before
+    removal) — so a dependent stays at the instant it was meant to fire instead of orphaning. Chained
+    dependents (anchored to a direct dependent) are unaffected: the direct dependent keeps its `step_id`
+    and its position, so they still resolve.
+  - **Undo / redo** — the canvas keeps a stack of item-list snapshots (deepcopies): `_record()` pushes the
+    CURRENT state before each mutation (add/replace/remove/clear/anchor/detach/delete) and clears redo; a
+    move-drag stashes its pre-drag snapshot at press (`_drag["undo0"]`) and commits it on a moved release;
+    `undo()`/`redo()` swap between the stacks via `_restore` (prunes a stale selection). `set_items` (a
+    fresh load) resets both stacks. Keyboard: **Ctrl+Z** undo, **Ctrl+Y** / **Ctrl+Shift+Z** redo,
+    **Ctrl+D** duplicate the selection, **Delete/Backspace** delete it (`keyPressEvent`; the canvas takes
+    focus on press, `StrongFocus`). Toolbar **Undo/Redo** chips (`_sync_undo_buttons` on every `changed`).
+  - **Hover tooltips** — `_update_tooltip`/`_tooltip_text` (via `QToolTip`, throttled on the hovered uid;
+    `leaveEvent` clears) show a rich multi-line description: task + kind, what it does (ramp from→to·dur,
+    tune param changes, bar starts/stops timing), and, if step-anchored, `⚓ after <task>'s <edge> +M:SS`.
+  - **Connector routing (owner-reported, obstacle-aware)** — connectors always **exit and enter steps
+    HORIZONTALLY** and route AROUND intervening third-party steps, with the offset chip **inline** on the
+    entry run (the line passes through it). `_draw_connector` → `_connector_points` → `_ortho_path`
+    (rounded-orthogonal through axis-aligned waypoints):
+    - **Drop column** is chosen LEFT of the dependent by `chip_w + 24` (room for the inline chip), then
+      pushed LEFT of any **intervening obstacle** it lands in (`_intervening_obstacles(anchor_uid,
+      dep_uid)` = x-intervals of steps whose ROW is strictly between the two) — so a `+3:00` line no
+      longer drops THROUGH a `+0s` step, it runs along the anchor's row and drops clear of it.
+    - **Exit** leaves the anchor AWAY from its body (`exit_dir`): END edge / point exits right, START
+      edge exits left. **Entry** is always a horizontal run into the dependent's start from the left.
+    - **Wrap** when the drop column falls left of the anchor edge (a ~zero offset): exit the stub, run a
+      channel just outside the dependent's row, back to the drop column, drop, and run in — entry stays
+      horizontal (the owner's "wrap down, back, and into the step start").
+    - The offset chip is centred inline on the entry run just left of the step (`chip_cx = x2 − chip_w/2
+      − 10`, at `y2`); the selected-connector "Remove anchor" chip sits directly below it (`y2 + 15`).
+    Tests: `_connector_points` avoids an intervening obstacle's column and wraps at zero offset
+    (`tests/test_timeline_step_anchor_ui.py`).
+  - Pure model: **`timeline_model.step_drop_offset(items, src, tgt, edge, h_off, step_bases)`** (+ helpers
+    `_by_uid`/`_item_edge_offset`). Tests: `tests/test_timeline_step_anchor.py` (step_drop_offset keeps in
+    place / clamps to 0 / rejects self·bar·cycle) + `tests/test_timeline_step_anchor_ui.py` (canvas
+    `_make_anchor`/`_detach_anchor`, the remove chip appears only when anchored, `_edge_at`/`_drop_target`
+    eligibility; context-menu spec varies by item, duplicate clones with a fresh uid + no step_id, delete
+    re-anchors dependents to on-air, delete of a plain item just removes it; undo/redo of add·anchor·
+    delete-with-reanchor, set_items resets history; tooltip text names the anchor + bar timing). Suite
+    904 → 921 offscreen. Drift-guarded files untouched.
+  - **Drag snapping** — while dragging a bar handle / bar body / pin / Hold, the moved edge snaps
+    (within `SNAP_PX = 7`) to a meaningful x: the on-air / off-air anchors, the Hold divider, every OTHER
+    step's edges (a bar/ramp's start+stop, a pin's centre), and the major axis ticks (`_snap_targets`
+    excludes the dragged item; `_snap_cursor` picks the nearest). A snap sets the offset EXACTLY on the
+    target (else the 1 s grid) and shows a dashed accent **guide line** (`_snap_guide` / `_paint_snap_guide`,
+    cleared on release + hover). Bar-body snaps its START edge. Tests: `_snap_targets` includes other
+    edges + anchors and excludes self; a near-edge cursor snaps within `SNAP_PX`
+    (`tests/test_timeline_step_anchor_ui.py`). Suite 923 → 924.
+  - **Multi-select + group move** — the canvas holds a `_selection` SET (with `_selected` as the PRIMARY
+    for the connector chip / context menu / tooltip). **Shift/Ctrl-click** toggles an item
+    (`_toggle_select`); a plain click on a member keeps the set (so a body-drag moves the group) and
+    collapses to just it on release-without-move; **Ctrl+A** selects all; an empty-canvas **marquee**
+    drag (`_marquee` / `_apply_marquee`, a translucent accent rect) selects intersecting items
+    (additive with a modifier). `_paint_selection` rings every selected item. **Group move**: dragging
+    any selected item's BODY (`bar_body`/`run_body`) shifts every selected item by one on-air delta
+    (`_group_move` / `_group_bases`), snapping the primary's leading edge (excluding the whole moving
+    group from snap targets); the gap between them is preserved. **Delete/Backspace** deletes the whole
+    selection in one undo step (`_delete_selection`, reusing `_reanchor_deps`, which re-anchors each
+    deleted target's dependents unless they're also being deleted); the right-click menu shows
+    **"Delete selected"** for a multi-selection. Live-drag already previews the move, so no separate
+    ghost. Tests (`tests/test_timeline_step_anchor_ui.py`): toggle/select-only, delete-selection +
+    one-undo, marquee intersect, group move preserves the gap. Suite 924 → 928.
+  - **Overview minimap** (`_Minimap`, an "OVERVIEW" strip under the stage) — the whole sequence scaled
+    to fit (`scale = track_w / canvas.width()`): on-air (green) / off-air (red) guides, one task-hued
+    segment per row (`_rows`/`_geom`, bars/ramps span start→stop, pins a small mark; tunes/ramps dimmed),
+    and a draggable accent **viewport rectangle** (the scroll area's value + viewport width, scaled).
+    Click/drag the strip → `_scroll_to` centres the canvas there. Repaints on the canvas `changed` and on
+    the horizontal scrollbar's `valueChanged`/`rangeChanged` (covers edits, scroll, and zoom). Smoke
+    test: `_minimap` present, paints, `_scroll_to` safe (`tests/test_timeline_step_anchor_ui.py`).
+    Suite 928 → 929. **The redesign's interactive plan (visual → drag/drop → connectors → context menu →
+    time axis → snapping → multi-select → minimap) is now COMPLETE.**
+  - **Axis off-air anchor labelled "0"** — `_paint_axis` labels the off-air anchor **0** (was "arm",
+    owner found it confusing); warm-up/cool-down ticks already read ±M:SS around it, so it reads
+    balanced. Muted tick-label colour. Paint-only. Suite still 929.
+  - **Ramp / tune power shows the CONTROLLED quantity in the row header + canvas** (owner ask) — the
+    left-side `_RowHeader` sub-line showed a calibrated `--power` in the raw BASE quantity for both a
+    ramp's from→to and a tune step's value. Now both read the quantity the operator SET (a chirp's live
+    density, `power_view`) — the tune canvas pill already did this via `_pill_power_display`; extended to
+    the ramp canvas pill (`_paint_ramp`) and the row header for both. `_pill_power_display`'s view-delta
+    math was extracted into **`_view_delta_for(item, info, pv)`** (bw-keyed view → delta at the CARRIED
+    bw via `sequence_effective_values`; constant-offset view → the law's rep delta) and reused by a new
+    **`_ramp_power_display(item)`** → `(from_str, to_str)` in the view's unit (None for a non-power ramp
+    or no view → raw base). `_RowHeader._meta` routes tune→`_pill_power_display`, ramp→`_ramp_power_display`.
+    Best-effort (any gap falls back to raw base). Client-only; drift-guarded files untouched. Tests:
+    `tests/test_step_editor_carried_bw.py` (`_ramp_power_display` shows density at carried bw / None
+    without a view / None for a `--bw` ramp; the row header shows the controlled quantity for a ramp AND
+    a tune). Suite 929 → 932.
+  - **Tune-step readout chips on the canvas — option B** (owner ask: the pin caption looked "cheap" +
+    the task-name badge was redundant with the pin colour). Mockup `docs/tune-pin-mockup.html` (published
+    Artifact); owner picked **B (recessed readout chip)**. `_paint_pin`'s tune branch now drops the
+    task-name badge (the pin hue + row header already name the task) and renders **one recessed inset
+    chip per changed param** (`_paint_tune_chips`): a hue rail in the task colour, an UPPERCASE param
+    label (`TEXT_FAINT`), the mono value, and a **family-tinted unit chip** (teal density / slate dBm,
+    colours from `param_form._family_chip` via `_unit_chip_colors`); an on/off param renders a small
+    green "on" / muted "off" state pill. The controlled `--power` shows its view quantity + unit
+    (split from `_pill_power_display`). Layout is measured once in `_tune_chip_defs` and shared by
+    `_paint_tune_chips` + `_run_width` (footprint/hit stay in sync); `_tune_parts` splits each param
+    into `(name, value, unit, is_flag)`. A ONE-SHOT keeps its task-name caption (the name is its
+    identity). Chip metrics: `TCHIP_*`/`TUCHIP_PAD` constants. Client-only; drift-guarded files
+    untouched. Tests: `tests/test_step_editor_carried_bw.py` (`_tune_parts` split + flags; one chip per
+    param with widths + separator; family colours differ + the pin paints). Suite 932 → 935.
+    - **Anchor-target pins caption LEFT** (owner follow-up): a pin that some step is anchored TO has its
+      connector exit to the RIGHT (`_paint_connectors`: a point exits right), which would run straight
+      through a right-hand caption. `_paint_pin` now checks `_is_anchor_target(it)` (any row with
+      `anchor=="step"` referencing this item's `step_id`) and, when true, places the caption on the LEFT
+      of the pin (chips right-aligned ending at `cx − 13`; one-shot name right-aligned) so it clears the
+      line; a plain pin keeps the right side. `_paint_tune_chips` now takes pre-measured `(defs, fonts)`
+      + a start x so the caller can left- or right-anchor without resolving twice. (A pin that is BOTH a
+      target and a dependent is rare — it flips left, favouring the more prominent right-exit line.)
+      Test: `tests/test_step_editor_carried_bw.py::test_anchor_target_pin_flips_its_caption_to_the_left`.
+      Suite 935 → 936.
+    - **Two-sided pins duck the exit UNDER the caption** (owner follow-up; mockup
+      `docs/tune-pin-both-sides-mockup.html`, option C): a pin that is BOTH a target AND a dependent
+      (a chain `A → this → C`) has a connector off both sides, so the left-flip has no free side.
+      `_paint_pin` keeps its caption on the RIGHT with a wider gap (`PIN_CAP_GAP2` = 24 vs
+      `PIN_CAP_GAP` = 13), and the connector router routes that pin's EXIT line horizontally out, then
+      into a channel just below/above the readout (toward the dependent) and UNDER it — so the line
+      never runs through the text (connectors paint under the pins, so a beside caption otherwise reads
+      as line-through-text). `_pin_right_caption(it)` returns the right caption's `(left_x, width)`
+      (None when flipped left); `_paint_connectors` passes it as `anchor_cap` to `_draw_connector` →
+      `_connector_points`, which prepends a duck (`exit stub → drop just before the caption → under-
+      channel`) and resumes the normal drop-to-dependent routing past the caption. Byte-identical for a
+      one-sided pin / bar / ramp anchor (`anchor_cap` None). Tests: `tests/test_step_editor_carried_bw.py`
+      (two-sided pin keeps a right span at the wide gap + target-only stays None; `_connector_points`
+      ducks below y1 and drops before the caption with `anchor_cap`, no duck without). Verified live on
+      an `A → mid → C` tune chain. Suite 936 → 938.
+
+## Current state — step-to-step anchoring Phase 1 (client authoring + geometry): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo; stacked on `run-task-conflict-guards`)
+Owner ask: anchor a step not only to on-air/off-air/Hold but to ANOTHER step's start/end edge — e.g. a
+ramp right after another ramp's end — so editing the target moves everything downstream (a DAG).
+Decisions: full DAG (any step → any step's start/end + offset); PHASED (Phase 1 = tunes/ramps; Phase 2
+makes the Hold itself step-anchorable). Plus the owner ordering rule: a dependent may never fire before
+its anchor (offset ≥ 0), and moving an anchor mustn't invalidate a dependent. **Agent side** (1.24.0,
+capability `sequence-step-anchor`; see `sdr-agent/CLAUDE.md`): two-pass topological `_resolve_steps`,
+`_validate_steps` rejects unknown target / self / bad edge / cycle / step-in-a-Hold-sequence / negative
+offset. **Client Phase 1** (this):
+- **`api/models.py`** — `SequenceStep` gains `id` / `anchor_step_id` / `anchor_edge` (additive; a plain
+  sequence's wire is byte-identical — the fields are emitted only when a step is a target or is anchored).
+- **`ui/timeline_model.py`** — `RunItem` carries `step_id`/`anchor_step_id`/`anchor_edge`.
+  **`resolve_step_offsets(items, h_off)`** places every `anchor="step"` item topologically on the on-air
+  clock (a point's start==end==offset; a ramp's end==start+duration; chains resolve; a cycle/unknown/
+  off-air target drops → the item falls back to its own offset, `validate()` blocks it). `effective_
+  anchor_offset`/`ramp_span`/`_carry_order_key` gained an optional `step_bases`; both temporal power walks,
+  `sequence_effective_values`, `compute_anchors`, and `min_on_air_duration` (pre-resolves to start-anchored
+  offsets before delegating to the drift-guarded `api.ramp`) thread it. `validate()` mirrors the agent.
+  `eligible_step_targets(items, source_uid)` (cycle-safe, on-air-resolvable points+ramps only — NOT bars/
+  Hold in Phase 1), `ensure_step_id`, `step_edge_offset`, `step_anchor_supported(client)` (`≥ 1.24.0`).
+- **`ui/timeline_editor.py`** (StepEditorDialog) + **`ui/ramp_editor.py`** — an **"after another step…"**
+  anchor option (shown when an eligible target exists and there's no Hold), with **Anchor to** (target) +
+  **Relative to** (its start/end) pickers; saving assigns the target a stable id and records the anchor;
+  a negative offset is refused. The canvas resolves `step_bases` alongside `_hold_off`, so a dependent
+  draws off its target and moving the target moves it.
+- **`ui/sequence_editor.py`** (save) + **`ui/sequences_panel.py`** (arm) — a safety gate `step_anchor_
+  supported`: block saving/arming a step-anchored sequence to a unit whose agent is < 1.24.0 (the agent
+  stays the hard backstop; the library holds only a definition, never blocked).
+**Owner-testing fix (round-trip drop):** `TimelineEditor.steps()` (deploy) and `set_steps()` (load)
+rebuild the wire step dicts BY HAND and were dropping `id`/`anchor_step_id`/`anchor_edge` — so a saved
+step-anchored sequence armed as `anchor="step"` with an EMPTY `anchor_step_id` (agent 400 "needs
+anchor_step_id"), and on re-edit the item reloaded `anchor="step"` with no target → the dialog fell back
+to the first eligible step (the "wrong target" symptom). Both now carry the three fields. The pure
+`items_to_steps`/`steps_to_items` were always correct; the gap was these two hand-built converters — now
+covered by `test_editor_steps_roundtrip_preserves_step_anchor`.
+Tests: `tests/test_timeline_step_anchor.py` (resolver / round-trip / validate / min-duration / eligible
+targets / gate / stable id) + `tests/test_timeline_step_anchor_ui.py` (both dialogs offer the anchor,
+assign the id, hide it with a Hold, refuse a negative offset, editor steps()/set_steps() round-trip).
+Suite 875 → 900 offscreen. Drift-guarded
+files untouched. **KNOWN Phase-1 LIMITATIONS**: a step-anchored target is limited to points/ramps (a bar's
+off-air end and the Hold aren't offered as targets — the Hold becomes step-anchorable in Phase 2);
+dragging a step-anchored pill on the canvas doesn't live-track during the drag (it snaps into place on
+drop — the dialog is the precise authoring path). **NEXT — Phase 2**: the Hold itself step-anchorable.
+
+## Current state — run/task conflict guards (arm-over-running · stop-task-in-run): COMPLETE (branch `claude/run-task-conflict-guards`, client-only)
+Owner ask: (1) arming a sequence/plan whose task is already running should INFORM + offer to stop it;
+(2) stopping a task (Tasks tab) that's part of a running sequence/plan should INFORM + offer to stop
+just the task OR the whole run. Client-only — no agent change; uses existing endpoints (`list_tasks`,
+`stop_task`, `cancel_sequence_run`, arm), and the agent's existing arm guard ("cannot arm: task(s)
+already running") stays the backstop. Pieces:
+- **`ui/run_conflict.py`** (new, pure/no-Qt) — `sequence_task_names(steps)`, `running_task_names(
+  statuses, wanted)` (∩ RUNNING/STARTING), `active_runs_using_task(runs, task)` (ARMED/RUNNING/HOLDING
+  runs whose steps use the task), `run_label(run)` (`plan “X”`/`sequence “Y”`).
+- **Arm pre-check (Feature 1)** — `sequences_panel._on_start` now fires `seq_precheck` (fetch
+  `list_tasks`, intersect with the sequence's tasks) → `_on_task_done`: clear/none → `_arm_flow` (the
+  old `_on_start` body, extracted: ArmDialog + arm); conflicts → `_offer_stop_and_arm` ("Stop & arm" /
+  Cancel) → `seq_stoptasks` (stop each) → `_arm_flow`. Plans: `_on_arm`'s preflight also fetches
+  `tasks_all`; `_finish_arm_preflight` computes per-unit conflicts across items → `_offer_stop_and_arm_plan`
+  → `plan_stoptasks` (`_stop_tasks_on_hosts`, per-task result) → re-run `_on_arm` (preflight now clear).
+- **Stop-in-run (Feature 2)** — `unit_detail`: `UnitDetail.on_fast_update` feeds `snap.runs` →
+  `_TasksPanel.update_runs`; each `_TaskRow` gets a `runs_provider`. `_TaskRow._on_stop` → if an active
+  run owns the task, `_confirm_stop_owned` (3-way: **Stop task only** / **Stop sequence/plan** /
+  Cancel); "Stop run" aborts the owning run(s) via `cancel_sequence_run` (`task_abortrun` label);
+  else the plain stop. Multiple owning runs → "Stop all".
+No agent/scripts/capability change; drift-guarded files untouched. Tests: `tests/test_run_conflict.py`
+(pure helpers) + `tests/test_run_conflict_ui.py` (row stop routes to the dialog only when a run owns
+the task; panel feeds runs to rows; sequence pre-check arms/offers/stops-then-arms; the plan batch-stop
+helper reports per-task). Suite 870 → 875 offscreen.
+
 ## Current state — spreadsheet run-log export (client): COMPLETE (branch `claude/hold-step-phase-0-wwwxf7-lty0i5`, cross-repo)
 Export a ran sequence/plan's log as an **.xlsx** — one ROW PER STATE CHANGE (a tune that changes
 nothing adds no row), every power quantity + realized SDR gain/attenuation + each live/derived param in

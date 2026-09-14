@@ -45,10 +45,12 @@ from .param_form import fmt_duration
 from .plan_editor import PlanEditorDialog
 from .plan_log_dialog import PlanLogDialog
 from .qt_adapter import DataHub
+from . import run_conflict
 from .theme import Palette
 from .timeline_model import (
     SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY, SEQUENCE_LOG_TABLE_CAPABILITY,
-    hold_runtime_supported)
+    hold_runtime_supported, hold_enter_supported, hold_ramp_pause_supported,
+    ramp_crosses_hold_steps, step_anchor_supported, step_anchor_negative_supported)
 from .widgets import StatusPill, natural_key
 
 ARM_MARGIN_S = 5.0
@@ -144,6 +146,29 @@ def _plan_has_hold(plan: m.Plan, seqs_by_host: Optional[dict] = None) -> bool:
     return False
 
 
+def _step_anchor_block_lines(items_steps, fleet) -> List[str]:
+    """Block lines (empty = OK) for arming steps that use step-to-step anchoring on a unit whose
+    agent can't resolve it — needs ≥ 1.24.0 (a negative step offset ≥ 1.25.0). Mirrors the Library
+    save/arm gate so a plan / scheduled arm blocks with a clear message instead of a raw agent 400.
+    ``items_steps`` is an iterable of (hostname, label, steps); an undiscovered unit is skipped (the
+    agent stays the backstop)."""
+    out: List[str] = []
+    for host, label, steps in items_steps:
+        step_steps = [s for s in steps if getattr(s, "anchor", "") == "step"]
+        if not step_steps:
+            continue
+        try:
+            client = fleet.get(host)
+        except Exception:  # noqa: BLE001 — undiscovered unit → the agent is the backstop
+            continue
+        if not step_anchor_supported(client):
+            out.append(f"• {label}: needs agent ≥ 1.24.0 (step-to-step anchoring)")
+        elif (any(float(getattr(s, "offset_s", 0.0)) < 0 for s in step_steps)
+              and not step_anchor_negative_supported(client)):
+            out.append(f"• {label}: needs agent ≥ 1.25.0 (a negative step offset)")
+    return out
+
+
 def _hold_aware_plan_item(plan: m.Plan, resolved: Dict[int, list],
                           supports_runtime) -> Optional[m.PlanItem]:
     """The single plan item to arm hold_aware (single-unit, operator-present), or None.
@@ -206,6 +231,25 @@ def _proceed_run(client, run_id: str, resume_laptop: datetime,
     resume_at = resume_laptop + timedelta(seconds=client.clock_offset_s())
     return client.proceed_sequence_run(
         run_id, m.ProceedRequest(proceed_at=resume_at.isoformat(), steps=steps))
+
+
+def _stop_tasks_on_hosts(fleet: Fleet, conflicts: Dict[str, list]) -> List[tuple]:
+    """Stop each conflicting task on its unit; return [(host, task, error_or_None)] so the
+    caller reports per-task failures without aborting the rest. Runs on a worker thread."""
+    out: List[tuple] = []
+    for host, task_names in conflicts.items():
+        try:
+            client = fleet.get(host)
+        except Exception as exc:            # noqa: BLE001 — reported per host, siblings continue
+            out.extend((host, t, exc) for t in task_names)
+            continue
+        for t in task_names:
+            try:
+                client.stop_task(t)
+                out.append((host, t, None))
+            except Exception as exc:        # noqa: BLE001
+                out.append((host, t, exc))
+    return out
 
 
 def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
@@ -695,12 +739,13 @@ class PlansTab(QWidget):
         hostnames = sorted({i.hostname for i in plan.items})
         self.hub.run_async(
             f"plan_preflight:{plan.id}",
-            lambda: (self.fleet.clock_skew(hostnames), self.fleet.sequences_all(hostnames)),
+            lambda: (self.fleet.clock_skew(hostnames), self.fleet.sequences_all(hostnames),
+                     self.fleet.tasks_all(hostnames)),
         )
 
     def _finish_arm_preflight(self, plan: m.Plan, result) -> None:
         try:
-            (systems, max_skew), seqs = result
+            (systems, max_skew), seqs, tasks = result
         except (TypeError, ValueError):
             self._set_status("pre-flight failed", error=True)
             QMessageBox.warning(self, "Pre-flight failed", f"{result}")
@@ -756,6 +801,38 @@ class PlansTab(QWidget):
             self._set_status("arm cancelled", error=True)
             return
 
+        # Safety gate (mirrors the Library save/arm gate): a step-to-step anchor needs an agent
+        # that can resolve it (≥ 1.24.0; a negative step offset ≥ 1.25.0). Block with a clear
+        # message rather than letting the agent reject the arm with a raw 400.
+        sa_block = _step_anchor_block_lines(
+            ((plan.items[idx].hostname, plan.items[idx].unit_label or plan.items[idx].hostname,
+              steps) for idx, steps in resolved.items()), self.fleet)
+        if sa_block:
+            QMessageBox.warning(
+                self, "Cannot arm plan",
+                "A step in this plan is anchored to another step, which these units’ agents "
+                "can’t resolve yet:\n" + "\n".join(sa_block) + "\n\nUpdate the units’ agents, or "
+                "re-anchor those steps to on-air / off-air.")
+            self._set_status("arm blocked — step anchoring unsupported", error=True)
+            return
+
+        # Guard: don't arm over a task already transmitting on any item's unit (the agent
+        # refuses such an arm). Offer to stop the conflicting tasks and arm.
+        conflicts: Dict[str, list] = {}
+        for idx, steps in resolved.items():
+            host = plan.items[idx].hostname
+            statuses = tasks.get(host) if isinstance(tasks, dict) else None
+            running = run_conflict.running_task_names(
+                statuses if isinstance(statuses, list) else [],
+                run_conflict.sequence_task_names(steps))
+            for t in running:
+                conflicts.setdefault(host, [])
+                if t not in conflicts[host]:
+                    conflicts[host].append(t)
+        if conflicts:
+            self._offer_stop_and_arm_plan(plan, conflicts)
+            return
+
         skew_note = ""
         if max_skew is not None and max_skew > CLOCK_WARN_SKEW_S:
             skew_note = (f"⚠ Unit clocks differ by {max_skew:.1f}s. A shared on-air "
@@ -809,6 +886,37 @@ class PlansTab(QWidget):
             lambda: _arm_plan(self.fleet, plan, t0, duration_s),
         )
 
+    def _offer_stop_and_arm_plan(self, plan: m.Plan, conflicts: Dict[str, list]) -> None:
+        """One or more of the plan's tasks are already running on their units — offer to stop
+        them and re-run the arm (which re-does pre-flight, now clear)."""
+        label = {i.hostname: (i.unit_label or i.hostname) for i in plan.items}
+        total = sum(len(ts) for ts in conflicts.values())
+        if len(conflicts) == 1:
+            host, ts = next(iter(conflicts.items()))
+            names = ", ".join(f"“{t}”" for t in ts)
+            text = f"{names} {'is' if total == 1 else 'are'} already running on {label.get(host, host)}."
+        else:
+            text = "Some of this plan's tasks are already running:\n" + "\n".join(
+                f"• {label.get(h, h)}: {', '.join(ts)}" for h, ts in conflicts.items())
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Task already running")
+        box.setText(text)
+        box.setInformativeText(
+            "A plan can't arm over a task that's already transmitting. Stop it and arm the plan?")
+        stop_arm = box.addButton("Stop && arm", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(stop_arm)
+        box.exec()
+        if box.clickedButton() is not stop_arm:
+            self._set_status("arm cancelled")
+            return
+        self._set_status("stopping task(s)…")
+        self.hub.run_async(
+            f"plan_stoptasks:{plan.id}",
+            lambda: _stop_tasks_on_hosts(self.fleet, conflicts),
+        )
+
     def _arm_hold_aware_plan(self, plan: m.Plan, item: m.PlanItem, steps: list,
                              safety_lead_s: float, skew_note: str) -> None:
         """Arm a single-unit, single-sequence plan whose item holds — operator-present, so the
@@ -817,8 +925,38 @@ class PlansTab(QWidget):
         (docs/sequence-hold-step.md §6.2)."""
         hold_off = next((s.offset_s for s in steps
                          if m._step_action(s) == m.StepAction.HOLD.value), 0.0)
-        wa = fmt_duration(round(max(0.0, hold_off + _lead_in(steps))))
         label = item.unit_label or item.hostname
+        # A step anchored to the Hold's START (anchor="enter") needs agent ≥ 1.26.0 on the unit
+        # (a safety gate; the collapse path compiles the Hold out and never sends it).
+        if any(getattr(s, "anchor", "") == "enter" for s in steps):
+            try:
+                ok = hold_enter_supported(self.fleet.get(item.hostname))
+            except Exception:  # noqa: BLE001
+                ok = False
+            if not ok:
+                QMessageBox.warning(
+                    self, "Hold-start anchor not supported here",
+                    f"“{plan.name or plan.id}” anchors a step to the Hold's start (before the "
+                    f"pause), but {label}'s agent doesn't support it (needs sequence-hold-enter, "
+                    f"agent ≥ 1.26.0). Update the unit's agent, or anchor that step to on-air.")
+                self._set_status("arm blocked — agent lacks sequence-hold-enter")
+                return
+        # A ramp that CROSSES the Hold needs agent ≥ 1.27.0 on the unit to pause it there.
+        if ramp_crosses_hold_steps(steps):
+            try:
+                ok = hold_ramp_pause_supported(self.fleet.get(item.hostname))
+            except Exception:  # noqa: BLE001
+                ok = False
+            if not ok:
+                QMessageBox.warning(
+                    self, "Ramp across the Hold not supported here",
+                    f"“{plan.name or plan.id}” has a ramp that runs across the Hold, but {label}'s "
+                    f"agent can't pause it there (needs sequence-hold-ramp-pause, agent ≥ 1.27.0). "
+                    f"Update the unit's agent, or end the ramp at the pause and continue it from "
+                    f"resume.")
+                self._set_status("arm blocked — agent lacks sequence-hold-ramp-pause")
+                return
+        wa = fmt_duration(round(max(0.0, hold_off + _lead_in(steps))))
         dlg = ArmDialog(
             f"Arm plan “{plan.name or plan.id}” (holds at the Hold)",
             safety_lead_s + ARM_MARGIN_S, DEFAULT_STOP_DURATION_S, 0.0, skew_note, parent=self,
@@ -1066,6 +1204,17 @@ class PlansTab(QWidget):
             elif isinstance(result, Exception):
                 self._set_status(f"stop failed: {result}", error=True)
             self._refresh_runs()
+        elif op == "plan_stoptasks":
+            bad = [(h, t, e) for h, t, e in result if e is not None] \
+                if isinstance(result, list) else []
+            if isinstance(result, Exception) or bad:
+                self._set_status("stop failed", error=True)
+                detail = str(result) if isinstance(result, Exception) else \
+                    "\n".join(f"• {h}/{t}: {e}" for h, t, e in bad)
+                QMessageBox.warning(self, "Could not stop the running task", detail)
+                return
+            if plan is not None:
+                self._on_arm(plan)           # tasks stopped → re-run arm (pre-flight now clear)
 
     def _report_arm(self, result) -> None:
         if isinstance(result, Exception) or not isinstance(result, list):

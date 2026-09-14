@@ -1,0 +1,216 @@
+<title>Tune Step Labels</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  /* the app's own calm light palette (ui/theme.py) */
+  --ground:#EEF0F3; --surface:#FFFFFF; --surface-alt:#FAFBFC; --inset:#F1F4F7;
+  --border:#E2E5EA; --border-strong:#CDD2DA; --hairline:#ECEEF1;
+  --text:#1E2530; --muted:#5C6675; --faint:#8A93A2;
+  --accent:#2C6E9B; --accent-ink:#1F5476; --ok:#1D9E75; --warn:#BA7517; --bad:#C23B3B;
+  /* per-task hues + the two power-unit families (slate = absolute dBm, teal = a density) */
+  --teal:#1E8FA3; --teal-ink:#12707F; --teal-soft:#E4F2F3;
+  --violet:#6D5AC4; --violet-ink:#54449B; --violet-soft:#ECE8F8;
+  --slate:#5C6675; --slate-ink:#414A58; --slate-soft:#EDEFF2;
+  --sans:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --mono:"IBM Plex Mono","DejaVu Sans Mono",ui-monospace,monospace;
+  --shadow-sm:0 1px 2px rgba(22,32,48,.06), 0 1px 3px rgba(22,32,48,.05);
+  --band:#F7F9FB;              /* the faint canvas row a pin sits on */
+}
+:root:not([data-theme="light"]){
+  @media (prefers-color-scheme: dark){
+    --ground:#14181E; --surface:#1B2129; --surface-alt:#20272F; --inset:#232B34;
+    --border:#2C353F; --border-strong:#3A4552; --hairline:#262E37;
+    --text:#E7ECF2; --muted:#A2ADBB; --faint:#727E8C;
+    --accent:#5FA8D6; --accent-ink:#9BCBE8; --ok:#3FBE93; --warn:#D69A46; --bad:#E06A6A;
+    --teal:#37B7CC; --teal-ink:#8FE0EC; --teal-soft:#183038;
+    --violet:#9A88E4; --violet-ink:#C6BBF3; --violet-soft:#241F3A;
+    --slate:#8A93A2; --slate-ink:#C2C9D3; --slate-soft:#262E37;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.28);
+    --band:#191F26;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#14181E; --surface:#1B2129; --surface-alt:#20272F; --inset:#232B34;
+  --border:#2C353F; --border-strong:#3A4552; --hairline:#262E37;
+  --text:#E7ECF2; --muted:#A2ADBB; --faint:#727E8C;
+  --accent:#5FA8D6; --accent-ink:#9BCBE8; --ok:#3FBE93; --warn:#D69A46; --bad:#E06A6A;
+  --teal:#37B7CC; --teal-ink:#8FE0EC; --teal-soft:#183038;
+  --violet:#9A88E4; --violet-ink:#C6BBF3; --violet-soft:#241F3A;
+  --slate:#8A93A2; --slate-ink:#C2C9D3; --slate-soft:#262E37;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.28);
+  --band:#191F26;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--text);font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;padding:30px 20px 56px}
+.wrap{max-width:960px;margin:0 auto}
+h1{font-size:21px;font-weight:600;letter-spacing:-.2px;margin:0 0 5px;text-wrap:balance}
+.lede{color:var(--muted);font-size:13px;line-height:1.65;margin:0 0 8px;max-width:70ch}
+.lede b{color:var(--text);font-weight:600}
+
+/* the "why drop the name" proof strip */
+.proof{display:flex;flex-wrap:wrap;gap:10px 22px;align-items:center;margin:16px 0 26px;
+  padding:13px 16px;background:var(--surface-alt);border:1px solid var(--border);border-radius:12px}
+.proof .pt{font-size:12px;color:var(--muted);line-height:1.5;max-width:44ch}
+.proof .pt b{color:var(--text)}
+
+.opt{background:var(--surface);border:1px solid var(--border);border-radius:14px;
+  box-shadow:var(--shadow-sm);padding:16px 18px 20px;margin-bottom:16px}
+.opt.pick{border-color:color-mix(in srgb,var(--teal) 55%,var(--border));
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--teal) 16%,transparent), var(--shadow-sm)}
+.ohead{display:flex;align-items:baseline;gap:10px;margin-bottom:3px;flex-wrap:wrap}
+.otag{font-size:11px;font-weight:700;letter-spacing:.5px;color:#fff;background:var(--faint);
+  border-radius:6px;padding:2px 8px}
+.opt.pick .otag{background:var(--teal)}
+.opt.now .otag{background:var(--bad)}
+.oname{font-size:15px;font-weight:600}
+.rec{margin-left:auto;font-size:10.5px;font-weight:700;letter-spacing:.4px;color:var(--teal-ink);
+  background:color-mix(in srgb,var(--teal) 15%,transparent);border-radius:999px;padding:3px 10px}
+.orat{color:var(--muted);font-size:12.5px;line-height:1.6;margin:5px 0 16px;max-width:72ch}
+.orat code{font-family:var(--mono);font-size:11.5px;background:var(--inset);
+  padding:1px 5px;border-radius:4px;color:var(--text)}
+
+/* a small grid of example rows, each imitating the editor's canvas lane */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:9px 14px}
+.cell{display:flex;flex-direction:column;gap:6px}
+.cell.wide{grid-column:1/-1}
+.clab{font-size:9.5px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--faint)}
+
+/* ── the canvas lane + tune pin (matches ui/timeline_editor _paint_pin) ─────── */
+.lane{--hue:var(--teal);--ink:var(--teal-ink);--soft:var(--teal-soft);
+  display:flex;align-items:center;gap:9px;height:34px;padding:0 12px;border-radius:9px;
+  background:var(--band);border:1px solid var(--hairline);overflow:hidden}
+.lane.v{--hue:var(--violet);--ink:var(--violet-ink);--soft:var(--violet-soft)}
+.pin{width:14px;height:14px;flex:none;border-radius:50%;background:var(--hue);
+  box-shadow:0 0 0 2.4px var(--surface), var(--shadow-sm)}
+
+/* NOW — the current look: filled task badge + raw key=value text */
+.oldbadge{font-size:9px;font-weight:700;letter-spacing:.3px;color:var(--ink);
+  background:color-mix(in srgb,var(--hue) 16%,var(--surface));border-radius:4px;padding:2px 6px;flex:none}
+.oldtext{font-size:12px;font-weight:700;color:var(--text);white-space:nowrap}
+
+/* shared restyled pieces */
+.lead{width:2px;align-self:stretch;margin:7px 0;border-radius:2px;
+  background:color-mix(in srgb,var(--hue) 55%,transparent);flex:none}
+.pname{font-size:9.5px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;
+  color:var(--faint);flex:none}
+.pval{font-family:var(--mono);font-size:12.5px;font-weight:500;color:var(--text);
+  font-variant-numeric:tabular-nums;white-space:nowrap;flex:none}
+.uchip{font-family:var(--mono);font-size:9.5px;font-weight:500;border-radius:4px;
+  padding:1px 5px;flex:none;white-space:nowrap;letter-spacing:.2px}
+.u-dens{color:var(--teal-ink);background:var(--teal-soft)}
+.u-abs {color:var(--slate-ink);background:var(--slate-soft)}
+.u-plain{color:var(--muted);background:var(--inset)}
+.on{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--ok);
+  background:color-mix(in srgb,var(--ok) 14%,transparent);border-radius:4px;padding:1px 7px;flex:none}
+.sep{color:var(--border-strong);font-size:12px;flex:none;padding:0 1px}
+
+/* B — one recessed readout chip with a hue rail */
+.chip{display:inline-flex;align-items:center;gap:7px;height:22px;padding:0 9px 0 8px;
+  border-radius:7px;background:var(--inset);border:1px solid var(--border);position:relative}
+.chip::before{content:"";position:absolute;left:3px;top:5px;bottom:5px;width:2.5px;border-radius:2px;
+  background:var(--hue)}
+.chip .pname{padding-left:5px}
+
+/* C — a hue action tag (the verb, not the redundant task name) */
+.vtag{font-size:9px;font-weight:700;letter-spacing:.6px;color:#fff;background:var(--hue);
+  border-radius:4px;padding:2px 6px;flex:none}
+:root[data-theme="dark"] .vtag,
+:root:not([data-theme="light"]) .vtag{color:var(--ground)}
+
+footer{color:var(--faint);font-size:12px;margin-top:22px;line-height:1.65;max-width:74ch}
+footer b{color:var(--muted)}
+</style>
+
+<div class="wrap">
+  <h1>Tune step labels</h1>
+  <p class="lede">A <b>tune</b> step is an instant on the timeline — a pin plus a short caption of the
+  parameter it changes. Today that caption leads with the <b>task name</b> in a filled badge and then
+  dumps a raw <code>power=−10.50&nbsp;dBm/MHz</code> string. The name is redundant (the pin's colour
+  already says which task), and the raw key=value reads unstyled. Below: the current look, then three
+  restyled captions that drop the name and give the reading a real label · value · unit treatment.</p>
+
+  <div class="proof">
+    <div class="lane"><span class="pin"></span><span class="pname">Power</span><span class="pval">−10.50</span><span class="uchip u-dens">dBm/MHz</span></div>
+    <div class="lane v"><span class="pin"></span><span class="pname">Power</span><span class="pval">−45.00</span><span class="uchip u-abs">dBm</span></div>
+    <div class="pt">The <b>colour already carries the task</b> — teal is the GPS&nbsp;C/A signal, violet the
+    chirp — and the row header on the left repeats the task name in full. So the badge on every pin is
+    saying what the colour just said.</div>
+  </div>
+
+  <div id="opts"></div>
+
+  <footer>Reuses the editor's real styling — IBM Plex Sans / Mono, the per-task hue, and the
+  power-unit family colours (<b>slate = absolute dBm, teal = a spectral density</b>, from
+  <code>_unit_family</code>). The value is the quantity actually set (a chirp's live density), not the
+  raw base. Pick one and I'll wire it into <code>_paint_pin</code> (and the row-header sub-line to match).</footer>
+</div>
+
+<script>
+// representative captions a tune step produces, each in a task hue
+const P_DENS = {n:'Power', v:'−10.50', u:'dBm/MHz', fam:'u-dens'};
+const P_ABS  = {n:'Power', v:'−45.00', u:'dBm',     fam:'u-abs'};
+const BW     = {n:'BW',    v:'20',     u:'MHz',     fam:'u-plain'};
+const RF     = {n:'RF',    v:'on',     flag:true};
+const SL     = {n:'Sidelobes', v:'5',  u:'',        fam:'u-plain'};
+
+function val(p){
+  if(p.flag) return `<span class="pname">${p.n}</span><span class="on">${p.v}</span>`;
+  const u = p.u ? `<span class="uchip ${p.fam}">${p.u}</span>` : '';
+  return `<span class="pname">${p.n}</span><span class="pval">${p.v}</span>${u}`;
+}
+function join(parts){ return parts.map(val).join('<span class="sep">·</span>'); }
+
+function lane(hue, inner){ return `<div class="lane ${hue}"><span class="pin"></span>${inner}</div>`; }
+
+function render(variant, hue, parts){
+  if(variant==='now'){
+    const task = hue==='v' ? 'chirp' : 'gps_ca';
+    const raw = parts.map(p => p.flag ? `${p.n.toLowerCase()}=${p.v}`
+      : `${p.n.toLowerCase()}=${p.v}${p.u?(' '+p.u):''}`).join(', ');
+    return lane(hue, `<span class="oldbadge">${task}</span><span class="oldtext">${raw}</span>`);
+  }
+  if(variant==='A') return lane(hue, `<span class="lead"></span>${join(parts)}`);
+  if(variant==='B'){
+    const inner = parts.map(p => {
+      if(p.flag) return `<span class="chip"><span class="pname">${p.n}</span><span class="on">${p.v}</span></span>`;
+      const u = p.u ? `<span class="uchip ${p.fam}">${p.u}</span>` : '';
+      return `<span class="chip"><span class="pname">${p.n}</span><span class="pval">${p.v}</span>${u}</span>`;
+    }).join('<span class="sep" style="padding:0 3px"></span>');
+    return lane(hue, inner);
+  }
+  if(variant==='C') return lane(hue, `<span class="vtag">SET</span>${join(parts)}`);
+  return '';
+}
+
+const CASES = [
+  {lab:'density power · teal', hue:'',  parts:[P_DENS]},
+  {lab:'absolute power · violet', hue:'v', parts:[P_ABS]},
+  {lab:'integer param', hue:'', parts:[BW]},
+  {lab:'on / off flag', hue:'v', parts:[RF]},
+  {lab:'two params', hue:'', parts:[SL, P_ABS], wide:true},
+];
+
+const OPTIONS = [
+  {tag:'NOW', name:'Current — task badge + raw text', now:true, variant:'now', rec:'',
+   rat:"Leads with the task name in a filled badge, then the parameters as a raw <code>key=value</code> list in bold. The badge duplicates the pin colour, and the reading has no hierarchy — name, number and unit all run together at one weight."},
+  {tag:'A', name:'Label · value · unit', pick:true, variant:'A', rec:'Recommended',
+   rat:"No badge. A hairline hue lead ties the caption to its pin, then the parameter as a small uppercase label, the value in tabular mono, and the unit in a family-tinted chip (teal density / slate dBm). Lightest touch — nothing boxes the text, so it stays legible when pins crowd together."},
+  {tag:'B', name:'Recessed readout chip', variant:'B', rec:'',
+   rat:"Each reading sits in one inset chip with a hue rail, echoing the duration capsule on a bar. More structure and weight — reads as a distinct object — at the cost of a heavier look when several pins stack."},
+  {tag:'C', name:'Action tag', variant:'C', rec:'',
+   rat:"Keeps a leading tag, but it names the <code>SET</code> action rather than the task, so it adds meaning instead of repeating the colour. The value gets the same label · value · unit treatment as A."},
+];
+
+document.getElementById('opts').innerHTML = OPTIONS.map(o => `
+  <div class="opt ${o.pick?'pick':''} ${o.now?'now':''}">
+    <div class="ohead"><span class="otag">${o.tag}</span><span class="oname">${o.name}</span>
+      ${o.rec?`<span class="rec">${o.rec}</span>`:''}</div>
+    <div class="orat">${o.rat}</div>
+    <div class="grid">
+      ${CASES.map(c => `<div class="cell${c.wide?' wide':''}"><span class="clab">${c.lab}</span>${render(o.variant,c.hue,c.parts)}</div>`).join('')}
+    </div>
+  </div>`).join('');
+</script>

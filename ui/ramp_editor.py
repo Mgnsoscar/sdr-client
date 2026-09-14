@@ -302,12 +302,59 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         src_anchor = getattr(self._src, "anchor", "start")
         if getattr(self._editor, "has_hold", lambda: False)() or src_anchor == "hold":
             self._anchor.addItem("Hold (after Hold)", "hold")
+        # Tied by its END to the pause's START: the ramp finishes as the Hold begins (window A,
+        # timed at arm) — the down-ramp-before-the-pause case. Offset ≤ 0 = the end's from the pause.
+        if getattr(self._editor, "has_hold", lambda: False)() or src_anchor == "enter":
+            self._anchor.addItem("Hold start (ends at the pause)", "enter")
+        # Step-to-step anchoring (agent ≥ 1.24.0): run this ramp forward from ANOTHER step's
+        # start/end edge — e.g. a down-ramp right after an up-ramp's end. Offered when there's
+        # an eligible target (no cycle) or the ramp already uses it; saving to an agent that
+        # can't resolve it is blocked at save-time. Mutually exclusive with a Hold (Phase 1).
+        items_getter = getattr(self._editor, "items", None)
+        self._step_targets = tlm.step_targets_for_edit(list(items_getter()), self._src) \
+            if (items_getter is not None and not getattr(self._editor, "has_hold", lambda: False)()) \
+            else []
+        if self._step_targets or src_anchor == "step":
+            self._anchor.addItem("After step…", "step")
         _ai = self._anchor.findData(src_anchor)
         self._anchor.setCurrentIndex(_ai if _ai >= 0 else 0)
 
         self._offset = _spin(float(getattr(self._src, "offset", 0.0)))
         self._offset_end = _spin(float(getattr(self._src, "offset_end", 0.0)))
         form.addWidget(_ofield("Anchor", self._anchor))
+
+        # Step-anchor target + edge pickers (shown only when anchor == "step").
+        self._anchor_target = Dropdown()
+        for tgt in self._step_targets:
+            self._anchor_target.addItem(tlm._target_label(tgt), getattr(tgt, "uid", None))
+        self._anchor_edge = Dropdown()
+        self._anchor_edge.addItem("its end", "end")
+        self._anchor_edge.addItem("its start", "start")
+        # Which of THIS ramp's edges is tied there: its start (runs forward from the point) or its
+        # END (sits at the point, runs backward from it — e.g. a down-ramp that must FINISH when
+        # another step fires). The offset then belongs to the tied edge.
+        self._own_edge = Dropdown()
+        self._own_edge.addItem("the ramp's start", "start")
+        self._own_edge.addItem("the ramp's end", "end")
+        self._target_row = _ofield("Anchor to", self._anchor_target)
+        self._edge_row = _ofield("Relative to", self._anchor_edge)
+        self._own_row = _ofield("Tie", self._own_edge)
+        form.addWidget(self._target_row)
+        form.addWidget(self._edge_row)
+        form.addWidget(self._own_row)
+        if src_anchor == "step":
+            want = getattr(self._src, "anchor_step_id", "") or ""
+            for tgt in self._step_targets:
+                if (getattr(tgt, "step_id", "") or "") == want:
+                    ti = self._anchor_target.findData(getattr(tgt, "uid", None))
+                    if ti >= 0:
+                        self._anchor_target.setCurrentIndex(ti)
+                    break
+            ei = self._anchor_edge.findData(getattr(self._src, "anchor_edge", "end") or "end")
+            self._anchor_edge.setCurrentIndex(ei if ei >= 0 else 0)
+            oi = self._own_edge.findData(getattr(self._src, "anchor_own_edge", "start") or "start")
+            self._own_edge.setCurrentIndex(oi if oi >= 0 else 0)
+
         self._off_row = _ofield("Offset from anchor", self._offset)
         self._off_lbl = self._off_row._klabel
         self._offend_row = _ofield("End offset from off-air", self._offset_end)
@@ -453,6 +500,7 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         self._offset.valueChanged.connect(self._update_preview)
         self._offset_end.valueChanged.connect(self._update_preview)
         self._anchor.currentIndexChanged.connect(self._sync_anchor)
+        self._own_edge.currentIndexChanged.connect(self._sync_anchor)   # relabel + sublabels
         self._mode.currentIndexChanged.connect(self._sync_mode)
 
         # Restore the mode this ramp was authored in (else _sync_anchor defaults to
@@ -564,7 +612,15 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         anchor = self._anchor.currentData() or "start"
         off = round(float(self._offset.value()), 1)
         items_getter = getattr(self._editor, "items", None)
-        h_off = tlm.hold_offset(items_getter()) if items_getter is not None else None
+        items = list(items_getter()) if items_getter is not None else []
+        h_off = tlm.hold_offset(items) if items else None
+        if anchor == "step":
+            # Order at the RESOLVED base (target edge + offset) so only genuinely-earlier steps
+            # carry state into this ramp's operating point — mirror _carry_order_key's step branch.
+            bases = tlm.resolve_step_offsets(items, h_off)
+            base = bases.get(getattr(self._src, "uid", None))
+            if base is not None:
+                return (0, base)
         return tlm.carry_order_key(anchor, off, h_off)
 
     def _freq_unit_factor(self, freq_param: str) -> float:
@@ -781,9 +837,23 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
             self._off_lbl.setText("Start offset from on-air")
         elif anchor == "hold":
             self._off_lbl.setText("Offset from Hold (resume)")
+        elif anchor == "enter":
+            self._off_lbl.setText("End offset from the pause (≤ 0)")
+        elif anchor == "step":
+            # Direction-neutral: the offset runs from the step's edge and may be negative
+            # (the tied edge sits before it), like a start/stop-anchored warm-up lead-in.
+            end_tied = (getattr(self, "_own_edge", None) is not None
+                        and self._own_edge.currentData() == "end")
+            self._off_lbl.setText("End offset from the step" if end_tied else "Offset from the step")
         else:
             self._off_lbl.setText("Offset from anchor")
         self._offend_row.setVisible(both)
+        # Target/edge/tie pickers only when anchoring to another step.
+        is_step = anchor == "step"
+        if getattr(self, "_target_row", None) is not None:
+            self._target_row.setVisible(is_step)
+            self._edge_row.setVisible(is_step)
+            self._own_row.setVisible(is_step)
         # Include first/last applies to single-anchor ramps; a window-filling ramp
         # always spans both edges, so hide the whole row there.
         self._inc_row.setVisible(not both)
@@ -1254,6 +1324,15 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         if anchor == "hold":
             # Window B: the ramp runs forward from the resume instant to its end.
             return (self._time_sub("on-resume", off), "ramp end")
+        if anchor == "enter":
+            # Tied by its END to the pause's start: the TO level is reached at/before the pause.
+            return ("ramp start", self._time_sub("the pause", off))
+        if anchor == "step":
+            # Tied to another step's edge by its start (runs forward from there) or by its END
+            # (the TO level is reached at that point; the ramp runs backward from it).
+            if getattr(self, "_own_edge", None) is not None and self._own_edge.currentData() == "end":
+                return ("ramp start", self._time_sub("the step", off))
+            return (self._time_sub("the step", off), "ramp end")
         return (self._time_sub("on-air", off), "ramp end")
 
     @staticmethod
@@ -1587,6 +1666,24 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         offset = round(self._offset.value(), 1)
         offset_end = round(self._offset_end.value(), 1) if anchor == "both" else 0.0
 
+        # A step-anchored ramp runs forward from its target's edge; resolve the target (and
+        # assign it a stable id) here. A NEGATIVE offset is allowed (the ramp starts before its
+        # target's edge, like a start/stop-anchored warm-up lead-in); the save/arm gate enforces
+        # the sequence-step-anchor-negative capability.
+        step_fields: dict = {}
+        if anchor == "step":
+            tgt_uid = self._anchor_target.currentData()
+            items_getter = getattr(self._editor, "items", None)
+            target = None
+            if items_getter is not None:
+                target = next((it for it in items_getter()
+                               if getattr(it, "uid", None) == tgt_uid), None)
+            if target is None:
+                return self._set_preview("pick a step to anchor to", error=True)
+            step_fields = {"anchor_step_id": tlm.ensure_step_id(target),
+                           "anchor_edge": self._anchor_edge.currentData() or "end",
+                           "anchor_own_edge": self._own_edge.currentData() or "start"}
+
         args: List[str] = []
         if self._run_mode:
             # Fixed values for the other params (the ramped one is injected per point
@@ -1595,11 +1692,12 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
             if ferr:
                 return self._set_preview(ferr, error=True)
             args = self._form.build_args()
-        elif anchor != "hold":
-            # A window-B (Hold-anchored) ramp is timed from the resume instant, not against
-            # the on-air window, so the on-air-fit check doesn't apply (its target task still
-            # needs a duration step — enforced by the sequence-level validate()). Mirrors the
-            # step editor skipping the window-fit check for a hold-anchored tune.
+        elif anchor not in ("hold", "step", "enter"):
+            # A window-B (Hold-anchored) ramp is timed from the resume instant — and a
+            # pause-anchored one from the pause — not against the on-air window, so the
+            # on-air-fit check doesn't apply (its target task still needs a duration step —
+            # enforced by the sequence-level validate()). Mirrors the step editor skipping the
+            # window-fit check for a hold-anchored tune.
             spans_getter = getattr(self._editor, "task_spans", None)
             if spans_getter is not None:
                 span_err = tlm.step_within_task_error(spans_getter(task), anchor, offset,
@@ -1623,7 +1721,8 @@ QFrame#ofield QCheckBox {{ background: transparent; }}
         self.result_item = tlm.RunItem(
             task_name=task, action="ramp", ramp=ramp, anchor=anchor,
             offset=offset, offset_end=offset_end,
-            args=args, replace_args=True, uid=self._src.uid, power_view=power_view)
+            args=args, replace_args=True, uid=self._src.uid, power_view=power_view,
+            step_id=getattr(self._src, "step_id", "") or "", **step_fields)
         self.accept()
 
     def _disconnect(self) -> None:

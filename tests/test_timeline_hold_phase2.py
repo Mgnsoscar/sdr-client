@@ -142,20 +142,22 @@ def test_hold_marker_paints_and_is_its_own_divider():
 
 
 def test_dragging_a_window_b_pill_measures_offset_from_the_hold():
-    # A window-B (anchor="hold") one-shot is placed from the Hold divider, so a drag must measure
-    # its new offset from the hold — not from off-air (which produced a corrupted negative offset).
+    # A window-B (anchor="hold") one-shot is placed from the Hold's RESUME edge (= the hold's
+    # on-air position + the fixed HOLD band, where the post-hold axis reads 0), so a drag measures
+    # its offset from RESUME — not from off-air (which produced a corrupted negative offset).
     items = [tlm.BarItem(task_name="tx", start_offset=0, stop_offset=0),
              _hold(100.0),
              tlm.RunItem(task_name="tx", action="tune", anchor="hold", offset=5, params={"g": 1})]
     ed = _editor(items)
     c = ed._canvas
     wb = items[2]
-    # The drag base for a window-B pill is the Hold's x, and a hold-anchored tune isn't span-clamped.
-    hold_x = c._on + c._hold_off * c._eff()
-    assert abs(c._anchor_base_x(wb) - hold_x) < 1e-6
+    from ui.timeline_editor import HOLD_BAND_PX
+    # The drag base for a window-B pill is the Hold's RESUME edge, and it isn't span-clamped.
+    resume_x = c._on + c._hold_off * c._eff() + HOLD_BAND_PX
+    assert abs(c._anchor_base_x(wb) - resume_x) < 1e-6
     assert c._clamp_tune_offset(wb, 40.0) == 40.0            # window B not clamped to the on-air span
-    # A drag to 40 s past the hold yields offset +40 (positive), and _live_relayout round-trips it.
-    target_x = hold_x + 40 * c._eff()
+    # A drag to 40 s past resume yields offset +40 (positive), and _live_relayout round-trips it.
+    target_x = resume_x + 40 * c._eff()
     wb.offset = tlm._snap((target_x - c._anchor_base_x(wb)) / c._eff())
     assert wb.offset == 40.0
     c._live_relayout(wb)
@@ -239,11 +241,13 @@ def test_validate_rejects_an_orphaned_hold_anchored_step():
 # ── The step editor's "Hold" anchor option ───────────────────────────────────
 
 def test_hold_anchor_option_appears_only_with_a_hold():
-    # No hold on the timeline → only on-air / off-air.
+    # No hold on the timeline → on-air / off-air (and "step", since the duration task is now an
+    # eligible anchor target), but NOT "hold".
     ed = _editor([tlm.BarItem(task_name="tx", start_offset=0, stop_offset=0)])
     d0 = StepEditorDialog(tlm.RunItem(task_name="tx", action="tune", anchor="start", offset=0.0),
                           ed, new=True)
-    assert [d0._anchor.itemData(i) for i in range(d0._anchor.count())] == ["start", "stop"]
+    opts = [d0._anchor.itemData(i) for i in range(d0._anchor.count())]
+    assert "start" in opts and "stop" in opts and "hold" not in opts
 
     # A hold present → the "hold" anchor is offered.
     ed2 = _editor([tlm.BarItem(task_name="tx", start_offset=0, stop_offset=0), _hold(100.0)])
@@ -265,3 +269,97 @@ def test_editing_a_hold_anchored_step_keeps_the_option_and_round_trips():
     assert dlg.result_item is not None
     assert dlg.result_item.anchor == "hold" and dlg.result_item.offset == 12.0
     assert dlg.result_item.params == {"p": 1.0}
+
+
+# ── The Hold as a WINDOW: bands, forward-from-resume axis, floating/merged off-air ──────
+#   (the Hold replaces the relative band; everything after it is one off-air-styled window
+#    whose axis counts forward from RESUME, and off-air floats to Proceed — merging with the
+#    resume edge when nothing is anchored after the Hold.)
+
+def _ramp(param, a, b, steps, dur, **k):
+    return dict(param=param, start=a, stop=b, steps=steps, duration_s=dur, **k)
+
+
+def test_hold_renders_as_a_fixed_width_window_with_a_floating_off_air():
+    from ui.timeline_editor import HOLD_BAND_PX
+    items = [tlm.BarItem(task_name="tx", start_offset=0.0, stop_offset=0.0),
+             _hold(120.0),
+             tlm.RunItem(task_name="tx", action="tune", anchor="hold", offset=0.0, params={"g": 1}),
+             tlm.RunItem(task_name="tx", action="ramp", anchor="hold", offset=10.0,
+                         ramp=_ramp("power", -50, -90, 5, 40))]
+    c = _editor(items)._canvas
+    assert c._hold_present is True
+    # A fixed-width Hold WINDOW: resume sits exactly one HOLD band right of the enter edge.
+    assert abs((c._resume_x - c._enter_x) - HOLD_BAND_PX) < 1e-6
+    # There IS post-hold content, so off-air floats to its right (not merged).
+    assert c._hold_merged is False
+    assert c._off > c._resume_x + 1
+
+
+def test_off_air_merges_with_resume_when_nothing_follows_the_hold():
+    # A bar + a Hold + only a window-A (on-air) tune: nothing is anchored after the Hold, so
+    # its resume edge IS off-air — the two merge (off_x == resume_x).
+    items = [tlm.BarItem(task_name="tx", start_offset=0.0, stop_offset=0.0),
+             tlm.RunItem(task_name="tx", action="tune", anchor="start", offset=30.0, params={"g": 1}),
+             _hold(120.0)]
+    c = _editor(items)._canvas
+    assert c._hold_present is True
+    assert c._hold_merged is True
+    assert abs(c._off - c._resume_x) < 3.0
+
+
+def test_window_b_content_sits_right_of_the_hold_band():
+    from ui.timeline_editor import HOLD_BAND_PX
+    # A window-B tune at offset 0 (resume +0:00) lands at the RESUME edge (enter + band), not
+    # at the enter edge — the hold band pushes post-hold content clear of the divider.
+    items = [tlm.BarItem(task_name="tx", start_offset=0.0, stop_offset=0.0),
+             _hold(120.0),
+             tlm.RunItem(task_name="tx", action="tune", anchor="hold", offset=0.0, params={"g": 1})]
+    c = _editor(items)._canvas
+    wb = items[2]
+    assert abs(c._geom[wb.uid]["cx"] - c._resume_x) < 1e-6
+    assert abs(c._geom[wb.uid]["cx"] - c._enter_x) > HOLD_BAND_PX - 1
+
+
+def test_the_bar_runs_visibly_through_the_hold_window():
+    # A duration task with a Hold spans the whole width: its start is on-air (left of the Hold)
+    # and its stop is at the floating off-air (right of the Hold) — so the bar runs THROUGH the
+    # Hold window rather than stopping at it.
+    items = [tlm.BarItem(task_name="tx", start_offset=0.0, stop_offset=0.0),
+             _hold(120.0),
+             tlm.RunItem(task_name="tx", action="tune", anchor="hold", offset=30.0, params={"g": 1})]
+    c = _editor(items)._canvas
+    g = c._geom[items[0].uid]
+    assert g["start_x"] < c._enter_x < c._resume_x < g["stop_x"] + 1
+
+
+def test_hold_hit_covers_the_whole_band():
+    items = [tlm.BarItem(task_name="tx", start_offset=-5, stop_offset=5),
+             _hold(120.0),
+             tlm.RunItem(task_name="tx", action="tune", anchor="hold", offset=10.0, params={"g": 1})]
+    c = _editor(items)._canvas
+    mid = (c._enter_x + c._resume_x) / 2       # a click in the MIDDLE of the band grabs the hold
+    hit = c._hit(mid, 60)
+    assert hit is not None and hit[0] is items[1] and hit[1] == "hold_body"
+
+
+def test_non_hold_timeline_geometry_is_unchanged():
+    # Without a Hold, the hold-window state stays off and the off-air anchor matches the pure
+    # model geometry (the whole hold path is inert — the non-hold render is byte-identical).
+    items = [tlm.BarItem(task_name="tx", start_offset=0.0, stop_offset=0.0),
+             tlm.RunItem(task_name="tx", action="tune", anchor="start", offset=30.0, params={"g": 1})]
+    c = _editor(items)._canvas
+    assert c._hold_present is False
+    assert c._enter_x is None and c._resume_x is None and c._hold_merged is False
+
+
+def test_hold_window_and_merged_marker_paint_without_error():
+    # Full (floating off-air) and merged renders both paint cleanly.
+    full = [tlm.BarItem(task_name="tx", start_offset=0.0, stop_offset=0.0), _hold(120.0),
+            tlm.RunItem(task_name="tx", action="tune", anchor="hold", offset=0.0, params={"g": 1}),
+            tlm.RunItem(task_name="tx", action="tune", anchor="stop", offset=-20.0, params={"g": 0})]
+    _editor(full)._canvas.render(QPixmap(1400, 380))
+    merged = [tlm.BarItem(task_name="tx", start_offset=0.0, stop_offset=0.0), _hold(120.0)]
+    cm = _editor(merged)._canvas
+    assert cm._hold_merged is True
+    cm.render(QPixmap(1400, 380))

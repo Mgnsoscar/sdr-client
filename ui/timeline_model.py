@@ -40,9 +40,26 @@ SEQUENCE_HOLD_NOW_CAPABILITY = "sequence-hold-now"
 # window B from the operator's edited sequence. The client gates its window-B edit UI on it (a
 # ≤1.18 agent would silently ignore the edit and run the stored window B).
 SEQUENCE_HOLD_EDIT_CAPABILITY = "sequence-hold-edit"
+# Agent >= 1.26.0 resolves anchor="enter" — a step measured from the Hold's ENTER instant (the
+# pause's start; a ramp tied by its END so it finishes as the pause begins). Window A, known at arm.
+# The client gates saving / hold-aware arming of such a sequence on it (a safety gate: an older agent
+# rejects the anchor value). The schedule/plan path compiles the Hold out (collapse_hold), so it
+# never sends the anchor.
+SEQUENCE_HOLD_ENTER_CAPABILITY = "sequence-hold-enter"
+SEQUENCE_HOLD_ENTER_MIN_VERSION = (1, 26, 0)
 # Agent >= 1.21.0 serves GET /sequence-runs/{id}/log-table (the run's spreadsheet-shaped log). The
 # client gates its "Export log…" button on it — an older agent has no such endpoint to export from.
 SEQUENCE_LOG_TABLE_CAPABILITY = "sequence-log-table"
+# Agent >= 1.24.0 resolves a step anchored to ANOTHER step's edge (anchor="step", the DAG). The
+# client gates saving/arming a sequence that uses a step anchor on it — a ≤1.23 agent can't resolve
+# the anchor (it would mis-fire), so this is a safety gate, not just a feature flag.
+SEQUENCE_STEP_ANCHOR_CAPABILITY = "sequence-step-anchor"
+SEQUENCE_STEP_ANCHOR_MIN_VERSION = (1, 24, 0)
+# Agent >= 1.25.0 accepts a NEGATIVE offset on a step anchor (a step-anchored step firing BEFORE the
+# edge it hangs off, like a start/stop anchor's lead-in). A ≤1.24 agent 400s on it, so the client
+# gates saving/arming a sequence that uses a negative step offset on this string (a safety gate).
+SEQUENCE_STEP_ANCHOR_NEG_CAPABILITY = "sequence-step-anchor-negative"
+SEQUENCE_STEP_ANCHOR_NEG_MIN_VERSION = (1, 25, 0)
 
 # The `sequence-hold` capability is advertised from agent 1.16.0, but 1.16.0 shipped the Hold
 # DATA MODEL ONLY — a hold-aware arm was refused (the Phase-0 guard). The HOLDING RUNTIME (park →
@@ -82,6 +99,87 @@ def hold_runtime_supported(client) -> bool:
     ver = ver + (0,) * (len(SEQUENCE_HOLD_RUNTIME_MIN_VERSION) - len(ver))   # pad "1.17" → (1,17,0)
     return ver >= SEQUENCE_HOLD_RUNTIME_MIN_VERSION
 
+
+def hold_enter_supported(client) -> bool:
+    """True iff the unit's agent resolves a step anchored to the Hold's START (anchor="enter":
+    advertises `sequence-hold-enter` AND runs agent >= 1.26.0). Same shape as
+    `hold_runtime_supported`: an unknown/blank version with the capability present is treated as
+    capable, so this never blocks a real capable unit."""
+    try:
+        if not client.supports(SEQUENCE_HOLD_ENTER_CAPABILITY):
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    ver = _agent_version_tuple(getattr(client, "agent_version", "") or "")
+    if not ver:
+        return True
+    ver = ver + (0,) * (len(SEQUENCE_HOLD_ENTER_MIN_VERSION) - len(ver))
+    return ver >= SEQUENCE_HOLD_ENTER_MIN_VERSION
+
+
+def uses_hold_enter(items) -> bool:
+    """True when any item is anchored to the Hold's START (anchor="enter")."""
+    return any(getattr(it, "anchor", "") == "enter" for it in items or [])
+
+
+# Agent >= 1.27.0 PAUSES a ramp that crosses the Hold: the points up to the pause fire in window A,
+# the level reached holds through the pause, and the remaining points resume after Proceed shifted
+# by the pause's length. A ≤1.26 agent kept the whole ramp in window A and DELAYED the pause until
+# the ramp finished (silently missing the hold offset), so the client gates saving / hold-aware
+# arming of such a sequence on this string. The schedule/plan path compiles the Hold out (the ramp
+# runs straight through), so it never needs the gate.
+SEQUENCE_HOLD_RAMP_PAUSE_CAPABILITY = "sequence-hold-ramp-pause"
+SEQUENCE_HOLD_RAMP_PAUSE_MIN_VERSION = (1, 27, 0)
+
+
+def hold_ramp_pause_supported(client) -> bool:
+    """True iff the unit's agent pauses a ramp that crosses the Hold (advertises
+    `sequence-hold-ramp-pause` AND runs agent >= 1.27.0). Same shape as `hold_enter_supported`:
+    an unknown/blank version with the capability present is treated as capable."""
+    try:
+        if not client.supports(SEQUENCE_HOLD_RAMP_PAUSE_CAPABILITY):
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    ver = _agent_version_tuple(getattr(client, "agent_version", "") or "")
+    if not ver:
+        return True
+    ver = ver + (0,) * (len(SEQUENCE_HOLD_RAMP_PAUSE_MIN_VERSION) - len(ver))
+    return ver >= SEQUENCE_HOLD_RAMP_PAUSE_MIN_VERSION
+
+
+def step_anchor_supported(client) -> bool:
+    """True iff the unit's agent resolves a step-to-step anchor (advertises
+    `sequence-step-anchor` AND runs agent >= 1.24.0). Same belt-and-suspenders shape as
+    `hold_runtime_supported`: an unknown/blank version with the capability present is treated
+    as capable (the capability stays authoritative), so this never blocks a real capable unit."""
+    try:
+        if not client.supports(SEQUENCE_STEP_ANCHOR_CAPABILITY):
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    ver = _agent_version_tuple(getattr(client, "agent_version", "") or "")
+    if not ver:
+        return True
+    ver = ver + (0,) * (len(SEQUENCE_STEP_ANCHOR_MIN_VERSION) - len(ver))
+    return ver >= SEQUENCE_STEP_ANCHOR_MIN_VERSION
+
+
+def step_anchor_negative_supported(client) -> bool:
+    """True iff the unit's agent accepts a NEGATIVE offset on a step anchor (advertises
+    `sequence-step-anchor-negative` AND runs agent >= 1.25.0). Same belt-and-suspenders shape as
+    `step_anchor_supported`; an unknown/blank version with the capability present is capable."""
+    try:
+        if not client.supports(SEQUENCE_STEP_ANCHOR_NEG_CAPABILITY):
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    ver = _agent_version_tuple(getattr(client, "agent_version", "") or "")
+    if not ver:
+        return True
+    ver = ver + (0,) * (len(SEQUENCE_STEP_ANCHOR_NEG_MIN_VERSION) - len(ver))
+    return ver >= SEQUENCE_STEP_ANCHOR_NEG_MIN_VERSION
+
 # ── Geometry constants ───────────────────────────────────────────────────────
 SCALE = 3.0            # px per second in the warm-up / cool-down zones
 MIDDLE_GAP = 220       # base px between ON-AIR and OFF-AIR (the on-air band)
@@ -92,6 +190,11 @@ MIN_SIDE_S = 60.0      # each side is at least this many seconds wide
 SNAP_S = 1.0           # drag snaps offsets to this granularity (seconds)
 
 _ids = itertools.count(1)
+
+# A bar (duration task) has TWO anchorable edges but flattens to two wire steps; the OFF-AIR stop
+# step's wire id is the bar's id + this suffix, so a dependent can anchor to either edge. Chosen
+# unlikely to collide with a generated id ("st-<hex>").
+BAR_STOP_SUFFIX = "~stop"
 
 
 # ── Items ────────────────────────────────────────────────────────────────────
@@ -104,11 +207,18 @@ class BarItem:
     replace_args: bool = True
     start_offset: float = 0.0   # seconds relative to the START anchor (see start_anchor)
     stop_offset: float = 0.0    # seconds relative to OFF-AIR (anchor="stop")
-    # Which anchor the START end hangs off: "start" = ON-AIR (T0, the usual case), or
-    # "hold" = the Hold's resume instant, making this a window-B duration task that only
-    # starts once the operator proceeds (its STOP stays OFF-AIR). start_offset is measured
-    # from that anchor. Only "hold" when the timeline has a Hold.
+    # Which anchor the START end hangs off: "start" = ON-AIR (T0, the usual case),
+    # "hold" = the Hold's resume instant (a window-B duration task), or "step" = ANOTHER
+    # step/task's edge (start_anchor_step_id + start_anchor_edge below). Its STOP always stays
+    # OFF-AIR. start_offset is measured from that anchor. "hold" only when a Hold exists.
     start_anchor: str = "start"
+    # For being an anchor TARGET: a stable cross-reference id (the bar's ON-AIR start edge; its
+    # OFF-AIR stop edge is the wire id + BAR_STOP_SUFFIX). Assigned when another step anchors to
+    # this task. And for being an anchor SOURCE (start_anchor == "step"): which step this task's
+    # START hangs off + which of its edges. Round-tripped; resolved by resolve_step_offsets.
+    step_id: str = ""
+    start_anchor_step_id: str = ""
+    start_anchor_edge: str = "end"
     # If the run is armed with a resume offset, pass it to this task's start (only a
     # resumable duration task honours it). Carried through edit so it isn't reset.
     inject_resume_offset: bool = False
@@ -149,6 +259,19 @@ class RunItem:
     # to hold the standing quantity), not set by the operator. Present only on DEPLOYED items; the
     # canvas is always clean (set_steps strips this dest), so the authoring UI never shows it.
     power_hold_dest: Optional[str] = None
+    # Step-to-step anchoring (Phase 1). `step_id` is a stable cross-reference id (wire `id`),
+    # assigned only when this item is referenced by another; `anchor_step_id`/`anchor_edge` are set
+    # when THIS item hangs off another (anchor == "step"): it fires at the target's start/end edge
+    # + `offset` (offset >= 0). Round-tripped; resolved topologically by resolve_step_offsets.
+    step_id: str = ""
+    anchor_step_id: str = ""
+    anchor_edge: str = "end"    # "start" | "end" of the target's extent
+    # Which of THIS item's edges is tied to the target (step anchors only). A point has one
+    # edge, so this only matters for a RAMP: "start" (the default — the ramp runs forward from
+    # `target edge + offset`) or "end" (the ramp's END sits at `target edge + offset` and the ramp
+    # runs BACKWARD from there; `offset` is then the END's offset). On the wire `offset_s` is always
+    # the START's offset (= offset − duration for an end tie), so the agent needs no new logic.
+    anchor_own_edge: str = "start"
     uid: int = 0
     kind: str = "run"
 
@@ -170,13 +293,16 @@ def _ramp_duration(r: dict) -> float:
         return 0.0
 
 
-def ramp_span(it, h_off: Optional[float] = None):
+def ramp_span(it, h_off: Optional[float] = None, step_bases: Optional[Dict[int, float]] = None,
+              off_bases: Optional[Dict[int, float]] = None):
     """A ramp's two timeline endpoints as ((left_anchor, left_off), (right_anchor,
     right_off)) — so it can be drawn as a duration bar. A 'both' ramp spans on-air
     to off-air; a single-anchor ramp runs `duration` seconds from its anchor. A
     window-B (`anchor="hold"`) ramp is placed as if start-anchored at the hold's
     position (`h_off + its offset`) — the geometry treats the hold as a start-side
-    dwell; the stored anchor stays "hold" (see effective_anchor_offset)."""
+    dwell; the stored anchor stays "hold" (see effective_anchor_offset). A step-anchored
+    (`anchor="step"`) ramp runs forward from its resolved base — on the ON-AIR clock
+    (step_bases[uid]) or, when its chain roots off-air, the OFF-AIR clock (off_bases[uid])."""
     r = dict(getattr(it, "ramp", None) or {})
     if it.anchor == "both":
         return (("start", float(it.offset)), ("stop", float(getattr(it, "offset_end", 0.0))))
@@ -186,11 +312,64 @@ def ramp_span(it, h_off: Optional[float] = None):
     if it.anchor == "hold" and h_off is not None:
         base = h_off + float(it.offset)
         return (("start", base), ("start", base + dur))
+    if it.anchor == "enter" and h_off is not None:
+        # Tied by its END to the Hold's ENTER instant (the pause's start): `offset` is the end's
+        # offset from the pause (≤ 0 — like a stop-anchored ramp's offset from off-air), the ramp
+        # runs backward from it, in window A on the on-air clock.
+        end = h_off + float(it.offset)
+        return (("start", end - dur), ("start", end))
+    if it.anchor == "step":
+        uid = getattr(it, "uid", None)
+        base = (step_bases or {}).get(uid)
+        if base is not None:
+            return (("start", base), ("start", base + dur))
+        obase = (off_bases or {}).get(uid)
+        if obase is not None:
+            return (("stop", obase), ("stop", obase + dur))     # chain roots off-air
+        base = float(it.offset)              # orphan → draw sanely
+        return (("start", base), ("start", base + dur))
     return (("start", float(it.offset)), ("start", float(it.offset) + dur))
 
 
 def _is_ramp(it) -> bool:
     return getattr(it, "action", "run") == "ramp"
+
+
+def is_step_source(it) -> bool:
+    """True when `it` hangs off ANOTHER step (anchor="step") — a run/tune/ramp via `anchor`, or a
+    duration task (bar) via its START anchor (`start_anchor="step"`; its stop stays off-air)."""
+    if getattr(it, "kind", None) == "bar":
+        return getattr(it, "start_anchor", "start") == "step"
+    return getattr(it, "anchor", "start") == "step"
+
+
+def step_source_ref(it) -> Tuple[str, str]:
+    """(target step_id, target edge) a step-anchor SOURCE hangs off — a run via anchor_*, a bar
+    via start_anchor_*. ("", "end") for anything that isn't a step source."""
+    if getattr(it, "kind", None) == "bar":
+        return (getattr(it, "start_anchor_step_id", "") or "",
+                getattr(it, "start_anchor_edge", "end") or "end")
+    return (getattr(it, "anchor_step_id", "") or "",
+            getattr(it, "anchor_edge", "end") or "end")
+
+
+def own_edge_shift(it) -> float:
+    """Seconds between a step-anchored item's TIED edge and its START: the ramp duration for a
+    ramp tied by its END (`anchor_own_edge="end"`), else 0. `offset − own_edge_shift` is the
+    start's offset from the target edge (the wire `offset_s`)."""
+    if (_is_ramp(it) and getattr(it, "anchor", "start") == "step"
+            and (getattr(it, "anchor_own_edge", "start") or "start") == "end"):
+        return _ramp_duration(dict(getattr(it, "ramp", None) or {}))
+    return 0.0
+
+
+def step_wire_offset(it) -> float:
+    """The `offset_s` a step-anchored RunItem puts on the wire: its START's offset from the target
+    edge. Equal to `offset` except for an end-tied ramp (offset − duration). A bar's start offset
+    is already its start's offset."""
+    if getattr(it, "kind", None) == "bar":
+        return float(getattr(it, "start_offset", 0.0))
+    return float(getattr(it, "offset", 0.0)) - own_edge_shift(it)
 
 
 def _is_hold(it) -> bool:
@@ -210,29 +389,533 @@ def has_hold(items) -> bool:
     return any(_is_hold(it) for it in items)
 
 
-def effective_anchor_offset(item, h_off: Optional[float]) -> Tuple[str, float]:
-    """(anchor, offset) used for GEOMETRY/placement only. A window-B item
-    (`anchor="hold"`) is placed as if start-anchored at `hold_offset + its offset`
-    (the hold sits at `hold_offset` on the on-air side, and window B flows on from
-    there); every other item keeps its own anchor/offset. The stored item keeps its
-    real `anchor="hold"` — this mapping is purely for drawing, never for round-trip.
-    An ORPHANED hold anchor (no Hold on the timeline, `h_off` is None — an invalid state
-    that `validate()` rejects at save) is placed start-side at its own offset, so it draws
-    sanely on the on-air side rather than jumping to off-air."""
+# ── Per-task colour + row ordering (editor redesign) ──────────────────────────────
+# Each DURATION task gets a stable hue; its tunes/ramps inherit it (same task_name);
+# a one-shot task gets its own. Hues are picked DISTINCT from the reserved status trio
+# (green #1D9E75 / amber #BA7517 / red #C23B3B) so colour means "which task", never state.
+TASK_HUES = ["#1E8FA3", "#6D5AC4", "#B5487E", "#3F63C4", "#157F93", "#7E4FB0", "#B06A2E", "#2E7D57"]
+
+
+def task_hue_map(items) -> Dict[str, str]:
+    """task_name -> hue hex, assigned in first-seen order over the (non-Hold) items. A tune
+    or ramp shares its parent duration task's ``task_name``, so it resolves to the same hue;
+    a one-shot's own task gets the next hue. Deterministic for a given item order."""
+    order: List[str] = []
+    for it in items:
+        if _is_hold(it):
+            continue
+        name = getattr(it, "task_name", "") or ""
+        if name and name not in order:
+            order.append(name)
+    return {name: TASK_HUES[i % len(TASK_HUES)] for i, name in enumerate(order)}
+
+
+def _row_fire(it, step_bases: Optional[Dict[int, float]] = None) -> float:
+    """Best-effort on-air offset used only to ORDER a task's steps within its group. A
+    step-anchored item is ordered at its RESOLVED base (target edge + offset, from
+    step_bases) — not its raw offset-from-edge, which would sort it as if it fired at that
+    raw value regardless of when its target actually fires."""
+    if getattr(it, "kind", None) == "bar":
+        return float(getattr(it, "start_offset", 0.0))
+    if getattr(it, "anchor", "start") == "step" and step_bases is not None:
+        base = step_bases.get(getattr(it, "uid", None))
+        if base is not None:
+            return base
+    return float(getattr(it, "offset", 0.0))
+
+
+def _is_oneshot(it) -> bool:
+    """A one-shot RUN launches a task once — it does not modify a running duration task
+    (a tune/ramp does), so it is not a child of any duration bar and never groups under
+    one, even a bar that happens to share its task_name."""
+    return getattr(it, "kind", None) != "bar" and getattr(it, "action", "run") == "run"
+
+
+def _group_key_of(it):
+    """Grouping key for display_order. Tunes/ramps group under their parent task
+    (task_name, beneath its bar); a one-shot run stands alone (a unique per-item key)."""
+    if _is_oneshot(it):
+        return ("\x00oneshot", getattr(it, "uid", id(it)))
+    return getattr(it, "task_name", "") or ""
+
+
+def _row_kind_rank(it) -> int:
+    """Within a task's group the rows sort by KIND first: the duration bar, then that
+    task's RAMPS, then its TUNES — so a task's ramps always sit directly under it, above
+    the tunes (fire time breaks ties within each kind). A one-shot run is its own group,
+    so this rank only orders a bar and its tune/ramp children."""
+    if getattr(it, "kind", None) == "bar":
+        return 0
+    action = getattr(it, "action", "run")
+    if action == "ramp":
+        return 1
+    if action == "tune":
+        return 2
+    return 3
+
+
+def display_order(items):
+    """(rows, holds) for the Gantt-style canvas: a duration bar leads its group with that
+    task's ramps then its tunes beneath it (fire time breaking ties within each kind); a
+    one-shot RUN stands on its OWN row, never grouped under a duration task (it launches a
+    task once rather than modifying a running one). The duration-task groups come first
+    (ordered by earliest fire), then ALL one-shots collected at the BOTTOM (ordered among
+    themselves by fire time) — they are independent of the tasks, so they don't interleave.
+    Holds own no row (they paint as dividers) and are returned separately. Pure; does not
+    mutate the input and is never used for serialisation (that keeps the authored order)."""
+    holds = [it for it in items if _is_hold(it)]
+    step_bases = resolve_step_offsets(items, hold_offset(items))
+    seen: list = []
+    groups: Dict[object, list] = {}
+    for it in items:
+        if _is_hold(it):
+            continue
+        key = _group_key_of(it)
+        if key not in groups:
+            groups[key] = []
+            seen.append(key)
+        groups[key].append(it)
+    # Duration-task groups first, then all one-shots at the bottom; within each band by
+    # earliest fire, first-seen index breaking ties so the order is stable.
+    def _group_key(key):
+        g = groups[key]
+        band = 1 if all(_is_oneshot(it) for it in g) else 0
+        return (band, min(_row_fire(it, step_bases) for it in g), seen.index(key))
+    rows: list = []
+    for key in sorted(seen, key=_group_key):
+        g = sorted(groups[key],
+                   key=lambda it: (_row_kind_rank(it), _row_fire(it, step_bases)))
+        rows.extend(g)
+    return rows, holds
+
+
+def effective_anchor_offset(item, h_off: Optional[float],
+                            step_bases: Optional[Dict[int, float]] = None,
+                            off_bases: Optional[Dict[int, float]] = None) -> Tuple[str, float]:
+    """(anchor, offset) used for GEOMETRY/placement only. A window-B item (`anchor="hold"`) is
+    placed as if start-anchored at `hold_offset + its offset`; a step-anchored item
+    (`anchor="step"`) whose chain roots at ON-AIR is placed start-side at its resolved base
+    (`step_bases[uid]`), one whose chain roots at OFF-AIR stop-side at its off-air base
+    (`off_bases[uid]`, when supplied — otherwise it falls back on-air); every other item keeps
+    its own anchor/offset. The stored item keeps its real anchor — drawing only, never round-trip.
+    An ORPHANED anchor is placed start-side at its own offset, so it draws sanely on-air."""
     anchor = getattr(item, "anchor", "start")
     off = float(getattr(item, "offset", 0.0))
-    if anchor == "hold":
+    if anchor in ("hold", "enter"):
+        # "hold" = forward from the Hold's RESUME instant (window B); "enter" = measured from
+        # the Hold's ENTER instant (the pause's start, window A). Both live at h_off + offset on
+        # the on-air axis for geometry (the canvas inserts the hold band for "hold" only).
         return "start", (h_off or 0.0) + off
+    if anchor == "step":
+        uid = getattr(item, "uid", None)
+        base = (step_bases or {}).get(uid)
+        if base is not None:
+            return "start", base
+        obase = (off_bases or {}).get(uid)
+        if obase is not None:
+            return "stop", obase                      # its chain roots at off-air
+        return "start", off                           # orphan fallback
     return anchor, off
 
 
-def bar_start_placement(item, h_off: Optional[float]) -> Tuple[str, float]:
+def ramp_hold_cross(it, h_off: Optional[float], step_bases: Optional[Dict[int, float]] = None,
+                    off_bases: Optional[Dict[int, float]] = None) -> Optional[Tuple[float, float]]:
+    """(start, end) on the on-air clock of a window-A ramp that CROSSES the Hold — it starts at
+    or before the pause and ends after it — else None. Such a ramp is PAUSED at the Hold (agent
+    ≥ 1.27.0, `sequence-hold-ramp-pause`): the level it has reached holds through the pause and
+    its remaining points resume after Proceed, shifted by the pause's length. A window-B
+    (hold-anchored) ramp starts at/after the resume edge and an enter-anchored one ends at/before
+    the pause, so neither crosses; a window-filling 'both' ramp has no single on-air span."""
+    if h_off is None or not _is_ramp(it):
+        return None
+    if getattr(it, "anchor", "start") in ("hold", "enter", "both"):
+        return None
+    try:
+        (la, lo), (ra, ro) = ramp_span(it, h_off, step_bases, off_bases)
+    except (ValueError, TypeError):
+        return None
+    if la != "start" or ra != "start":
+        return None
+    lo, hi = min(lo, ro), max(lo, ro)
+    if lo > h_off + 1e-6 or hi <= h_off + 1e-6:
+        return None
+    # Crossing means a POINT FIRES after the pause (the agent defers by fires); a last level whose
+    # hold merely spills past the pause is absorbed by it — nothing is left to resume.
+    if not _ramp_fires_after(dict(getattr(it, "ramp", None) or {}), lo, h_off):
+        return None
+    return (float(lo), float(hi))
+
+
+def _ramp_fires_after(r: dict, start_offset: float, h_off: float) -> bool:
+    """True when a start-laid ramp spec placed at `start_offset` has a point firing after `h_off`."""
+    try:
+        resolved = _resolve_ramp_points(r, "start", 0.0)
+        fires = _place_ramp_points(r, "start", float(start_offset), resolved)
+    except (ValueError, TypeError):
+        return False
+    return any(float(off) > h_off + 1e-6 for (_a, off, _v) in fires)
+
+
+def ramp_crosses_hold(items) -> bool:
+    """True when any ramp on the timeline crosses the Hold (see `ramp_hold_cross`)."""
+    h_off = hold_offset(items)
+    if h_off is None:
+        return False
+    sb = resolve_step_offsets(items, h_off)
+    ob = resolve_step_offsets_off(items, h_off)
+    return any(ramp_hold_cross(it, h_off, sb, ob) is not None for it in items)
+
+
+def ramp_level_at_pause(it, h_off: Optional[float]) -> Optional[float]:
+    """The value a Hold-crossing ramp is FROZEN at through the pause: its last point fired at or
+    before the pause (the agent holds the level reached). None when the ramp doesn't cross."""
+    cross = ramp_hold_cross(it, h_off)
+    if cross is None:
+        return None
+    r = dict(getattr(it, "ramp", None) or {})
+    try:
+        resolved = _resolve_ramp_points(r, "start", 0.0)
+        fires = _place_ramp_points(r, "start", cross[0], resolved)
+    except (ValueError, TypeError):
+        return None
+    before = [v for (_a, off, v) in fires if float(off) <= h_off + 1e-6]
+    return float(before[-1]) if before else None
+
+
+def _wire_get(s, key: str, default=None):
+    return s.get(key, default) if isinstance(s, dict) else getattr(s, key, default)
+
+
+def ramp_crosses_hold_steps(steps) -> bool:
+    """Wire-level `ramp_crosses_hold` for stored SequenceSteps (the arm-time gate): a
+    start-anchored RAMP step that starts at or before the Hold and ends after it."""
+    h_off = None
+    for s in steps or []:
+        a = _wire_get(s, "action")
+        if str(getattr(a, "value", a) or "") == "hold":
+            h_off = float(_wire_get(s, "offset_s", 0.0) or 0.0)
+            break
+    if h_off is None:
+        return False
+    for s in steps or []:
+        a = _wire_get(s, "action")
+        if str(getattr(a, "value", a) or "") != "ramp":
+            continue
+        if (_wire_get(s, "anchor", "start") or "start") != "start":
+            continue
+        r = _wire_get(s, "ramp")
+        rd = r if isinstance(r, dict) else (r.model_dump() if hasattr(r, "model_dump") else None)
+        if not rd:
+            continue
+        lo = float(_wire_get(s, "offset_s", 0.0) or 0.0)
+        if lo <= h_off + 1e-6 and _ramp_fires_after(rd, lo, h_off):
+            return True
+    return False
+
+
+_ANCHOR_ON_AIR = ("start", "hold", "enter", "step")   # anchors whose edges live in on-air-offset space
+
+
+def _resolve_step_clocked(items, h_off: Optional[float]) -> Dict[int, Tuple[str, float]]:
+    """Resolve every step-anchored item to a (clock, offset) — clock 'start' = ON-AIR, 'stop' =
+    OFF-AIR — by hanging it off its target step's referenced edge (+ its own offset). A chain
+    inherits its ROOT's clock: a dependent whose chain roots at on-air is placed relative to
+    on-air; one rooted at off-air (a stop-anchored step, or a bar's off-air stop edge) relative
+    to off-air (its absolute time isn't known until arm, but its OFF-AIR-relative position is).
+
+    Resolution is TOPOLOGICAL (mirrors the agent's `_resolve_steps`): a target may itself be
+    step-anchored, so chains resolve. A cyclic/unknown target is left UNRESOLVED and omitted."""
+    by_id = {getattr(it, "step_id", "") or "": it for it in items if getattr(it, "step_id", "")}
+
+    def own_base(it, seen: set) -> Optional[Tuple[str, float]]:
+        """(clock, offset) of the item's OWN start edge. A bar hangs off `start_anchor`, a run
+        off `anchor`; a stop anchor roots off-air; both stays unresolved (window-filling)."""
+        if getattr(it, "kind", None) == "bar":
+            sa = getattr(it, "start_anchor", "start")
+            if sa == "start":
+                return ("start", float(getattr(it, "start_offset", 0.0)))
+            if sa == "hold":
+                return ("start", (h_off or 0.0) + float(getattr(it, "start_offset", 0.0)))
+            if sa == "step":
+                return resolve_base(it, seen)
+            return None
+        anchor = getattr(it, "anchor", "start")
+        if anchor == "start":
+            return ("start", float(getattr(it, "offset", 0.0)))
+        if anchor == "stop":
+            return ("stop", float(getattr(it, "offset", 0.0)))
+        if anchor == "hold":
+            return ("start", (h_off or 0.0) + float(getattr(it, "offset", 0.0)))
+        if anchor == "step":
+            return resolve_base(it, seen)
+        return None                                   # both — window-filling, not a point edge
+
+    def edge_offset(it, edge: str, seen: set) -> Optional[Tuple[str, float]]:
+        # A bar's END edge is its OFF-AIR stop (relative to off-air), not the start clock.
+        if getattr(it, "kind", None) == "bar" and edge == "end":
+            return ("stop", float(getattr(it, "stop_offset", 0.0)))
+        cb = own_base(it, seen)
+        if cb is None:
+            return None
+        clock, base = cb
+        if edge == "end" and _is_ramp(it):
+            base += _ramp_duration(dict(getattr(it, "ramp", None) or {}))
+        return (clock, base)                          # point: start == end; ramp/bar start edge
+
+    def resolve_base(it, seen: set) -> Optional[Tuple[str, float]]:
+        uid = getattr(it, "uid", None)
+        if uid in seen:
+            return None                               # cycle
+        # A bar SOURCE hangs its start off a step; a run its start too — except a ramp tied by its
+        # END, whose start sits `duration` before the tied point (step_wire_offset folds that in).
+        ref, edge = step_source_ref(it)
+        own = step_wire_offset(it)
+        tgt = by_id.get(ref)
+        if tgt is None:
+            return None                               # unknown target
+        e = edge_offset(tgt, edge, seen | {uid})
+        if e is None:
+            return None
+        return (e[0], e[1] + own)
+
+    out: Dict[int, Tuple[str, float]] = {}
+    for it in items:
+        if is_step_source(it):
+            cb = resolve_base(it, set())
+            if cb is not None:
+                out[getattr(it, "uid", None)] = cb
+    return out
+
+
+def resolve_step_offsets(items, h_off: Optional[float]) -> Dict[int, float]:
+    """{uid: on-air base offset} for every step-anchored item whose chain roots at ON-AIR
+    (a point's start==end==offset; a ramp's end == start+duration). Off-air-rooted chains and
+    cyclic/unknown targets are omitted (see resolve_step_offsets_off / the agent backstop).
+    Kept as plain floats — the shape most consumers (ordering, in-task checks) rely on."""
+    return {uid: off for uid, (clock, off) in _resolve_step_clocked(items, h_off).items()
+            if clock == "start"}
+
+
+def resolve_step_offsets_off(items, h_off: Optional[float]) -> Dict[int, float]:
+    """{uid: off-air base offset} for every step-anchored item whose chain roots at OFF-AIR
+    (anchored to a stop step, a bar's off-air stop edge, or a chain that reaches one). The
+    offset is relative to off-air; its absolute time is set at arm."""
+    return {uid: off for uid, (clock, off) in _resolve_step_clocked(items, h_off).items()
+            if clock == "stop"}
+
+
+def _reaches(src_uid, target_it, by_sid, seen=None) -> bool:
+    """True if following anchor edges FROM target_it reaches the item with uid src_uid —
+    i.e. anchoring src → target would close a cycle. Follows a run's `anchor_step_id` and a
+    bar's `start_anchor_step_id` (a bar hangs off a step via its START)."""
+    seen = seen or set()
+    uid = getattr(target_it, "uid", None)
+    if uid in seen:
+        return False
+    seen.add(uid)
+    if uid == src_uid:
+        return True
+    if getattr(target_it, "kind", None) == "bar":
+        if getattr(target_it, "start_anchor", "start") != "step":
+            return False
+        nxt = by_sid.get(getattr(target_it, "start_anchor_step_id", "") or "")
+    else:
+        if getattr(target_it, "anchor", "start") != "step":
+            return False
+        nxt = by_sid.get(getattr(target_it, "anchor_step_id", "") or "")
+    return nxt is not None and _reaches(src_uid, nxt, by_sid, seen)
+
+
+def _target_label(it) -> str:
+    """A short human label for a step-anchor target (its kind + task)."""
+    act = getattr(it, "action", "run")
+    name = {"tune": "Tune", "ramp": "Ramp", "run": "Run"}.get(act, act.capitalize())
+    task = getattr(it, "task_name", "") or "?"
+    return f"{name} · {task}"
+
+
+def step_anchor_fault(item, by_sid: Dict[str, object]) -> Optional[str]:
+    """Diagnose WHY a step-anchored `item` won't resolve on the on-air clock — a specific,
+    actionable message naming the offending step and reason, so a save that fails
+    validation tells the operator what to fix (instead of a catch-all "cycle or can't be
+    timed"). Walks the single anchor chain up to its root; returns None if it resolves.
+
+    `by_sid` maps step_id → item (for every item that carries a step_id)."""
+    label = _target_label(item)
+    seen = set()
+    cur = item
+    while getattr(cur, "anchor", "start") == "step":
+        uid = getattr(cur, "uid", None)
+        if uid in seen:
+            return (f"{label} is part of a step-anchor loop (a step ends up anchored back "
+                    f"to itself) — re-anchor one of the steps to break the cycle")
+        seen.add(uid)
+        nxt = by_sid.get(getattr(cur, "anchor_step_id", "") or "")
+        if nxt is None:
+            return f"{label} anchors to a step that no longer exists — pick a new target"
+        cur = nxt
+    # `cur` is the chain's ultimate root. An off-air (stop) root is fine — it resolves on the
+    # off-air clock (set at arm). Only a window-filling ('both') ramp has no single edge to hang
+    # off, so a chain rooted there can't be placed.
+    if getattr(cur, "anchor", "start") == "both":
+        return (f"{label} anchors to a window-filling ramp ({_target_label(cur)}), which has no "
+                f"single edge to hang off — anchor it to a point/edge step instead")
+    return None
+
+
+def eligible_step_targets(items, source_uid) -> List:
+    """The items `source_uid` may anchor to (anchor="step") without forming a cycle: run/tune/ramp
+    points+ramps AND duration tasks (a bar — its on-air start edge or its off-air stop edge),
+    on EITHER clock (an off-air-anchored step is a valid target now; the Hold and a window-filling
+    'both' ramp are not). Excludes the source itself and anything that already (transitively)
+    anchors back to it. Order mirrors the timeline."""
+    by_sid = {getattr(it, "step_id", "") or "": it for it in items if getattr(it, "step_id", "")}
+    out: List = []
+    for it in items:
+        if getattr(it, "uid", None) == source_uid or _is_hold(it):
+            continue
+        if getattr(it, "kind", None) == "bar":
+            if not _reaches(source_uid, it, by_sid):
+                out.append(it)
+            continue
+        if getattr(it, "action", "run") not in ("run", "tune", "ramp"):
+            continue
+        if getattr(it, "anchor", "start") == "both":   # window-filling — no single point edge
+            continue
+        if _reaches(source_uid, it, by_sid):
+            continue
+        out.append(it)
+    return out
+
+
+def step_targets_for_edit(items, item) -> List:
+    """The step-anchor targets to OFFER when EDITING `item`: the eligible on-air targets
+    (`eligible_step_targets`), PLUS — when `item` is already step-anchored to a target that
+    is no longer eligible (it was edited to off-air / into a bar, or now looks like a cycle) —
+    that stored target itself, so re-editing the step never SILENTLY re-points it to a
+    different one. The stored target is only added when it still exists as an item; a target
+    that genuinely can't be timed is left for `validate()`/the agent to reject, with the
+    anchor the operator chose intact (not swapped out behind their back)."""
+    targets = list(eligible_step_targets(items, getattr(item, "uid", None)))
+    if getattr(item, "anchor", "start") == "step":
+        want = getattr(item, "anchor_step_id", "") or ""
+        if want and not any((getattr(t, "step_id", "") or "") == want for t in targets):
+            stored = next(
+                (o for o in items
+                 if (getattr(o, "step_id", "") or "") == want
+                 and getattr(o, "uid", None) != getattr(item, "uid", None)), None)
+            if stored is not None:
+                targets.append(stored)
+    return targets
+
+
+def step_edge_offset(items, target_step_id: str, edge: str,
+                     h_off: Optional[float]) -> Optional[float]:
+    """On-air offset of the step `target_step_id`'s start/end edge (None if the target is
+    unknown or its edge isn't on the on-air clock — a bar's off-air stop, or a stop/both step).
+    Reuses the shared topological resolution (`resolve_step_offsets` + `_item_edge_offset`) so
+    bar targets resolve the same way everywhere."""
+    tgt = next((it for it in items if (getattr(it, "step_id", "") or "") == (target_step_id or "")
+                and target_step_id), None)
+    if tgt is None:
+        return None
+    return _item_edge_offset(items, tgt, edge or "end", h_off,
+                             resolve_step_offsets(items, h_off))
+
+
+def ensure_step_id(it) -> str:
+    """Assign (once) and return a stable cross-reference id for `it` so another step can
+    anchor to it. Idempotent — a loaded item keeps its wire id."""
+    import uuid
+    sid = getattr(it, "step_id", "") or ""
+    if not sid:
+        sid = "st-" + uuid.uuid4().hex[:8]
+        try:
+            it.step_id = sid
+        except Exception:  # noqa: BLE001 — a read-only/namespace item can't carry one
+            return ""
+    return sid
+
+
+def _by_uid(items, uid):
+    for it in items:
+        if getattr(it, "uid", None) == uid:
+            return it
+    return None
+
+
+def _item_edge_clocked(items, it, edge: str, h_off: Optional[float],
+                       step_bases: Optional[Dict[int, float]] = None,
+                       off_bases: Optional[Dict[int, float]] = None) -> Optional[Tuple[str, float]]:
+    """(clock, offset) of `it`'s start/end edge for GEOMETRY — clock 'start' = on-air, 'stop' =
+    off-air. A bar's END edge is its OFF-AIR stop; a ramp's END edge is its full duration (last
+    fire + the final level's hold). None for a window-filling ('both') / orphaned edge."""
+    if getattr(it, "kind", None) == "bar":
+        if edge == "end":
+            return ("stop", float(getattr(it, "stop_offset", 0.0)))
+        return bar_start_placement(it, h_off, step_bases, off_bases)     # its start edge
+    a, base = effective_anchor_offset(it, h_off, step_bases, off_bases)
+    if a not in ("start", "stop"):
+        return None                                   # 'both' — no single point edge here
+    if edge == "end" and _is_ramp(it):
+        base += _ramp_duration(dict(getattr(it, "ramp", None) or {}))
+    return (a, base)
+
+
+def _item_edge_offset(items, it, edge: str, h_off: Optional[float],
+                      step_bases: Optional[Dict[int, float]] = None) -> Optional[float]:
+    """ON-AIR offset of `it`'s edge (None if the edge isn't on the on-air clock). A thin
+    on-air-only view of `_item_edge_clocked`, kept for callers that only place on-air."""
+    ce = _item_edge_clocked(items, it, edge, h_off, step_bases)
+    return ce[1] if ce is not None and ce[0] == "start" else None
+
+
+def step_drop_offset(items, source_uid, target_uid, edge: str,
+                     h_off: Optional[float],
+                     step_bases: Optional[Dict[int, float]] = None) -> Optional[float]:
+    """The offset that anchors `source_uid`'s start to `target_uid`'s `edge` while keeping the
+    source visually where it already sits — i.e. the gap between the source's current start and
+    the target edge, snapped. The offset may be NEGATIVE (the source sits before the edge — like
+    a start/stop anchor's lead-in); the agent accepts that from 1.25.0, and the save/arm gate on
+    `sequence-step-anchor-negative` keeps it off an older unit. None when the drop is invalid: the
+    target isn't an eligible (cycle-safe, on-air) target for the source, or its edge isn't
+    on the on-air clock. Pure — the caller assigns the ids and records the anchor."""
+    src = _by_uid(items, source_uid)
+    tgt = _by_uid(items, target_uid)
+    if src is None or tgt is None or src is tgt:
+        return None
+    if tgt not in eligible_step_targets(items, source_uid):
+        return None
+    tgt_edge = _item_edge_offset(items, tgt, edge, h_off, step_bases)
+    if tgt_edge is None:
+        return None
+    src_base = _item_edge_offset(items, src, "start", h_off, step_bases)
+    if src_base is None:                      # a stop/both-anchored source snaps to the edge
+        return 0.0
+    return _snap(src_base - tgt_edge)         # may be negative — the source keeps its place
+
+
+def bar_start_placement(item, h_off: Optional[float],
+                        step_bases: Optional[Dict[int, float]] = None,
+                        off_bases: Optional[Dict[int, float]] = None) -> Tuple[str, float]:
     """(anchor, offset) for drawing a duration bar's START handle. A window-B bar
-    (`start_anchor="hold"`) places its start at the Hold divider (`hold_offset +
-    start_offset`) on the start side; a normal bar places it on-air at its own offset.
-    Drawing only — the stored bar keeps `start_anchor` + `start_offset` for round-trip."""
-    if getattr(item, "start_anchor", "start") == "hold" and h_off is not None:
+    (`start_anchor="hold"`) places its start at the Hold divider (`hold_offset + start_offset`);
+    a STEP-anchored bar (`start_anchor="step"`) places it at its resolved base — on-air
+    (`step_bases[uid]`) or, when its chain roots off-air, off-air (`off_bases[uid]`); a normal
+    bar places it on-air at its own offset. Drawing only — the stored bar keeps its round-trip
+    fields."""
+    sa = getattr(item, "start_anchor", "start")
+    if sa == "hold" and h_off is not None:
         return "start", (h_off or 0.0) + float(getattr(item, "start_offset", 0.0))
+    if sa == "step":
+        uid = getattr(item, "uid", None)
+        base = (step_bases or {}).get(uid)
+        if base is not None:
+            return "start", base
+        obase = (off_bases or {}).get(uid)
+        if obase is not None:
+            return "stop", obase
+        return "start", float(getattr(item, "start_offset", 0.0))
     return "start", float(getattr(item, "start_offset", 0.0))
 
 
@@ -274,16 +957,17 @@ def compute_anchors(items, zoom: float = 1.0) -> Tuple[float, float, int]:
                 max_off = max(max_off, -off)
 
     h_off = hold_offset(items)
+    step_bases = resolve_step_offsets(items, h_off)
     for it in items:
         if it.kind == "bar":
-            take("start", it.start_offset)
+            take(*bar_start_placement(it, h_off, step_bases))   # honours a step-anchored start
             take("stop", it.stop_offset)
         elif _is_ramp(it):
-            (la, lo), (ra, ro) = ramp_span(it, h_off)
+            (la, lo), (ra, ro) = ramp_span(it, h_off, step_bases)
             take(la, lo)
             take(ra, ro)
-        else:  # run/tune/hold — map a window-B (anchor="hold") item to the hold's side
-            a, o = effective_anchor_offset(it, h_off)
+        else:  # run/tune/hold — map a window-B/step-anchored item to the on-air side
+            a, o = effective_anchor_offset(it, h_off, step_bases)
             take(a, o)
     left_s += HEADROOM_S
     right_s += HEADROOM_S
@@ -373,18 +1057,47 @@ def item_to_steps(it) -> List[dict]:
     args/replace_args)."""
     pv = getattr(it, "power_view", None)
     hd = getattr(it, "power_hold_dest", None)
+    # Step-to-step anchoring fields, emitted only when present so a plain sequence's wire
+    # shape is byte-identical (a bar/hold is never a step anchor source in Phase 1).
+    sid = getattr(it, "step_id", "") or ""
+    asid = getattr(it, "anchor_step_id", "") or ""
+    aedge = getattr(it, "anchor_edge", "end") or "end"
+
+    def _sa(step: dict) -> dict:
+        if sid:
+            step["id"] = sid
+        if getattr(it, "anchor", "start") == "step":
+            step["anchor_step_id"] = asid
+            step["anchor_edge"] = aedge
+            # A ramp tied by its END: the wire offset is the START's (offset − duration) — the
+            # agent runs the ramp forward from there unchanged; the tie is carried as metadata so
+            # the client redraws/edits it by its end (emitted only when set, plain wire unchanged).
+            if (getattr(it, "anchor_own_edge", "start") or "start") == "end" and _is_ramp(it):
+                step["offset_s"] = step_wire_offset(it)
+                step["anchor_own_edge"] = "end"
+        return step
+
     if it.kind == "bar":
-        # A window-B duration task hangs its START off the Hold (anchor="hold"); its STOP
-        # stays off-air. A normal bar keeps anchor="start" (byte-identical to before).
+        # A duration task flattens to a START step (on-air, or window-B via the Hold, or hung off
+        # another step) + a STOP step (off-air). When the bar is an anchor TARGET (it has a
+        # step_id) BOTH wire steps carry an id — the start step the bar's id, the stop step
+        # id+suffix — so a dependent can anchor to either edge. When it is an anchor SOURCE
+        # (start_anchor="step") the START step carries the anchor fields (its STOP stays off-air).
         start_anchor = getattr(it, "start_anchor", "start")
-        return [
-            {"anchor": start_anchor, "offset_s": it.start_offset, "action": "start",
-             "task_name": it.task_name, "args": list(it.args), "replace_args": it.replace_args,
-             "inject_resume_offset": bool(getattr(it, "inject_resume_offset", False)),
-             "power_view": pv, "power_hold_dest": hd},
-            {"anchor": "stop", "offset_s": it.stop_offset, "action": "stop",
-             "task_name": it.task_name, "args": [], "replace_args": False},
-        ]
+        start: dict = {
+            "anchor": start_anchor, "offset_s": it.start_offset, "action": "start",
+            "task_name": it.task_name, "args": list(it.args), "replace_args": it.replace_args,
+            "inject_resume_offset": bool(getattr(it, "inject_resume_offset", False)),
+            "power_view": pv, "power_hold_dest": hd}
+        stop: dict = {"anchor": "stop", "offset_s": it.stop_offset, "action": "stop",
+                      "task_name": it.task_name, "args": [], "replace_args": False}
+        if sid:
+            start["id"] = sid
+            stop["id"] = sid + BAR_STOP_SUFFIX
+        if start_anchor == "step":
+            start["anchor_step_id"] = getattr(it, "start_anchor_step_id", "") or ""
+            start["anchor_edge"] = getattr(it, "start_anchor_edge", "end") or "end"
+        return [start, stop]
     if getattr(it, "action", "run") == "hold":
         # The Hold boundary marker (docs/sequence-hold-step.md): anchor="start" at the
         # end of window A. It names no task and carries no work — just a divider between
@@ -396,34 +1109,86 @@ def item_to_steps(it) -> List[dict]:
              "args": [], "replace_args": False},
         ]
     if getattr(it, "action", "run") == "tune":
-        return [
+        return [_sa(
             {"anchor": it.anchor, "offset_s": it.offset, "action": "tune",
              "task_name": it.task_name, "params": dict(it.params or {}),
-             "power_view": pv, "power_hold_dest": hd},
+             "power_view": pv, "power_hold_dest": hd}),
         ]
     if getattr(it, "action", "run") == "ramp":
         # A run-mode ramp carries the OTHER params' fixed values as args; a tune ramp
         # has none. replace_args mirrors a one-shot (the args are the complete set).
-        return [
+        return [_sa(
             {"anchor": it.anchor, "offset_s": it.offset, "action": "ramp",
              "offset_end_s": getattr(it, "offset_end", 0.0),
              "task_name": it.task_name, "ramp": dict(it.ramp or {}),
              "args": list(getattr(it, "args", []) or []),
              "replace_args": bool(getattr(it, "replace_args", True)),
-             "power_view": pv, "power_hold_dest": hd},
+             "power_view": pv, "power_hold_dest": hd}),
         ]
-    return [
+    return [_sa(
         {"anchor": it.anchor, "offset_s": it.offset, "action": "run",
          "task_name": it.task_name, "args": list(it.args), "replace_args": it.replace_args,
-         "power_view": pv, "power_hold_dest": hd},
+         "power_view": pv, "power_hold_dest": hd}),
     ]
 
 
+def _bar_step_ids(items) -> set:
+    """The step_ids of every bar (duration task) that is an anchor target — so a dependent's
+    reference to a bar's OFF-AIR stop edge can be re-pointed to the bar's stop wire step."""
+    return {getattr(it, "step_id", "") or "" for it in items
+            if getattr(it, "kind", None) == "bar" and getattr(it, "step_id", "")}
+
+
+def _encode_anchor_ref(asid: str, aedge: str, bar_ids: set) -> Tuple[str, str]:
+    """Wire (anchor_step_id, anchor_edge) for an item that anchors to `asid`'s `aedge`. A bar
+    target has two wire steps: the START step (id = the bar id) and the STOP step (id + suffix),
+    each a single fire — so a dependent on the bar's END edge points to the stop step (edge
+    'start'), and one on the START edge points to the start step. Non-bar targets pass through."""
+    if asid in bar_ids:
+        return (asid + BAR_STOP_SUFFIX, "start") if aedge == "end" else (asid, "start")
+    return asid, aedge
+
+
+def _decode_anchor_ref(asid: str, aedge: str) -> Tuple[str, str]:
+    """Item (anchor_step_id, anchor_edge) from a wire ref — the inverse of _encode_anchor_ref: a
+    ref to a bar's stop wire step (id + suffix) maps back to the bar id + the 'end' edge."""
+    if asid.endswith(BAR_STOP_SUFFIX):
+        return asid[: -len(BAR_STOP_SUFFIX)], "end"
+    return asid, aedge
+
+
 def items_to_steps(items) -> List[dict]:
+    bar_ids = _bar_step_ids(items)
     out: List[dict] = []
     for it in items:
-        out.extend(item_to_steps(it))
+        for step in item_to_steps(it):
+            # Re-point a reference to a bar TARGET at the correct wire step (its start or stop).
+            ref = step.get("anchor_step_id")
+            if ref:
+                step["anchor_step_id"], step["anchor_edge"] = _encode_anchor_ref(
+                    ref, step.get("anchor_edge", "end") or "end", bar_ids)
+            out.append(step)
     return out
+
+
+def _step_anchor_fields(s: dict) -> dict:
+    """The step-to-step anchoring fields carried from a wire step onto a RunItem (blank when
+    absent, so a plain step round-trips unchanged). A reference to a bar's stop wire step
+    (id + suffix) decodes back to the bar id + the 'end' edge."""
+    asid, aedge = _decode_anchor_ref(str(s.get("anchor_step_id") or ""),
+                                     str(s.get("anchor_edge") or "end"))
+    own = "end" if str(s.get("anchor_own_edge") or "start") == "end" else "start"
+    return {"step_id": str(s.get("id") or ""), "anchor_step_id": asid, "anchor_edge": aedge,
+            "anchor_own_edge": own}
+
+
+def _ramp_item_offset(s: dict) -> float:
+    """A ramp wire step's item `offset`: the START's offset (`offset_s`), or — for a ramp tied by
+    its END — the end's offset (`offset_s` + duration), which is what the item stores/edits."""
+    off = float(s["offset_s"])
+    if str(s.get("anchor") or "start") == "step" and str(s.get("anchor_own_edge") or "") == "end":
+        off += _ramp_duration(dict(s.get("ramp") or {}))
+    return off
 
 
 def steps_to_items(steps: List[dict]) -> List:
@@ -446,22 +1211,22 @@ def steps_to_items(steps: List[dict]) -> List:
                 task_name=s["task_name"], args=list(s.get("args") or []),
                 replace_args=bool(s.get("replace_args", True)),
                 anchor=s.get("anchor", "start"), offset=float(s["offset_s"]),
-                power_view=s.get("power_view")))
+                power_view=s.get("power_view"), **_step_anchor_fields(s)))
         elif action == "tune":
             items.append(RunItem(
                 task_name=s["task_name"], action="tune",
                 params=dict(s.get("params") or {}),
                 anchor=s.get("anchor", "start"), offset=float(s["offset_s"]),
-                power_view=s.get("power_view")))
+                power_view=s.get("power_view"), **_step_anchor_fields(s)))
         elif action == "ramp":
             items.append(RunItem(
                 task_name=s["task_name"], action="ramp",
                 ramp=dict(s.get("ramp") or {}),
                 args=list(s.get("args") or []),
                 replace_args=bool(s.get("replace_args", True)),
-                anchor=s.get("anchor", "start"), offset=float(s["offset_s"]),
+                anchor=s.get("anchor", "start"), offset=_ramp_item_offset(s),
                 offset_end=float(s.get("offset_end_s") or 0.0),
-                power_view=s.get("power_view")))
+                power_view=s.get("power_view"), **_step_anchor_fields(s)))
         elif action == "start":
             starts.append(s)
         elif action == "stop":
@@ -471,12 +1236,19 @@ def steps_to_items(steps: List[dict]) -> List:
         task = st["task_name"]
         rem = stops_by_task.get(task) or []
         stop = rem.pop(0) if rem else None
+        # The bar's cross-reference id comes from its START step's id; its start may hang off
+        # another step (anchor="step" → start_anchor + start_anchor_step_id/edge, bar-ref decoded).
+        sanc = st.get("anchor", "start")
+        sasid, saedge = _decode_anchor_ref(str(st.get("anchor_step_id") or ""),
+                                           str(st.get("anchor_edge") or "end"))
         items.append(BarItem(
             task_name=task, args=list(st.get("args") or []),
             replace_args=bool(st.get("replace_args", True)),
             start_offset=float(st["offset_s"]),
             stop_offset=float(stop["offset_s"]) if stop else 0.0,
-            start_anchor=st.get("anchor", "start"),   # "hold" → a window-B duration task
+            start_anchor=sanc,                        # "hold" → window-B; "step" → hung off a step
+            step_id=str(st.get("id") or ""),
+            start_anchor_step_id=sasid, start_anchor_edge=saedge,
             inject_resume_offset=bool(st.get("inject_resume_offset", False)),
             power_view=st.get("power_view")))
 
@@ -489,6 +1261,169 @@ def steps_to_items(steps: List[dict]) -> List:
 
 
 # ── Validation (mirrors the agent's _validate_steps) ─────────────────────────
+
+# ── Step-conflict validation (a tune/ramp can't step outside its task, and two steps
+#    can't fight over the same live control at the same time) ─────────────────────────
+
+# --power (calibrated) and --gain (raw SDR gain) are two ways to drive the SAME output level,
+# so a tune/ramp on either conflicts with a tune/ramp on the other.
+_LEVEL_DESTS = frozenset({"power", "gain"})
+
+
+def _control_key(dest: str) -> str:
+    """Normalise a parameter dest to its CONTROL identity: power and gain both drive the one
+    output level, so they share a key; every other parameter is its own key."""
+    return "level" if dest in _LEVEL_DESTS else dest
+
+
+def _controlled_keys(it) -> set:
+    """The normalised control keys a tune/ramp step SETS — a tune's changed params, or a ramp's
+    swept param. Empty for anything else (a bar / one-shot / Hold)."""
+    act = getattr(it, "action", "run")
+    if act == "tune":
+        return {_control_key(str(d)) for d in (getattr(it, "params", None) or {})}
+    if act == "ramp":
+        p = (getattr(it, "ramp", None) or {}).get("param")
+        return {_control_key(str(p))} if p else set()
+    return set()
+
+
+def _step_time_span(it, h_off, step_bases):
+    """A tune/ramp's fire interval as (clock, lo, hi) on a comparable axis, or None when it
+    isn't time-comparable at authoring (an unresolved step anchor). `clock` is "on" (the on-air
+    clock — start/hold/step anchors), "off" (the off-air clock — a stop anchor; its offset is
+    ≤ 0), or "both" (a window-filling ramp, which overlaps everything). A tune is a point
+    (lo == hi); a ramp spans its duration from the anchored edge. Cross-clock intervals ("on"
+    vs "off") aren't comparable until the window length is fixed at arm, so they never overlap
+    here (the agent stays the backstop)."""
+    anchor = getattr(it, "anchor", "start")
+    if _is_ramp(it):
+        if anchor == "both":
+            return ("both", 0.0, 0.0)
+        dur = _ramp_duration(dict(getattr(it, "ramp", None) or {}))
+        if anchor == "stop":
+            off = float(getattr(it, "offset", 0.0))
+            return ("off", off - dur, off)
+        a, base = effective_anchor_offset(it, h_off, step_bases)
+        if a != "start":
+            return None
+        return ("on", base, base + dur)
+    # a point (tune / run)
+    if anchor == "stop":
+        off = float(getattr(it, "offset", 0.0))
+        return ("off", off, off)
+    a, base = effective_anchor_offset(it, h_off, step_bases)
+    if a != "start":
+        return None
+    return ("on", base, base)
+
+
+def _spans_overlap(s1, s2, tol: float = 1e-6) -> bool:
+    """True if two `_step_time_span` intervals overlap in time. A window-filling ("both") ramp
+    overlaps everything; two intervals on different clocks (on vs off) are not comparable at
+    authoring, so they don't."""
+    c1, lo1, hi1 = s1
+    c2, lo2, hi2 = s2
+    if c1 == "both" or c2 == "both":
+        return True
+    if c1 != c2:
+        return False
+    pt1 = abs(hi1 - lo1) <= tol
+    pt2 = abs(hi2 - lo2) <= tol
+    if pt1 and pt2:
+        return abs(lo1 - lo2) <= tol                    # two points: the same instant
+    # A ramp occupies [lo, hi): its last level's hold ENDS at hi, so a step firing exactly at hi
+    # comes AFTER it (a ramp chained onto another's end, or a crossing ramp's resumed remainder
+    # right after its run-up) — while a step at its START instant still collides.
+    if pt1:
+        return lo2 - tol <= lo1 < hi2 - tol
+    if pt2:
+        return lo1 - tol <= lo2 < hi1 - tol
+    return lo1 < hi2 - tol and lo2 < hi1 - tol
+
+
+def _step_conflict_error(items) -> Optional[str]:
+    """Error string if any tune/ramp fires outside its parent duration task, if a task is
+    started more than once, or if two steps drive the SAME live control at the SAME time
+    (a tune vs tune, tune vs ramp, or ramp vs ramp on the same task / output level). None if
+    the set is conflict-free. Off-air / hold / step-anchored timing that can't be resolved on
+    a single clock at authoring is left to the agent's runtime validation."""
+    h_off = hold_offset(items)
+    step_bases = resolve_step_offsets(items, h_off)
+
+    # Rule E — a task can be started at most once (you can't run one task twice at a time;
+    # its bars would share the on-air window). The off-air time isn't known until arm, so
+    # "overlap" can't be computed here — a second bar for a task is refused outright.
+    bars_by_task: Dict[str, list] = {}
+    for it in items:
+        if getattr(it, "kind", None) == "bar":
+            bars_by_task.setdefault(it.task_name or "", []).append(it)
+    for task, bars in bars_by_task.items():
+        if len(bars) > 1:
+            return (f"'{task}' is started {len(bars)} times — a duration task can run only once "
+                    f"per sequence; remove the extra duration step (retune it with a tune/ramp "
+                    f"instead of restarting it)")
+
+    # Rule A — a tune/ramp must fire inside its parent task's on-air span (start/stop/both
+    # anchors; a hold-anchored step is timed at proceed, checked elsewhere).
+    for it in items:
+        act = getattr(it, "action", "run")
+        if act not in ("tune", "ramp"):
+            continue
+        anchor = getattr(it, "anchor", "start")
+        spans = [(float(b.start_offset), float(b.stop_offset))
+                 for b in bars_by_task.get(it.task_name or "", [])]
+        if not spans:
+            continue   # the "targets a task with a duration step" check already covers this
+        if anchor in ("start", "stop", "both"):
+            err = step_within_task_error(spans, anchor, float(getattr(it, "offset", 0.0)),
+                                         float(getattr(it, "offset_end", 0.0)), kind=act)
+            if err:
+                return f"{_target_label(it)}: {err}"
+        elif anchor == "step":
+            # A step-anchored tune/ramp fires at its RESOLVED on-air time (via the anchor chain).
+            # If that lands BEFORE its own task goes on air it's invalid — e.g. dragging its target
+            # so the dependent falls before the task's start (the owner-reported case). Only the
+            # lower (on-air) bound is checkable at authoring — off-air floats until arm — and only
+            # when the chain resolves on the on-air clock (an off-air-rooted chain is the agent's).
+            base = step_bases.get(getattr(it, "uid", None))
+            if base is None:
+                continue
+            s0 = min(s for s, _ in spans)
+            if base < s0 - 1e-6:
+                from .param_form import fmt_duration
+                return (f"{_target_label(it)}: anchored to another step, this {act} resolves to "
+                        f"{fmt_duration(base, signed=True)} from on-air — before '{it.task_name}' "
+                        f"goes on air; it must fire at or after on-air "
+                        f"({fmt_duration(s0, signed=True)})")
+
+    # Rules B / C / D — two steps can't drive the same control at the same time. Group tune/ramp
+    # steps by task, then any pair whose control keys intersect AND whose time spans overlap is a
+    # conflict (tune·tune at one instant, a tune inside a ramp's sweep, or two overlapping ramps).
+    by_task: Dict[str, list] = {}
+    for it in items:
+        if getattr(it, "action", "run") not in ("tune", "ramp"):
+            continue
+        keys = _controlled_keys(it)
+        span = _step_time_span(it, h_off, step_bases)
+        if not keys or span is None:
+            continue
+        by_task.setdefault(it.task_name or "", []).append((it, keys, span))
+    for task, entries in by_task.items():
+        for i in range(len(entries)):
+            it_a, keys_a, span_a = entries[i]
+            for j in range(i + 1, len(entries)):
+                it_b, keys_b, span_b = entries[j]
+                shared = keys_a & keys_b
+                if not shared or not _spans_overlap(span_a, span_b):
+                    continue
+                what = "the output level" if shared == {"level"} else \
+                    "'" + "', '".join(sorted(shared)) + "'"
+                return (f"{_target_label(it_a)} and {_target_label(it_b)} both set {what} at "
+                        f"the same time on '{task}' — two steps can't drive one control at once; "
+                        f"move one, or remove it")
+    return None
+
 
 def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
     """Return an error string if the item set wouldn't make a valid sequence."""
@@ -514,6 +1449,42 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
     # geometry/walk mis-place (mirrors the agent's _validate_steps).
     if not has_hold(items) and any(s["anchor"] == "hold" for s in steps):
         return "a post-hold (‘hold’-anchored) step needs a Hold — add one or re-anchor the step"
+    # A step anchored to the Hold's START (anchor="enter" — it ends/fires at or before the pause)
+    # likewise needs the Hold, and can't reach INTO the pause (the run is holding then).
+    if not has_hold(items) and any(s["anchor"] == "enter" for s in steps):
+        return "a step anchored to the Hold's start needs a Hold — add one or re-anchor the step"
+    if any(s["anchor"] == "enter" and float(s["offset_s"]) > 1e-9 for s in steps):
+        return ("a step anchored to the Hold's start must end at or before the pause (its "
+                "offset can't be positive)")
+    # ── Step-to-step anchoring (mirrors the agent's _validate_steps) ──────────────────────
+    step_items = [it for it in items if is_step_source(it)]
+    if step_items:
+        if has_hold(items):
+            return ("step-to-step anchoring isn't supported in a sequence with a Hold yet — "
+                    "anchor to on-air/off-air/Hold instead")
+        by_sid = {getattr(it, "step_id", "") or "": it for it in items if getattr(it, "step_id", "")}
+        for it in step_items:
+            tgt_id, aedge = step_source_ref(it)
+            if not tgt_id:
+                return f"a step anchored to another step needs a target (on '{it.task_name}')"
+            if aedge not in ("start", "end"):
+                return "a step anchor's edge must be ‘start’ or ‘end’"
+            # A negative offset is allowed (fire BEFORE the target's edge — like a start/stop anchor's
+            # lead-in); the agent accepts it from 1.25.0. Saving/arming with a negative step offset is
+            # gated on `sequence-step-anchor-negative` in sequence_editor/sequences_panel, not here.
+            if tgt_id == (getattr(it, "step_id", "") or ""):
+                return f"a step can't anchor to itself (on '{it.task_name}')"
+            if tgt_id not in by_sid:
+                return f"a step on '{it.task_name}' anchors to a step that no longer exists"
+        # Resolution catches cycles and a chain rooted at a window-filling ('both') ramp (no single
+        # edge). A chain that resolves on EITHER clock — on-air or off-air (set at arm) — is valid.
+        bases = resolve_step_offsets(items, None)
+        off = resolve_step_offsets_off(items, None)
+        for it in step_items:
+            uid = getattr(it, "uid", None)
+            if uid not in bases and uid not in off:
+                return (step_anchor_fault(it, by_sid)
+                        or "a step anchors to one that can't be timed — re-anchor it")
     # A tune step retunes a running duration task, so the task it targets must be
     # started by a duration (bar) step in this same sequence.
     duration_tasks = {it.task_name for it in items if getattr(it, "kind", None) == "bar"}
@@ -526,6 +1497,11 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
             err = _ramp_spec_error(getattr(it, "ramp", None), it.anchor)
             if err:
                 return f"ramp on '{it.task_name}': {err}"
+    # A step must fire inside its parent task, a task starts once, and two steps can't drive the
+    # same live control at the same time (tune·tune / tune·ramp / ramp·ramp on one output level).
+    conflict = _step_conflict_error(items)
+    if conflict:
+        return conflict
     return None
 
 
@@ -616,21 +1592,29 @@ def carry_order_key(anchor: str, offset: float, h_off: Optional[float]) -> Tuple
     with stop-anchored steps still after start ones)."""
     if anchor == "hold" and h_off is not None:
         return (1, h_off + offset)
+    if anchor == "enter" and h_off is not None:     # before the pause: window A, on-air clock
+        return (0, h_off + offset)
     if anchor == "stop":
         return (2, offset)
     return (0, offset)
 
 
-def _carry_order_key(it, h_off: Optional[float] = None) -> Tuple[int, float]:
+def _carry_order_key(it, h_off: Optional[float] = None,
+                     step_bases: Optional[Dict[int, float]] = None) -> Tuple[int, float]:
     """``carry_order_key`` for a timeline item. A duration bar starts the task (phase 0 at its
     start offset); a run/tune/ramp keys off its anchor + offset (window-B steps ordered past the
-    hold when ``h_off`` is given)."""
+    hold when ``h_off`` is given). A step-anchored item orders at its RESOLVED on-air offset
+    (phase 0, like a start-anchored step) so it carries state in its true fire order."""
     if getattr(it, "kind", None) == "bar":
         # A window-B duration task (start_anchor="hold") starts at the resume instant, so it
         # orders in phase 1 like other window-B work; a normal bar is phase-0 on-air baseline.
         if getattr(it, "start_anchor", "start") == "hold" and h_off is not None:
             return (1, h_off + float(getattr(it, "start_offset", 0.0)))
         return (0, float(getattr(it, "start_offset", 0.0)))
+    if getattr(it, "anchor", "start") == "step":
+        base = (step_bases or {}).get(getattr(it, "uid", None))
+        if base is not None:
+            return (0, base)
     return carry_order_key(getattr(it, "anchor", "start"),
                            float(getattr(it, "offset", 0.0)), h_off)
 
@@ -654,10 +1638,11 @@ def sequence_effective_values(items, task: str, base_args: List[str], specs: Lis
     mine = [it for it in items if getattr(it, "task_name", None) == task
             and getattr(it, "uid", None) != target_uid]
     h_off = hold_offset(items)                          # place window B after window A
+    step_bases = resolve_step_offsets(items, h_off)     # order step-anchored work by fire time
     if target_key is None:
         target_key = (float("inf"), float("inf"))      # no anchor info → replay all priors
-    for it in sorted(mine, key=lambda it: _carry_order_key(it, h_off)):
-        if _carry_order_key(it, h_off) >= target_key:
+    for it in sorted(mine, key=lambda it: _carry_order_key(it, h_off, step_bases)):
+        if _carry_order_key(it, h_off, step_bases) >= target_key:
             continue
         if it.kind == "bar":
             if getattr(it, "replace_args", True):
@@ -934,6 +1919,7 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
         # (the up-ramp's final --power + bridge params). Ordering, not absolute wall-clock, is
         # all the temporal walk needs — the held level then seeds window B automatically.
         h_off = hold_offset(items)
+        step_bases = resolve_step_offsets(items, h_off)
 
         # Build fire-time-ordered events for this task.
         events: list = []                        # (fire_s, seq_idx, kind, payload)
@@ -948,11 +1934,11 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
                                {"replace": getattr(it, "replace_args", True), "args": list(it.args),
                                 "power_view": pv}))
             elif act == "tune":
-                fa, fo = effective_anchor_offset(it, h_off)
+                fa, fo = effective_anchor_offset(it, h_off, step_bases)
                 events.append((_fire_time_s(fa, fo, window), seq_idx, "tune",
                                {"params": dict(getattr(it, "params", {}) or {}), "power_view": pv}))
             elif act == "run":
-                fa, fo = effective_anchor_offset(it, h_off)
+                fa, fo = effective_anchor_offset(it, h_off, step_bases)
                 events.append((_fire_time_s(fa, fo, window), seq_idx, "args",
                                {"replace": getattr(it, "replace_args", True), "args": list(it.args),
                                 "power_view": pv}))
@@ -961,9 +1947,9 @@ def achievability_warnings(items, resolve) -> List[AchievabilityIssue]:
                 rdest = name_to_dest.get(r.get("param")) or flag_to_dest.get(r.get("flag"))
                 if rdest != power_dest:
                     continue                     # only a POWER ramp is analysed (see docstring)
-                # A window-B ramp resolves/places from the hold's side (start-anchored at
-                # hold_offset + its offset), so its points order after window A.
-                r_anchor, r_offset = effective_anchor_offset(it, h_off)
+                # A window-B/step-anchored ramp resolves/places from its on-air base, so its
+                # points order after the steps it follows.
+                r_anchor, r_offset = effective_anchor_offset(it, h_off, step_bases)
                 try:
                     resolved = _resolve_ramp_points(r, r_anchor, window)
                     fires = _place_ramp_points(r, r_anchor, r_offset, resolved)
@@ -1200,6 +2186,7 @@ def hold_control_quantity(items, resolve):
         # (anchor="hold") step orders after window A at hold_offset + its offset, so an injection
         # re-derives the held base at the right moment (mirrors achievability_warnings).
         h_off = hold_offset(items)
+        step_bases = resolve_step_offsets(items, h_off)
 
         # Fire-time events, keeping the item index so a --bw change can be injected into (mirrors
         # achievability_warnings' event build).
@@ -1215,11 +2202,11 @@ def hold_control_quantity(items, resolve):
                                {"replace": getattr(it, "replace_args", True), "args": list(it.args),
                                 "power_view": pv}))
             elif act == "tune":
-                fa, fo = effective_anchor_offset(it, h_off)
+                fa, fo = effective_anchor_offset(it, h_off, step_bases)
                 events.append((_fire_time_s(fa, fo, window), seq_idx, "tune",
                                {"params": dict(getattr(it, "params", {}) or {}), "power_view": pv}))
             elif act == "run":
-                fa, fo = effective_anchor_offset(it, h_off)
+                fa, fo = effective_anchor_offset(it, h_off, step_bases)
                 events.append((_fire_time_s(fa, fo, window), seq_idx, "args",
                                {"replace": getattr(it, "replace_args", True), "args": list(it.args),
                                 "power_view": pv}))
@@ -1230,7 +2217,7 @@ def hold_control_quantity(items, resolve):
                 rdest = name_to_dest.get(r.get("param")) or flag_to_dest.get(r.get("flag"))
                 if rdest != power_dest or r.get("mode") == "run":
                     continue
-                r_anchor, r_offset = effective_anchor_offset(it, h_off)
+                r_anchor, r_offset = effective_anchor_offset(it, h_off, step_bases)
                 try:
                     resolved = _resolve_ramp_points(r, r_anchor, window)
                     fires = _place_ramp_points(r, r_anchor, r_offset, resolved)
@@ -1364,8 +2351,24 @@ def min_on_air_duration(items) -> float:
     shared api.ramp math after normalising items to step-shaped objects."""
     from types import SimpleNamespace
     from api import ramp as _ramp
+    # Pre-resolve step anchors to start-anchored offsets: api.ramp is drift-guarded and only
+    # knows start/stop/both, so a step-anchored tail must be expressed on the on-air clock at
+    # its resolved base before delegating (the agent resolves anchor="step" in sequence_runner,
+    # not in ramp.py). A step-anchored item's canonical uid is on the ITEM, not the flat step,
+    # so resolve over items and map by fire order.
+    h_off = hold_offset(items)
+    step_bases = resolve_step_offsets(items, h_off)
+    # Build a parallel list of resolved (anchor, offset) overrides keyed by step index, in the
+    # same order item_to_steps emits. A step-anchored RunItem emits exactly one step.
+    overrides: Dict[int, Tuple[str, float]] = {}
+    flat_idx = 0
+    for it in items:
+        n = len(item_to_steps(it))
+        if getattr(it, "anchor", "start") == "step" and getattr(it, "uid", None) in step_bases:
+            overrides[flat_idx] = ("start", step_bases[getattr(it, "uid")])
+        flat_idx += n
     objs = []
-    for s in items_to_steps(items):
+    for i, s in enumerate(items_to_steps(items)):
         r = s.get("ramp")
         robj = None
         if r:
@@ -1373,8 +2376,11 @@ def min_on_air_duration(items) -> float:
                 start=r.get("start"), stop=r.get("stop"),
                 steps=r.get("steps"), step=r.get("step"),
                 hold_s=r.get("hold_s"), duration_s=r.get("duration_s"))
+        anchor, offset = s.get("anchor", "start"), s.get("offset_s", 0.0)
+        if i in overrides:
+            anchor, offset = overrides[i]
         objs.append(SimpleNamespace(
-            anchor=s.get("anchor", "start"), offset_s=s.get("offset_s", 0.0),
+            anchor=anchor, offset_s=offset,
             offset_end_s=s.get("offset_end_s", 0.0),
             action=s.get("action", ""), ramp=robj))
     return _ramp.min_on_air_duration(objs)

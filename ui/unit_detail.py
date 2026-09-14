@@ -17,7 +17,7 @@ Data:
 """
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -31,6 +31,7 @@ from .agent_update_dialog import AgentUpdateDialog
 from .calibration_panel import CalibrationPanel
 from .live_tune_dialog import LiveTuneDialog
 from .qt_adapter import DataHub
+from . import run_conflict
 from .run_task_dialog import RunTaskDialog
 from .sequences_panel import SequencesPanel
 from .task_log_dialog import TaskLogDialog
@@ -38,16 +39,30 @@ from .theme import Palette
 from .widgets import StatusPill, natural_key
 
 
+def _abort_one(client, run_id: str):
+    """Abort one run; return (run_id, error_or_None) so a batch reports per-run failures
+    without aborting the rest."""
+    try:
+        client.cancel_sequence_run(run_id)
+        return (run_id, None)
+    except Exception as exc:      # noqa: BLE001 — reported, not raised, so siblings still abort
+        return (run_id, exc)
+
+
 # ── A single task row ────────────────────────────────────────────────────────
 
 class _TaskRow(QFrame):
     """One task: name, state pill, and start/stop buttons."""
 
-    def __init__(self, hostname: str, task: m.ProcessStatus, hub: DataHub):
+    def __init__(self, hostname: str, task: m.ProcessStatus, hub: DataHub,
+                 runs_provider: Optional[Callable[[], list]] = None):
         super().__init__()
         self.hostname = hostname
         self.task_name = task.name
         self.hub = hub
+        # Returns the unit's currently-active sequence/plan runs (fed from the fast poll),
+        # so a Stop can tell whether this task belongs to a running sequence/plan.
+        self._runs_provider = runs_provider or (lambda: [])
         self.setObjectName("card")
         self._build(task)
 
@@ -180,11 +195,54 @@ class _TaskRow(QFrame):
             b.setEnabled(True)
 
     def _on_stop(self) -> None:
+        # If this task is part of a running sequence/plan, stopping just the task leaves the
+        # run driving a task that's no longer there — so let the operator choose: the task
+        # alone, or the whole run.
+        owning = run_conflict.active_runs_using_task(self._runs_provider(), self.task_name)
+        if owning:
+            self._confirm_stop_owned(owning)
+            return
+        self._do_stop_task()
+
+    def _do_stop_task(self) -> None:
         self._busy("stopping…")
         self.hub.run_async(
             f"task_stop:{self.hostname}:{self.task_name}",
             lambda: self.hub.fleet.get(self.hostname).stop_task(self.task_name),
         )
+
+    def _confirm_stop_owned(self, owning: list) -> None:
+        """A task the operator asked to stop is part of one or more active runs — offer to
+        stop just the task or the whole sequence/plan."""
+        if len(owning) == 1:
+            what = run_conflict.run_label(owning[0])
+        else:
+            what = f"{len(owning)} running sequences/plans"
+        box = QMessageBox(self.window())
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Task is part of a running sequence/plan")
+        box.setText(f"“{self.task_name}” is running as part of {what}.")
+        box.setInformativeText(
+            "Stop just this task (the sequence/plan keeps running and may re-command it), "
+            "or stop the whole sequence/plan?")
+        stop_run = box.addButton(
+            "Stop sequence/plan" if len(owning) == 1 else "Stop all",
+            QMessageBox.ButtonRole.DestructiveRole)
+        stop_task = box.addButton("Stop task only", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(stop_run)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is stop_task:
+            self._do_stop_task()
+        elif clicked is stop_run:
+            self._busy("stopping run…")
+            run_ids = [r.id for r in owning]
+            client = self.hub.fleet.get(self.hostname)
+            self.hub.run_async(
+                f"task_abortrun:{self.hostname}:{self.task_name}",
+                lambda: [_abort_one(client, rid) for rid in run_ids],
+            )
 
 
 # ── Tasks panel ──────────────────────────────────────────────────────────────
@@ -200,6 +258,7 @@ class _TasksPanel(QWidget):
         self.hub = hub
         self._rows: Dict[str, _TaskRow] = {}
         self._tasks: list[m.ProcessStatus] = []   # latest full list from the poller
+        self._active_runs: list = []              # unit's active sequence/plan runs (fast poll)
         self._laid_out: Optional[list] = None     # [(name, description), ...] in layout order
         self._loaded = False
         # Update a row the instant its start/stop/restart returns, instead of
@@ -244,6 +303,12 @@ class _TasksPanel(QWidget):
         self._loaded = True
         self._render()
 
+    def update_runs(self, runs: list) -> None:
+        """The unit's active sequence/plan runs (fed from the fast poll) — read by a row's
+        Stop to detect when a task belongs to a running sequence/plan. Rows read it lazily
+        via their runs_provider, so no re-render is needed."""
+        self._active_runs = list(runs or [])
+
     def _visible_tasks(self) -> list[m.ProcessStatus]:
         # Stable alphanumeric order — so a state change (or an edit) never reorders
         # the list — then narrowed by the search box (name or description).
@@ -269,7 +334,8 @@ class _TasksPanel(QWidget):
                     w.deleteLater()
             self._rows.clear()
             for t in visible:
-                r = _TaskRow(self.hostname, t, self.hub)
+                r = _TaskRow(self.hostname, t, self.hub,
+                             runs_provider=lambda: self._active_runs)
                 self._rows[t.name] = r
                 self._list.addWidget(r)
             if not visible:
@@ -312,6 +378,16 @@ class _TasksPanel(QWidget):
         if len(parts) != 3 or parts[1] != self.hostname:
             return
         op = parts[0]
+        if op == "task_abortrun":     # stopping the whole sequence/plan a task belongs to
+            name = parts[2]
+            bad = [(rid, e) for rid, e in (result or []) if e is not None] \
+                if isinstance(result, list) else []
+            row = self._rows.get(name)
+            if bad and row is not None:
+                row.set_error("; ".join(str(e) for _, e in bad))
+            elif isinstance(result, Exception) and row is not None:
+                row.set_error(str(result))
+            return
         if op not in ("task_start", "task_stop", "task_restart"):
             return
         name = parts[2]
@@ -530,6 +606,10 @@ class UnitDetail(QWidget):
         tasksv = snap.tasks.get(self.hostname)
         if isinstance(tasksv, list) and self._tasks_panel is not None:
             self._tasks_panel.update_tasks(tasksv)
+        # Active sequence/plan runs — so a task's Stop can tell whether it belongs to one.
+        runsv = snap.runs.get(self.hostname) if hasattr(snap, "runs") else None
+        if isinstance(runsv, list) and self._tasks_panel is not None:
+            self._tasks_panel.update_runs(runsv)
         # Header status: reachability is authoritative (health() never raises), so a
         # unit that's gone offline flips to "offline" instead of showing a stale
         # "online". Fall back to system presence only when health is absent from the

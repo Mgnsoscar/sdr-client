@@ -24,7 +24,7 @@ import yaml
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout,
+    QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from api import models as m
@@ -33,6 +33,8 @@ from .qt_adapter import DataHub
 from .scope_selector import ScopeSelector
 from .theme import Palette
 from .timeline_editor import TimelineEditor, task_signals_from_yaml
+from . import timeline_model as tlm
+from .timeline_model import step_anchor_supported, step_anchor_negative_supported
 
 
 class SequenceEditorDialog(QDialog):
@@ -68,27 +70,71 @@ class SequenceEditorDialog(QDialog):
         from .dialog_style import editor_qss
         self.setStyleSheet(editor_qss())
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 16, 16, 12)
-        outer.setSpacing(10)
+        outer.setContentsMargins(18, 16, 18, 14)
+        outer.setSpacing(12)
 
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        form.setSpacing(8)
+        # ── Header: SEQUENCE NAME + description · scope · actions · validity pill ──
+        header = QHBoxLayout(); header.setSpacing(14)
+        left = QVBoxLayout(); left.setSpacing(3)
+        cap = QLabel("SEQUENCE NAME")
+        cap.setStyleSheet(f"font-size:10px; font-weight:700; letter-spacing:0.7px; "
+                          f"color:{Palette.TEXT_FAINT};")
+        left.addWidget(cap)
         self._name = QLineEdit()
         self._name.setPlaceholderText("unique sequence name")
+        self._name.setStyleSheet(
+            f"QLineEdit {{ font-size:18px; font-weight:600; color:{Palette.TEXT}; "
+            f"border:1px solid transparent; border-radius:8px; padding:5px 8px; background:transparent; }}"
+            f"QLineEdit:hover {{ background:{Palette.SURFACE_ALT}; }}"
+            f"QLineEdit:focus {{ background:#FFFFFF; border-color:{Palette.ACCENT}; }}")
         self._name.textChanged.connect(lambda _=0: self._revalidate())
-        form.addRow("Name *", self._name)
+        left.addWidget(self._name)
         from .desc_widget import description_editor
         self._desc = description_editor()
-        form.addRow("Description", self._desc)
+        try:
+            self._desc.setMaximumHeight(30)
+        except Exception:  # noqa: BLE001
+            pass
+        left.addWidget(self._desc)
+        header.addLayout(left, stretch=1)
 
-        # Library-only: which unit types this sequence targets. A live unit already
-        # holds only its own sequences, so scope is meaningless there.
+        right = QVBoxLayout(); right.setSpacing(9)
+        self._ready_pill = QLabel("checking…")
+        self._ready_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        right.addWidget(self._ready_pill, alignment=Qt.AlignmentFlag.AlignRight)
+        actions = QHBoxLayout(); actions.setSpacing(8)
+        # Library-only scope selector; on a live unit, a static unit chip instead.
         self._scope: Optional[ScopeSelector] = None
         if self.hostname == LIBRARY_HOST:
             self._scope = ScopeSelector()
-            form.addRow("Applies to", self._scope)
-        outer.addLayout(form)
+            actions.addWidget(self._scope)
+        else:
+            chip = QLabel(f"🛰  {self.hostname}")
+            chip.setStyleSheet(
+                f"background:{Palette.INSET}; border:1px solid {Palette.BORDER}; border-radius:999px; "
+                f"padding:5px 11px; color:{Palette.TEXT_MUTED}; font-size:12px;")
+            actions.addWidget(chip)
+        cancel = QPushButton("Cancel")
+        cancel.setStyleSheet(
+            f"QPushButton {{ background:#FFFFFF; border:1px solid {Palette.BORDER_STRONG}; "
+            f"border-radius:8px; padding:7px 16px; font-weight:600; color:{Palette.TEXT}; }}"
+            f"QPushButton:hover {{ background:{Palette.SURFACE_ALT}; }}")
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel.clicked.connect(self.reject)
+        save = QPushButton("Save sequence")
+        save.setStyleSheet(
+            f"QPushButton {{ background:{Palette.ACCENT}; border:none; border-radius:8px; "
+            f"padding:7px 18px; font-weight:700; color:#FFFFFF; }}"
+            f"QPushButton:hover {{ background:#25597E; }}"
+            f"QPushButton:disabled {{ background:{Palette.BORDER_STRONG}; color:#FFFFFF; }}")
+        save.setCursor(Qt.CursorShape.PointingHandCursor)
+        save.clicked.connect(self._on_save)
+        actions.addWidget(cancel); actions.addWidget(save)
+        self._buttons = QWidget(); self._buttons.setLayout(actions)   # enable/disable as a group
+        right.addWidget(self._buttons, alignment=Qt.AlignmentFlag.AlignRight)
+        header.addLayout(right)
+        outer.addLayout(header)
+        self._set_ready("checking", "checking…")
 
         self._timeline = TimelineEditor()
         self._timeline.changed.connect(self._revalidate)
@@ -102,12 +148,19 @@ class SequenceEditorDialog(QDialog):
         self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
         outer.addWidget(self._status)
 
-        self._buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
-        )
-        self._buttons.accepted.connect(self._on_save)
-        self._buttons.rejected.connect(self.reject)
-        outer.addWidget(self._buttons)
+    def _set_ready(self, kind: str, text: str) -> None:
+        """Style the validity pill: ready (green) / warn (amber) / err (red) / checking (grey)."""
+        colors = {
+            "ready": (Palette.ONLINE, Palette.ONLINE_SOFT),
+            "warn": (Palette.ARMED, Palette.ARMED_SOFT),
+            "err": (Palette.CRASH, Palette.CRASH_SOFT),
+            "checking": (Palette.IDLE, Palette.IDLE_SOFT),
+        }
+        fg, bg = colors.get(kind, colors["checking"])
+        self._ready_pill.setText(text)
+        self._ready_pill.setStyleSheet(
+            f"background:{bg}; color:{fg}; border-radius:999px; padding:4px 12px; "
+            f"font-size:11.5px; font-weight:600;")
 
     # ── Loading ──────────────────────────────────────────────────────────────
 
@@ -157,21 +210,91 @@ class SequenceEditorDialog(QDialog):
     # ── Validation / save ────────────────────────────────────────────────────
 
     def _revalidate(self) -> None:
-        err = self._current_error()
+        # Include the capability gates (_step_anchor_block / _hold_enter_block) so the Ready/
+        # Needs-correction pill can't say "Ready" while _on_save would refuse the save.
+        err = (self._current_error() or self._step_anchor_block() or self._hold_enter_block()
+               or self._hold_ramp_pause_block())
         if err:
             self._set_status(err, warn=True)
+            self._set_ready("warn", "Needs correction")
         else:
             self._set_status("ready to save")
+            self._set_ready("ready", "Ready")
 
     def _current_error(self) -> str | None:
         if not self._name.text().strip():
             return "sequence name is required"
         return self._timeline.validate()
 
+    def _step_anchor_block(self) -> Optional[str]:
+        """A safety gate (like the Hold/calibration gates): block saving a step-anchored
+        sequence to a UNIT whose agent can't resolve anchor="step" (< 1.24.0) — it would be
+        rejected or mis-fire. The library holds only a definition, so it's never blocked; a
+        unit we can't resolve/check is left to the agent's own validate() backstop."""
+        # Short-circuit the cheap cases BEFORE the timeline fold: the Library holds only a
+        # definition (never blocked), and a step-anchored item is visible on the raw items
+        # (its offset == the offset_s that would be sent), so we avoid running steps() —
+        # which folds calibration per task — on every keystroke of a plain sequence.
+        if self.hostname == LIBRARY_HOST:
+            return None
+
+        # A bar hangs off a step via its START anchor; the negative check reads the offset the
+        # WIRE carries (a ramp tied by its END sends its start's offset = end offset − duration).
+        step_items = [it for it in self._timeline.items() if tlm.is_step_source(it)]
+        if not step_items:
+            return None
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001 — undiscovered unit → let the agent be the backstop
+            return None
+        if not step_anchor_supported(client):
+            return ("this sequence anchors a step to another step, which needs a newer agent "
+                    "(≥ 1.24.0). Update the unit’s agent, or re-anchor those steps to "
+                    "on-air / off-air.")
+        if any(tlm.step_wire_offset(it) < 0 for it in step_items) \
+                and not step_anchor_negative_supported(client):
+            return ("a step here is anchored to fire BEFORE another step (a negative offset), which "
+                    "needs a newer agent (≥ 1.25.0). Update the unit’s agent, or set those offsets "
+                    "to 0 or more.")
+        return None
+
+    def _hold_enter_block(self) -> Optional[str]:
+        """A safety gate: block saving a sequence with a step anchored to the Hold's START
+        (anchor="enter") to a UNIT whose agent doesn't resolve it (< 1.26.0 — it rejects the
+        anchor value). The library holds only a definition, so it's never blocked."""
+        if self.hostname == LIBRARY_HOST or not tlm.uses_hold_enter(self._timeline.items()):
+            return None
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001 — undiscovered unit → let the agent be the backstop
+            return None
+        if not tlm.hold_enter_supported(client):
+            return ("this sequence anchors a step to the Hold's start (before the pause), which "
+                    "needs a newer agent (≥ 1.26.0). Update the unit’s agent, or anchor it to "
+                    "on-air instead.")
+        return None
+
+    def _hold_ramp_pause_block(self) -> Optional[str]:
+        """A safety gate: block saving a sequence with a ramp that CROSSES the Hold to a UNIT whose
+        agent can't pause it there (< 1.27.0 — it would delay the pause until the ramp finished).
+        The library holds only a definition, so it's never blocked."""
+        if self.hostname == LIBRARY_HOST or not tlm.ramp_crosses_hold(self._timeline.items()):
+            return None
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001 — undiscovered unit → let the agent be the backstop
+            return None
+        if not tlm.hold_ramp_pause_supported(client):
+            return ("a ramp here runs across the Hold, which needs a newer agent (≥ 1.27.0) to "
+                    "pause it at the Hold and resume it after. Update the unit’s agent, or end "
+                    "the ramp at the pause and continue it from resume.")
+        return None
+
     def _on_save(self) -> None:
         if self._saving:
             return
-        err = self._current_error()
+        err = (self._current_error() or self._step_anchor_block() or self._hold_enter_block()
+               or self._hold_ramp_pause_block())
         if err:
             self._set_status(err, error=True)
             return
