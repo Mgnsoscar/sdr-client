@@ -106,12 +106,26 @@ Client-only (no wire/agent/capability change; drift-guarded files untouched):
   `set_tasks`). Backstop: `_window_a_signature()` = the raw canvas items' wire dicts whose anchor isn't
   `hold`/`stop` (incl. the Hold), order-independent, no deploy-time power precompute (so calibration
   arriving later can't change it) — `_accept` refuses when it differs from the one taken at load.
-Tests: `tests/test_hold_edit_locked.py` (12: classification incl. enter / window-B bar / crossing vs.
+- **`/code-review` follow-ups.** (1) The lock held only per gesture: a press on the running task's LIVE
+  stop grip selected the whole bar, after which Delete / Ctrl+D / the right-click menu / the editor's
+  Remove acted on it. Now the MUTATION layer refuses what already happened — `_delete_uids` drops
+  elapsed uids before cascading, `_duplicate_item` / `edit_item` bail (the editor shows the notice),
+  `contextMenuEvent` treats any elapsed-kind item as locked — and a live-grip press on the running bar
+  never selects it (`mousePressEvent` clears the selection instead). (2) `_window_a_signature` returned
+  `[]` on a probe failure, which two failures would falsely match; it now returns None and `_accept`
+  refuses an unsignable window A. (3) `elapsed_kind` re-derived a ramp's point list on every paint /
+  hover / header row; it is now cached per geometry rebuild (`_refresh_elapsed` in `_rebuild_geom` +
+  `set_elapsed_locked`, `_elapsed_kind_of` does the work, a not-yet-laid-out item is derived on demand).
+  The agent-side findings (proceed's off-air landing on the last fire; stop-anchored window-B content
+  resolving before resume; PATCH on-air-end dropping hold fires) are fixed in `sdr-agent` 1.27.1.
+Tests: `tests/test_hold_edit_locked.py` (15: classification incl. enter / window-B bar / crossing vs.
 at-pause ramp / unlocked; hit-testing incl. the live stop grip + the Hold band; press/dbl-click → notice
 only; Ctrl+A + marquee; drop targets; drag clamps; the RF gate left alone; post-hold seeding; paint —
 grey/hue, ribbon placement, header meta, unlocked has no ribbon; tooltips; the dialog locks on load,
-accepts a window-B edit, refuses a window-A change). Suite 1059 → 1071 offscreen. Verified by a headless
-render (`tools/hold_edit_shot.py`, a committed dev harness like `tools/_seqshot.py`).
+accepts a window-B edit, refuses a window-A change; the running task is untouchable through its stop
+grip at the mutation layer; the classification cache follows edits + un/re-locking; an unsignable
+window A is refused). Suite 1059 → 1074 offscreen. Verified by a headless render
+(`tools/hold_edit_shot.py`, a committed dev harness like `tools/_seqshot.py`).
 
 ## Current state — a ramp ACROSS the Hold is PAUSED there and resumes after Proceed: COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo)
 Owner question: a ramp could be placed with its middle inside the Hold window, and its hover

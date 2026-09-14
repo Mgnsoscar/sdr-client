@@ -13,8 +13,8 @@ import pytest
 pytest.importorskip("PyQt6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QEvent, QObject, QPointF, Qt, pyqtSignal
-from PyQt6.QtGui import QKeyEvent, QMouseEvent, QPixmap
+from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, pyqtSignal
+from PyQt6.QtGui import QContextMenuEvent, QKeyEvent, QMouseEvent, QPixmap
 from PyQt6.QtWidgets import QApplication
 
 from api import models as m
@@ -346,4 +346,71 @@ def test_hold_edit_dialog_locks_the_elapsed_window_and_refuses_a_window_a_change
     dlg._accept()
     assert dlg.result_steps is None
     assert "already run" in dlg._status.text()
+    dlg.close()
+
+
+# ── code-review follow-ups: the lock holds at the MUTATION layer too ─────────
+
+def test_the_running_task_is_untouchable_through_its_live_stop_grip(monkeypatch):
+    ed, s = _locked()
+    cv = ed._canvas
+    g = cv._geom
+    notices, menus = [], []
+    monkeypatch.setattr(cv, "_lock_notice", lambda it, pt: notices.append(it))
+    monkeypatch.setattr(cv, "_open_context_menu", lambda it, pos: menus.append(it))
+    # A press on the LIVE stop grip starts the resize drag but selects nothing (a selection would
+    # expose Delete / Ctrl+D / the menu on a task that already launched).
+    cv._select_only(s["wb"].uid)
+    _press(cv, g[s["bar"].uid]["stop_x"] - 2, _cy(cv, s["bar"]))
+    assert cv._drag is not None and cv._drag["part"] == "bar_stop" and not cv._selection
+    cv._drag = None
+    # Right-click on the same grip → the notice, never the Edit… / Duplicate / Delete menu.
+    x, y = g[s["bar"].uid]["stop_x"] - 2, _cy(cv, s["bar"])
+    cv.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(int(x), int(y)),
+                                          QPoint(int(x), int(y))))
+    assert notices[-1] is s["bar"] and menus == []
+    n = len(cv.items())
+    # The mutation layer refuses what already happened, whichever path reaches it.
+    cv._delete_uids({s["bar"].uid})
+    cv._delete_uids({s["rf"].uid, s["runup"].uid, s["hold"].uid})
+    assert len(cv.items()) == n and not cv.can_undo()
+    cv._duplicate_item(s["runup"]); cv._duplicate_item(s["bar"])
+    assert len(cv.items()) == n
+    cv.edit_item(s["bar"]); cv.edit_item(s["rf"])
+    assert notices[-2:] == [s["bar"], s["rf"]]
+    # Even a forced selection (a bypass) + Delete / Ctrl+D leaves the running task alone…
+    cv._selection = {s["bar"].uid}; cv._selected = s["bar"].uid
+    cv.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier))
+    cv.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier))
+    assert len(cv.items()) == n and any(it is s["bar"] for it in cv.items())
+    # …while a window-B step still deletes as usual (its own undo step).
+    cv._delete_uids({s["wb"].uid})
+    assert len(cv.items()) == n - 1 and cv.can_undo()
+
+
+def test_elapsed_classification_is_cached_per_layout_and_follows_edits():
+    ed, s = _locked()
+    cv = ed._canvas
+    assert set(cv._elapsed) == {it.uid for it in cv.items()}          # one entry per item
+    assert cv._elapsed[s["runup"].uid] == "full" and cv._elapsed[s["wb"].uid] is None
+    # A step added later is classified as soon as it is laid out.
+    late = _tune(10.0, bw=5)                                            # window A (on-air +10)
+    cv.add_item(late)
+    assert cv.elapsed_kind(late) == "full" and cv._elapsed[late.uid] == "full"
+    # Unlocking clears the classification; re-locking restores it without a relayout.
+    ed.set_elapsed_locked(False)
+    assert cv._elapsed == {} and cv.elapsed_kind(s["runup"]) is None
+    ed.set_elapsed_locked(True)
+    assert cv.elapsed_kind(s["runup"]) == "full" and cv.elapsed_kind(s["bar"]) == "start"
+
+
+def test_hold_edit_dialog_refuses_when_window_a_cannot_be_signed(monkeypatch):
+    from ui.hold_edit_dialog import HoldEditDialog
+
+    dlg = HoldEditDialog(_EditHub(), "unit", m.Sequence(id="s1", name="LoL", steps=_wire_seq()))
+    _app.processEvents()
+    assert dlg._window_a_sig                                            # signed at load
+    monkeypatch.setattr(dlg, "_window_a_signature", lambda: None)      # a probe failure at accept
+    dlg._accept()
+    assert dlg.result_steps is None and "couldn't verify" in dlg._status.text()
     dlg.close()

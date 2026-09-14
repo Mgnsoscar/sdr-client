@@ -231,7 +231,13 @@ window A and DEFERS the rest as `SequenceRun.paused_fires` (anchor `"hold"`, `of
 after the pause). The level reached at the pause holds through it exactly like any other window-A
 state. At **proceed** the deferred points are re-based to `T_resume + offset_s` (the ramp resumes
 where it left off, shifted by the pause's length) and count toward the post-hold content that fixes
-`on_air_end`. Edit-while-holding re-derives the remainder from the EDITED window A, so retargeting
+`on_air_end`. Since agent 1.27.1 that content is the WHOLE post-hold picture the client draws: off-air =
+`T_resume` + the forward extent of the hold-anchored work (a ramp's full span, its last level's dwell
+included — the level is held, not merely touched, before off-air; a resumed point carries its dwell as
+`StepFire.dwell_s`) + the backward extent of the stop-anchored (off-air) work, so a stop-anchored
+down-ramp lands after the resumed content instead of resolving before `T_resume`. (`PATCH …/on-air-end`
+refuses a Hold run — its off-air is set here and only here.) Edit-while-holding re-derives the
+remainder from the EDITED window A, so retargeting
 the ramp's top while holding takes effect. **Fast-forward** ("Hold now") follows a jump-the-clock
 rule: what would have fired before the pause is skipped (as today), what comes after it stays
 deferred and resumes. The scheduled/plan path compiles the Hold out, so the ramp simply runs through.

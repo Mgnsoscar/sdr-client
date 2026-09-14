@@ -46,7 +46,7 @@ import shlex
 from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QIcon, QLinearGradient, QPainter,
+from PyQt6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetrics, QIcon, QLinearGradient, QPainter,
                          QPainterPath, QPen, QPixmap)
 from PyQt6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QFrame,
@@ -493,10 +493,22 @@ class _TimelineCanvas(QWidget):
         self._clear_selection()
         self._connect = None
         self._drag = None
+        self._refresh_elapsed()
         self.update()
 
     def elapsed_locked(self) -> bool:
         return self._lock_elapsed
+
+    def _item(self, uid):
+        return next((o for o in self._items if getattr(o, "uid", None) == uid), None)
+
+    def _refresh_elapsed(self) -> None:
+        """Recompute the per-item elapsed classification (see elapsed_kind). It depends only on
+        the items, the Hold's offset and the resolved step bases — all fixed when the geometry is
+        rebuilt — so it is cached there rather than re-derived (a ramp's point list included) on
+        every paint, hover hit-test and header row."""
+        self._elapsed = ({it.uid: self._elapsed_kind_of(it) for it in self._items}
+                         if self._lock_elapsed else {})
 
     def elapsed_kind(self, it) -> Optional[str]:
         """In the locked (Hold-edit) mode, what part of `it` has ALREADY HAPPENED:
@@ -506,8 +518,17 @@ class _TimelineCanvas(QWidget):
                   post-hold and stays editable);
         "hold"  — the Hold marker itself (it is now — fixed);
         None    — still to come (window B, off-air, a window-B duration task). Always None when
-                  not locked or without a Hold."""
-        if not self._lock_elapsed or self._hold_off is None:
+                  not locked or without a Hold. Cached per geometry rebuild (_refresh_elapsed)."""
+        if it is None or not self._lock_elapsed:
+            return None
+        cache = getattr(self, "_elapsed", None) or {}
+        uid = getattr(it, "uid", None)
+        if uid in cache:
+            return cache[uid]
+        return self._elapsed_kind_of(it)          # not laid out yet (a fresh item): derive it
+
+    def _elapsed_kind_of(self, it) -> Optional[str]:
+        if it is None or not self._lock_elapsed or self._hold_off is None:
             return None
         h = float(self._hold_off) + 1e-6
         if tlm._is_hold(it):
@@ -902,6 +923,7 @@ class _TimelineCanvas(QWidget):
                 g["w"] = self._run_width(it)
             g["foot_h"] = LANE_H
             self._geom[it.uid] = g
+        self._refresh_elapsed()                 # Hold-edit: re-classify what already happened
         self.update()
 
     # ── Painting ──────────────────────────────────────────────────────────────
@@ -2660,7 +2682,11 @@ class _TimelineCanvas(QWidget):
             return
         # Plain click: select just this item, UNLESS it's already part of a multi-selection
         # (then keep the set so the drag moves the whole group; collapse on release-if-not-moved).
-        if it.uid not in self._selection:
+        # Hold-edit: the running task's live stop grip resizes it but never SELECTS it — a
+        # selection would expose Delete / Ctrl+D / the menu on a task that already launched.
+        if self.elapsed_kind(it) is not None:
+            self._clear_selection(); self.update()
+        elif it.uid not in self._selection:
             self._select_only(it.uid); self.update()
         self._connect = None
         group = (set(self._selection) if part in ("bar_body", "run_body")
@@ -3466,8 +3492,8 @@ class _TimelineCanvas(QWidget):
         """Clone an item (a fresh uid + no step_id — the copy is not a reference target),
         nudged a little so it doesn't sit exactly on the original, and select it. A Hold is
         unique per sequence, so it isn't duplicable."""
-        if tlm._is_hold(it):
-            return
+        if tlm._is_hold(it) or self.elapsed_kind(it) is not None:
+            return                                # (Hold-edit: nothing already-happened is cloned)
         clone = copy.deepcopy(it)
         clone.uid = next(tlm._ids)
         clone.step_id = ""
@@ -3511,6 +3537,9 @@ class _TimelineCanvas(QWidget):
     def _delete_uids(self, uids: set) -> None:
         """Delete a set of items in ONE undo step: a bar takes its tunes/ramps with it, and every
         dependent of a deleted item that is NOT itself deleted is re-rooted at its fire time."""
+        # Hold-edit: what already happened can't be deleted — not a locked step, not the running
+        # task (its cascade would take its post-hold tunes/ramps with it), not the Hold.
+        uids = {u for u in uids if self.elapsed_kind(self._item(u)) is None}
         uids = self._cascade_uids(set(uids))
         if not uids:
             return
@@ -3546,7 +3575,9 @@ class _TimelineCanvas(QWidget):
             e.ignore()
             return
         it = hit[0]
-        if hit[1] == "locked":                 # Hold-edit: nothing to do to what already happened
+        # Hold-edit: nothing to do to what already happened — a locked part, or the running
+        # task reached through its live stop grip (no Edit… / Duplicate / Delete on it either).
+        if hit[1] == "locked" or self.elapsed_kind(it) is not None:
             self._lock_notice(it, e.globalPos())
             e.accept()
             return
@@ -3663,6 +3694,9 @@ class _TimelineCanvas(QWidget):
         return StepEditorDialog(item, self._editor, new=new, parent=self)
 
     def edit_item(self, item) -> None:
+        if self.elapsed_kind(item) is not None:   # Hold-edit: no editor for what already happened
+            self._lock_notice(item, QCursor.pos())
+            return
         dlg = self._dialog_for(item, new=False)
         r = dlg.exec()
         if r == dlg.REMOVE:

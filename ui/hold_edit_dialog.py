@@ -140,15 +140,16 @@ class HoldEditDialog(QDialog):
 
     # ── The elapsed window's signature (the accept-time backstop) ────────────
 
-    def _window_a_signature(self) -> List[str]:
+    def _window_a_signature(self) -> Optional[List[str]]:
         """The steps that already RAN — window A on the agent's split: everything not measured
         from resume (`hold`) or off-air (`stop`), the Hold marker included — as order-independent
         wire dicts. Built from the RAW canvas items (no deploy-time power precompute), so an
-        untouched window A signs identically whether or not calibration has arrived yet."""
+        untouched window A signs identically whether or not calibration has arrived yet. None when
+        the items can't be signed (never an empty list, which two failures would falsely match)."""
         try:
             dicts = tlm.items_to_steps(self._timeline.items())
-        except Exception:                                   # noqa: BLE001 — never block on a probe
-            return []
+        except Exception:                                   # noqa: BLE001 — refused at accept
+            return None
         keep = [d for d in dicts if d.get("anchor") not in ("hold", "stop")]
         return sorted(json.dumps(d, sort_keys=True, default=str) for d in keep)
 
@@ -165,8 +166,14 @@ class HoldEditDialog(QDialog):
                              error=True)
             return
         # Window A already ran: a changed / added / removed step there can never take effect
-        # (the canvas refuses those edits; this catches anything that got past it).
-        if self._window_a_signature() != self._window_a_sig:
+        # (the canvas refuses those edits; this catches anything that got past it). An unsignable
+        # window A (either side) is refused too — never let a probe failure disable the check.
+        sig = self._window_a_signature()
+        if sig is None or self._window_a_sig is None:
+            self._set_status("couldn't verify the steps before the Hold — cancel and reopen the "
+                             "editor", error=True)
+            return
+        if sig != self._window_a_sig:
             self._set_status("the steps before the Hold have already run and can't be changed — "
                              "undo those edits (Ctrl+Z) and change only the post-hold steps",
                              error=True)
