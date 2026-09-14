@@ -111,7 +111,7 @@ at-pause ramp / unlocked; hit-testing incl. the live stop grip + the Hold band; 
 only; Ctrl+A + marquee; drop targets; drag clamps; the RF gate left alone; post-hold seeding; paint —
 grey/hue, ribbon placement, header meta, unlocked has no ribbon; tooltips; the dialog locks on load,
 accepts a window-B edit, refuses a window-A change). Suite 1059 → 1071 offscreen. Verified by a headless
-render (`scratchpad/hold_edit_locked.py`).
+render (`tools/hold_edit_shot.py`, a committed dev harness like `tools/_seqshot.py`).
 
 ## Current state — a ramp ACROSS the Hold is PAUSED there and resumes after Proceed: COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo)
 Owner question: a ramp could be placed with its middle inside the Hold window, and its hover
