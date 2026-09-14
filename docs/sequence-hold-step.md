@@ -222,6 +222,24 @@ stays HOLDING longer than `max_hold_s`, the runner **auto-aborts** (RF off, task
 one field and one comparison in `_tick`. Ships in v1. The Proceed dialog surfaces the remaining
 allowance ("auto-stops in 04:12") so a long receiver restart doesn't get silently cut off.
 
+### 5.7 A ramp across the pause (agent 1.27.0, `sequence-hold-ramp-pause`)
+
+A window-A ramp may START before the Hold and END after it. The Hold means "time stops and the
+state is frozen", so such a ramp is **paused**, not rejected and not run through (DECIDED with the
+owner): at arm, `_split_fires_at_hold` keeps the ramp's points at or before the hold instant in
+window A and DEFERS the rest as `SequenceRun.paused_fires` (anchor `"hold"`, `offset_s` = seconds
+after the pause). The level reached at the pause holds through it exactly like any other window-A
+state. At **proceed** the deferred points are re-based to `T_resume + offset_s` (the ramp resumes
+where it left off, shifted by the pause's length) and count toward the post-hold content that fixes
+`on_air_end`. Edit-while-holding re-derives the remainder from the EDITED window A, so retargeting
+the ramp's top while holding takes effect. **Fast-forward** ("Hold now") follows a jump-the-clock
+rule: what would have fired before the pause is skipped (as today), what comes after it stays
+deferred and resumes. The scheduled/plan path compiles the Hold out, so the ramp simply runs through.
+A pre-1.27 agent kept the whole ramp in window A and silently DELAYED the pause until it finished,
+hence the client gate. Client: the canvas draws such a ramp as two pieces flanking the Hold window
+(threaded across the band), its end on the resume axis, and the tooltip reads "pauses X in, holding
+<level> · ends Y after resume".
+
 ## 6. Client / UI design
 
 ### 6.1 Timeline authoring (the third anchor)

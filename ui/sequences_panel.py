@@ -59,6 +59,7 @@ from . import timeline_model as tlm
 from .timeline_model import (
     SEQUENCE_HOLD_CAPABILITY, SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY,
     SEQUENCE_LOG_TABLE_CAPABILITY, hold_runtime_supported, hold_enter_supported,
+    hold_ramp_pause_supported, ramp_crosses_hold_steps,
     step_anchor_supported, step_anchor_negative_supported)
 from .widgets import StatusPill, natural_key
 
@@ -620,6 +621,17 @@ class SequencesPanel(QWidget):
                 f"agent ≥ 1.26.0). Update the unit's agent, or anchor that step to on-air.")
             self._set_status("arm blocked — agent lacks sequence-hold-enter", error=True)
             return
+        # A ramp that CROSSES the Hold needs agent ≥ 1.27.0 to pause it there (a safety gate: an
+        # older agent keeps it in window A and delays the pause until the ramp finishes).
+        if ramp_crosses_hold_steps(seq.steps) and not self._hold_ramp_pause_ok():
+            QMessageBox.warning(
+                self, "Ramp across the Hold not supported here",
+                f"“{seq.name or seq.id}” has a ramp that runs across the Hold, but "
+                f"{self.hostname}'s agent can't pause it there (needs sequence-hold-ramp-pause, "
+                f"agent ≥ 1.27.0). Update the unit's agent, or end the ramp at the pause and "
+                f"continue it from resume.")
+            self._set_status("arm blocked — agent lacks sequence-hold-ramp-pause", error=True)
+            return
         wa = fmt_duration(round(max(0.0, hold_off + _lead_in(seq))))
         dlg = ArmDialog(
             f"Arm sequence “{seq.name or seq.id}”",
@@ -755,6 +767,15 @@ class SequencesPanel(QWidget):
         except Exception:  # noqa: BLE001
             return False
         return hold_enter_supported(client)
+
+    def _hold_ramp_pause_ok(self) -> bool:
+        """True iff this unit's agent pauses a ramp that crosses the Hold
+        (sequence-hold-ramp-pause + >= 1.27.0)."""
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001
+            return False
+        return hold_ramp_pause_supported(client)
 
     def _step_anchor_ok(self) -> bool:
         """True iff this unit's agent resolves a step-to-step anchor (sequence-step-anchor + >= 1.24.0)."""

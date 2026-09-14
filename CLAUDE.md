@@ -71,6 +71,34 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — a ramp ACROSS the Hold is PAUSED there and resumes after Proceed: COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo)
+Owner question: a ramp could be placed with its middle inside the Hold window, and its hover
+duration / end time read wrong. Decision (owner-approved): ALLOW it — the Hold freezes the ramp at
+the level it has reached, and it continues after Proceed shifted by the pause's length (design
+`docs/sequence-hold-step.md` §5.7; agent `1.27.0`, capability `sequence-hold-ramp-pause` — a ≤1.26
+agent silently DELAYED the pause until the ramp finished, hence the gate). Client side:
+- **Model** (`ui/timeline_model.py`): `ramp_hold_cross(it, h_off, …)` → the on-air `(start, end)` of a
+  window-A ramp that starts at/before the pause and ends after it (hold/enter/'both' ramps never
+  cross); `ramp_crosses_hold(items)`; the wire-level `ramp_crosses_hold_steps(steps)` (stored
+  SequenceSteps or dicts, for the arm gates); `ramp_level_at_pause(it, h_off)` = the last point fired
+  at/before the pause (the level held). Gate `hold_ramp_pause_supported(client)` (cap + ≥ 1.27.0).
+- **Canvas** (`ui/timeline_editor.py`): `_resume_shift(it, offset)` now also shifts any on-air-clock
+  time PAST the pause by `HOLD_BAND_PX` (via `_place_x`), so a crossing ramp's END lands on the RESUME
+  side at `resume_x + (end − h_off)·eff` — the geometry and the axis agree again. `_rebuild_geom` /
+  `_live_relayout` stamp `g["cut_x"]` (= `_enter_x`, via `_ramp_cut_x`) for a crossing ramp, and
+  `_paint_ramp` draws it as TWO capsule pieces flanking the Hold window — the run-up ending at the
+  enter edge (text: range · the ramp's OWN duration) and the remainder starting at the resume edge
+  (the slope end-cap) — threaded by a dashed line across the band. `_post_hold_extents` already
+  floats off-air past the resumed end. Tooltip (`_absolute_timing_lines`): `starts X after on-air ·
+  pauses Y in, holding L · ends Z after resume` (+ the off-air line). Drag: the split is derived, so a
+  ramp dragged into / out of the Hold splits / rejoins live.
+- **Gates**: `sequence_editor._hold_ramp_pause_block` (save + Ready pill), `sequences_panel.
+  _hold_ramp_pause_ok` (hold-aware arm), `plans_tab._arm_hold_aware_plan` — all on
+  `ramp_crosses_hold(_steps)`; the schedule/plan collapse path runs the ramp straight through.
+Tests: `tests/test_hold_ramp_pause.py` (detection incl. a ramp starting AT the pause; the held level;
+wire-level detection on models + dicts; the gate; geometry end-on-resume-side + two capsules that
+flank the band; live drag splits/rejoins; tooltip lines). Suite 1046 → 1054 offscreen; agent 491 → 496.
+
 ## Current state — owner-testing round 3 (readouts · tooltips · task-name-free rows · Hold-START anchor · bar anchor handle · RF auto-gating · drag clamps · live band): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo)
 A third Word doc (`Issues_and_wishes_v3`, 9 items). Suite 1019 → 1046 offscreen; agent 485 → 491 (`1.26.0`).
 - **#1/#6 Drag readout = the OFFSET only.** `_paint_drag_readout` shows just `±M:SS` (via `_fmt_offset`) for

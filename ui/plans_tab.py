@@ -49,8 +49,8 @@ from . import run_conflict
 from .theme import Palette
 from .timeline_model import (
     SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY, SEQUENCE_LOG_TABLE_CAPABILITY,
-    hold_runtime_supported, hold_enter_supported, step_anchor_supported,
-    step_anchor_negative_supported)
+    hold_runtime_supported, hold_enter_supported, hold_ramp_pause_supported,
+    ramp_crosses_hold_steps, step_anchor_supported, step_anchor_negative_supported)
 from .widgets import StatusPill, natural_key
 
 ARM_MARGIN_S = 5.0
@@ -940,6 +940,21 @@ class PlansTab(QWidget):
                     f"pause), but {label}'s agent doesn't support it (needs sequence-hold-enter, "
                     f"agent ≥ 1.26.0). Update the unit's agent, or anchor that step to on-air.")
                 self._set_status("arm blocked — agent lacks sequence-hold-enter")
+                return
+        # A ramp that CROSSES the Hold needs agent ≥ 1.27.0 on the unit to pause it there.
+        if ramp_crosses_hold_steps(steps):
+            try:
+                ok = hold_ramp_pause_supported(self.fleet.get(item.hostname))
+            except Exception:  # noqa: BLE001
+                ok = False
+            if not ok:
+                QMessageBox.warning(
+                    self, "Ramp across the Hold not supported here",
+                    f"“{plan.name or plan.id}” has a ramp that runs across the Hold, but {label}'s "
+                    f"agent can't pause it there (needs sequence-hold-ramp-pause, agent ≥ 1.27.0). "
+                    f"Update the unit's agent, or end the ramp at the pause and continue it from "
+                    f"resume.")
+                self._set_status("arm blocked — agent lacks sequence-hold-ramp-pause")
                 return
         wa = fmt_duration(round(max(0.0, hold_off + _lead_in(steps))))
         dlg = ArmDialog(

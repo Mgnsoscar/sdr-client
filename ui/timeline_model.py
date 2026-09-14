@@ -122,6 +122,32 @@ def uses_hold_enter(items) -> bool:
     return any(getattr(it, "anchor", "") == "enter" for it in items or [])
 
 
+# Agent >= 1.27.0 PAUSES a ramp that crosses the Hold: the points up to the pause fire in window A,
+# the level reached holds through the pause, and the remaining points resume after Proceed shifted
+# by the pause's length. A ≤1.26 agent kept the whole ramp in window A and DELAYED the pause until
+# the ramp finished (silently missing the hold offset), so the client gates saving / hold-aware
+# arming of such a sequence on this string. The schedule/plan path compiles the Hold out (the ramp
+# runs straight through), so it never needs the gate.
+SEQUENCE_HOLD_RAMP_PAUSE_CAPABILITY = "sequence-hold-ramp-pause"
+SEQUENCE_HOLD_RAMP_PAUSE_MIN_VERSION = (1, 27, 0)
+
+
+def hold_ramp_pause_supported(client) -> bool:
+    """True iff the unit's agent pauses a ramp that crosses the Hold (advertises
+    `sequence-hold-ramp-pause` AND runs agent >= 1.27.0). Same shape as `hold_enter_supported`:
+    an unknown/blank version with the capability present is treated as capable."""
+    try:
+        if not client.supports(SEQUENCE_HOLD_RAMP_PAUSE_CAPABILITY):
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    ver = _agent_version_tuple(getattr(client, "agent_version", "") or "")
+    if not ver:
+        return True
+    ver = ver + (0,) * (len(SEQUENCE_HOLD_RAMP_PAUSE_MIN_VERSION) - len(ver))
+    return ver >= SEQUENCE_HOLD_RAMP_PAUSE_MIN_VERSION
+
+
 def step_anchor_supported(client) -> bool:
     """True iff the unit's agent resolves a step-to-step anchor (advertises
     `sequence-step-anchor` AND runs agent >= 1.24.0). Same belt-and-suspenders shape as
@@ -490,6 +516,91 @@ def effective_anchor_offset(item, h_off: Optional[float],
             return "stop", obase                      # its chain roots at off-air
         return "start", off                           # orphan fallback
     return anchor, off
+
+
+def ramp_hold_cross(it, h_off: Optional[float], step_bases: Optional[Dict[int, float]] = None,
+                    off_bases: Optional[Dict[int, float]] = None) -> Optional[Tuple[float, float]]:
+    """(start, end) on the on-air clock of a window-A ramp that CROSSES the Hold — it starts at
+    or before the pause and ends after it — else None. Such a ramp is PAUSED at the Hold (agent
+    ≥ 1.27.0, `sequence-hold-ramp-pause`): the level it has reached holds through the pause and
+    its remaining points resume after Proceed, shifted by the pause's length. A window-B
+    (hold-anchored) ramp starts at/after the resume edge and an enter-anchored one ends at/before
+    the pause, so neither crosses; a window-filling 'both' ramp has no single on-air span."""
+    if h_off is None or not _is_ramp(it):
+        return None
+    if getattr(it, "anchor", "start") in ("hold", "enter", "both"):
+        return None
+    try:
+        (la, lo), (ra, ro) = ramp_span(it, h_off, step_bases, off_bases)
+    except (ValueError, TypeError):
+        return None
+    if la != "start" or ra != "start":
+        return None
+    lo, hi = min(lo, ro), max(lo, ro)
+    if lo <= h_off + 1e-6 and hi > h_off + 1e-6:
+        return (float(lo), float(hi))
+    return None
+
+
+def ramp_crosses_hold(items) -> bool:
+    """True when any ramp on the timeline crosses the Hold (see `ramp_hold_cross`)."""
+    h_off = hold_offset(items)
+    if h_off is None:
+        return False
+    sb = resolve_step_offsets(items, h_off)
+    ob = resolve_step_offsets_off(items, h_off)
+    return any(ramp_hold_cross(it, h_off, sb, ob) is not None for it in items)
+
+
+def ramp_level_at_pause(it, h_off: Optional[float]) -> Optional[float]:
+    """The value a Hold-crossing ramp is FROZEN at through the pause: its last point fired at or
+    before the pause (the agent holds the level reached). None when the ramp doesn't cross."""
+    cross = ramp_hold_cross(it, h_off)
+    if cross is None:
+        return None
+    r = dict(getattr(it, "ramp", None) or {})
+    try:
+        resolved = _resolve_ramp_points(r, "start", 0.0)
+        fires = _place_ramp_points(r, "start", cross[0], resolved)
+    except (ValueError, TypeError):
+        return None
+    before = [v for (_a, off, v) in fires if float(off) <= h_off + 1e-6]
+    return float(before[-1]) if before else None
+
+
+def _wire_get(s, key: str, default=None):
+    return s.get(key, default) if isinstance(s, dict) else getattr(s, key, default)
+
+
+def ramp_crosses_hold_steps(steps) -> bool:
+    """Wire-level `ramp_crosses_hold` for stored SequenceSteps (the arm-time gate): a
+    start-anchored RAMP step that starts at or before the Hold and ends after it."""
+    h_off = None
+    for s in steps or []:
+        a = _wire_get(s, "action")
+        if str(getattr(a, "value", a) or "") == "hold":
+            h_off = float(_wire_get(s, "offset_s", 0.0) or 0.0)
+            break
+    if h_off is None:
+        return False
+    for s in steps or []:
+        a = _wire_get(s, "action")
+        if str(getattr(a, "value", a) or "") != "ramp":
+            continue
+        if (_wire_get(s, "anchor", "start") or "start") != "start":
+            continue
+        r = _wire_get(s, "ramp")
+        rd = r if isinstance(r, dict) else (r.model_dump() if hasattr(r, "model_dump") else None)
+        if not rd:
+            continue
+        try:
+            dur = _ramp_duration(rd)
+        except (ValueError, TypeError):
+            continue
+        lo = float(_wire_get(s, "offset_s", 0.0) or 0.0)
+        if lo <= h_off + 1e-6 and lo + dur > h_off + 1e-6:
+            return True
+    return False
 
 
 _ANCHOR_ON_AIR = ("start", "hold", "enter", "step")   # anchors whose edges live in on-air-offset space

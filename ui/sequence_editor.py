@@ -212,7 +212,8 @@ class SequenceEditorDialog(QDialog):
     def _revalidate(self) -> None:
         # Include the capability gates (_step_anchor_block / _hold_enter_block) so the Ready/
         # Needs-correction pill can't say "Ready" while _on_save would refuse the save.
-        err = self._current_error() or self._step_anchor_block() or self._hold_enter_block()
+        err = (self._current_error() or self._step_anchor_block() or self._hold_enter_block()
+               or self._hold_ramp_pause_block())
         if err:
             self._set_status(err, warn=True)
             self._set_ready("warn", "Needs correction")
@@ -273,10 +274,27 @@ class SequenceEditorDialog(QDialog):
                     "on-air instead.")
         return None
 
+    def _hold_ramp_pause_block(self) -> Optional[str]:
+        """A safety gate: block saving a sequence with a ramp that CROSSES the Hold to a UNIT whose
+        agent can't pause it there (< 1.27.0 — it would delay the pause until the ramp finished).
+        The library holds only a definition, so it's never blocked."""
+        if self.hostname == LIBRARY_HOST or not tlm.ramp_crosses_hold(self._timeline.items()):
+            return None
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001 — undiscovered unit → let the agent be the backstop
+            return None
+        if not tlm.hold_ramp_pause_supported(client):
+            return ("a ramp here runs across the Hold, which needs a newer agent (≥ 1.27.0) to "
+                    "pause it at the Hold and resume it after. Update the unit’s agent, or end "
+                    "the ramp at the pause and continue it from resume.")
+        return None
+
     def _on_save(self) -> None:
         if self._saving:
             return
-        err = self._current_error() or self._step_anchor_block() or self._hold_enter_block()
+        err = (self._current_error() or self._step_anchor_block() or self._hold_enter_block()
+               or self._hold_ramp_pause_block())
         if err:
             self._set_status(err, error=True)
             return

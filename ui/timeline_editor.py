@@ -387,11 +387,13 @@ class _TimelineCanvas(QWidget):
                 take(a, o)
         return fwd, bwd
 
-    def _resume_shift(self, it) -> float:
-        """HOLD_BAND_PX for a resume-side item (its START hangs off the Hold — a window-B
-        `anchor="hold"` step/ramp, a window-B bar, or a step-anchored item resolved past the
-        hold), else 0. The Hold marker itself and every window-A / off-air item are NOT shifted
-        (off-air content rides `self._off`, which already floats past the band)."""
+    def _resume_shift(self, it, offset: Optional[float] = None) -> float:
+        """HOLD_BAND_PX for a resume-side placement (an item whose START hangs off the Hold — a
+        window-B `anchor="hold"` step/ramp, a window-B bar, or a step-anchored item resolved past
+        the hold — or any on-air-clock `offset` PAST the pause, e.g. the END of a ramp that
+        crosses the Hold and resumes after it), else 0. The Hold marker itself and every
+        window-A / off-air placement are NOT shifted (off-air content rides `self._off`, which
+        already floats past the band)."""
         if not self._hold_present or tlm._is_hold(it):
             return 0.0
         anc = getattr(it, "anchor", "start")
@@ -403,6 +405,8 @@ class _TimelineCanvas(QWidget):
             base = (self._step_bases or {}).get(getattr(it, "uid", None))
             if base is not None and base > (self._hold_off or 0.0) + 1e-6:
                 return HOLD_BAND_PX
+        if offset is not None and offset > (self._hold_off or 0.0) + 1e-6:
+            return HOLD_BAND_PX       # a time past the pause sits on the resume side of the band
         return 0.0
 
     def _place_x(self, it, anchor: str, offset: float) -> float:
@@ -410,8 +414,17 @@ class _TimelineCanvas(QWidget):
         to the RIGHT of the window. Byte-identical to `offset_to_x` when no Hold is present."""
         x = tlm.offset_to_x(anchor, offset, self._on, self._off, self._zoom)
         if anchor == "start":
-            x += self._resume_shift(it)
+            x += self._resume_shift(it, offset)
         return x
+
+    def _ramp_cut_x(self, it) -> Optional[float]:
+        """The enter-edge x where a window-A ramp that CROSSES the Hold is frozen (None otherwise).
+        Such a ramp paints as two pieces flanking the Hold window (see _paint_ramp): the run-up to
+        the pause, then its remainder forward from resume."""
+        if not self._hold_present or self._enter_x is None:
+            return None
+        cross = tlm.ramp_hold_cross(it, self._hold_off, self._step_bases, self._step_off_bases)
+        return float(self._enter_x) if cross is not None else None
 
     def set_scroll_area(self, scroll) -> None:
         self._scroll = scroll
@@ -789,6 +802,7 @@ class _TimelineCanvas(QWidget):
                 g["start_x"] = self._place_x(it, la, lo)
                 g["stop_x"] = self._place_x(it, ra, ro)
                 g["ends"] = ((la, lo), (ra, ro))
+                g["cut_x"] = self._ramp_cut_x(it)
             else:
                 g["cx"] = self._run_cx(it)
                 g["w"] = self._run_width(it)
@@ -1381,33 +1395,51 @@ class _TimelineCanvas(QWidget):
         y, sx, px = g["y"], g["start_x"], g["stop_x"]
         base, edge, fa, fb, ink = self._item_colors(it)
         left = min(sx, px); w = max(RAMP_MIN_W, abs(px - sx))
-        rect = QRectF(left, y, w, LANE_H)
-        self._capsule(p, rect, base, edge, fa, fb)
+        cy = y + LANE_H / 2
+        cut = g.get("cut_x")
+        if (cut is not None and self._resume_x is not None
+                and cut > left + 2.0 and px > self._resume_x + 2.0):
+            # A ramp crossing the Hold is FROZEN at the pause and resumes after it: two pieces
+            # flanking the Hold window (the run-up to the pause, then the remainder forward from
+            # resume), threaded across the band so it still reads as ONE ramp. Text lives in the
+            # first piece, the slope end-cap in the second (where the ramp actually ends).
+            rect = QRectF(left, y, max(RAMP_MIN_W / 2.0, cut - left), LANE_H)
+            cap_rect = QRectF(self._resume_x, y, max(RAMP_MIN_W / 2.0, px - self._resume_x), LANE_H)
+            self._capsule(p, rect, base, edge, fa, fb)
+            self._capsule(p, cap_rect, base, edge, fa, fb)
+            thread = QColor(base); thread.setAlpha(150)
+            tp = QPen(thread, 1.4); tp.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(tp); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawLine(QPointF(cut, cy), QPointF(self._resume_x, cy))
+        else:
+            rect = QRectF(left, y, w, LANE_H)
+            self._capsule(p, rect, base, edge, fa, fb)
+            cap_rect = rect
         r = dict(getattr(it, "ramp", None) or {})
         a, b = r.get("start"), r.get("stop")
         rising = (a is not None and b is not None and b >= a)
 
         # ── right end-cap: a faint tinted zone (divider + slope mark) ─────────────
-        cap_w = RAMP_CAP_W if w > RAMP_CAP_W + 22 else 0.0
+        cap_w = RAMP_CAP_W if cap_rect.width() > RAMP_CAP_W + 22 else 0.0
         if cap_w:
-            clip = QPainterPath(); clip.addRoundedRect(rect, BAR_R, BAR_R)
+            clip = QPainterPath(); clip.addRoundedRect(cap_rect, BAR_R, BAR_R)
             p.save(); p.setClipPath(clip)
-            cap = QRectF(rect.right() - cap_w, rect.top(), cap_w, rect.height())
+            cap = QRectF(cap_rect.right() - cap_w, cap_rect.top(), cap_w, cap_rect.height())
             fill = QColor(base); fill.setAlpha(26)
             p.setPen(Qt.PenStyle.NoPen); p.setBrush(fill); p.drawRect(cap)
             div = QColor(base); div.setAlpha(75)
             p.setPen(QPen(div, 1))
-            p.drawLine(QPointF(cap.left(), rect.top() + 1.0),
-                       QPointF(cap.left(), rect.bottom() - 1.0))
+            p.drawLine(QPointF(cap.left(), cap_rect.top() + 1.0),
+                       QPointF(cap.left(), cap_rect.bottom() - 1.0))
             p.restore()
-            self._paint_slope(p, cap.center().x(), rect.center().y(), rising, base)
+            self._paint_slope(p, cap.center().x(), cap_rect.center().y(), rising, base)
         else:
             # too narrow for a cap — a compact slope glyph tucked at the right edge
-            self._paint_slope(p, rect.right() - 12, rect.center().y(), rising, base, span=7.0)
+            self._paint_slope(p, cap_rect.right() - 12, cap_rect.center().y(), rising, base, span=7.0)
 
         # ── flush-left text: range · duration (no task badge — the row's hue/indent name the
-        #    parent task, owner v3 #3) ─────────────────────────────────────────────────────────
-        text_r = rect.right() - (cap_w or 6.0) - 8.0
+        #    parent task, owner v3 #3) — in the FIRST piece when the ramp is split at a Hold ──
+        text_r = rect.right() - ((cap_w if cap_rect is rect else 0.0) or 6.0) - 8.0
         bx = left + 10
         # duration, right-aligned just left of the cap divider
         try:
@@ -2826,6 +2858,7 @@ class _TimelineCanvas(QWidget):
             g["start_x"] = self._place_x(it, la, lo)
             g["stop_x"] = self._place_x(it, ra, ro)
             g["ends"] = ((la, lo), (ra, ro))
+            g["cut_x"] = self._ramp_cut_x(it)
         else:
             # _run_cx maps a window-B (anchor='hold') item to the Hold's side, so the pill
             # tracks the cursor correctly instead of jumping to the off-air anchor.
@@ -2987,6 +3020,20 @@ class _TimelineCanvas(QWidget):
         if ramp:
             (la, lo), (ra, ro) = tlm.ramp_span(it, h, self._step_bases, self._step_off_bases)
             a, o = (ra, ro) if end_tied else (la, lo)
+            cross = tlm.ramp_hold_cross(it, h, self._step_bases, self._step_off_bases)
+            if cross is not None:
+                # A ramp crossing the Hold: frozen at the pause (the level reached holds), the
+                # remainder resumes after Proceed — its end is a fixed time after RESUME.
+                lo_t, hi_t = cross
+                out.append("starts " + rel(lo_t, "on-air"))
+                lvl = tlm.ramp_level_at_pause(it, h)
+                held = f", holding {fmt_value(lvl)}" if lvl is not None else ""
+                out.append(f"pauses {fmt_duration(h - lo_t)} in{held}")
+                out.append("ends " + rel(hi_t - h, "resume"))
+                fwd, bwd = self._post_hold_extents()
+                if fwd > 0 or bwd > 0:
+                    out.append("ends " + rel((hi_t - h) - (fwd + bwd), "off-air"))
+                return out
         else:
             a, o = tlm.effective_anchor_offset(it, h, self._step_bases, self._step_off_bases)
         anchor = getattr(it, "anchor", "start")
