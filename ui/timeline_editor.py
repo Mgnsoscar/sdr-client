@@ -3569,40 +3569,81 @@ class _TimelineCanvas(QWidget):
             self._delete_uids(set(self._selection))
 
     # ── Right-click context menu ──────────────────────────────────────────────
+    #
+    # One shape for every kind — Edit… · its offset(s) · Duplicate (a step) · Remove anchor (when
+    # hung off another step) · Delete — and, on a DURATION task, "Tune…" / "Ramp…" that seed a new
+    # step on that task at the time under the cursor. Right-clicking EMPTY canvas offers "Add …"
+    # at the clicked time. An offset entry opens a small inline field at the cursor (no dialog),
+    # captioned with the reference it is measured from. Hold-edit (locked): what already happened
+    # shows only the lock notice; the task running THROUGH the Hold takes Tune… / Ramp… / Stop
+    # offset… on its post-hold stretch (its start, Edit and Delete stay refused).
+
     def contextMenuEvent(self, e):  # noqa: N802
-        hit = self._hit(e.pos().x(), e.pos().y())
+        x, y = float(e.pos().x()), float(e.pos().y())
+        hit = self._hit_free(x, y)
         if hit is None:
-            e.ignore()
+            if self._open_canvas_menu(x, y, e.globalPos()):
+                e.accept()
+            else:
+                e.ignore()
             return
         it = hit[0]
-        # Hold-edit: nothing to do to what already happened — a locked part, or the running
-        # task reached through its live stop grip (no Edit… / Duplicate / Delete on it either).
-        if hit[1] == "locked" or self.elapsed_kind(it) is not None:
+        k = self.elapsed_kind(it)
+        # Hold-edit: nothing to do to what already happened — a fired step, the Hold (now), or the
+        # running task's ELAPSED stretch; its post-hold stretch still takes new steps + its stop.
+        if k in ("full", "hold") or (k == "start" and not self._on_post_hold_stretch(x)):
             self._lock_notice(it, e.globalPos())
             e.accept()
             return
-        if it.uid not in self._selection:      # right-click outside the selection re-selects it
+        if k is None and it.uid not in self._selection:   # right-click outside the selection re-selects
             self._select_only(it.uid)
         self.update()
-        self._open_context_menu(it, e.globalPos())
+        self._open_context_menu(it, e.globalPos(), x)
         e.accept()
 
+    def _on_post_hold_stretch(self, x: float) -> bool:
+        """Whether canvas x lies at/after the Hold's RESUME edge (the post-hold window)."""
+        return self._resume_x is not None and x >= float(self._resume_x) - 0.5
+
+    def _offset_entries(self, it) -> List[Tuple[str, str]]:
+        """The offsets the menu sets inline on `it`, as (which, label): a duration task's start +
+        stop, a step's / the Hold's single offset. A window-filling ("both") ramp has none."""
+        if getattr(it, "kind", None) == "bar":
+            return [("start", "Start offset…"), ("stop", "Stop offset…")]
+        if tlm._is_ramp(it) and getattr(it, "anchor", "start") == "both":
+            return []
+        return [("offset", "Offset…")]
+
     def _context_menu_spec(self, it) -> List[str]:
-        """Labels for the right-click menu on `it`, in order ('—' = a separator)."""
-        multi = len(self._selection) > 1
-        if multi:                              # a multi-selection menu acts on the whole set
+        """Labels for the right-click menu on `it`, in order ('—' = a separator). A duration
+        task: Edit… · Start offset… · Stop offset… · [Remove anchor] · Tune… · Ramp… · Delete — never
+        Duplicate (one bar per task, validate() rule E). A tune / ramp / one-shot: Edit… · Offset… ·
+        Duplicate · [Remove anchor] · Delete. The Hold: Edit… · Offset… · Delete. Hold-edit: the task
+        running THROUGH the Hold takes only what is still ahead of it."""
+        if self.elapsed_kind(it) == "start":
+            return ["Tune…", "Ramp…", "—", "Stop offset…"]
+        if len(self._selection) > 1:           # a multi-selection menu acts on the whole set
             return ["Delete selected"]
-        spec = ["Edit…"]
+        spec = ["Edit…"] + [label for _which, label in self._offset_entries(it)]
+        if getattr(it, "kind", None) == "bar":
+            if tlm.is_step_source(it):             # a bar anchored by its start
+                spec.append("Remove anchor")
+            return spec + ["—", "Tune…", "Ramp…", "—", "Delete"]
         if not tlm._is_hold(it):
             spec.append("Duplicate")
-        if tlm.is_step_source(it):                 # a run, or a bar anchored by its start
+        if tlm.is_step_source(it):
             spec.append("Remove anchor")
-        spec += ["—", "Delete"]
-        return spec
+        return spec + ["—", "Delete"]
 
-    def _run_context_action(self, it, label: str) -> None:
+    def _run_context_action(self, it, label: str, x: Optional[float] = None,
+                            global_pos=None) -> None:
         if label == "Edit…":
             self.edit_item(it)
+        elif label in ("Start offset…", "Stop offset…", "Offset…"):
+            which = {"Start offset…": "start", "Stop offset…": "stop"}.get(label, "offset")
+            self._prompt_offset(it, which, global_pos)
+        elif label in ("Tune…", "Ramp…"):
+            self._add_step_on(it, "tune" if label == "Tune…" else "ramp", x)
         elif label == "Duplicate":
             self._duplicate_item(it)
         elif label == "Remove anchor":
@@ -3612,7 +3653,7 @@ class _TimelineCanvas(QWidget):
         elif label == "Delete selected":
             self._delete_selection()
 
-    def _open_context_menu(self, it, global_pos) -> None:
+    def _open_context_menu(self, it, global_pos, x: Optional[float] = None) -> None:
         menu = QMenu(self)
         actions = {}
         for label in self._context_menu_spec(it):
@@ -3622,7 +3663,186 @@ class _TimelineCanvas(QWidget):
                 actions[menu.addAction(label)] = label
         chosen = menu.exec(global_pos)
         if chosen in actions:
-            self._run_context_action(it, actions[chosen])
+            self._run_context_action(it, actions[chosen], x, global_pos)
+
+    # ── The empty-canvas menu: add a step at the clicked time ─────────────────
+    def _canvas_menu_spec(self, x: float) -> List[str]:
+        """The right-click menu on EMPTY canvas: add a step at the clicked time. Hold-edit: only
+        the post-hold window takes new steps (the elapsed side gets no menu). A Hold is offered
+        once per sequence, where Hold authoring is on."""
+        if self._lock_elapsed and not self._on_post_hold_stretch(x):
+            return []
+        spec = ["Add duration task…", "Add one-shot…", "Add tune…", "Add ramp…"]
+        if (getattr(self._editor, "_hold_authoring", True) and not tlm.has_hold(self._items)
+                and not self._lock_elapsed):
+            spec += ["—", "Add Hold"]
+        return spec
+
+    def _run_canvas_action(self, label: str, x: float, y: float) -> None:
+        anchor, offset = self._window_at_x(x)
+        if label == "Add Hold":
+            self.add_new("hold", offset=max(0.0, tlm._snap((x - self._on) / self._eff())))
+        elif label == "Add duration task…":
+            self.add_new("bar", anchor=anchor, offset=offset)
+        elif label == "Add one-shot…":
+            self.add_new("run", anchor=anchor, offset=offset)
+        elif label in ("Add tune…", "Add ramp…"):
+            self.add_new("tune" if label == "Add tune…" else "ramp",
+                         task=self._task_at_y(y) or None, anchor=anchor, offset=offset)
+
+    def _open_canvas_menu(self, x: float, y: float, global_pos) -> bool:
+        spec = self._canvas_menu_spec(x)
+        if not spec:
+            return False
+        menu = QMenu(self)
+        actions = {}
+        for label in spec:
+            if label == "—":
+                menu.addSeparator()
+            else:
+                actions[menu.addAction(label)] = label
+        chosen = menu.exec(global_pos)
+        if chosen in actions:
+            self._run_canvas_action(actions[chosen], x, y)
+        return True
+
+    def _window_at_x(self, x: float) -> Tuple[str, float]:
+        """(anchor, offset_s) for a canvas x — the anchor of the WINDOW x falls in, so a step
+        added there is measured the way the axis under it reads: an on-air offset in the green
+        window (and the warm-up before it), a resume offset in the post-hold window (0 anywhere
+        on the Hold band), an off-air offset in the red window (and the cool-down past off-air).
+        In the hatched relative stretch (no Hold) the nearer absolute window wins. Snapped to the
+        1 s grid."""
+        eff = self._eff()
+        off_def = self._off_def_x()
+        if self._hold_present and self._resume_x is not None and self._enter_x is not None:
+            if x < float(self._enter_x):
+                return "start", tlm._snap((x - self._on) / eff)
+            if x < float(self._resume_x):
+                return "hold", 0.0
+            if not self._hold_merged and x >= off_def - 0.5:
+                return "stop", tlm._snap((x - self._off) / eff)
+            return "hold", max(0.0, tlm._snap((x - float(self._resume_x)) / eff))
+        if x >= off_def - 0.5:                      # the red off-air window / the cool-down
+            return "stop", tlm._snap((x - self._off) / eff)
+        def_x = self._def_x()
+        if off_def > def_x + 1.0 and x > (def_x + off_def) / 2.0:
+            return "stop", tlm._snap((x - self._off) / eff)   # nearer the off-air window
+        return "start", tlm._snap((x - self._on) / eff)
+
+    def _task_at_y(self, y: float) -> str:
+        """The duration task whose row (its bar, or one of its tune / ramp rows) spans y — the
+        task a tune / ramp added from the canvas menu there acts on. '' when the row has none."""
+        bars = {o.task_name for o in self._items if getattr(o, "kind", None) == "bar"}
+        for it in self._rows:
+            g = self._geom.get(it.uid)
+            if not g:
+                continue
+            top = g["y"]
+            if top - 2 <= y <= top + g.get("foot_h", LANE_H) + LANE_VGAP:
+                name = getattr(it, "task_name", "") or ""
+                return name if name in bars else ""
+        return ""
+
+    def _add_step_on(self, bar, kind: str, x: Optional[float]) -> None:
+        """Tune… / Ramp… from a duration task's menu: a new step on THAT task, seeded at the time
+        under the cursor (the window's anchor, snapped, clamped inside the task) — the editor
+        opens pre-filled. Without a click position (keyboard), at the task's start."""
+        if x is None:
+            g = self._geom.get(getattr(bar, "uid", None)) or {}
+            x = float(g.get("start_x", self._on))
+        anchor, offset = self._window_at_x(x)
+        self.add_new(kind, task=getattr(bar, "task_name", "") or None, anchor=anchor, offset=offset)
+
+    # ── Inline offset entry (the menu's "… offset…" items) ────────────────────
+    def _offset_value(self, it, which: str) -> float:
+        if which == "start":
+            return float(getattr(it, "start_offset", 0.0))
+        if which == "stop":
+            return float(getattr(it, "stop_offset", 0.0))
+        return float(getattr(it, "offset", 0.0))
+
+    def _offset_reference(self, it, which: str) -> str:
+        """What the offset is measured from — the entry's caption: 'from on-air', 'from off-air',
+        'from resume', 'from the pause (≤ 0)', or the anchored step's edge."""
+        if tlm._is_hold(it):
+            return "from on-air"
+        if getattr(it, "kind", None) == "bar":
+            if which == "stop":
+                return "from off-air"
+            anc = getattr(it, "start_anchor", "start") or "start"
+        else:
+            anc = getattr(it, "anchor", "start") or "start"
+        if anc == "step":
+            ref, edge = tlm.step_source_ref(it)
+            tgt = next((o for o in self._items
+                        if ref and (getattr(o, "step_id", "") or "") == ref and o is not it), None)
+            if tgt is None:
+                return "from the anchored step"
+            if getattr(tgt, "kind", None) == "bar":
+                return f"from {tgt.task_name}'s {'stop' if edge == 'end' else 'start'}"
+            return f"from {tlm._target_label(tgt)}'s {edge}"
+        return {"stop": "from off-air", "hold": "from resume",
+                "enter": "from the pause (≤ 0)"}.get(anc, "from on-air")
+
+    def _offset_title(self, it, which: str) -> str:
+        if which == "start":
+            return "Start"
+        if which == "stop":
+            return "Stop"
+        return "Pause at" if tlm._is_hold(it) else "Offset"
+
+    def _can_set_offset(self, it, which: str) -> bool:
+        """Hold-edit: what already happened can't be moved — a fired step, the Hold, the running
+        task's START; its stop (post-hold) still can."""
+        k = self.elapsed_kind(it)
+        return k is None or (k == "start" and which == "stop")
+
+    def _prompt_offset(self, it, which: str, global_pos=None):
+        """Open the small inline offset entry at the cursor for `it`'s `which` offset; Enter
+        applies it (through the same clamps a drag gets), Esc / a click elsewhere cancels.
+        Returns the popup (None when the offset is locked — the notice shows instead)."""
+        if global_pos is None:
+            global_pos = QCursor.pos()
+        if not self._can_set_offset(it, which):
+            self._lock_notice(it, global_pos)
+            return None
+        pop = _OffsetPopup(f"{self._offset_title(it, which)} — {self._offset_reference(it, which)}",
+                           self._offset_value(it, which), parent=self)
+        pop.committed.connect(lambda v, it=it, which=which: self._apply_offset(it, which, v))
+        pop.open_at(global_pos)
+        return pop
+
+    def _apply_offset(self, it, which: str, value: float) -> Optional[float]:
+        """Set one offset of `it` exactly (the inline entry's commit), through the same clamps a
+        drag applies: a tune / ramp stays inside its task (both ends) and keeps its dependents
+        inside theirs; a bar's RF auto-gating follows its new start / stop; a pause-anchored step
+        stays ≤ 0. One undo step. Returns the value applied (None when refused)."""
+        if not any(o is it for o in self._items) or not self._can_set_offset(it, which):
+            return None
+        value = float(value)
+        if getattr(it, "kind", None) == "bar":
+            if which == "start" and getattr(it, "start_anchor", "start") == "hold":
+                value = max(0.0, value)               # a window-B start is never before resume
+            new = value
+            if abs(new - self._offset_value(it, which)) < 1e-9:
+                return new
+            self._record()
+            if which == "stop":
+                it.stop_offset = new
+            else:
+                it.start_offset = new
+            self._auto_rf_gate(it)                    # part of the same undo entry
+        else:
+            new = self._clamp_for_dependents(it, self._clamp_tune_offset(it, value)) \
+                if not tlm._is_hold(it) else self._clamp_tune_offset(it, value)
+            if abs(new - float(getattr(it, "offset", 0.0))) < 1e-9:
+                return new
+            self._record()
+            it.offset = new
+        self.relayout(keep_on=True)
+        self.changed.emit()
+        return new
 
     # ── Zoom (Ctrl+wheel on a mouse; pinch on a touchpad) ─────────────────────
 
@@ -3704,35 +3924,50 @@ class _TimelineCanvas(QWidget):
         elif r == QDialog.DialogCode.Accepted and dlg.result_item is not None:
             self.replace_item(item.uid, dlg.result_item)
 
-    def _seed_item(self, kind: str):
-        """The item a '+ <kind>' button starts the editor with. In the Hold-edit (locked) mode a new
-        step is seeded in the POST-HOLD window (anchored to the Hold's resume edge) — on-air is
-        history there."""
-        default_task = self._editor.available_tasks()[0] if self._editor.available_tasks() else ""
-        anchor = "hold" if (self._lock_elapsed and self._hold_off is not None) else "start"
+    def _seed_item(self, kind: str, task: Optional[str] = None, anchor: Optional[str] = None,
+                   offset: Optional[float] = None):
+        """The item a '+ <kind>' button (or a right-click "Add … / Tune… / Ramp…") starts the
+        editor with. `task` / `anchor` / `offset` pre-fill it (the menu's task + the time under
+        the cursor); a tune / ramp offset is clamped inside its task like a drag. In the Hold-edit
+        (locked) mode a new step is seeded in the POST-HOLD window (anchored to the Hold's resume
+        edge) — on-air is history there."""
+        tasks = self._editor.available_tasks()
+        default_task = task if task else (tasks[0] if tasks else "")
+        locked = self._lock_elapsed and self._hold_off is not None
+        if anchor is None or (locked and anchor in ("start", "enter")):
+            anchor = "hold" if locked else "start"
+        off = float(offset) if offset is not None else 0.0
         if kind == "bar":
-            return tlm.BarItem(task_name=default_task, start_offset=0.0, stop_offset=0.0,
-                               start_anchor=anchor)
+            sa = anchor if anchor in ("start", "hold") else ("hold" if locked else "start")
+            return tlm.BarItem(task_name=default_task, start_offset=off if sa == anchor else 0.0,
+                               stop_offset=0.0, start_anchor=sa)
         if kind == "tune":
-            return tlm.RunItem(task_name=default_task, action="tune", anchor=anchor, offset=0.0)
-        if kind == "ramp":
-            return tlm.RunItem(task_name=default_task, action="ramp", anchor=anchor,
-                               offset=0.0, ramp={})
-        return tlm.RunItem(task_name=default_task, anchor=anchor, offset=0.0)
+            it = tlm.RunItem(task_name=default_task, action="tune", anchor=anchor, offset=off)
+        elif kind == "ramp":
+            it = tlm.RunItem(task_name=default_task, action="ramp", anchor=anchor, offset=off,
+                             ramp={})
+        else:
+            return tlm.RunItem(task_name=default_task, anchor=anchor, offset=off)
+        if offset is not None:
+            it.offset = self._clamp_tune_offset(it, off)
+        return it
 
-    def add_new(self, kind: str) -> None:
+    def add_new(self, kind: str, task: Optional[str] = None, anchor: Optional[str] = None,
+                offset: Optional[float] = None) -> None:
         if kind == "hold":
             # One Hold per sequence (docs/sequence-hold-step.md §5.1). Seed its position
-            # after the furthest window-A on-air point so it reads as "pause at the top".
+            # after the furthest window-A on-air point so it reads as "pause at the top"
+            # (or exactly where the canvas menu was opened).
             if tlm.has_hold(self._items):
                 QMessageBox.information(
                     self, "Hold", "A sequence can have only one Hold — edit or remove "
                     "the existing one.")
                 return
             item = tlm.RunItem(task_name="", action="hold", anchor="start",
-                               offset=self._default_hold_offset())
+                               offset=float(offset) if offset is not None
+                               else self._default_hold_offset())
         else:
-            item = self._seed_item(kind)
+            item = self._seed_item(kind, task, anchor, offset)
         dlg = self._dialog_for(item, new=True)
         r = dlg.exec()
         if r == QDialog.DialogCode.Accepted and dlg.result_item is not None:
@@ -4611,6 +4846,67 @@ class HoldEditorDialog(QDialog):
             task_name="", action="hold", anchor="start",
             offset=round(self._off.value(), 1), uid=self._src.uid)
         self.accept()
+
+
+class _OffsetPopup(QFrame):
+    """The right-click menu's inline offset entry: a small popup at the cursor — a caption naming
+    the reference the offset is measured from ("Start — from on-air", "Stop — from off-air",
+    "Offset — from resume" …) over one duration field. Enter commits (`committed(seconds)`), Esc
+    or a click elsewhere cancels. No dialog, no OK button — it reads like a drag readout you can
+    type into."""
+
+    committed = pyqtSignal(float)
+
+    def __init__(self, caption: str, value: float, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("offsetPopup")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setStyleSheet(
+            f"#offsetPopup {{ background: {Palette.SURFACE}; border: 1px solid {Palette.BORDER_STRONG}; "
+            f"border-radius: 8px; }}")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(4)
+        self._caption = QLabel(caption)
+        self._caption.setStyleSheet(
+            f"font-size: 10px; font-weight: 700; letter-spacing: 0.5px; color: {Palette.ACCENT};")
+        lay.addWidget(self._caption)
+        self._spin = DurationSpinBox()
+        self._spin.setValue(float(value))
+        self._spin.setMinimumWidth(150)
+        lay.addWidget(self._spin)
+        hint = QLabel("Enter to apply · Esc to cancel")
+        hint.setStyleSheet(f"font-size: 10px; color: {Palette.TEXT_FAINT};")
+        lay.addWidget(hint)
+        self._spin.lineEdit().returnPressed.connect(self._commit)
+
+    def caption(self) -> str:
+        return self._caption.text()
+
+    def value(self) -> float:
+        return float(self._spin.value())
+
+    def set_value(self, v: float) -> None:
+        self._spin.setValue(float(v))
+
+    def open_at(self, global_pos) -> None:
+        self.adjustSize()
+        self.move(global_pos)
+        self.show()
+        self._spin.setFocus()
+        self._spin.selectAll()
+
+    def _commit(self) -> None:
+        self._spin.interpretText()               # a typed entry not yet committed by focus-out
+        self.committed.emit(float(self._spin.value()))
+        self.close()
+
+    def keyPressEvent(self, e):  # noqa: N802
+        if e.key() == Qt.Key.Key_Escape:
+            self.close(); e.accept(); return
+        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._commit(); e.accept(); return
+        super().keyPressEvent(e)
 
 
 class _RowHeader(QWidget):

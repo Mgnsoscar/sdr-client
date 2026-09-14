@@ -357,18 +357,20 @@ def test_the_running_task_is_untouchable_through_its_live_stop_grip(monkeypatch)
     g = cv._geom
     notices, menus = [], []
     monkeypatch.setattr(cv, "_lock_notice", lambda it, pt: notices.append(it))
-    monkeypatch.setattr(cv, "_open_context_menu", lambda it, pos: menus.append(it))
+    monkeypatch.setattr(cv, "_open_context_menu", lambda it, pos, x=None: menus.append(it))
     # A press on the LIVE stop grip starts the resize drag but selects nothing (a selection would
     # expose Delete / Ctrl+D / the menu on a task that already launched).
     cv._select_only(s["wb"].uid)
     _press(cv, g[s["bar"].uid]["stop_x"] - 2, _cy(cv, s["bar"]))
     assert cv._drag is not None and cv._drag["part"] == "bar_stop" and not cv._selection
     cv._drag = None
-    # Right-click on the same grip → the notice, never the Edit… / Duplicate / Delete menu.
+    # Right-click on the same grip (its post-hold stretch) → only what's still ahead of the task:
+    # Tune… / Ramp… / Stop offset… — never Edit… / Duplicate / Delete, and it stays unselected.
     x, y = g[s["bar"].uid]["stop_x"] - 2, _cy(cv, s["bar"])
     cv.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(int(x), int(y)),
                                           QPoint(int(x), int(y))))
-    assert notices[-1] is s["bar"] and menus == []
+    assert menus == [s["bar"]] and not notices and not cv._selection
+    assert cv._context_menu_spec(s["bar"]) == ["Tune…", "Ramp…", "—", "Stop offset…"]
     n = len(cv.items())
     # The mutation layer refuses what already happened, whichever path reaches it.
     cv._delete_uids({s["bar"].uid})
