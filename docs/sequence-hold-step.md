@@ -238,7 +238,14 @@ deferred and resumes. The scheduled/plan path compiles the Hold out, so the ramp
 A pre-1.27 agent kept the whole ramp in window A and silently DELAYED the pause until it finished,
 hence the client gate. Client: the canvas draws such a ramp as two pieces flanking the Hold window
 (threaded across the band), its end on the resume axis, and the tooltip reads "pauses X in, holding
-<level> · ends Y after resume".
+<level> · ends Y after resume". **Edit-while-holding** (DECIDED with the owner): the Hold-edit dialog
+loads a crossing ramp SPLIT (`api.models.split_ramps_at_hold`) — its run-up (the points at/before the
+pause, already fired) stays a window-A ramp, and its not-yet-fired remainder becomes its OWN post-hold
+(`anchor="hold"`) ramp whose start/stop/dwell/offset default to exactly what resuming would have
+produced (the first deferred level → the original stop, at the first deferred point's time after the
+pause). The operator retargets that remainder like any window-B step; left alone it reproduces the
+agent's paused remainder, and since the run-up no longer crosses, the agent derives no second remainder
+from the edited window A. A lone point on either side is presented as the single tune it is.
 
 ## 6. Client / UI design
 

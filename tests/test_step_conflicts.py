@@ -111,6 +111,19 @@ def test_a_tune_on_a_different_param_than_the_ramp_is_ok():
     assert _ok([_bar(), _ramp(0.0, "power", anchor="both"), _tune(5.0, "sidelobes")]) is None
 
 
+def test_a_step_at_a_ramps_exact_end_follows_it_but_one_at_its_start_collides():
+    # A ramp holds [start, start + duration): its last level's hold ENDS at the end, so a
+    # same-control tune or ramp firing exactly there FOLLOWS it — a ramp chained onto another's end,
+    # or a crossing ramp's resumed remainder right after its run-up at the Hold. At the ramp's
+    # START instant a same-control step still collides.
+    assert _ok([_bar(), _ramp(0.0, "power"), _tune(6.0, "power")]) is None      # dur 6 s: ends at 6
+    assert _ok([_bar(), _ramp(0.0, "power"), _ramp(6.0, "power")]) is None
+    err = _ok([_bar(), _ramp(0.0, "power"), _tune(0.0, "power")])
+    assert err and "same time" in err
+    err = _ok([_bar(), _ramp(0.0, "power"), _ramp(5.9, "power")])               # overlaps by 0.1 s
+    assert err and "same time" in err
+
+
 # ── Rule D: two ramps on the same control ─────────────────────────────────────
 
 def test_two_both_ramps_on_the_same_control_rejected():

@@ -95,9 +95,28 @@ agent silently DELAYED the pause until the ramp finished, hence the gate). Clien
 - **Gates**: `sequence_editor._hold_ramp_pause_block` (save + Ready pill), `sequences_panel.
   _hold_ramp_pause_ok` (hold-aware arm), `plans_tab._arm_hold_aware_plan` — all on
   `ramp_crosses_hold(_steps)`; the schedule/plan collapse path runs the ramp straight through.
+- **Crossing is defined by FIRES, not extent** (matches the agent's split): `ramp_hold_cross` /
+  `ramp_crosses_hold_steps` require a POINT after the pause (`_ramp_fires_after`); a window-A ramp
+  whose last level's hold merely spills past the pause is absorbed by it — `_ramp_edges` draws it
+  ending AT the enter edge, `_post_hold_extents` ignores its tail, nothing is split.
+- **Edit-while-holding presents the remainder as its OWN post-hold ramp** (owner ask):
+  `api/models.split_ramps_at_hold(steps)` (wire-level, via the drift-guarded `api.ramp`) turns a
+  crossing ramp into its run-up (a window-A ramp over exactly the points at/before the pause, the
+  original `id` kept) + its remainder as a NEW `anchor="hold"` ramp with `offset_s` = the first
+  deferred point's time after the pause, start = that level, stop = the original stop, the original
+  dwell (steps = points − 1, duration = points × hold), `power_view` carried, `id` cleared; a lone
+  point on either side becomes the single tune it is (a run-mode ramp's → the one-shot run). Unedited,
+  its fires equal the agent's paused remainder exactly; since the run-up no longer crosses, the agent
+  derives no second remainder from the edited window A. `HoldEditDialog` loads
+  `split_ramps_at_hold(sequence.steps)` (its banner says so). Needed a conflict-rule refinement:
+  `_spans_overlap` now treats a ramp as `[lo, hi)` (its last hold ENDS at hi, so a same-control step at
+  exactly hi follows it; two points at one instant / a step at a ramp's start still collide) — the two
+  pieces touch at the pause boundary and were falsely flagged as "same time".
 Tests: `tests/test_hold_ramp_pause.py` (detection incl. a ramp starting AT the pause; the held level;
 wire-level detection on models + dicts; the gate; geometry end-on-resume-side + two capsules that
-flank the band; live drag splits/rejoins; tooltip lines). Suite 1046 → 1054 offscreen; agent 491 → 496.
+flank the band; live drag splits/rejoins; tooltip lines; `split_ramps_at_hold` fire-equality / lone
+points / non-crossing untouched; the Hold-edit dialog loads split + accepts), `tests/test_step_
+conflicts.py` (a step at a ramp's exact end follows it). Suite 1046 → 1059 offscreen; agent 491 → 496.
 
 ## Current state — owner-testing round 3 (readouts · tooltips · task-name-free rows · Hold-START anchor · bar anchor handle · RF auto-gating · drag clamps · live band): COMPLETE (branch `claude/step-to-step-anchoring`, cross-repo)
 A third Word doc (`Issues_and_wishes_v3`, 9 items). Suite 1019 → 1046 offscreen; agent 485 → 491 (`1.26.0`).

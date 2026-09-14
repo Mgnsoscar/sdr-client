@@ -509,6 +509,78 @@ def collapse_hold(steps: List["SequenceStep"]) -> List["SequenceStep"]:
     return out
 
 
+def split_ramps_at_hold(steps: List["SequenceStep"]) -> List["SequenceStep"]:
+    """For EDIT-WHILE-HOLDING (docs/sequence-hold-step.md §5.7 / §6.4): present a ramp that
+    CROSSES the Hold as two steps — the run-up to the pause (window A, already fired, kept exactly:
+    the points at/before the pause) and the not-yet-fired REMAINDER as its own post-hold
+    (``anchor="hold"``) ramp whose start / stop / timing default to what resuming would have
+    produced (the first deferred level → the original stop, the original dwell, ``offset_s`` = the
+    first deferred point's time after the pause). The operator can then retarget the remainder like
+    any window-B step; left alone, it reproduces the agent's paused remainder exactly. A lone point
+    on either side becomes the single tune (or, for a run-mode ramp, the one-shot run) it is.
+    Non-crossing steps come back as the same objects; a Hold-free list is returned unchanged."""
+    from . import ramp as _ramp
+    steps = list(steps or [])
+    hold_off = next((float(s.offset_s) for s in steps
+                     if _step_action(s) == StepAction.HOLD.value), None)
+    if hold_off is None:
+        return steps
+    out: List["SequenceStep"] = []
+    for s in steps:
+        r = s.ramp
+        if (_step_action(s) != StepAction.RAMP.value or r is None
+                or getattr(s, "anchor", "start") != "start"):
+            out.append(s)
+            continue
+        try:
+            res = _ramp.resolve_ramp(r.start, r.stop, steps=r.steps, step=r.step, hold_s=r.hold_s,
+                                     duration_s=r.duration_s, include_first=r.include_first,
+                                     include_last=r.include_last)
+            pts = _ramp.place_ramp("start", float(s.offset_s), res)
+        except (ValueError, TypeError):
+            out.append(s)
+            continue
+        before = [(float(off), float(v)) for (_a, off, v) in pts if float(off) <= hold_off + 1e-6]
+        after = [(float(off), float(v)) for (_a, off, v) in pts if float(off) > hold_off + 1e-6]
+        if not before or not after:
+            out.append(s)                                  # doesn't cross the pause
+            continue
+        out.append(_ramp_piece(s, "start", before[0][0], before, res.hold_s))
+        out.append(_ramp_piece(s, "hold", after[0][0] - hold_off, after, res.hold_s, fresh=True))
+    return out
+
+
+def _fmt_ramp_value(v: float, integer: bool) -> str:
+    return str(int(round(v))) if integer else f"{v:g}"
+
+
+def _ramp_piece(s: "SequenceStep", anchor: str, offset_s: float, pts, hold_s: float,
+                fresh: bool = False) -> "SequenceStep":
+    """One piece of a ramp split at the Hold: a ramp over exactly ``pts`` (its levels, each held
+    ``hold_s``), or — for a single point — the one tune / one-shot run that point is. ``fresh``
+    marks the remainder as a NEW step (no stable id — it is not the original reference target)."""
+    r = s.ramp
+    values = [v for (_off, v) in pts]
+    base: Dict[str, Any] = {"anchor": anchor, "offset_s": float(offset_s), "offset_end_s": None,
+                            "anchor_step_id": "", "anchor_edge": "end", "anchor_own_edge": "start"}
+    if fresh:
+        base["id"] = ""
+    if len(values) == 1:
+        v = values[0]
+        if getattr(r, "mode", "tune") == "run":
+            vs = _fmt_ramp_value(v, bool(getattr(r, "integer", False)))
+            args = list(s.args or []) + ([r.flag, vs] if r.flag else [vs])
+            return s.model_copy(update={**base, "action": StepAction.RUN, "ramp": None,
+                                        "args": args, "replace_args": True, "params": {}})
+        return s.model_copy(update={**base, "action": StepAction.TUNE, "ramp": None,
+                                    "params": {r.param: v}})
+    piece = r.model_copy(update={"start": values[0], "stop": values[-1], "steps": len(values) - 1,
+                                 "step": None, "hold_s": None,
+                                 "duration_s": len(values) * float(hold_s),
+                                 "include_first": True, "include_last": True})
+    return s.model_copy(update={**base, "ramp": piece})
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Panic
 # ══════════════════════════════════════════════════════════════════════════════

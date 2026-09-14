@@ -537,9 +537,23 @@ def ramp_hold_cross(it, h_off: Optional[float], step_bases: Optional[Dict[int, f
     if la != "start" or ra != "start":
         return None
     lo, hi = min(lo, ro), max(lo, ro)
-    if lo <= h_off + 1e-6 and hi > h_off + 1e-6:
-        return (float(lo), float(hi))
-    return None
+    if lo > h_off + 1e-6 or hi <= h_off + 1e-6:
+        return None
+    # Crossing means a POINT FIRES after the pause (the agent defers by fires); a last level whose
+    # hold merely spills past the pause is absorbed by it — nothing is left to resume.
+    if not _ramp_fires_after(dict(getattr(it, "ramp", None) or {}), lo, h_off):
+        return None
+    return (float(lo), float(hi))
+
+
+def _ramp_fires_after(r: dict, start_offset: float, h_off: float) -> bool:
+    """True when a start-laid ramp spec placed at `start_offset` has a point firing after `h_off`."""
+    try:
+        resolved = _resolve_ramp_points(r, "start", 0.0)
+        fires = _place_ramp_points(r, "start", float(start_offset), resolved)
+    except (ValueError, TypeError):
+        return False
+    return any(float(off) > h_off + 1e-6 for (_a, off, _v) in fires)
 
 
 def ramp_crosses_hold(items) -> bool:
@@ -593,12 +607,8 @@ def ramp_crosses_hold_steps(steps) -> bool:
         rd = r if isinstance(r, dict) else (r.model_dump() if hasattr(r, "model_dump") else None)
         if not rd:
             continue
-        try:
-            dur = _ramp_duration(rd)
-        except (ValueError, TypeError):
-            continue
         lo = float(_wire_get(s, "offset_s", 0.0) or 0.0)
-        if lo <= h_off + 1e-6 and lo + dur > h_off + 1e-6:
+        if lo <= h_off + 1e-6 and _ramp_fires_after(rd, lo, h_off):
             return True
     return False
 
@@ -1318,7 +1328,18 @@ def _spans_overlap(s1, s2, tol: float = 1e-6) -> bool:
         return True
     if c1 != c2:
         return False
-    return lo1 <= hi2 + tol and lo2 <= hi1 + tol
+    pt1 = abs(hi1 - lo1) <= tol
+    pt2 = abs(hi2 - lo2) <= tol
+    if pt1 and pt2:
+        return abs(lo1 - lo2) <= tol                    # two points: the same instant
+    # A ramp occupies [lo, hi): its last level's hold ENDS at hi, so a step firing exactly at hi
+    # comes AFTER it (a ramp chained onto another's end, or a crossing ramp's resumed remainder
+    # right after its run-up) — while a step at its START instant still collides.
+    if pt1:
+        return lo2 - tol <= lo1 < hi2 - tol
+    if pt2:
+        return lo1 - tol <= lo2 < hi1 - tol
+    return lo1 < hi2 - tol and lo2 < hi1 - tol
 
 
 def _step_conflict_error(items) -> Optional[str]:

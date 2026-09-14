@@ -381,7 +381,15 @@ class _TimelineCanvas(QWidget):
                     bwd = max(bwd, -so)
             elif tlm._is_ramp(it):
                 (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases, self._step_off_bases)
-                take(la, lo); take(ra, ro)
+                take(la, lo)
+                # a window-A ramp whose last hold merely spills into the pause has nothing to
+                # resume — the pause absorbs it, so its end adds no post-hold content
+                absorbed = (getattr(it, "anchor", "start") == "start" and la == "start"
+                            and ra == "start" and ro > h + 1e-6
+                            and tlm.ramp_hold_cross(it, self._hold_off, self._step_bases,
+                                                    self._step_off_bases) is None)
+                if not absorbed:
+                    take(ra, ro)
             else:
                 a, o = tlm.effective_anchor_offset(it, self._hold_off, self._step_bases, self._step_off_bases)
                 take(a, o)
@@ -425,6 +433,19 @@ class _TimelineCanvas(QWidget):
             return None
         cross = tlm.ramp_hold_cross(it, self._hold_off, self._step_bases, self._step_off_bases)
         return float(self._enter_x) if cross is not None else None
+
+    def _ramp_edges(self, it):
+        """(start_x, stop_x, ends, cut_x) for a ramp. A window-A ramp whose points all fire at or
+        before the pause but whose LAST level's hold spills past it ends AT the enter edge — the
+        pause absorbs that hold (nothing is left to resume, so it isn't split)."""
+        (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases, self._step_off_bases)
+        sx, px = self._place_x(it, la, lo), self._place_x(it, ra, ro)
+        cut = self._ramp_cut_x(it)
+        if (cut is None and self._hold_present and self._enter_x is not None
+                and getattr(it, "anchor", "start") == "start" and la == "start" and ra == "start"
+                and lo <= (self._hold_off or 0.0) + 1e-6 and ro > (self._hold_off or 0.0) + 1e-6):
+            px = float(self._enter_x)
+        return sx, px, ((la, lo), (ra, ro)), cut
 
     def set_scroll_area(self, scroll) -> None:
         self._scroll = scroll
@@ -798,11 +819,7 @@ class _TimelineCanvas(QWidget):
                 g["stop_x"] = self._place_x(it, "stop", it.stop_offset)
             elif tlm._is_ramp(it):
                 # A ramp draws as a duration bar between its two anchored ends.
-                (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases, self._step_off_bases)
-                g["start_x"] = self._place_x(it, la, lo)
-                g["stop_x"] = self._place_x(it, ra, ro)
-                g["ends"] = ((la, lo), (ra, ro))
-                g["cut_x"] = self._ramp_cut_x(it)
+                g["start_x"], g["stop_x"], g["ends"], g["cut_x"] = self._ramp_edges(it)
             else:
                 g["cx"] = self._run_cx(it)
                 g["w"] = self._run_width(it)
@@ -2854,11 +2871,7 @@ class _TimelineCanvas(QWidget):
             g["start_x"] = self._place_x(it, *tlm.bar_start_placement(it, self._hold_off, self._step_bases, self._step_off_bases))
             g["stop_x"] = self._place_x(it, "stop", it.stop_offset)
         elif tlm._is_ramp(it):
-            (la, lo), (ra, ro) = tlm.ramp_span(it, self._hold_off, self._step_bases, self._step_off_bases)
-            g["start_x"] = self._place_x(it, la, lo)
-            g["stop_x"] = self._place_x(it, ra, ro)
-            g["ends"] = ((la, lo), (ra, ro))
-            g["cut_x"] = self._ramp_cut_x(it)
+            g["start_x"], g["stop_x"], g["ends"], g["cut_x"] = self._ramp_edges(it)
         else:
             # _run_cx maps a window-B (anchor='hold') item to the Hold's side, so the pill
             # tracks the cursor correctly instead of jumping to the off-air anchor.

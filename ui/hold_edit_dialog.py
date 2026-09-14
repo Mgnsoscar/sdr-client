@@ -7,7 +7,9 @@ receiver actually lost lock) and then Proceed with the revised steps. This hosts
 editor used to author a sequence, loaded with the running sequence; only the steps AFTER the Hold
 take effect — window A has already run — which the banner states plainly. OK returns the edited
 FULL step list via ``result_steps`` (the caller sends it as ``ProceedRequest.steps``; the agent
-re-extracts window B from it and ignores the already-fired window A).
+re-extracts window B from it and ignores the already-fired window A). A ramp that crosses the Hold
+is loaded SPLIT (``api.models.split_ramps_at_hold``): its run-up stays in window A and its
+not-yet-fired remainder becomes its own post-hold ramp, pre-filled as if resumed (§5.7).
 """
 from __future__ import annotations
 
@@ -38,7 +40,10 @@ class HoldEditDialog(QDialog):
         self.setMinimumSize(780, 480)
         self._build()
         fit_dialog_to_screen(self, 900, 620)   # relax the floor + cap width/height to the screen
-        self._timeline.set_steps(sequence.steps)
+        # A ramp that runs ACROSS the Hold is shown as its run-up (already fired) plus its
+        # not-yet-fired remainder as its OWN post-hold ramp, pre-filled with the levels and timing
+        # resuming would give — so the operator retargets it like any window-B step (§5.7).
+        self._timeline.set_steps(m.split_ramps_at_hold(sequence.steps))
         self.hub.task_done.connect(self._on_task_done)
         self.finished.connect(lambda _=0: self._disconnect())
         self._load()
@@ -53,7 +58,8 @@ class HoldEditDialog(QDialog):
         note = QLabel(
             "Edit the steps AFTER the Hold (the down-ramp and cool-down). Window A has already "
             "run and is left as-is — only the post-hold steps you change here take effect when "
-            "you Proceed.")
+            "you Proceed. A ramp that runs across the Hold shows its remaining part as its own "
+            "post-hold ramp, pre-filled as if simply resumed — retarget it here if you like.")
         note.setWordWrap(True)
         note.setStyleSheet(
             f"font-size: 11px; color: {Palette.ACCENT_INK}; background: {Palette.ACCENT_SOFT}; "

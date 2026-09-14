@@ -174,3 +174,118 @@ def test_tooltip_reads_the_pause_and_the_resume_for_a_crossing_ramp():
     rp2 = _ramp(100.0); cv.add_item(rp2)
     t2 = cv._tooltip_text(rp2)
     assert "pauses" not in t2 and "starts 1 min, 40 s after on-air" in t2
+
+
+# ── Edit-while-holding: the remainder as its own post-hold ramp ───────────────
+
+def _wire_seq(ramp_at=280.0, hold_at=300.0, steps=3, duration=60.0, mode="tune"):
+    spec = m.RampSpec(param="power", start=-50.0, stop=-90.0, steps=steps, duration_s=duration,
+                      mode=mode, flag="--power" if mode == "run" else None)
+    return [
+        m.SequenceStep(anchor="start", offset_s=0.0, action="start", task_name="chirp"),
+        m.SequenceStep(anchor="start", offset_s=ramp_at, action="ramp", task_name="chirp",
+                       ramp=spec, power_view="psd_live", id="rmp"),
+        m.SequenceStep(anchor="start", offset_s=hold_at, action="hold", task_name=""),
+        m.SequenceStep(anchor="hold", offset_s=20.0, action="tune", task_name="chirp",
+                       params={"bw": 12}),
+        m.SequenceStep(anchor="stop", offset_s=0.0, action="stop", task_name="chirp"),
+    ]
+
+
+def _fires(step, base=0.0):
+    """[(time, value)] a wire ramp step fires at (start layout), via the drift-guarded api.ramp."""
+    from api import ramp as _ramp
+    r = step.ramp
+    res = _ramp.resolve_ramp(r.start, r.stop, steps=r.steps, step=r.step, hold_s=r.hold_s,
+                             duration_s=r.duration_s, include_first=r.include_first,
+                             include_last=r.include_last)
+    return [(round(base + off, 6), round(v, 6))
+            for (_a, off, v) in _ramp.place_ramp("start", float(step.offset_s), res)]
+
+
+def test_split_ramps_at_hold_presents_the_remainder_as_a_post_hold_ramp():
+    steps = _wire_seq()          # points 280 (−50), 295 (−63.3), 310 (−76.7), 325 (−90); pause @ 300
+    original = _fires(steps[1])
+    out = m.split_ramps_at_hold(steps)
+    assert not tlm.ramp_crosses_hold_steps(out)                 # nothing crosses any more
+    ramps = [s for s in out if m._step_action(s) == "ramp"]
+    assert len(ramps) == 2
+    a, b = ramps
+    # the run-up: exactly the points that fired before the pause, still window A
+    assert a.anchor == "start" and a.offset_s == 280.0 and a.id == "rmp"
+    assert _fires(a) == original[:2]
+    # the remainder: its own post-hold ramp, defaulting to what resuming would have produced
+    assert b.anchor == "hold" and b.offset_s == pytest.approx(10.0)      # 310 − 300
+    assert b.ramp.start == pytest.approx(-76.666667) and b.ramp.stop == -90.0
+    assert b.ramp.steps == 1 and b.ramp.duration_s == pytest.approx(30.0)
+    assert b.power_view == "psd_live" and b.id == ""                     # a NEW step, not the target
+    assert _fires(b, base=300.0) == original[2:]                         # identical fire times/levels
+    # the other steps ride through untouched, in order
+    assert [m._step_action(s) for s in out] == ["start", "ramp", "ramp", "hold", "tune", "stop"]
+    assert out[0] is steps[0] and out[3] is steps[2] and out[-1] is steps[-1]
+
+
+def test_split_ramps_at_hold_lone_points_become_tunes():
+    # points 270, 285, 300 | 315 → the remainder is one level: a post-hold TUNE 15 s after the pause
+    out = m.split_ramps_at_hold(_wire_seq(ramp_at=270.0))
+    tail = [s for s in out if s.anchor == "hold" and m._step_action(s) == "tune"
+            and "power" in (s.params or {})]
+    assert len(tail) == 1 and tail[0].offset_s == pytest.approx(15.0)
+    assert tail[0].params == {"power": -90.0} and tail[0].ramp is None
+    # points 295 | 310, 325, 340 → the run-up is one level: a window-A tune at 295
+    out = m.split_ramps_at_hold(_wire_seq(ramp_at=295.0))
+    head = next(s for s in out if s.anchor == "start" and m._step_action(s) == "tune")
+    assert head.offset_s == 295.0 and head.params == {"power": -50.0}
+    rem = next(s for s in out if s.anchor == "hold" and m._step_action(s) == "ramp")
+    assert rem.offset_s == pytest.approx(10.0) and rem.ramp.steps == 2
+    assert _fires(rem, base=300.0) == _fires(_wire_seq(ramp_at=295.0)[1])[1:]
+    # a run-mode ramp's lone remainder is the one-shot run that point is
+    out = m.split_ramps_at_hold(_wire_seq(ramp_at=270.0, mode="run"))
+    run = next(s for s in out if s.anchor == "hold" and m._step_action(s) == "run")
+    assert run.args[-2:] == ["--power", "-90"] and run.replace_args
+
+
+def test_split_ramps_at_hold_leaves_non_crossing_sequences_alone():
+    steps = _wire_seq(ramp_at=100.0)                             # ends at 160: before the pause
+    out = m.split_ramps_at_hold(steps)
+    assert [s is t for s, t in zip(out, steps)] == [True] * len(steps)
+    free = [s for s in _wire_seq() if m._step_action(s) != "hold"]
+    assert m.split_ramps_at_hold(free) == free                   # no Hold: unchanged
+
+
+def test_hold_edit_dialog_loads_a_crossing_ramp_split():
+    from PyQt6.QtCore import QObject, pyqtSignal
+    from ui.hold_edit_dialog import HoldEditDialog
+
+    class _EditHub(QObject):
+        task_done = pyqtSignal(str, object)
+
+        def __init__(self):
+            super().__init__()
+            client = type("C", (), {
+                "list_tasks": lambda self_: [type("T", (), {"name": "chirp"})()],
+                "get_tasks_yaml": lambda self_: ("tasks:\n  - name: chirp\n"
+                                                 "    command: [python3, chirp.py]\n"),
+                "get_calibration": lambda self_: {"unit_type": "broadcaster", "valid": True,
+                                                  "signals": {}},
+            })()
+            self.fleet = type("F", (), {"get": lambda self_, h: client})()
+
+        def run_async(self, label, fn):
+            try:
+                res = fn()
+            except Exception as exc:                         # noqa: BLE001
+                res = exc
+            self.task_done.emit(label, res)
+
+    seq = m.Sequence(id="s1", name="cross", steps=_wire_seq())
+    dlg = HoldEditDialog(_EditHub(), "unit", seq)
+    _app.processEvents()
+    loaded = dlg._timeline.steps()
+    assert not tlm.ramp_crosses_hold_steps(loaded)               # split on load
+    rem = [s for s in loaded if s.anchor == "hold" and m._step_action(s) == "ramp"]
+    assert len(rem) == 1 and rem[0].offset_s == pytest.approx(10.0)
+    assert rem[0].ramp.stop == -90.0                             # retargetable like any window-B step
+    dlg._accept()
+    assert dlg.result_steps is not None and any(s.anchor == "hold" for s in dlg.result_steps)
+    dlg.close()
