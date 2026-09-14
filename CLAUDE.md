@@ -71,6 +71,46 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — right-click context menus (per-kind actions · inline offsets · Tune…/Ramp… at the click · empty-canvas Add…): COMPLETE (branch `claude/context-menu-actions`, client-only)
+Owner ask: right-clicking a duration task should offer edit · set the offset from its anchor · tune… ·
+ramp… · delete. Implemented in `ui/timeline_editor.py` (`_TimelineCanvas`), client-only — no wire /
+agent / capability change; drift-guarded files untouched. Suite 1074 → 1086 offscreen.
+- **One shape per kind** (`_context_menu_spec`, pure/tested): a DURATION task → `Edit… · Start offset… ·
+  Stop offset… · [Remove anchor] · Tune… · Ramp… · Delete` (never Duplicate — one bar per task, rule E);
+  a tune / ramp / one-shot → `Edit… · Offset… · Duplicate · [Remove anchor] · Delete`; the Hold →
+  `Edit… · Offset… · Delete`; a window-filling ("both") ramp has no `Offset…` (`_offset_entries`); a
+  multi-selection keeps `Delete selected`. `_run_context_action(it, label, x, global_pos)` dispatches.
+- **Inline offset entry** (`_OffsetPopup`, a frameless `Popup` QFrame at the cursor — caption + one
+  `DurationSpinBox`, Enter applies / Esc or a click elsewhere cancels; no dialog): the caption names
+  the reference (`_offset_reference`: `Start — from on-air` / `from resume` / `from <target>'s end`,
+  `Stop — from off-air`, `Offset — from the pause (≤ 0)`, `Pause at — from on-air`). `_prompt_offset`
+  builds it; `_apply_offset(it, which, value)` commits through the SAME clamps a drag gets
+  (`_clamp_tune_offset` + `_clamp_for_dependents` for a tune/ramp, a window-B bar start ≥ 0, the bar's
+  `_auto_rf_gate`), one undo step, a no-op pushes none.
+- **Tune… / Ramp… on a duration task** (`_add_step_on`): a new step on THAT task, seeded at the time
+  under the cursor — `_window_at_x(x)` → the `(anchor, offset)` of the WINDOW clicked (on-air offset in
+  the green window + warm-up, resume offset in the post-hold window / 0 on the Hold band, off-air
+  offset in the red window + cool-down; the nearer absolute window in the hatched stretch), snapped
+  to the 1 s grid, then clamped inside the task by `_seed_item` (extended with `task` / `anchor` /
+  `offset`; `add_new` passes them through, a Hold takes an `offset`). The step / ramp editor opens
+  pre-filled (task, anchor, offset); Cancel adds nothing.
+- **Empty canvas** (`contextMenuEvent` → `_open_canvas_menu` / `_canvas_menu_spec` /
+  `_run_canvas_action`): `Add duration task… · one-shot… · tune… · ramp… · [Add Hold]` at the clicked
+  time; a tune / ramp takes the task of the ROW under the cursor (`_task_at_y`, a bar or its tune/ramp
+  rows), else the default; `Add Hold` only while none exists and Hold authoring is on.
+- **Hold-edit (locked)**: a fired step / the Hold band / the running task's ELAPSED stretch (x before
+  the resume edge, `_on_post_hold_stretch`) → the lock notice only; the task running THROUGH the Hold
+  on its POST-HOLD stretch → `Tune… · Ramp… · Stop offset…` (unselected; Edit / start / Delete stay
+  refused — `_can_set_offset` backs the mutation layer, `_seed_item` coerces an on-air/enter seed to
+  `hold` while locked); a window-B step keeps its full menu; the empty-canvas menu is offered only on
+  the post-hold side, without `Add Hold`.
+Tests: `tests/test_context_menu_actions.py` (12: the shape per kind + conditional items; `_window_at_x`
+without / with a Hold incl. merged; Tune…/Ramp… seed + clamp + the real dialogs pre-filled; the canvas
+menu + `_task_at_y`; right-click routing; `_apply_offset` clamps / undo / refusals; popup captions +
+Enter commit; locked-mode menus + refusals). `test_timeline_step_anchor_ui.py` /
+`test_hold_edit_locked.py` updated to the new shape (the running task's live stop grip now opens the
+restricted menu instead of the notice).
+
 ## Current state — Hold-edit: the ELAPSED window is frosted + LOCKED (option A): COMPLETE (branch `claude/step-to-step-anchoring`, client-only)
 Owner ask: while a run is HOLDING, the edit dialog should grey out the already-elapsed window and make
 it impossible to even try to edit those steps. Mockup `docs/hold-edit-elapsed-mockup.html` (published

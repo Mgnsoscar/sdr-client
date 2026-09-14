@@ -345,7 +345,7 @@ def test_context_menu_spec_varies_by_item():
                              "steps": 3, "duration_s": 6.0})
     cv = _chirp_editor([_bar(), up, down, _hold(400.0)])._canvas
     # an anchored item gets Remove anchor; a plain item doesn't; a Hold has no Duplicate
-    assert cv._context_menu_spec(down) == ["Edit…", "Duplicate", "Remove anchor", "—", "Delete"]
+    assert cv._context_menu_spec(down) == ["Edit…", "Offset…", "Duplicate", "Remove anchor", "—", "Delete"]
     assert "Remove anchor" not in cv._context_menu_spec(up)
     hold = next(it for it in cv._items if tlm._is_hold(it))
     hspec = cv._context_menu_spec(hold)
