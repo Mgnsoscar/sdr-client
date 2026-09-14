@@ -468,6 +468,7 @@ class _PlanCanvas(_TimelineCanvas):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         baseline = int(self._baseline)
         on_x, off_x = int(self._on), int(self._off)
+        top = LANES_TOP - 8                     # the row band's top, as the sequence canvas paints it
 
         # The on-air window is the whole stage.
         p.fillRect(on_x, LANES_TOP - 10, off_x - on_x, baseline - (LANES_TOP - 10),
@@ -479,8 +480,11 @@ class _PlanCanvas(_TimelineCanvas):
         p.setFont(tick_font)
         self._paint_window_ticks(p, baseline, on_x, off_x)
 
-        self._paint_anchor(p, on_x, baseline, "ON-AIR", Palette.ONLINE)
-        self._paint_anchor(p, off_x, baseline, "OFF-AIR", Palette.CRASH)
+        # The shared anchor pills (signature: painter, x, top, baseline, label, colour) — keep
+        # this call in step with _TimelineCanvas._paint_anchor; tests/test_plan_canvas_paint.py
+        # renders this canvas so a drift between the two shows up in the suite, not the field.
+        self._paint_anchor(p, on_x, top, baseline, "ON-AIR", Palette.ONLINE)
+        self._paint_anchor(p, off_x, top, baseline, "OFF-AIR", Palette.CRASH)
 
         cap_font = QFont(); cap_font.setPointSize(9); cap_font.setItalic(True)
         p.setFont(cap_font)

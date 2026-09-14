@@ -71,6 +71,23 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — plan editor crash on open ("New plan" / "Edit"): FIXED (branch `claude/plan-canvas-paint-fix`, client-only)
+Owner report: opening the plan editor crashed the app — `TypeError: _TimelineCanvas._paint_anchor()
+missing 1 required positional argument: 'color'` from `ui/plan_editor.py` `_PlanCanvas.paintEvent`.
+Root cause: `_PlanCanvas` subclasses the SEQUENCE canvas and paints through its helpers; the
+sequence-editor redesign gave `_TimelineCanvas._paint_anchor` a `top` argument (the row band's top,
+for the pill) and the plan canvas's own `paintEvent` still called the old five-argument form. PyQt
+aborts the process on an unhandled exception inside a virtual override, hence the hard crash. Nothing
+in the suite ever RENDERED the plan canvas (its tests covered round-trips + the dialogs' logic), so
+the drift stayed green. Fix: the plan canvas passes `top = LANES_TOP − 8` exactly as the base does
+(`_paint_bar(p, it)` and the rest of the shared helpers were still in step). Regression net:
+`tests/test_plan_canvas_paint.py` renders the plan canvas EMPTY (New plan), with placed bars (Edit),
+and the whole `PlanEditorDialog` both ways, capturing paint-time exceptions through a `sys.excepthook`
+fixture (PyQt calls a custom hook instead of aborting; the hook keeps only the formatted TEXT — holding
+the traceback keeps the failed paintEvent's frame and its still-active `QPainter` alive, which is fatal
+for the next render) and failing on any — so a future helper-signature drift between the two canvases
+fails here, not in the field. Suite 1086 → 1089 offscreen.
+
 ## Current state — right-click context menus (per-kind actions · inline offsets · Tune…/Ramp… at the click · empty-canvas Add…): COMPLETE (branch `claude/context-menu-actions`, client-only)
 Owner ask: right-clicking a duration task should offer edit · set the offset from its anchor · tune… ·
 ramp… · delete. Implemented in `ui/timeline_editor.py` (`_TimelineCanvas`), client-only — no wire /
