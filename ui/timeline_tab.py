@@ -18,13 +18,17 @@ stop = off-air / T_end). Blocks are positioned by time down the day; overlapping
 plans sit side by side. The calendar marks which dates carry plans, so a schedule
 can be built days in advance. Clicking a block's body edits or removes it.
 
-Arming is manual and per-block: each block carries an Arm button (disabled once
-its start time has passed) that arms the plan's sequences at their absolute
-scheduled times — a fixed window, so each sequence runs and stops on schedule
-even when armed hours ahead. A block turns amber once armed and green once on
-air, with a Stop to cancel/abort; state is read from the units' runs, grouped by
-plan and matched to the block's window. (Arming mid-window — after the start —
-is intentionally not supported yet.)
+Arming is manual: each block carries an Arm button (disabled once its start time
+has passed) that arms the plan's sequences at their absolute scheduled times — a
+fixed window, so each sequence runs and stops on schedule even when armed hours
+ahead — and the timeline header's **Arm all (N)** arms every not-yet-started, idle
+plan of the shown day in one go (one confirmation listing them; armed in start
+order, a refused plan never stops the rest). A block turns amber once armed and
+green once on air, with a Stop to cancel/abort; state is read from the units'
+runs, grouped by plan and matched to the block's window. (Arming mid-window —
+after the start — is intentionally not supported yet.) A unit's agent admits a
+later window while an earlier plan is on air from 1.27.3; an older agent refuses
+it as "task(s) already running", so arm the day before the first plan starts there.
 
 Persistence is the local ScheduleStore (schedule.json); plan names/descriptions
 are resolved live from the PlanStore.
@@ -134,6 +138,21 @@ def _arm_scheduled(fleet: Fleet, plan: m.Plan, start_utc: datetime,
             out.append((item, run, None))
         except Exception as exc:  # noqa: BLE001 — reported per item
             out.append((item, None, str(exc)))
+    return out
+
+
+def _arm_scheduled_many(fleet: Fleet, jobs: List[tuple]) -> List[tuple]:
+    """Arm several scheduled entries in one go ("Arm all"). Chronological — a unit's
+    agent admits each later window against the runs already armed before it — and a
+    refused plan never stops the rest (each is reported on its own). Worker thread.
+    `jobs` = [(entry, plan, start_utc, stop_utc)]; returns
+    [(entry, plan, [(item, SequenceRun|None, error|None)] or a whole-plan error string)]."""
+    out = []
+    for entry, plan, start_utc, stop_utc in sorted(jobs, key=lambda j: j[2]):
+        try:
+            out.append((entry, plan, _arm_scheduled(fleet, plan, start_utc, stop_utc)))
+        except Exception as exc:  # noqa: BLE001 — e.g. a unit unreachable for its clock
+            out.append((entry, plan, str(exc)))
     return out
 
 
@@ -1140,13 +1159,23 @@ class TimelineTab(QWidget):
         self._tl_sub.setStyleSheet(f"font-size:12.5px; color:{Palette.TEXT_MUTED};")
         hbox.addWidget(eb); hbox.addLayout(drow); hbox.addWidget(self._tl_sub)
         hh.addLayout(hbox, 1)
-        self._tl_back = QPushButton("Back to today")
-        self._tl_back.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._tl_back.setStyleSheet(
+        head_btn_qss = (
             f"QPushButton {{ height:30px; padding:0 13px; border:1px solid {Palette.BORDER};"
             f" border-radius:9px; background:{Palette.SURFACE}; color:{Palette.ACCENT_INK};"
             f" font-size:12px; font-weight:600; }}"
-            f"QPushButton:hover {{ background:{Palette.ACCENT_SOFT}; border-color:{Palette.ACCENT_SOFT}; }}")
+            f"QPushButton:hover {{ background:{Palette.ACCENT_SOFT}; border-color:{Palette.ACCENT_SOFT}; }}"
+            f"QPushButton:disabled {{ color:{Palette.TEXT_FAINT}; background:{Palette.SURFACE}; }}")
+        # Arm every not-yet-started, idle plan of the shown day in one go (one confirm).
+        self._tl_arm_all = QPushButton("Arm all")
+        self._tl_arm_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tl_arm_all.setStyleSheet(head_btn_qss.replace(Palette.ACCENT_INK, Palette.ARMED, 1))
+        self._tl_arm_all.setToolTip("Arm every plan on this day that hasn't started yet, so they "
+                                    "all start and stop on schedule by themselves.")
+        self._tl_arm_all.clicked.connect(self._on_arm_all)
+        hh.addWidget(self._tl_arm_all, 0, Qt.AlignmentFlag.AlignTop)
+        self._tl_back = QPushButton("Back to today")
+        self._tl_back.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tl_back.setStyleSheet(head_btn_qss)
         self._tl_back.clicked.connect(self._go_timeline_today)
         hh.addWidget(self._tl_back, 0, Qt.AlignmentFlag.AlignTop)
         cv.addWidget(head)
@@ -1246,6 +1275,21 @@ class TimelineTab(QWidget):
         rows.sort(key=lambda r: r["start"])
         return rows
 
+    def _armable_entries(self, d: date) -> List[m.ScheduledPlan]:
+        """The entries "Arm all" would arm on day `d`: not started yet, IDLE (no active run
+        of theirs on any unit — an armed / on-air block is left alone), with a plan that
+        still exists and has sequences. In start order."""
+        out = []
+        for row in self._entries_on(d):
+            if not row["armable"] or row["state"] != "idle":
+                continue
+            entry = self._store.get(row["id"])
+            plan = self._plan_for(entry) if entry is not None else None
+            if plan is None or not plan.items:
+                continue
+            out.append(entry)
+        return out
+
     def _refresh_compact(self) -> None:
         self._compact.set_day(self._selected_day, self._entries_on(self._selected_day))
 
@@ -1258,6 +1302,9 @@ class TimelineTab(QWidget):
         self._tl_date.setText(f"{_WDAY_NAMES[d.weekday()]}, {d.day} {_MONTH_NAMES[d.month - 1]} {d.year}")
         self._tl_badge.setVisible(is_today)
         self._tl_back.setVisible(not is_today)
+        n_armable = len(self._armable_entries(d))
+        self._tl_arm_all.setText(f"Arm all ({n_armable})" if n_armable else "Arm all")
+        self._tl_arm_all.setEnabled(n_armable > 0)
         self._tl_sub.setText(
             f"{len(blocks)} plan{'s' if len(blocks) != 1 else ''}" if blocks else "No plans scheduled")
         total = len(self._store.entries())
@@ -1414,43 +1461,60 @@ class TimelineTab(QWidget):
             lambda: (self.hub.fleet.clock_skew(hostnames),
                      self.hub.fleet.sequences_all(hostnames)))
 
-    def _finish_preflight(self, entry: m.ScheduledPlan, result) -> None:
-        plan = self._plan_for(entry)
-        if plan is None:
-            return
-        # result = (clock_skew_result, sequences_all_result); tolerate the old 2-tuple shape.
+    # ── Pre-flight pieces shared by the per-block Arm and Arm all ──────────────
+
+    @staticmethod
+    def _split_preflight(result) -> Tuple[Optional[float], dict]:
+        """(max clock skew, sequences-by-host) out of the preflight worker's result =
+        (clock_skew_result, sequences_all_result); tolerates the old skew-only shape."""
         skew_result, seqs = (result if isinstance(result, tuple) and len(result) == 2
                              and isinstance(result[0], tuple) else (result, {}))
         max_skew = (skew_result[1] if isinstance(skew_result, tuple) and len(skew_result) == 2
                     else None)
-        start_utc, stop_utc = _to_utc(entry.start), _to_utc(entry.stop)
-        s, e = _parse(entry.start), _parse(entry.stop)
-        skew_note = ""
+        return max_skew, (seqs if isinstance(seqs, dict) else {})
+
+    @staticmethod
+    def _skew_note(max_skew: Optional[float]) -> str:
         if max_skew is not None and max_skew > CLOCK_WARN_SKEW_S:
-            skew_note = (f"\n\n⚠ Unit clocks differ by {max_skew:.1f}s — a shared on-air time "
-                         f"depends on synced clocks; units may differ by that much.")
-        n_units = len({i.hostname for i in plan.items})
-        # A Hold has no effect on the schedule (unattended): the run passes straight
-        # through it (docs/sequence-hold-step.md §7). Tell the operator up-front — checking a
-        # plan-local step copy AND a stored sequence an item references.
-        hold_note = ""
-        if _plan_has_hold(plan, seqs):
-            hold_note = ("\n\n⏸ This plan contains a Hold. Scheduled runs are unattended, so "
-                         "the Hold is disabled here: the sequence runs straight through without "
-                         "pausing (the down-ramp starts immediately after the up-ramp). Run it "
-                         "from the Library if you need the operator-gated pause.")
-        # Safety gate (mirrors the Library/plan arm): a step-to-step anchor needs agent ≥ 1.24.0
-        # (a negative step offset ≥ 1.25.0) — block rather than let the agent 400 the arm.
+            return (f"\n\n⚠ Unit clocks differ by {max_skew:.1f}s — a shared on-air time "
+                    f"depends on synced clocks; units may differ by that much.")
+        return ""
+
+    # A Hold has no effect on the schedule (unattended): the run passes straight through it
+    # (docs/sequence-hold-step.md §7). Told up-front — for a plan-local step copy AND a
+    # stored sequence an item references.
+    _HOLD_NOTE = ("Scheduled runs are unattended, so the Hold is disabled here: the sequence "
+                  "runs straight through without pausing (the down-ramp starts immediately "
+                  "after the up-ramp). Run it from the Library if you need the operator-gated "
+                  "pause.")
+
+    def _step_anchor_block(self, plan: m.Plan, seqs: dict) -> List[str]:
+        """Safety gate (mirrors the Library/plan arm): a step-to-step anchor needs agent
+        ≥ 1.24.0 (a negative step offset ≥ 1.25.0) — block rather than let the agent 400
+        the arm. Lines naming the offending units/steps, empty when fine."""
         def _item_steps(it):
             if it.steps:
                 return it.steps
-            val = seqs.get(it.hostname) if isinstance(seqs, dict) else None
+            val = seqs.get(it.hostname)
             stored = (next((s for s in val if s.id == it.sequence_id), None)
                       if isinstance(val, list) else None)
             return stored.steps if stored is not None else []
-        sa_block = _step_anchor_block_lines(
+        return _step_anchor_block_lines(
             ((it.hostname, it.unit_label or it.hostname, _item_steps(it)) for it in plan.items),
             self.hub.fleet)
+
+    def _finish_preflight(self, entry: m.ScheduledPlan, result) -> None:
+        plan = self._plan_for(entry)
+        if plan is None:
+            return
+        max_skew, seqs = self._split_preflight(result)
+        start_utc, stop_utc = _to_utc(entry.start), _to_utc(entry.stop)
+        s, e = _parse(entry.start), _parse(entry.stop)
+        skew_note = self._skew_note(max_skew)
+        n_units = len({i.hostname for i in plan.items})
+        hold_note = ("\n\n⏸ This plan contains a Hold. " + self._HOLD_NOTE
+                     if _plan_has_hold(plan, seqs) else "")
+        sa_block = self._step_anchor_block(plan, seqs)
         if sa_block:
             QMessageBox.warning(
                 self, "Cannot arm plan",
@@ -1474,6 +1538,95 @@ class TimelineTab(QWidget):
         self.hub.run_async(
             f"tl_arm:{entry.id}",
             lambda: _arm_scheduled(self.hub.fleet, plan, start_utc, stop_utc))
+
+    # ── Arm all (the shown day) ─────────────────────────────────────────────────
+
+    def _on_arm_all(self) -> None:
+        """Arm every not-yet-started, idle plan of the shown day in one go: one preflight
+        over all their units, one confirmation listing the plans, then a chronological
+        arm — each plan then starts and stops on its own schedule."""
+        if getattr(self, "_arm_busy", False) or self.hub is None:
+            return
+        entries = self._armable_entries(self._timeline_day)
+        if not entries:
+            QMessageBox.information(self, "Nothing to arm",
+                                    "Every plan on this day has already started or is armed.")
+            return
+        ready: List[m.ScheduledPlan] = []
+        skipped: List[Tuple[m.ScheduledPlan, str]] = []
+        for entry in entries:
+            plan = self._plan_for(entry)
+            missing = [i for i in plan.items if i.hostname not in self.hub.fleet]
+            if missing:
+                names = ", ".join(i.unit_label or i.hostname for i in missing)
+                skipped.append((entry, f"units not in the fleet: {names}"))
+            else:
+                ready.append(entry)
+        if not ready:
+            QMessageBox.warning(
+                self, "Cannot arm",
+                "None of this day's plans can be armed:\n"
+                + "\n".join(f"• {self._resolve(en)[0]}: {why}" for en, why in skipped))
+            return
+        hostnames = sorted({i.hostname for en in ready for i in self._plan_for(en).items})
+        self._arm_all_pending = (ready, skipped)
+        self._arm_busy = True
+        self._status.setText(f"pre-flight for {len(ready)} plan(s)…")
+        self.hub.run_async(
+            f"tl_preflight_all:{self._timeline_day.isoformat()}",
+            lambda: (self.hub.fleet.clock_skew(hostnames),
+                     self.hub.fleet.sequences_all(hostnames)))
+
+    def _finish_preflight_all(self, result) -> None:
+        ready, skipped = getattr(self, "_arm_all_pending", None) or ([], [])
+        self._arm_all_pending = None
+        if not ready:
+            return
+        max_skew, seqs = self._split_preflight(result)
+        jobs: List[tuple] = []
+        lines: List[str] = []
+        holds: List[str] = []
+        for entry in ready:
+            plan = self._plan_for(entry)
+            start_utc, stop_utc = _to_utc(entry.start), _to_utc(entry.stop)
+            s, e = _parse(entry.start), _parse(entry.stop)
+            if plan is None or start_utc is None or stop_utc is None:
+                skipped.append((entry, "its plan or window is no longer valid"))
+                continue
+            if self._step_anchor_block(plan, seqs):
+                skipped.append((entry, "a step anchored to another step, which these units’ "
+                                       "agents can’t resolve yet (update the agents)"))
+                continue
+            if _plan_has_hold(plan, seqs):
+                holds.append(plan.name)
+            n_units = len({i.hostname for i in plan.items})
+            lines.append(f"• {s.strftime('%H:%M')} → {e.strftime('%H:%M')}   {plan.name}   "
+                         f"({n_units} unit{'s' if n_units != 1 else ''})")
+            jobs.append((entry, plan, start_utc, stop_utc))
+        skip_note = ("\n\nSkipped:\n" + "\n".join(f"• {self._resolve(en)[0]} — {why}"
+                                                   for en, why in skipped) if skipped else "")
+        if not jobs:
+            QMessageBox.warning(self, "Cannot arm", "None of this day's plans can be armed." + skip_note)
+            self._status.setText("arm all: nothing armable")
+            return
+        hold_note = ("\n\n⏸ " + ", ".join(f"“{n}”" for n in holds) + " contain"
+                     + ("s" if len(holds) == 1 else "") + " a Hold. " + self._HOLD_NOTE
+                     if holds else "")
+        d = self._timeline_day
+        if QMessageBox.question(
+            self, "Arm all plans",
+            f"Arm {len(jobs)} plan(s) on {_WDAY_NAMES[d.weekday()][:3]} {d.day} "
+            f"{_MONTH_NAMES[d.month - 1][:3]}? Each starts and stops at its own window:\n\n"
+            + "\n".join(lines) + self._skew_note(max_skew) + hold_note + skip_note,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
+        ) != QMessageBox.StandardButton.Yes:
+            self._status.setText("arm cancelled")
+            return
+        self._status.setText(f"arming {len(jobs)} plan(s)…")
+        self.hub.run_async(
+            f"tl_arm_all:{d.isoformat()}",
+            lambda: _arm_scheduled_many(self.hub.fleet, jobs))
 
     def _on_stop(self, entry_id: str) -> None:
         entry = self._store.get(entry_id)
@@ -1523,6 +1676,14 @@ class TimelineTab(QWidget):
         if ":" not in label or not label.startswith("tl_"):
             return
         op, entry_id = label.split(":", 1)
+        if op == "tl_preflight_all":       # Arm all: the id is the day, not an entry
+            self._arm_busy = False
+            self._finish_preflight_all(result)
+            return
+        if op == "tl_arm_all":
+            self._report_arm_all(result)
+            self._refresh_runs()
+            return
         entry = self._store.get(entry_id)
         if op == "tl_preflight":
             self._arm_busy = False       # preflight done; the modal dialog guards the rest
@@ -1557,3 +1718,33 @@ class TimelineTab(QWidget):
             self._status.setText("arm: some units failed")
         else:
             self._status.setText(f"armed {len(ok)} sequence(s)")
+
+    def _report_arm_all(self, result) -> None:
+        """Per-plan outcome of an Arm all: every plan whose sequences all armed counts as
+        armed; a plan with any refused sequence is listed with the agent's reason (the
+        others were still armed — a refusal never stops the rest)."""
+        if isinstance(result, Exception) or not isinstance(result, list):
+            self._status.setText("arm all failed")
+            QMessageBox.warning(self, "Arm all failed", f"{result}")
+            return
+        armed = 0
+        failed: List[str] = []
+        for entry, plan, res in result:
+            name = plan.name or plan.id
+            if not isinstance(res, list):
+                failed.append(f"• {name}: {res}")
+                continue
+            bad = [(it, err) for it, run, err in res if err is not None]
+            if bad:
+                failed.append(f"• {name}: " + "; ".join(
+                    f"{it.unit_label or it.hostname} / {it.sequence_name or it.sequence_id}: {err}"
+                    for it, err in bad))
+            else:
+                armed += 1
+        n = len(result)
+        if failed:
+            QMessageBox.warning(self, "Arm all — partial",
+                                f"Armed {armed} of {n} plan(s).\n\nFailed:\n" + "\n".join(failed))
+            self._status.setText(f"armed {armed} of {n} plan(s) — some failed")
+        else:
+            self._status.setText(f"armed {armed} plan(s)")

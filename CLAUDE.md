@@ -71,6 +71,39 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — schedule tab "Arm all (N)": arm a whole day of plans in one go: COMPLETE (branch `claude/schedule-arm-all`, cross-repo with agent 1.27.3)
+Owner ask: four non-overlapping plans in the schedule — arm ALL of them and let them start/stop by
+themselves. Scheduled runs already fire at absolute times on the agent; the blockers were (a) the
+agent's two arm guards refusing a LATER, disjoint window once an earlier plan was on air / touching
+it (fixed in `sdr-agent` 1.27.3, `sequence_runner.arm`: a task on air BECAUSE of an active run is
+exempt from "task(s) already running", and the channel span now counts the stop tail after off-air —
+see its CLAUDE.md), and (b) the client arming one block per click, each with its own confirm. Client
+side (`ui/timeline_tab.py`, no wire/capability change; works against any agent — an older one just
+refuses the later arm and it's reported per plan):
+- **`_arm_scheduled_many(fleet, jobs)`** (worker) — `jobs = [(entry, plan, start_utc, stop_utc)]`,
+  armed in START order (a unit's agent admits each later window against the runs armed before it) via
+  the existing `_arm_scheduled` per plan; a whole-plan failure (e.g. a unit unreachable for its clock)
+  becomes an error string, a refused sequence stays the per-item error — a refusal never stops the rest.
+- **`Arm all (N)`** button in the timeline card header (`_tl_arm_all`, amber, left of Back-to-today):
+  `_refresh_planner` relabels/enables it from **`_armable_entries(day)`** = the day's rows that are
+  `armable` (plan exists, start in the future) AND `idle` (no active run of theirs — an armed / on-air
+  block is left alone), whose plan has items, in start order.
+- **`_on_arm_all`** → drops entries whose units aren't in the fleet (listed as Skipped, not fatal),
+  ONE preflight over all their units (`tl_preflight_all:<day>`: `clock_skew` + `sequences_all`) →
+  **`_finish_preflight_all`**: per entry the step-anchor gate (skipped with the reason) + the Hold
+  notice (collected by plan name), ONE confirm listing `• HH:MM → HH:MM   Plan   (n units)` + the skew
+  note + Skipped → `tl_arm_all:<day>` → **`_report_arm_all`**: "armed X plan(s)" or a partial box naming
+  each failed plan with the agent's reason (a plan with any refused sequence counts as failed; the
+  others armed). `_on_task_done` routes the two `_all` ops before the per-entry lookup. The per-block
+  path is unchanged; its preflight pieces were factored into `_split_preflight` / `_skew_note` /
+  `_HOLD_NOTE` / `_step_anchor_block` and shared.
+Tests: `tests/test_schedule_arm_all.py` (worker order + continue past a refusal + whole-plan error;
+the button counts only idle not-yet-started entries with a plan and reads "Arm all" disabled on a past
+day; a click arms both plans of the day with one confirm in start order at their absolute windows and
+the blocks read armed; a refused plan is reported and the rest arm (the refused one stays retryable);
+a missing unit is skipped; nothing armable → an info box). Suite 1086 → 1092 offscreen (off `main`;
+the plan-canvas paint fix branch adds its 3 on top).
+
 ## Current state — right-click context menus (per-kind actions · inline offsets · Tune…/Ramp… at the click · empty-canvas Add…): COMPLETE (branch `claude/context-menu-actions`, client-only)
 Owner ask: right-clicking a duration task should offer edit · set the offset from its anchor · tune… ·
 ramp… · delete. Implemented in `ui/timeline_editor.py` (`_TimelineCanvas`), client-only — no wire /
