@@ -3,7 +3,7 @@ Main window — the application shell.
 
 Layout:
     ┌─────────────────────────────────────────────────────────┐
-    │ [Timeline][Units][Sequences][Plans]   ●clocks   🔴 PANIC│  top bar
+    │ [Timeline][Units][Library]  14:32:07 NTP✓  ●clocks  🔴 PANIC│  top bar
     ├─────────────────────────────────────────────────────────┤
     │                  active tab (QStackedWidget)            │
     ├─────────────────────────────────────────────────────────┤
@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
 
 from api import models as m
 from .alert_feed import AlertFeed
+from .clock_widget import SyncedClockWidget
 from .library_tab import LibraryTab
 from .qt_adapter import DataHub
 from .theme import Palette
@@ -105,6 +106,12 @@ class MainWindow(QMainWindow):
             self._tab_buttons.append(btn)
 
         lay.addStretch(1)
+
+        # The wall clock: internet-synchronized (NTP), falling back to this PC's clock when
+        # no time server is reachable — always visible, so nobody needs a time.is tab open.
+        self.synced_clock = SyncedClockWidget(bar)
+        lay.addWidget(self.synced_clock)
+        lay.addWidget(QLabel("  "))
 
         # Clock-sync indicator. Clickable when a unit's clock differs from this PC
         # (so schedules would miss): a click sets the reachable units' clocks here.

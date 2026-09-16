@@ -36,6 +36,35 @@ captured at import (`config.DEFAULT_UNITS_FILE`), so `screenshot.py` sets it BEF
 cable) so the unit is calibrated by default — `screenshot.py --tab calibration` drills into the unit's
 Calibration panel to render it.
 
+## Current state — internet-synchronized clock in the top bar (NTP, PC-clock fallback): COMPLETE (branch `claude/synced-clock`, client-only)
+Owner ask: a clearly visible, internet-synchronized clock so an operator doesn't keep a `time.is`
+tab open; NTP-synced, not the PC clock, and falling back to the PC clock when NTP can't be reached.
+Client-only; no agent/scripts/wire/capability change; drift-guarded files untouched.
+- **`state/ntp_clock.py`** (new, pure stdlib, no Qt) — SNTP (RFC 4330): `query_ntp(server)` does one
+  UDP/123 exchange and `parse_ntp_response` derives the PC clock's OFFSET from true time via the
+  four-timestamp formula (rejecting an untrusted reply — wrong mode, leap-alarm `LI==3`, stratum 0
+  kiss-o'-death, empty transmit stamp); `sync(servers)` tries `pool.ntp.org` → Google → Cloudflare →
+  NIST, first to answer wins. **`SyncedClock`** stores only the offset (never a frozen time), so
+  `now()` = `time.time() + offset` advances smoothly between syncs; a failed re-sync KEEPS the last
+  good offset (the PC drifts far less than it's likely to be wrong outright). `source` is `"ntp"` or
+  `"local"`; `uncertainty_s()` = rtt/2; `status_text()`/`describe()` render the chip + tooltip.
+- **`ui/clock_widget.py`** (new) — `SyncedClockWidget` in the top bar: local `HH:MM:SS` (mono) + a
+  `ZONE · UTC hh:mm:ss · date` sub-line (UTC read-out suppressed when the PC's own zone is UTC — the
+  units + run timestamps are UTC, so it's worth pairing) + a source chip: green **`NTP ✓ ±N ms`**,
+  amber **`PC clock`**, muted **`syncing…`**. A daemon-thread `_NtpSyncer` runs `sync()` off the UI
+  thread and hands the result back over Qt signals (never blocks the GUI, a failure is a fallback not
+  a crash); re-sync every 600 s after success / 60 s after a failure; a click on the chip re-syncs now.
+  `autostart=False` keeps the timers + network off for tests.
+- **`ui/main_window.py`** — the widget sits in the top bar between the tab buttons and the existing
+  unit-vs-PC `clocks:` skew indicator (which is unchanged — that one compares each UNIT's clock to
+  this PC for scheduling; this one shows the true wall-clock time).
+Tests: `tests/test_synced_clock.py` (the four-timestamp math + every reject case; a real loopback fake
+NTP server measures a known offset; the closed-port fallback; first-answer-wins; `SyncedClock` keeps a
+good offset through a later failure; the widget shows NTP time + chip, falls back to the PC clock, and
+delivers an off-thread sync to the GUI). Suite 1095 → 1108 offscreen. NTP needs outbound UDP/123 (a
+locked-down LAN blocks it → the widget shows `PC clock` and keeps retrying, which is the intended
+fallback).
+
 ## Cross-repo invariants (do not break)
 - **Drift guard (enforced by `sdr-agent/tests/test_shared_source_drift.py`):**
   `api/argspec.py` and `api/ramp.py` MUST stay **byte-identical** to `sdr-agent/agent/argspec.py`
