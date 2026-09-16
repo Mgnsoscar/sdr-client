@@ -36,6 +36,44 @@ captured at import (`config.DEFAULT_UNITS_FILE`), so `screenshot.py` sets it BEF
 cable) so the unit is calibrated by default — `screenshot.py --tab calibration` drills into the unit's
 Calibration panel to render it.
 
+## Current state — live UI: Units tab + unit detail refresh on a pushed task/crash event: COMPLETE (branch `claude/synced-clock`, client-only)
+Owner ask (after confirming the SSE stream already exists): make the UI update as things happen instead
+of waiting up to a poll cycle. Survey finding: the alert feed, Sequences, Plans and the schedule Timeline
+already react to pushed events (`SequenceWebhook`); the one gap was the **Units tab + unit detail task
+rows / running-count**, which were fed only by the 3 s fast poll (`on_fast_update`). The agent already
+pushes `task_started`/`task_stopped`/`task_restarted` (`TaskEvent`) + `CrashEvent` over the existing SSE
+stream (`/events/stream`), and the client already receives them (`DataHub.event_received`) — that view
+just didn't listen. Fix (client-only; no agent/wire/capability change; drift-guarded files untouched):
+- **`ui/units_tab.py`** — new `UnitsTab.on_event(ev)`: on a `TaskEvent`/`CrashEvent`, map the event's
+  advertised `unit_id` to the Fleet's hostname key (`_host_for_unit_id`, iterates `fleet.units()`) and
+  call `hub.refresh_now(host)` — the existing scoped one-unit fast poll — so the change shows at once.
+  An unattributable event (no matching unit — shouldn't happen) falls back to a full `refresh_now()`.
+  This covers the EXTERNALLY-caused changes the poll lagged on: a crash, a task finishing, another
+  operator, or a schedule/sequence launching a task. A start/stop from THIS client already updated
+  optimistically via `_on_task_action_done`; the 3 s poll stays as the backstop.
+- **`ui/main_window.py`** — `_on_event` now also calls `self.units_tab.on_event(ev)` (it already fed the
+  alert feed). Sequences/Plans/Timeline keep reacting to sequence events on their own.
+Tests: `tests/test_units_live_refresh.py` (a task event refreshes only the matching unit; every lifecycle
+kind nudges; a crash refreshes; an unmatched unit_id → full refresh; non-lifecycle / junk events ignored).
+Suite 1108 → 1116 offscreen.
+
+## Current state — clock jitter: the seconds flip is pinned to the true boundary: COMPLETE (branch `claude/synced-clock`, client-only)
+Owner report: the synced clock kept correct time but "swings" every ~4–5 s vs time.is, then re-aligns.
+Cause: the display shows whole seconds but the redraw tick was a free-running `QTimer` at a fixed 200 ms,
+not aligned to the real second boundary — so each flip landed 0–200 ms late, and the 200 ms grid beat
+against the 1 s grid (nudged by GUI work from the poll / SSE) into a slow visible swing; re-applying the
+chip stylesheet (a Qt re-polish) + rebuilding the tooltip 5×/s added churn that delayed the very tick.
+Fix (`ui/clock_widget.py`, no behaviour change to the time source): the `_tick` is now **single-shot,
+re-armed each time to just after the next whole second** (`_schedule_tick` = ms to the next boundary +
+`TICK_GUARD_MS` 20 ms, from `clock.now()`), so the flip self-corrects onto the boundary every second
+regardless of timer slop or a momentary hitch; and `_render(full=False)` on a tick updates only the
+`HH:MM:SS` text — the sub-line, the source chip's text/stylesheet, and the tooltip are touched only when
+they actually change (or on a `full` redraw at init/sync/failure), so a plain tick does no re-polish.
+`refresh()` stays the full-redraw entry point (init + `_apply_sample`/`_apply_failure`). Tests:
+`tests/test_synced_clock.py` (the tick re-arms to ~the next boundary + guard and stays single-shot;
+`stop()` disarms it; a plain tick advances the time with zero chip-stylesheet re-applies + zero tooltip
+rebuilds; a real source change still restyles). Suite 1108 → 1116 offscreen (with the live-refresh work).
+
 ## Current state — internet-synchronized clock in the top bar (NTP, PC-clock fallback): COMPLETE (branch `claude/synced-clock`, client-only)
 Owner ask: a clearly visible, internet-synchronized clock so an operator doesn't keep a `time.is`
 tab open; NTP-synced, not the PC clock, and falling back to the PC clock when NTP can't be reached.

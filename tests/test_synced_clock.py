@@ -202,3 +202,54 @@ def test_widget_syncs_off_thread_and_delivers_the_result_to_the_gui():
     w2.sync_now()
     assert _pump(lambda: w2.chip_text() == "PC clock")
     w.stop(); w2.stop()
+
+
+# ── jitter fix: boundary-aligned tick + no per-tick churn ────────────────────────
+
+def test_tick_rearms_to_just_after_the_next_second_boundary():
+    from ui import clock_widget as cw
+    t = {"now": _T + 0.30}                                          # 0.70 s to the next boundary
+    clk = nc.SyncedClock(time_fn=lambda: t["now"])
+    w = SyncedClockWidget(autostart=False, clock=clk)
+    w._running = True
+    w._schedule_tick()
+    assert w._tick.isSingleShot()
+    assert w._tick.remainingTime() == pytest.approx(700 + cw.TICK_GUARD_MS, abs=25)
+    # Just after a boundary → a nearly full second to the next one (never a tiny busy-loop).
+    t["now"] = _T + 1.001
+    w._schedule_tick()
+    assert w._tick.remainingTime() >= 900
+    w.stop()
+    assert not w._tick.isActive()                                   # stop() disarms it
+
+
+def test_a_plain_tick_updates_the_time_but_not_the_chip_stylesheet_or_tooltip():
+    clk = nc.SyncedClock(time_fn=lambda: _T)
+    w = SyncedClockWidget(autostart=False, clock=clk, sync_fn=lambda: None)
+    w._apply_sample(nc.NtpSample(offset_s=0.0, rtt_s=0.05, server="s", stratum=1, sampled_at=_T))
+    # Count stylesheet re-applies + tooltip rebuilds across many ticks with unchanged status.
+    styles = {"n": 0}
+    real_style = w._chip.setStyleSheet
+    w._chip.setStyleSheet = lambda qss: (styles.__setitem__("n", styles["n"] + 1), real_style(qss))[1]
+    tips = {"n": 0}
+    real_tip = w.setToolTip
+    w.setToolTip = lambda t: (tips.__setitem__("n", tips["n"] + 1), real_tip(t))[1]
+    base = w.time_text()
+    for i in range(1, 6):
+        clk._time = (lambda k=i: lambda: _T + k)()                 # advance a whole second
+        w._on_tick()
+    assert w.time_text() != base                                    # the time DID advance
+    assert styles["n"] == 0                                         # …with no chip re-polish
+    assert tips["n"] == 0                                           # …and no tooltip rebuild
+    w.stop()
+
+
+def test_a_sync_change_still_restyles_the_chip():
+    clk = nc.SyncedClock(time_fn=lambda: _T)
+    w = SyncedClockWidget(autostart=False, clock=clk, sync_fn=lambda: None)
+    assert w._chip_kind == "pending"
+    w._apply_failure("blocked")                                    # pending → local: a real change
+    assert w._chip_kind == "local" and w.chip_text() == "PC clock"
+    w._apply_sample(nc.NtpSample(offset_s=1.0, rtt_s=0.04, server="s", stratum=2, sampled_at=_T))
+    assert w._chip_kind == "ntp" and w.chip_text().startswith("NTP")
+    w.stop()

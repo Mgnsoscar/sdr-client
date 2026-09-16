@@ -198,6 +198,10 @@ class MainWindow(QMainWindow):
 
     def _on_event(self, ev) -> None:
         self.alert_feed.add_event(ev)
+        # A pushed task/crash event changes what the Units view shows — refresh that unit
+        # now (scoped) instead of waiting for the next poll tick. Sequences/Plans/Timeline
+        # already react to sequence events on their own.
+        self.units_tab.on_event(ev)
 
     def _on_alert(self, line: str) -> None:
         # An attention-worthy event arrived. Make sure the feed is visible.
