@@ -71,6 +71,47 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — RF-fault DETECTION Phase 1 (client alarm + pills + diagnosis): COMPLETE (branch `claude/system-familiarization-f5mezz`, cross-repo with agent 1.28.0)
+Client half of the RF-fault detection layer (`../sdr-agent/docs/rf-fault-recovery.md` §5-6/§14b). The
+agent (1.28.0, capability `task-rf-health`) detects a dead-but-alive flowgraph (radio silent while the
+task reads RUNNING), fires a `TaskHealthEvent` over SSE, stamps `ProcessStatus.health` / `SequenceRun.fault`
+on the poll, and auto-drops RF; this surfaces it. All client-only; drift-guarded files untouched. Suite
+1108 → 1128 offscreen.
+- **`api/models.py`** — mirrors the agent's health axis FIELD-FOR-FIELD (all defaulted, skew-safe):
+  `TaskHealth` enum (OK/STALLED/RF_FAULT/UNKNOWN), `ProcessStatus.health`/`health_detail`/`last_output_at`,
+  `FaultSnapshot`, `TaskHealthEvent`, `SequenceRun.fault`/`fault_task`/`fault_at`, `sequence_rf_fault`
+  webhook type.
+- **`webhook/classify.py`** — routes `"task_health"` → `TaskHealthEvent` with an EXPLICIT branch BEFORE
+  the generic `"task_"` → `TaskEvent` rule (task_health starts with task_); `sequence_rf_fault` →
+  `SequenceWebhook`.
+- **`ui/main_window.py`** — implements the alarm stub the design named: `_on_alert` (beep + taskbar
+  flash `QApplication.alert`, every alert-level event) and the FAULT-only `_on_fault` (un-minimise +
+  raise + activate + a persistent `QSystemTrayIcon` balloon via `_notify_tray`). All guarded — headless
+  / no-audio / no-tray is a clean no-op. The `AlertFeed.fault_raised(event)` signal (distinct from
+  `alert_raised(str)`) carries the full event; it fires on the GUI thread (`event_received` is already
+  marshalled there).
+- **`ui/fault_detail_dialog.py`** (new) — the payoff for the agent's snapshot: renders a fault's
+  self-diagnosis (`_diagnosis_rows`: GR buffer backend env-vs-compiled, `/dev/shm` used/total%, VMA
+  maps vs `vm.max_map_count`, fd limit, HOME, SysV IPC, notes — with the `vmcircbuf` SUSPECTS flagged
+  red + a hint) plus the log tail at detection. `_pct` guards div-by-zero; a snapshot-less event still
+  builds. Opened by DOUBLE-CLICKING the RF-fault row in the activity feed (the event is stashed on the
+  `QListWidgetItem` UserRole).
+- **`ui/alert_feed.py`** — a `TaskHealthEvent` is red + alert-level (`_describe`), emits `fault_raised`,
+  and its row opens the diagnosis on double-click; `sequence_rf_fault` / `sequence_hold*` verbs added.
+- **Fault pills** — a fault OVERRIDES the state pill (red "RF FAULT", `set_status("RF FAULT",
+  "rf_fault")`): `ui/unit_detail.py` `_TaskRow.update_status` (off `task.health`; relabels "Log" →
+  "Fault log"; resets when health returns to OK), `ui/sequences_panel.py` `_SequenceRow` (off
+  `run.fault`), `ui/unit_card.py` `update_tasks` (a fault WINS over a crash on the fleet card's task
+  line). `ui/theme.py` — `rf_fault`/`fault` status colour (red, `Palette.CRASH`).
+- **`ui/timeline_model.py`** — `TASK_RF_HEALTH_CAPABILITY = "task-rf-health"` + `task_rf_health_supported(client)`
+  (capability-only). The Phase-1 pill/alarm render UNCONDITIONALLY (they only reflect data an older
+  agent never sends); the gate is reserved for the Phase-2 "Restart" affordance the agent must understand.
+Tests: `tests/test_rf_fault_ui.py` (20: models parse + defaults; classify routes task_health not
+TaskEvent; alert feed red + fault_raised + double-click diagnosis; the diagnosis-row suspects +
+div-by-zero; task/sequence/card pills override + reset; theme; the capability gate; headless-safe alarm
+handlers). Adversarial review (find→verify): 0 confirmed defects. **NEXT — Phase 2** (cross-repo): the
+"Restart" button (gated on `task-rf-health`) + resync/replay.
+
 ## Current state — schedule timeline: a countdown pill on the now-line: COMPLETE (branch `claude/system-familiarization-f5mezz`, client-only)
 Owner ask: near the red now-line, a countdown (on the same UI-wide clock as the now-line) to the NEXT
 scheduled plan, or to the END of a currently-running one — so there's no need to eyeball the gap. Owner
