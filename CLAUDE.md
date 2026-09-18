@@ -71,6 +71,31 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — schedule timeline: vertical zoom (Ctrl+scroll / header −/+ buttons): COMPLETE (branch `claude/system-familiarization-f5mezz`, client-only)
+Owner ask: let the schedule day-planner (the vertical day view, hours top→bottom) be zoomed in/out
+vertically. All in **`ui/timeline_tab.py`** `_DayPlanner`:
+- **`HOUR_PX` is now a per-instance vertical scale** (was a class constant), clamped to
+  `[HOUR_PX_MIN=20, HOUR_PX_MAX=220]`. `content_height` casts to int (the scale is now a float).
+  Everything that positions time (`_to_y`, `_layout`'s min-block-duration floor, the paint's block
+  rects + hour lines) already read `self.HOUR_PX`, so a scale change + re-layout + repaint rescales the
+  whole day; block hit-rects recompute in `paintEvent` so clicks stay correct.
+- **`set_hour_px(px, keep_dt=, keep_vp_y=)`** re-lays out at the new scale and, when hosted in a scroll
+  area (`set_scroll_area`, wired in `_build_timeline_card`), keeps `keep_dt` pinned at viewport-y
+  `keep_vp_y` (default: the time at the viewport centre stays centred) so the zoom feels anchored — it
+  sets the scrollbar synchronously AND via `QTimer.singleShot(0)` (the pattern the existing
+  scroll-to-anchor uses, since the scrollbar range updates after the layout settles). `zoom_by(factor)`
+  multiplies. New `_from_y` inverts `_to_y`.
+- **Interaction:** `wheelEvent` — **Ctrl+scroll** zooms, anchored on the time under the cursor
+  (`1.0015**angleDelta`); a plain wheel falls through to the parent scroll area. Two compact **−/+
+  buttons** in the timeline card header (left of "Arm all"), `zoom_by(0.8)` / `zoom_by(1.25)`, anchored
+  on the viewport centre.
+- Zoom persists across `set_day` refreshes (it never touches `HOUR_PX`). No agent/scripts/wire/capability
+  change; drift-guarded files untouched. Tests: `tests/test_timeline_zoom.py` (scale + content-height +
+  `_to_y` scale with zoom; clamp to MIN/MAX; `zoom_by`; `_from_y` inverts `_to_y`; zoom survives a
+  refresh; the anchor keeps a time at a fixed viewport-y incl. the default viewport-centre anchor;
+  Ctrl+wheel zooms in/out, a plain wheel doesn't). Suite +9 offscreen. Verified by a headless
+  `_DayPlanner.grab()` render at 52 vs 110 px/hour.
+
 ## Current state — schedule tab "Arm all (N)": arm a whole day of plans in one go: COMPLETE (branch `claude/schedule-arm-all`, cross-repo with agent 1.27.3)
 Owner ask: four non-overlapping plans in the schedule — arm ALL of them and let them start/stop by
 themselves. Scheduled runs already fire at absolute times on the agent; the blockers were (a) the

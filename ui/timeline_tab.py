@@ -365,7 +365,9 @@ class _DayPlanner(QWidget):
     arm_requested = pyqtSignal(str)
     stop_requested = pyqtSignal(str)
 
-    HOUR_PX = 52
+    HOUR_PX = 52             # default vertical scale (px per hour) — now zoomable (per instance)
+    HOUR_PX_MIN = 20         # zoomed all the way out (the whole day fits tighter)
+    HOUR_PX_MAX = 220        # zoomed all the way in (a few hours fill the view)
     AXIS_W = 58
     TOP_PAD = 10
     BOT_PAD = 12
@@ -385,13 +387,21 @@ class _DayPlanner(QWidget):
         super().__init__(parent)
         self._date = date.today()
         self._blocks: List[dict] = []
+        self._raw_blocks: List[dict] = []                     # the blocks as handed to set_day (for re-layout on zoom)
         self._rects: Dict[str, QRectF] = {}
         self._btn_rects: Dict[str, Tuple[QRectF, str]] = {}   # id -> (rect, action)
+        self.HOUR_PX = _DayPlanner.HOUR_PX                    # instance vertical scale (shadows the class default)
+        self._scroll_area = None                              # the QScrollArea hosting us (for zoom anchoring)
         self.setMouseTracking(True)
         self.setMinimumWidth(380)
 
+    def set_scroll_area(self, sa) -> None:
+        """The QScrollArea this planner lives in, so a zoom can keep the time under the cursor
+        (or the viewport centre) pinned as the scale changes."""
+        self._scroll_area = sa
+
     def content_height(self) -> int:
-        return self.TOP_PAD + 24 * self.HOUR_PX + self.BOT_PAD
+        return int(round(self.TOP_PAD + 24 * self.HOUR_PX + self.BOT_PAD))
 
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(640, self.content_height())
@@ -404,6 +414,7 @@ class _DayPlanner(QWidget):
     def set_day(self, d: date, blocks: List[dict]) -> None:
         """blocks: dicts with id, name, desc, start, stop, state, armable."""
         self._date = d
+        self._raw_blocks = list(blocks)
         self._layout(blocks)
         self.setMinimumHeight(self.content_height())
         self.updateGeometry()
@@ -417,6 +428,59 @@ class _DayPlanner(QWidget):
         day_start, _ = self._day_bounds()
         secs = max(0.0, min((dt - day_start).total_seconds(), 86400.0))
         return self.TOP_PAD + secs / 3600.0 * self.HOUR_PX
+
+    def _from_y(self, y: float) -> datetime:
+        """The time at content-y `y` — the inverse of `_to_y` (clamped to the day)."""
+        day_start, _ = self._day_bounds()
+        secs = max(0.0, min((y - self.TOP_PAD) / self.HOUR_PX * 3600.0, 86400.0))
+        return day_start + timedelta(seconds=secs)
+
+    # ── Vertical zoom ────────────────────────────────────────────────────────────
+
+    def set_hour_px(self, px: float, *, keep_dt: Optional[datetime] = None,
+                    keep_vp_y: Optional[float] = None) -> None:
+        """Set the vertical scale (px/hour), clamped to [MIN, MAX], and re-lay out at the new
+        scale. When hosted in a scroll area, keep `keep_dt` pinned at viewport-y `keep_vp_y`
+        (default: the day at the viewport centre stays centred), so a zoom feels anchored."""
+        px = max(self.HOUR_PX_MIN, min(self.HOUR_PX_MAX, float(px)))
+        if abs(px - self.HOUR_PX) < 1e-6:
+            return
+        sb = self._scroll_area.verticalScrollBar() if self._scroll_area is not None else None
+        if sb is not None:
+            vp_h = self._scroll_area.viewport().height()
+            if keep_vp_y is None:
+                keep_vp_y = vp_h / 2.0
+            if keep_dt is None:
+                keep_dt = self._from_y(sb.value() + keep_vp_y)
+        self.HOUR_PX = px
+        self._layout(self._raw_blocks)                       # min-block floor is in TIME, so it tracks the scale
+        self.setMinimumHeight(self.content_height())
+        self.resize(self.width(), self.content_height())     # let the scrollbar range update before we re-anchor
+        self.updateGeometry()
+        self.update()
+        if sb is not None and keep_dt is not None:
+            target = int(round(self._to_y(keep_dt) - keep_vp_y))
+            sb.setValue(target)                               # best-effort now …
+            QTimer.singleShot(0, lambda v=target: sb.setValue(v))   # … and after the layout settles
+
+    def zoom_by(self, factor: float, *, keep_vp_y: Optional[float] = None) -> None:
+        """Multiply the vertical scale by `factor` (e.g. 1.25 to zoom in, 0.8 to zoom out)."""
+        self.set_hour_px(self.HOUR_PX * float(factor), keep_vp_y=keep_vp_y)
+
+    def wheelEvent(self, e):  # noqa: N802
+        """Ctrl + wheel zooms the day vertically, anchored on the time under the cursor; a plain
+        wheel scrolls (handled by the parent scroll area)."""
+        if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            dy = e.angleDelta().y()
+            if dy:
+                cur_y = e.position().y()                       # content-y under the cursor
+                sb = self._scroll_area.verticalScrollBar() if self._scroll_area is not None else None
+                keep_dt = self._from_y(cur_y)
+                vp_y = (cur_y - sb.value()) if sb is not None else None
+                self.set_hour_px(self.HOUR_PX * (1.0015 ** dy), keep_dt=keep_dt, keep_vp_y=vp_y)
+            e.accept()
+            return
+        super().wheelEvent(e)
 
     def _layout(self, blocks: List[dict]) -> None:
         day_start, day_end = self._day_bounds()
@@ -1165,6 +1229,24 @@ class TimelineTab(QWidget):
             f" font-size:12px; font-weight:600; }}"
             f"QPushButton:hover {{ background:{Palette.ACCENT_SOFT}; border-color:{Palette.ACCENT_SOFT}; }}"
             f"QPushButton:disabled {{ color:{Palette.TEXT_FAINT}; background:{Palette.SURFACE}; }}")
+        # Vertical zoom of the day (also on Ctrl+scroll over the timeline).
+        zoom_btn_qss = (
+            f"QPushButton {{ min-width:28px; max-width:28px; height:30px; border:1px solid {Palette.BORDER};"
+            f" border-radius:9px; background:{Palette.SURFACE}; color:{Palette.ACCENT_INK};"
+            f" font-size:16px; font-weight:700; }}"
+            f"QPushButton:hover {{ background:{Palette.ACCENT_SOFT}; border-color:{Palette.ACCENT_SOFT}; }}")
+        self._tl_zoom_out = QPushButton("−")   # minus sign
+        self._tl_zoom_out.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tl_zoom_out.setStyleSheet(zoom_btn_qss)
+        self._tl_zoom_out.setToolTip("Zoom the day out (or Ctrl+scroll on the timeline)")
+        self._tl_zoom_out.clicked.connect(lambda: self._planner.zoom_by(0.8))
+        self._tl_zoom_in = QPushButton("+")
+        self._tl_zoom_in.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tl_zoom_in.setStyleSheet(zoom_btn_qss)
+        self._tl_zoom_in.setToolTip("Zoom the day in (or Ctrl+scroll on the timeline)")
+        self._tl_zoom_in.clicked.connect(lambda: self._planner.zoom_by(1.25))
+        hh.addWidget(self._tl_zoom_out, 0, Qt.AlignmentFlag.AlignTop)
+        hh.addWidget(self._tl_zoom_in, 0, Qt.AlignmentFlag.AlignTop)
         # Arm every not-yet-started, idle plan of the shown day in one go (one confirm).
         self._tl_arm_all = QPushButton("Arm all")
         self._tl_arm_all.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1188,6 +1270,7 @@ class TimelineTab(QWidget):
         self._tl_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._tl_scroll.setStyleSheet("QScrollArea{ background:transparent; border:none; }" + _SLIM_SCROLLBAR)
         self._tl_scroll.setWidget(self._planner)
+        self._planner.set_scroll_area(self._tl_scroll)   # so Ctrl+scroll / the zoom buttons can anchor
         cv.addWidget(self._tl_scroll, 1)
         return card
 
