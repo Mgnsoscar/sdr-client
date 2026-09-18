@@ -635,7 +635,7 @@ class ScheduledPlan(BaseModel):
     plan's on-air (T0), stop its off-air (T_end) — both absolute local ISO-8601.
     Client-only, like plans; execution (arming at the time) is a later step."""
     id: str
-    plan_id: str                        # the library plan this slot was seeded from
+    plan_id: str = ""                   # the library plan this slot was seeded from
     plan_name: str = ""                 # cached for display if the plan is gone
     start: str                          # ISO-8601 local datetime — on-air (T0)
     stop: str                           # ISO-8601 local datetime — off-air (T_end)
@@ -644,6 +644,12 @@ class ScheduledPlan(BaseModel):
     # scheduled the same plan. None means "follow the library plan by plan_id" (the
     # default, and every pre-existing entry).
     plan: Optional[Plan] = None
+    # A REFERENCE (note) entry: an external test the team does NOT transmit for,
+    # placed on the timeline for situational awareness only. It carries just a name
+    # (plan_name), a description, and the time slot — no plan, no unit, never armable.
+    # reference=False (the default) is an ordinary scheduled plan.
+    reference: bool = False
+    description: str = ""               # free-text note (reference entries only)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

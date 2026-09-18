@@ -44,8 +44,8 @@ from PyQt6.QtCore import QDate, QDateTime, QSize, Qt, QRectF, QTimer, QTime, pyq
 from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt6.QtWidgets import (
     QComboBox, QDateTimeEdit, QDialog, QDialogButtonBox, QFrame,
-    QFormLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
-    QSizePolicy, QVBoxLayout, QWidget,
+    QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
+    QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from api import Fleet
@@ -63,9 +63,16 @@ CLOCK_WARN_SKEW_S = 1.0
 _MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July",
                 "August", "September", "October", "November", "December")
 _WDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+# Reference (note) entries — external tests the team does NOT transmit for, placed on
+# the timeline only for situational awareness. Deliberately a non-status muted violet so
+# they never read as one of the reserved run states (green/amber/red/accent) and stand
+# clearly apart from our own plans; never armable.
+_REF_INK = "#7A6FA6"
+_REF_SOFT = "#EFEDF6"
+
 # Run-state → the day-dot / indicator colour convention shown in the legend.
 _DOT_COLOR = {"idle": Palette.ACCENT, "armed": Palette.ARMED, "on air": Palette.ONLINE,
-              "onair": Palette.ONLINE, "missing": Palette.IDLE}
+              "onair": Palette.ONLINE, "missing": Palette.IDLE, "reference": _REF_INK}
 
 # A slim, modern overlay scrollbar (no arrows, rounded thumb) for the scroll areas.
 _SLIM_SCROLLBAR = (
@@ -354,6 +361,118 @@ class _ScheduleDialog(QDialog):
         self.accept()
 
 
+# ── Add / edit a reference (note) entry ──────────────────────────────────────
+
+class _ReferenceDialog(QDialog):
+    """A reference (note) entry: an external test the team does NOT transmit for,
+    placed on the timeline for situational awareness only. It carries just a name, a
+    free-text description and a time slot — no plan, no unit — and is never armable.
+    Returns a ScheduledPlan (reference=True) via .result_entry on accept; Remove
+    (result code REMOVE) when editing."""
+
+    REMOVE = 2
+
+    def __init__(self, entry: Optional[m.ScheduledPlan] = None,
+                 default_day: Optional[date] = None, parent=None):
+        super().__init__(parent)
+        self._entry = entry
+        self.result_entry: Optional[m.ScheduledPlan] = None
+        self.setWindowTitle("Edit reference" if entry else "Add reference to timeline")
+        self.setMinimumWidth(440)
+        self._build(default_day or date.today())
+
+    def _build(self, default_day: date) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 16, 16, 12)
+        outer.setSpacing(10)
+
+        intro = QLabel("A reference is an external test you don't transmit for — a note on the "
+                       "timeline so the whole test-area plan is in one place. It isn't armable.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet(f"font-size: 11px; color: {_REF_INK};")
+        outer.addWidget(intro)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+
+        self._name = QLineEdit()
+        self._name.setPlaceholderText("e.g. Vendor A — jammer sweep")
+        if self._entry is not None:
+            self._name.setText(self._entry.plan_name)
+        self._name.textChanged.connect(self._revalidate)
+        form.addRow("Name", self._name)
+
+        self._desc = QPlainTextEdit()
+        self._desc.setPlaceholderText("What this external test is (optional)")
+        self._desc.setFixedHeight(72)
+        if self._entry is not None:
+            self._desc.setPlainText(self._entry.description)
+        form.addRow("Description", self._desc)
+
+        self._start = QDateTimeEdit()
+        self._start.setCalendarPopup(True)
+        self._start.setDisplayFormat("yyyy-MM-dd  HH:mm")
+        self._stop = QDateTimeEdit()
+        self._stop.setCalendarPopup(True)
+        self._stop.setDisplayFormat("yyyy-MM-dd  HH:mm")
+        if self._entry is not None:
+            self._start.setDateTime(QDateTime.fromString(self._entry.start, Qt.DateFormat.ISODate))
+            self._stop.setDateTime(QDateTime.fromString(self._entry.stop, Qt.DateFormat.ISODate))
+        else:
+            qd = QDate(default_day.year, default_day.month, default_day.day)
+            self._start.setDateTime(QDateTime(qd, QTime(20, 0)))
+            self._stop.setDateTime(QDateTime(qd, QTime(22, 0)))
+        self._start.dateTimeChanged.connect(self._revalidate)
+        self._stop.dateTimeChanged.connect(self._revalidate)
+        form.addRow("Start", self._start)
+        form.addRow("Stop", self._stop)
+        outer.addLayout(form)
+
+        self._status = QLabel("")
+        self._status.setStyleSheet(f"font-size: 11px; color: {Palette.TEXT_FAINT};")
+        outer.addWidget(self._status)
+
+        self._buttons = QDialogButtonBox()
+        if self._entry is not None:
+            rm = QPushButton("Remove")
+            rm.setStyleSheet(f"color: {Palette.CRASH};")
+            self._buttons.addButton(rm, QDialogButtonBox.ButtonRole.DestructiveRole)
+            rm.clicked.connect(lambda: self.done(self.REMOVE))
+        self._ok = self._buttons.addButton(QDialogButtonBox.StandardButton.Ok)
+        self._buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        self._buttons.accepted.connect(self._accept)
+        self._buttons.rejected.connect(self.reject)
+        outer.addWidget(self._buttons)
+        self._revalidate()
+
+    def _revalidate(self) -> None:
+        has_name = bool(self._name.text().strip())
+        after = self._stop.dateTime() > self._start.dateTime()
+        self._ok.setEnabled(has_name and after)
+        if not has_name:
+            self._status.setText("a reference needs a name")
+        elif not after:
+            self._status.setText("stop must be after start")
+        else:
+            span = self._start.dateTime().secsTo(self._stop.dateTime())
+            self._status.setText(f"{_fmt_duration(span)} — reference only, not transmitted")
+
+    def _accept(self) -> None:
+        name = self._name.text().strip()
+        if not name:
+            return
+        self.result_entry = m.ScheduledPlan(
+            id=self._entry.id if self._entry else new_scheduled_id(),
+            plan_id="",
+            plan_name=name,
+            start=self._start.dateTime().toString(Qt.DateFormat.ISODate),
+            stop=self._stop.dateTime().toString(Qt.DateFormat.ISODate),
+            reference=True,
+            description=self._desc.toPlainText().strip(),
+        )
+        self.accept()
+
+
 # ── The vertical day-planner ─────────────────────────────────────────────────
 
 class _DayPlanner(QWidget):
@@ -381,6 +500,7 @@ class _DayPlanner(QWidget):
         "armed": (Palette.ARMED, Palette.ARMED_SOFT),
         "on air": (Palette.ONLINE, Palette.ONLINE_SOFT),
         "missing": (Palette.IDLE, Palette.IDLE_SOFT),
+        "reference": (_REF_INK, _REF_SOFT),
     }
 
     def __init__(self, parent=None):
@@ -576,16 +696,26 @@ class _DayPlanner(QWidget):
 
     def _paint_block(self, p, b, rect, name_font, meta_font, desc_font) -> None:
         state = b.get("state", "idle")
+        is_ref = bool(b.get("reference"))
         border, fill = self._TINT.get(state, self._TINT["idle"])
-        p.setPen(QPen(QColor(border), 1.5))
         p.setBrush(QBrush(QColor(fill)))
-        p.drawRoundedRect(rect, 7, 7)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(QColor(border)))
-        p.drawRoundedRect(QRectF(rect.left(), rect.top() + 3, 3.5, rect.height() - 6), 1.5, 1.5)
+        if is_ref:
+            # A reference is a note, not a transmission: a DASHED outline and no colour rail
+            # set it apart from an armable/active plan at a glance.
+            pen = QPen(QColor(border), 1.4)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.drawRoundedRect(rect, 7, 7)
+        else:
+            p.setPen(QPen(QColor(border), 1.5))
+            p.drawRoundedRect(rect, 7, 7)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor(border)))
+            p.drawRoundedRect(QRectF(rect.left(), rect.top() + 3, 3.5, rect.height() - 6), 1.5, 1.5)
 
-        # Action button (top-right): Arm when idle & still armable, Stop when active.
-        btn_gap = self._paint_action(p, b, rect, state, meta_font)
+        # Top-right: a "REFERENCE" tag for a note; else the Arm/Unarm/Stop pill.
+        btn_gap = (self._paint_ref_badge(p, b, rect, border, meta_font) if is_ref
+                   else self._paint_action(p, b, rect, state, meta_font))
 
         inner = rect.adjusted(12, 4, -(8 + btn_gap), -4)
         pre = "…" if b["clip_top"] else ""
@@ -619,7 +749,9 @@ class _DayPlanner(QWidget):
         y += 16
         p.setFont(meta_font)
         p.setPen(QColor(border))
-        label = trange if state == "idle" else f"{trange}   ·   {state}"
+        # A reference shows just its window (the REFERENCE tag already names the kind);
+        # an idle plan likewise. Active plans append their run state.
+        label = trange if state in ("idle", "reference") else f"{trange}   ·   {state}"
         p.drawText(QRectF(inner.left(), y, inner.width(), 13),
                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), label)
         y += 14
@@ -661,6 +793,26 @@ class _DayPlanner(QWidget):
         if live:
             self._btn_rects[b["id"]] = (br, action)
         return self.BTN_W + 10
+
+    def _paint_ref_badge(self, p, b, rect, border, meta_font) -> int:
+        """A small, inert "REFERENCE" tag where a plan's Arm pill would sit — so a note is
+        clearly not armable. Registers no hit rect (the block body is still clickable to
+        edit). Returns the horizontal space it reserves."""
+        text = "REFERENCE"
+        f = QFont(meta_font); f.setBold(True); f.setPointSize(7)
+        fm = QFontMetrics(f)
+        bw = fm.horizontalAdvance(text) + 14
+        if rect.width() < bw + 12 or rect.height() < 16:
+            return 0            # no room — the block is still clickable to edit
+        by = (rect.center().y() - self.BTN_H / 2) if rect.height() < 40 else (rect.top() + 5)
+        br = QRectF(rect.right() - bw - 6, by, bw, self.BTN_H)
+        p.setPen(QPen(QColor(border), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(br, self.BTN_H / 2, self.BTN_H / 2)
+        p.setFont(f)
+        p.setPen(QColor(border))
+        p.drawText(br, int(Qt.AlignmentFlag.AlignCenter), text)
+        return int(bw) + 10
 
     # ── Interaction ────────────────────────────────────────────────────────────
 
@@ -957,6 +1109,7 @@ class _MonthCalendar(QFrame):
         for swatch, text in ((_Dot(Palette.ACCENT), "Scheduled"),
                              (_Dot(Palette.ARMED), "Armed"),
                              (_Dot(Palette.ONLINE), "On air"),
+                             (_Dot(_REF_INK), "Reference"),
                              (_CornerSwatch(), "On the timeline")):
             item = QHBoxLayout(); item.setContentsMargins(0, 0, 0, 0); item.setSpacing(6)
             item.addWidget(swatch)
@@ -1069,9 +1222,14 @@ class _CompactDayList(QFrame):
         state = r["state"]
         row = QFrame(); row.setObjectName("crow")
         # Scope to #crow: a bare `QFrame` rule would also style child QLabels (QLabel is a
-        # QFrame subclass), boxing the name and time.
-        row.setStyleSheet(f"QFrame#crow {{ background:{Palette.SURFACE_ALT}; border:1px solid "
-                          f"{Palette.BORDER}; border-radius:10px; }}")
+        # QFrame subclass), boxing the name and time. A reference gets a dashed violet
+        # border so it reads as a note, matching the day-planner.
+        if r.get("reference"):
+            row.setStyleSheet(f"QFrame#crow {{ background:{_REF_SOFT}; border:1px dashed "
+                              f"{_REF_INK}; border-radius:10px; }}")
+        else:
+            row.setStyleSheet(f"QFrame#crow {{ background:{Palette.SURFACE_ALT}; border:1px solid "
+                              f"{Palette.BORDER}; border-radius:10px; }}")
         h = QHBoxLayout(row); h.setContentsMargins(10, 7, 8, 7); h.setSpacing(9)
         h.addWidget(_Dot(_DOT_COLOR.get(state, Palette.IDLE),
                          pulse=state in ("on air", "onair"), diam=8))
@@ -1089,6 +1247,13 @@ class _CompactDayList(QFrame):
 
     def _action(self, r: dict) -> QPushButton:
         state, eid = r["state"], r["id"]
+        if r.get("reference"):
+            b = QPushButton("REFERENCE"); b.setEnabled(False)
+            b.setStyleSheet(
+                "QPushButton { min-width:64px; height:24px; padding:0 10px; border:1px solid "
+                f"{_REF_INK}; border-radius:12px; background:transparent; color:{_REF_INK};"
+                " font-size:9px; font-weight:700; }")
+            return b
         if state in ("on air", "onair"):
             b = self._btn("Stop", Palette.CRASH, "#A82F2F")
             b.clicked.connect(lambda _=False, i=eid: self.stop_requested.emit(i))
@@ -1168,7 +1333,19 @@ class TimelineTab(QWidget):
             f" padding:9px 18px; font-size:13.5px; font-weight:600; }}"
             f"QPushButton:hover {{ background:{Palette.ACCENT_INK}; }}")
         self._add_btn.clicked.connect(self._on_add)
-        abox = QVBoxLayout(); abox.addStretch(1); abox.addWidget(self._add_btn)
+        # A reference (note) entry — an external test we don't transmit for. Secondary/ghost
+        # style in the reference violet so it reads as a different kind of thing to add.
+        self._add_ref_btn = QPushButton("+   Add reference")
+        self._add_ref_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._add_ref_btn.setToolTip("Add an external test you don't transmit for — a note on "
+                                     "the timeline. It isn't armable.")
+        self._add_ref_btn.setStyleSheet(
+            f"QPushButton {{ background:{Palette.SURFACE}; color:{_REF_INK}; border:1px solid {_REF_INK};"
+            f" border-radius:10px; padding:8px 16px; font-size:13px; font-weight:600; }}"
+            f"QPushButton:hover {{ background:{_REF_SOFT}; }}")
+        self._add_ref_btn.clicked.connect(self._on_add_reference)
+        abox = QVBoxLayout(); abox.setSpacing(7)
+        abox.addStretch(1); abox.addWidget(self._add_btn); abox.addWidget(self._add_ref_btn)
         top.addLayout(abox)
         outer.addLayout(top)
 
@@ -1312,6 +1489,8 @@ class TimelineTab(QWidget):
         return entry.plan or self._plans.get(entry.plan_id)
 
     def _resolve(self, entry: m.ScheduledPlan) -> Tuple[str, str]:
+        if entry.reference:
+            return (entry.plan_name or "(reference)"), entry.description
         plan = self._plan_for(entry)
         if plan is not None:
             return plan.name or plan.id, plan.description
@@ -1353,7 +1532,10 @@ class TimelineTab(QWidget):
             rows.append({
                 "id": entry.id, "name": name, "desc": desc, "start": s, "stop": e,
                 "state": self._entry_state(entry),
-                "armable": self._plan_for(entry) is not None and now < s,
+                "reference": entry.reference,
+                # A reference is never armable (no plan, no unit).
+                "armable": (not entry.reference
+                            and self._plan_for(entry) is not None and now < s),
             })
         rows.sort(key=lambda r: r["start"])
         return rows
@@ -1454,6 +1636,8 @@ class TimelineTab(QWidget):
         return out
 
     def _entry_state(self, entry: m.ScheduledPlan) -> str:
+        if entry.reference:
+            return "reference"
         if self._plan_for(entry) is None:
             return "missing"
         runs = self._entry_runs(entry)
@@ -1479,9 +1663,32 @@ class TimelineTab(QWidget):
             self._jump_to(dlg.result_entry)
             self._reload()
 
+    def _on_add_reference(self) -> None:
+        """Add a reference (note) entry — an external test the team doesn't transmit for.
+        Needs no plans, so it's available regardless of the library."""
+        dlg = _ReferenceDialog(default_day=self._selected_date(), parent=self.window())
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.result_entry is not None:
+            self._store.upsert(dlg.result_entry)
+            self._sync_units()
+            self._jump_to(dlg.result_entry)
+            self._reload()
+
     def _on_block(self, entry_id: str) -> None:
         entry = self._store.get(entry_id)
         if entry is None:
+            return
+        if entry.reference:
+            dlg = _ReferenceDialog(entry=entry, parent=self.window())
+            r = dlg.exec()
+            if r == _ReferenceDialog.REMOVE:
+                self._store.delete(entry_id)
+                self._sync_units()
+                self._reload()
+            elif r == QDialog.DialogCode.Accepted and dlg.result_entry is not None:
+                self._store.upsert(dlg.result_entry)
+                self._sync_units()
+                self._jump_to(dlg.result_entry)
+                self._reload()
             return
         dlg = _ScheduleDialog(self._plans.plans(), entry=entry,
                               hub=self.hub, parent=self.window())
@@ -1518,8 +1725,8 @@ class TimelineTab(QWidget):
         if getattr(self, "_arm_busy", False):
             return                       # a preflight is already in flight — no double-arm
         entry = self._store.get(entry_id)
-        if entry is None or self.hub is None:
-            return
+        if entry is None or self.hub is None or entry.reference:
+            return          # references are notes only — never armed
         plan = self._plan_for(entry)
         if plan is None or not plan.items:
             QMessageBox.warning(self, "Cannot arm", "This plan no longer exists or has no sequences.")

@@ -71,6 +71,36 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — schedule timeline: reference (note) entries — external tests we don't transmit for: COMPLETE (branch `claude/system-familiarization-f5mezz`, client-only)
+Owner ask: put the WHOLE test-area transmission plan on the schedule, including the ~half of tests the
+team does NOT transmit for, so there's no need to keep a separate window open. Such a **reference** entry
+carries "only a name, a description, and a time slot", is "visually distinct from the actual plans
+assigned to our units", and is "not armable". Client-only — no agent/scripts/capability change;
+drift-guarded files untouched.
+- **Model** (`api/models.py`): `ScheduledPlan` gains `reference: bool = False` + `description: str = ""`,
+  and `plan_id` now defaults to `""` so a reference validates with no plan (`plan_id=""`, `plan=None`).
+  Additive/back-compat — an ordinary scheduled plan is `reference=False` and unchanged.
+- **Authoring** (`ui/timeline_tab.py`): new **`_ReferenceDialog`** (name + description + start/stop only,
+  no plan/unit picker) builds a `ScheduledPlan(reference=True, plan_name=name, description=…, plan_id="")`;
+  a **"+ Add reference"** secondary/ghost button (violet) sits beside "+ Add plan" in the header and works
+  **regardless of the library** (`_on_add_reference` needs no plans — unlike `_on_add`). `_on_block` routes
+  a reference block to `_ReferenceDialog` (edit / Remove); an ordinary entry still opens `_ScheduleDialog`.
+- **Distinct + non-armable**: `_resolve` returns `(plan_name, description)` for a reference; `_entry_state`
+  returns a new **`"reference"`** state; `_entries_on` stamps `reference=True` and forces `armable=False`;
+  `_armable_entries` (hence **Arm all** and its count) excludes references; `_on_arm` early-returns on a
+  reference (defensive — no button is ever drawn). `_DayPlanner._TINT["reference"]` is a muted violet
+  (`_REF_INK`/`_REF_SOFT` — a deliberately non-status hue, never green/amber/red/accent), painted as a
+  **DASHED** outline with **no colour rail** and a small inert **"REFERENCE"** tag where the Arm pill would
+  sit (`_paint_ref_badge`, registers no hit rect — the body still edits). The compact day list mirrors it
+  (dashed violet row + an inert "REFERENCE" chip); the calendar dot + legend gain a violet "Reference" key
+  (`_DOT_COLOR["reference"]`).
+Tests: `tests/test_schedule_reference.py` (model round-trip + no-plan validity; the dialog builds/validates/
+edits a reference; `_resolve`/`_entry_state`; a future reference is still non-armable; Arm-all ignores
+references; `_on_arm` is a no-op; "+ Add reference" works with zero plans; a reference block opens the
+reference dialog, not the plan dialog; a reference block registers no Arm hit rect). Suite 1098 offscreen.
+Verified by a headless `_DayPlanner.render()` (dashed violet block + REFERENCE tag above the solid,
+rail-and-Arm real plans).
+
 ## Current state — schedule timeline: vertical zoom (Ctrl+scroll / header −/+ buttons): COMPLETE (branch `claude/system-familiarization-f5mezz`, client-only)
 Owner ask: let the schedule day-planner (the vertical day view, hours top→bottom) be zoomed in/out
 vertically. All in **`ui/timeline_tab.py`** `_DayPlanner`:
