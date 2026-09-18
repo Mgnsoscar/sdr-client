@@ -200,6 +200,23 @@ def task_rf_health_supported(client) -> bool:
     except Exception:  # noqa: BLE001
         return False
 
+
+# Agent >= 1.29.0 recovers a run whose task RF-faulted: POST /sequence-runs/{id}/restart relaunches
+# the task at its crash-time level (RF on) and re-instates the ramp remainder + STOP (resync/replay).
+# The client gates its "Restart" button on this string (plus task-rf-health, so the fault is even
+# detectable); an older agent 404s the endpoint. Capability-only (added at 1.29.0 with the behaviour).
+SEQUENCE_RESTART_CAPABILITY = "sequence-restart"
+
+
+def sequence_restart_supported(client) -> bool:
+    """True iff the unit's agent advertises `sequence-restart` — POST /sequence-runs/{id}/restart
+    recovers a faulted run. The Restart button gates on this AND task_rf_health_supported (a fault
+    must be detectable in the first place). Capability-only (no version floor)."""
+    try:
+        return bool(client.supports(SEQUENCE_RESTART_CAPABILITY))
+    except Exception:  # noqa: BLE001
+        return False
+
 # ── Geometry constants ───────────────────────────────────────────────────────
 SCALE = 3.0            # px per second in the warm-up / cool-down zones
 MIDDLE_GAP = 220       # base px between ON-AIR and OFF-AIR (the on-air band)

@@ -797,6 +797,17 @@ class AgentClient:
         §5.4)."""
         return m.SequenceRun(**self._request("POST", f"/sequence-runs/{run_id}/hold-now"))
 
+    def restart_sequence_run(self, run_id: str,
+                             request: m.RestartRunRequest) -> m.SequenceRun:
+        """RF-fault RECOVERY (Phase 2): recover a RUNNING run whose task was detected
+        dead-but-alive. The agent relaunches the faulted task at its crash-time level (RF on)
+        and re-instates the ramp remainder + STOP — on the original schedule (mode 'resync')
+        or shifted later by the downtime (mode 'replay'). Returns the run (fault cleared, still
+        RUNNING). 409 if it is not a RUNNING faulted run, or a replay collides with a peer on
+        the channel. Needs agent capability `sequence-restart` (docs/rf-fault-recovery.md §7)."""
+        return m.SequenceRun(**self._request(
+            "POST", f"/sequence-runs/{run_id}/restart", json=request.model_dump()))
+
     # ══════════════════════════════════════════════════════════════════════════
     # Library (deploy / snapshot the whole definition set)
     # ══════════════════════════════════════════════════════════════════════════

@@ -510,6 +510,15 @@ class ProceedRequest(BaseModel):
     steps: Optional[List[SequenceStep]] = None
 
 
+class RestartRunRequest(BaseModel):
+    """Body for the (Phase 2) POST /sequence-runs/{id}/restart — recover a run whose task
+    RF-faulted (docs/rf-fault-recovery.md §7). Mirrors agent/models.py RestartRequest.
+    mode "resync" (default) rejoins the original schedule; "replay" delivers the whole
+    remaining profile, shifting off-air later by the downtime. restart_at is server-set,
+    so the client omits it."""
+    mode: str = "resync"               # "resync" | "replay"
+
+
 # ── Hold step helpers (docs/sequence-hold-step.md §7) ─────────────────────────
 # Detect a Hold in a step list and compile it out for the unattended (scheduled /
 # plan) path, where an operator-gated pause is a footgun. `has_hold` duck-types over

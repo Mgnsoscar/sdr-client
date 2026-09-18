@@ -58,7 +58,8 @@ from .hold_edit_dialog import HoldEditDialog
 from . import timeline_model as tlm
 from .timeline_model import (
     SEQUENCE_HOLD_CAPABILITY, SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY,
-    SEQUENCE_LOG_TABLE_CAPABILITY, hold_runtime_supported, hold_enter_supported,
+    SEQUENCE_LOG_TABLE_CAPABILITY, SEQUENCE_RESTART_CAPABILITY, TASK_RF_HEALTH_CAPABILITY,
+    hold_runtime_supported, hold_enter_supported,
     hold_ramp_pause_supported, ramp_crosses_hold_steps,
     step_anchor_supported, step_anchor_negative_supported)
 from .widgets import StatusPill, natural_key
@@ -218,7 +219,7 @@ class _SequenceRow(QFrame):
                  can_edit: bool = True, can_run: bool = True,
                  show_scope: bool = False, on_proceed=None, on_hold_now=None,
                  hold_now_ok: bool = False, on_edit_wb=None, edit_wb_ok: bool = False,
-                 on_export=None, export_ok: bool = False):
+                 on_export=None, export_ok: bool = False, on_restart=None, restart_ok: bool = False):
         super().__init__()
         self.seq = seq
         self.setObjectName("card")
@@ -231,6 +232,10 @@ class _SequenceRow(QFrame):
                   and active_run.held_actual is None)
         # While HOLDING, the post-hold (window-B) steps can be edited before proceeding.
         can_edit_wb = holding and edit_wb_ok and on_edit_wb is not None
+        # An RF-faulted active run can be recovered (Phase 2): relaunch the faulted task at its
+        # crash-time level + continue. Gated on both capabilities (see _rebuild).
+        can_restart = (restart_ok and on_restart is not None and active_run is not None
+                       and active_run.state in _ACTIVE and bool(getattr(active_run, "fault", "")))
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
@@ -308,6 +313,12 @@ class _SequenceRow(QFrame):
         self._export.setToolTip("Export a run's log to a spreadsheet — one row per state change, "
                                 "every parameter (and power quantity) in its own column")
         self._export.setVisible(can_export)
+        # Recover a faulted run: relaunch the faulted task at its crash-time level, RF on.
+        self._restart = QPushButton("Restart", self)
+        self._restart.setToolTip("Recover this run — the faulted task went silent; relaunch it at "
+                                 "its current level (RF on) and rejoin the schedule (or replay the "
+                                 "rest, shifted later)")
+        self._restart.setVisible(can_restart)
         # Minimum (not fixed) width: the row stays aligned at 100%, but a button grows to fit a
         # longer label ("Proceed" > "Arm") or a wider fallback font at fractional scaling instead
         # of clipping it to an ellipsis.
@@ -316,6 +327,7 @@ class _SequenceRow(QFrame):
         self._hold_now.setMinimumWidth(72)
         self._edit_wb.setMinimumWidth(60)
         self._export.setMinimumWidth(66)
+        self._restart.setMinimumWidth(66)
         self._start.setToolTip(
             "Proceed — schedule the post-hold window (the down-ramp) and resume the run"
             if holding else
@@ -348,9 +360,13 @@ class _SequenceRow(QFrame):
             self._edit_wb.clicked.connect(lambda: on_edit_wb(seq))
         if can_export:
             self._export.clicked.connect(lambda: on_export(seq))
+        if can_restart:
+            self._restart.clicked.connect(lambda: on_restart(seq))
         shown = []
         if can_run:
             shown += [self._start]
+            if can_restart:
+                shown.append(self._restart)      # only on a faulted run — the recovery action
             if can_ff:
                 shown.append(self._hold_now)     # only while a run-up is in progress
             if can_edit_wb:
@@ -729,6 +745,41 @@ class SequencesPanel(QWidget):
             lambda: client.hold_now_sequence_run(run.id),
         )
 
+    def _on_restart(self, seq: m.Sequence) -> None:
+        """Recover a faulted run (Phase 2): relaunch the faulted task at its crash-time level with
+        RF on and continue — on the original schedule (resync) or shifted later (replay). The
+        operator chooses the mode. docs/rf-fault-recovery.md §7."""
+        run = next((r for r in self._runs if r.sequence_id == seq.id
+                    and r.state in _ACTIVE and getattr(r, "fault", "")), None)
+        if run is None:
+            self._set_status("no faulted run to restart", error=True)
+            self._refresh_runs()
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Restart faulted run")
+        box.setText(f"“{seq.name or seq.id}” — the task went silent ({run.fault}).")
+        box.setInformativeText(
+            "Relaunch it at its current level with RF on, then:\n\n"
+            "• Resync — rejoin the original schedule; the missed slice is a silence gap "
+            "(off-air unchanged).\n"
+            "• Replay — deliver the whole remaining profile; off-air shifts later by the downtime.")
+        resync = box.addButton("Resync", QMessageBox.ButtonRole.AcceptRole)
+        replay = box.addButton("Replay", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(resync)
+        box.exec()
+        clicked = box.clickedButton()
+        mode = "resync" if clicked is resync else "replay" if clicked is replay else None
+        if mode is None:
+            return
+        client = self.hub.fleet.get(self.hostname)
+        self._set_status(f"restarting {seq.name or seq.id} ({mode})…")
+        self.hub.run_async(
+            f"seq_restart:{self.hostname}:{seq.id}",
+            lambda: client.restart_sequence_run(run.id, m.RestartRunRequest(mode=mode)),
+        )
+
     def _hold_status_text(self, run: m.SequenceRun) -> str:
         """Live one-liner for the Proceed dialog: elapsed run time · time held · the
         remaining max-hold allowance."""
@@ -1029,6 +1080,13 @@ class SequencesPanel(QWidget):
             else:
                 self._set_status("holding — fast-forwarded to the Hold")
             self._refresh_runs()
+        elif op == "seq_restart":
+            if isinstance(result, Exception):
+                self._set_status("restart failed", error=True)
+                QMessageBox.warning(self, "Could not restart the run", str(result))
+            else:
+                self._set_status("restarting — recovered")
+            self._refresh_runs()
         elif op == "seq_stop":
             if isinstance(result, list):
                 bad = [(rid, e) for rid, e in result if e is not None]
@@ -1092,6 +1150,10 @@ class SequencesPanel(QWidget):
         hold_now_ok = self.can_run and self._supports(SEQUENCE_HOLD_NOW_CAPABILITY)
         edit_wb_ok = self.can_run and self._supports(SEQUENCE_HOLD_EDIT_CAPABILITY)
         export_ok = self.can_run and self._supports(SEQUENCE_LOG_TABLE_CAPABILITY)
+        # Restart needs BOTH: the fault must be detectable (task-rf-health) AND the agent must
+        # understand the recovery endpoint (sequence-restart). Resolved once, not per row.
+        restart_ok = (self.can_run and self._supports(TASK_RF_HEALTH_CAPABILITY)
+                      and self._supports(SEQUENCE_RESTART_CAPABILITY))
         for seq in seqs:
             if want != _SEQ_FILTER_ALL and not m.applies_to_type(seq.types, want):
                 continue
@@ -1110,6 +1172,7 @@ class SequencesPanel(QWidget):
                 on_hold_now=self._on_hold_now, hold_now_ok=hold_now_ok,
                 on_edit_wb=self._on_edit_wb, edit_wb_ok=edit_wb_ok,
                 on_export=self._on_export_log, export_ok=export_ok,
+                on_restart=self._on_restart, restart_ok=restart_ok,
             ))
             shown += 1
         if shown == 0:

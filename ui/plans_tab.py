@@ -49,6 +49,7 @@ from . import run_conflict
 from .theme import Palette
 from .timeline_model import (
     SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY, SEQUENCE_LOG_TABLE_CAPABILITY,
+    SEQUENCE_RESTART_CAPABILITY, TASK_RF_HEALTH_CAPABILITY,
     hold_runtime_supported, hold_enter_supported, hold_ramp_pause_supported,
     ramp_crosses_hold_steps, step_anchor_supported, step_anchor_negative_supported)
 from .widgets import StatusPill, natural_key
@@ -357,11 +358,15 @@ class _PlanRow(QFrame):
                  pending_n: int, on_arm, on_stop, on_edit, on_delete, on_log,
                  holding: bool = False, can_ff: bool = False, can_edit_wb: bool = False,
                  on_proceed=None, on_hold_now=None, on_edit_wb=None,
-                 on_export=None, export_ok: bool = False):
+                 on_export=None, export_ok: bool = False,
+                 on_restart=None, can_restart: bool = False):
         super().__init__()
         self.plan = plan
         self.setObjectName("card")
         active = (on_air_n + pending_n) > 0 or holding
+        # An RF-faulted run anywhere in the plan → the recovery action + a red pill override.
+        faulted = next((r for r in runs if getattr(r, "fault", "")), None)
+        can_restart = bool(can_restart and on_restart is not None and faulted is not None)
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
@@ -409,6 +414,10 @@ class _PlanRow(QFrame):
         else:
             word, status = "idle", "idle"
         self._pill = StatusPill(word, status)
+        # A fault anywhere in the plan overrides the pill (red "RF FAULT"), like the sequence row.
+        if faulted is not None:
+            self._pill.set_status("RF FAULT", "rf_fault")
+            self._pill.setToolTip(f"RF fault: {faulted.fault}")
         lay.addWidget(self._pill, alignment=Qt.AlignmentFlag.AlignTop)
 
         # While HOLDING the Arm button becomes Proceed (schedule window B / resume).
@@ -432,11 +441,18 @@ class _PlanRow(QFrame):
                                 "every parameter (and power quantity) in its own column; one sheet "
                                 "per unit")
         self._export.setVisible(can_export)
+        # Recover a faulted run: relaunch the faulted task at its crash-time level, RF on.
+        self._restart = QPushButton("Restart", self)
+        self._restart.setToolTip("Recover a faulted run in this plan — relaunch the silent task at "
+                                 "its current level (RF on) and rejoin the schedule (or replay the "
+                                 "rest, shifted later)")
+        self._restart.setVisible(can_restart)
         # Minimum (not fixed) width so a longer label ("Proceed" > "Arm") grows instead of clipping.
         for b in (self._arm, self._stop, self._log, self._edit, self._delete):
             b.setMinimumWidth(66)
         self._hold_now.setMinimumWidth(72)
         self._export.setMinimumWidth(66)
+        self._restart.setMinimumWidth(66)
         self._arm.setToolTip(
             "Proceed — schedule the post-hold window (the down-ramp) and resume the run"
             if holding else
@@ -473,7 +489,11 @@ class _PlanRow(QFrame):
             self._hold_now.clicked.connect(lambda: on_hold_now(plan))
         if can_export:
             self._export.clicked.connect(lambda: on_export(plan))
+        if can_restart:
+            self._restart.clicked.connect(lambda: on_restart(plan))
         shown = [self._arm]
+        if can_restart:
+            shown.append(self._restart)      # only on a faulted run — the recovery action
         if can_ff:
             shown.append(self._hold_now)     # only while a run-up is in progress
         shown += [self._stop, self._log]
@@ -999,6 +1019,17 @@ class PlansTab(QWidget):
                     return host, r
         return None, None
 
+    def _fault_run_for(self, plan: m.Plan) -> tuple:
+        """(hostname, SequenceRun) of this plan's first RF-faulted active run, else (None, None).
+        KNOWN LIMITATION (multi-unit): a plan arm produces one run per unit; this recovers the FIRST
+        faulted unit's run (the single-unit case is exact). Per-unit fan-out mirrors the plan-export
+        run-id TODO."""
+        for host, runs in self._runs_by_host.items():
+            for r in runs:
+                if r.plan_id == plan.id and r.state in _ACTIVE and getattr(r, "fault", ""):
+                    return host, r
+        return None, None
+
     def _unit_supports(self, host: Optional[str], capability: str) -> bool:
         if not host:
             return False
@@ -1083,6 +1114,40 @@ class PlansTab(QWidget):
         self.hub.run_async(
             f"plan_holdnow:{plan.id}",
             lambda: client.hold_now_sequence_run(run.id),
+        )
+
+    def _on_restart(self, plan: m.Plan) -> None:
+        """Recover a faulted plan run (Phase 2): relaunch the faulted task at its crash-time level
+        with RF on, on the original schedule (resync) or shifted later (replay). Single-unit exact;
+        for a multi-unit plan this recovers the first faulted unit's run. docs/rf-fault-recovery.md §7."""
+        host, run = self._fault_run_for(plan)
+        if run is None:
+            self._set_status("no faulted run to restart", error=True)
+            self._refresh_runs()
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Restart faulted run")
+        box.setText(f"“{plan.name or plan.id}” on {host} — the task went silent ({run.fault}).")
+        box.setInformativeText(
+            "Relaunch it at its current level with RF on, then:\n\n"
+            "• Resync — rejoin the original schedule; the missed slice is a silence gap "
+            "(off-air unchanged).\n"
+            "• Replay — deliver the whole remaining profile; off-air shifts later by the downtime.")
+        resync = box.addButton("Resync", QMessageBox.ButtonRole.AcceptRole)
+        replay = box.addButton("Replay", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(resync)
+        box.exec()
+        clicked = box.clickedButton()
+        mode = "resync" if clicked is resync else "replay" if clicked is replay else None
+        if mode is None:
+            return
+        client = self.fleet.get(host)
+        self._set_status(f"restarting {plan.name or plan.id} ({mode})…")
+        self.hub.run_async(
+            f"plan_restart:{plan.id}",
+            lambda: client.restart_sequence_run(run.id, m.RestartRunRequest(mode=mode)),
         )
 
     def _on_edit_wb(self, plan: m.Plan) -> None:
@@ -1192,6 +1257,13 @@ class PlansTab(QWidget):
             else:
                 self._set_status("holding — fast-forwarded to the Hold")
             self._refresh_runs()
+        elif op == "plan_restart":
+            if isinstance(result, Exception):
+                self._set_status("restart failed", error=True)
+                QMessageBox.warning(self, "Could not restart the run", str(result))
+            else:
+                self._set_status("restarting — recovered")
+            self._refresh_runs()
         elif op == "plan_stop":
             if isinstance(result, list):
                 bad = [(rid, e) for rid, e in result if e is not None]
@@ -1289,6 +1361,11 @@ class PlansTab(QWidget):
             can_edit_wb = holding and self._unit_supports(hold_host, SEQUENCE_HOLD_EDIT_CAPABILITY)
             export_ok = any(self._unit_supports(it.hostname, SEQUENCE_LOG_TABLE_CAPABILITY)
                             for it in plan.items)
+            # Restart: a faulted run on a unit whose agent detects faults AND understands recovery.
+            fault_host, _fr2 = self._fault_run_for(plan)
+            can_restart = (fault_host is not None
+                           and self._unit_supports(fault_host, TASK_RF_HEALTH_CAPABILITY)
+                           and self._unit_supports(fault_host, SEQUENCE_RESTART_CAPABILITY))
             shown += 1
             self._list.addWidget(_PlanRow(
                 plan, runs, on_air_n, pending_n,
@@ -1296,7 +1373,8 @@ class PlansTab(QWidget):
                 on_edit=self._on_edit, on_delete=self._on_delete, on_log=self._on_log,
                 holding=holding, can_ff=can_ff, can_edit_wb=can_edit_wb,
                 on_proceed=self._on_proceed, on_hold_now=self._on_hold_now,
-                on_edit_wb=self._on_edit_wb, on_export=self._on_export_log, export_ok=export_ok))
+                on_edit_wb=self._on_edit_wb, on_export=self._on_export_log, export_ok=export_ok,
+                on_restart=self._on_restart, can_restart=can_restart))
         if shown == 0 and query:
             empty = QLabel(f"No plans match “{query}”.")
             empty.setStyleSheet(f"font-size: 12px; color: {Palette.TEXT_FAINT};")
