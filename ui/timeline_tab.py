@@ -512,6 +512,11 @@ class _DayPlanner(QWidget):
         self._btn_rects: Dict[str, Tuple[QRectF, str]] = {}   # id -> (rect, action)
         self.HOUR_PX = _DayPlanner.HOUR_PX                    # instance vertical scale (shadows the class default)
         self._scroll_area = None                              # the QScrollArea hosting us (for zoom anchoring)
+        # A 1-second repaint keeps the now-line and its countdown pill ticking; it runs only
+        # while today (the one day that carries a now-line) is shown (armed in set_day).
+        self._sec_timer = QTimer(self)
+        self._sec_timer.setInterval(1000)
+        self._sec_timer.timeout.connect(self.update)
         self.setMouseTracking(True)
         self.setMinimumWidth(380)
 
@@ -532,12 +537,18 @@ class _DayPlanner(QWidget):
     # ── Data ───────────────────────────────────────────────────────────────────
 
     def set_day(self, d: date, blocks: List[dict]) -> None:
-        """blocks: dicts with id, name, desc, start, stop, state, armable."""
+        """blocks: dicts with id, name, desc, start, stop, state, armable, reference."""
         self._date = d
         self._raw_blocks = list(blocks)
         self._layout(blocks)
         self.setMinimumHeight(self.content_height())
         self.updateGeometry()
+        # Tick every second only on today (where the now-line + countdown live).
+        if d == date.today():
+            if not self._sec_timer.isActive():
+                self._sec_timer.start()
+        else:
+            self._sec_timer.stop()
         self.update()
 
     def _day_bounds(self) -> Tuple[datetime, datetime]:
@@ -686,12 +697,14 @@ class _DayPlanner(QWidget):
 
         # "now" marker when viewing today — drawn last so it stays in front of the blocks
         if self._date == date.today():
-            y = int(self._to_y(datetime.now()))
+            now = datetime.now()
+            y = int(self._to_y(now))
             p.setPen(QPen(QColor(Palette.CRASH), 1))
             p.drawLine(self.AXIS_W, y, w, y)
             p.setBrush(QBrush(QColor(Palette.CRASH)))
             p.setPen(Qt.PenStyle.NoPen)
             p.drawEllipse(QRectF(self.AXIS_W - 3, y - 3, 6, 6))
+            self._paint_countdown(p, now, y, w)
         p.end()
 
     def _paint_block(self, p, b, rect, name_font, meta_font, desc_font) -> None:
@@ -793,6 +806,92 @@ class _DayPlanner(QWidget):
         if live:
             self._btn_rects[b["id"]] = (br, action)
         return self.BTN_W + 10
+
+    # ── the now-line countdown pill ────────────────────────────────────────────
+
+    def _countdown_target(self, now: datetime) -> Optional[Tuple[str, timedelta]]:
+        """What the now-line counts down to: ("onair", time-until a running plan's off-air)
+        if a plan is on air now, else ("next", time-until the next plan's on-air), else None.
+        Reference (note) windows are never transmitted, so they're skipped."""
+        cur: Optional[Tuple[dict, datetime]] = None
+        nxt: Optional[Tuple[dict, datetime]] = None
+        for b in self._blocks:
+            if b.get("reference"):
+                continue
+            s, e = b.get("start"), b.get("stop")
+            if s is None or e is None:
+                continue
+            if s <= now < e:
+                if cur is None or e < cur[1]:      # the one ending soonest
+                    cur = (b, e)
+            elif s > now:
+                if nxt is None or s < nxt[1]:      # the one starting soonest
+                    nxt = (b, s)
+        if cur is not None:
+            return "onair", cur[1] - now
+        if nxt is not None:
+            return "next", nxt[1] - now
+        return None
+
+    @staticmethod
+    def _fmt_countdown(secs: float) -> str:
+        secs = max(0, int(secs))
+        h, rem = divmod(secs, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+    def _paint_countdown(self, p, now: datetime, y: int, w: int) -> None:
+        """A small pill riding the RIGHT end of the now-line: a hollow ring + "STARTS IN" +
+        the countdown to the next plan, or (while a plan is on air) a filled dot + "ENDS IN"
+        + the countdown to its off-air. The plan itself is named by the block the line sits
+        on, so the pill carries no task name."""
+        target = self._countdown_target(now)
+        if target is None:
+            return
+        mode, remaining = target
+        onair = (mode == "onair")
+        accent = QColor(Palette.ONLINE if onair else Palette.CRASH)
+        label = ("ENDS IN" if onair else "STARTS IN")
+        text = self._fmt_countdown(remaining.total_seconds())
+
+        num_font = mono_font(15, 700)
+        lab_font = QFont(); lab_font.setPointSize(7); lab_font.setBold(True)
+        fm_num, fm_lab = QFontMetrics(num_font), QFontMetrics(lab_font)
+        glyph_d, pad_l, pad_r, gap = 9.0, 10.0, 12.0, 8.0
+        lab_w = fm_lab.horizontalAdvance(label)
+        num_w = fm_num.horizontalAdvance(text)
+        pill_w = pad_l + glyph_d + gap + lab_w + 7 + num_w + pad_r
+        pill_h = 26.0
+        if w - self.AXIS_W < pill_w + 12:          # too narrow to place the pill cleanly
+            return
+        rect = QRectF(w - 6 - pill_w, y - pill_h / 2, pill_w, pill_h)
+
+        # body: surface fill + hairline border + a state-coloured left rail
+        p.setPen(QPen(QColor(Palette.BORDER_STRONG), 1))
+        p.setBrush(QBrush(QColor(Palette.SURFACE)))
+        p.drawRoundedRect(rect, pill_h / 2, pill_h / 2)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(accent))
+        p.drawRoundedRect(QRectF(rect.left() + 1.5, rect.top() + 4, 3.0, rect.height() - 8), 1.5, 1.5)
+
+        x = rect.left() + pad_l
+        cy = rect.center().y()
+        # glyph: a filled dot for on air, a hollow ring for a pending next plan
+        gr = QRectF(x, cy - glyph_d / 2, glyph_d, glyph_d)
+        if onair:
+            p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(accent)); p.drawEllipse(gr)
+        else:
+            p.setPen(QPen(accent, 1.5)); p.setBrush(Qt.BrushStyle.NoBrush); p.drawEllipse(gr)
+        x += glyph_d + gap
+        # kick label ("STARTS IN" / "ENDS IN")
+        p.setFont(lab_font); p.setPen(accent)
+        p.drawText(QRectF(x, rect.top(), lab_w, rect.height()),
+                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), label)
+        x += lab_w + 7
+        # the countdown itself (mono, near-black for legibility on either state colour)
+        p.setFont(num_font); p.setPen(QColor(Palette.TEXT))
+        p.drawText(QRectF(x, rect.top(), num_w, rect.height()),
+                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), text)
 
     def _paint_ref_badge(self, p, b, rect, border, meta_font) -> int:
         """A small, inert "REFERENCE" tag where a plan's Arm pill would sit — so a note is

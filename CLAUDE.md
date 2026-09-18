@@ -71,6 +71,34 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — schedule timeline: a countdown pill on the now-line: COMPLETE (branch `claude/system-familiarization-f5mezz`, client-only)
+Owner ask: near the red now-line, a countdown (on the same UI-wide clock as the now-line) to the NEXT
+scheduled plan, or to the END of a currently-running one — so there's no need to eyeball the gap. Owner
+approved the published mockup, chose the **"on the line"** placement (right end), and said the pill needs
+NO task-name text (the block the line sits on already names it). All in **`ui/timeline_tab.py`**
+`_DayPlanner`; client-only, no agent/scripts/wire/capability change, drift-guarded files untouched.
+- **`_countdown_target(now)`** → `("onair", off-air − now)` if a non-reference plan is on air now (the one
+  ending soonest), else `("next", on-air − now)` for the soonest upcoming non-reference plan, else None.
+  **Reference (note) windows are skipped** — never a target, and being inside one doesn't read as "on air"
+  (they aren't transmitted). Computed from the day's laid-out blocks (`start`/`stop`/`reference`), so it's a
+  TODAY feature (the only day with a now-line); nothing upcoming today ⇒ no pill.
+- **`_paint_countdown(p, now, y, w)`** draws a compact pill riding the RIGHT end of the now-line
+  (`_paint_action`-style geometry): a state-coloured left rail + hairline border on `Palette.SURFACE`, a
+  hollow **ring** (`Palette.CRASH`) + `STARTS IN` for a pending next, or a filled **dot** (`Palette.ONLINE`)
+  + `ENDS IN` for a running plan, then the `mono_font` countdown (`_fmt_countdown`: `M:SS` / `H:MM:SS`,
+  clamps negatives). No task name. Bails when the lane is too narrow. Drawn right after the now-line + dot
+  so it sits on top.
+- **Ticking**: a per-instance **1-second `QTimer`** (`self._sec_timer` → `self.update()`) armed in `set_day`
+  only while today is shown (stopped on any other day), so the now-line and its countdown advance smoothly;
+  off-tab the widget is hidden so `update()` schedules no paint. Uses the SAME `datetime.now()` as the
+  now-line (already the app's clock the unit arm/stop times are set against) — no separate NTP path.
+Tests: `tests/test_timeline_countdown.py` (target = running-ends / next-starts / soonest-of-several /
+skips references incl. while inside one / none once past the last plan / reference-only day is empty;
+`_fmt_countdown` M:SS + H:MM:SS + clamp; the 1 s timer runs on today and stops off it; paint smoke for both
+pill states + the no-target no-pill case). Suite 1098 → 1108 offscreen. Verified by a headless
+`_DayPlanner.render()` (green "ENDS IN 08:46" dot-pill over the on-air block; hollow-ring "STARTS IN 14:31"
+skipping a violet reference to the next plan). Mockup published as an Artifact for the owner's sign-off.
+
 ## Current state — schedule timeline: reference (note) entries — external tests we don't transmit for: COMPLETE (branch `claude/system-familiarization-f5mezz`, client-only)
 Owner ask: put the WHOLE test-area transmission plan on the schedule, including the ~half of tests the
 team does NOT transmit for, so there's no need to keep a separate window open. Such a **reference** entry
