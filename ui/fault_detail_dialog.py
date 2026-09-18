@@ -58,9 +58,13 @@ def _diagnosis_rows(snap: m.FaultSnapshot) -> list:
     env = snap.vmcircbuf_backend_env or ""
     compiled = snap.vmcircbuf_backend_compiled or ""
     backend = env or compiled or "—"
-    # A non-mmap effective backend is the leaky-fallback suspect; a mismatch env≠compiled is worth
-    # naming even when both are mmap.
-    backend_suspect = bool(env) and env != _SAFE_BACKEND
+    # The EFFECTIVE backend is the env pin when set, else the COMPILED default — GR falls back to the
+    # compiled default when no GR_CONF_* env is pinned (e.g. when the P0 pin knob is disabled). A
+    # non-mmap effective backend is the leaky-fallback suspect whichever supplies it, so a sysv_shm
+    # COMPILED default with no env pin is flagged too (env-only would miss it, in exactly the config
+    # where sysv is active). A mismatch env≠compiled is named below even when both are mmap.
+    effective = env or compiled
+    backend_suspect = bool(effective) and effective != _SAFE_BACKEND
     backend_val = backend
     if env and compiled and env != compiled:
         backend_val = f"{env}  (compiled default: {compiled})"

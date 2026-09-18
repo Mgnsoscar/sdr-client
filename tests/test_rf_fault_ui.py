@@ -242,6 +242,19 @@ def test_diagnosis_rows_flag_the_vmcircbuf_suspects():
     assert by["Open-file limit (soft/hard)"].suspect is False
 
 
+def test_diagnosis_rows_flag_a_leaky_compiled_default_when_env_unset():
+    from ui.fault_detail_dialog import _diagnosis_rows
+    # The P0 GR pin knob is disabled → the task's GR_CONF_* env is unset (env ""), so the EFFECTIVE
+    # backend is the compiled default. A sysv_shm compiled default is the leaky suspect and must be
+    # flagged even though env is empty (the env-only check would have missed it — the confirmed bug).
+    snap = m.FaultSnapshot(vmcircbuf_backend_env="", vmcircbuf_backend_compiled="sysv_shm")
+    row = {r.label: r for r in _diagnosis_rows(snap)}["GR buffer backend"]
+    assert row.suspect is True and "sysv_shm" in row.value and row.hint
+    # env "" + a mmap compiled default is NOT suspect.
+    snap2 = m.FaultSnapshot(vmcircbuf_backend_env="", vmcircbuf_backend_compiled="mmap_shm_open")
+    assert {r.label: r for r in _diagnosis_rows(snap2)}["GR buffer backend"].suspect is False
+
+
 def test_diagnosis_rows_healthy_backend_not_flagged():
     from ui.fault_detail_dialog import _diagnosis_rows
     snap = m.FaultSnapshot(vmcircbuf_backend_env="mmap_shm_open",

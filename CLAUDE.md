@@ -106,10 +106,14 @@ on the poll, and auto-drops RF; this surfaces it. All client-only; drift-guarded
 - **`ui/timeline_model.py`** — `TASK_RF_HEALTH_CAPABILITY = "task-rf-health"` + `task_rf_health_supported(client)`
   (capability-only). The Phase-1 pill/alarm render UNCONDITIONALLY (they only reflect data an older
   agent never sends); the gate is reserved for the Phase-2 "Restart" affordance the agent must understand.
-Tests: `tests/test_rf_fault_ui.py` (20: models parse + defaults; classify routes task_health not
+Tests: `tests/test_rf_fault_ui.py` (21: models parse + defaults; classify routes task_health not
 TaskEvent; alert feed red + fault_raised + double-click diagnosis; the diagnosis-row suspects +
-div-by-zero; task/sequence/card pills override + reset; theme; the capability gate; headless-safe alarm
-handlers). Adversarial review (find→verify): 0 confirmed defects. **NEXT — Phase 2** (cross-repo): the
+div-by-zero + the leaky-COMPILED-default flag; task/sequence/card pills override + reset; theme; the
+capability gate; headless-safe alarm handlers). Suite 1108 → 1129. **Adversarial review** (find→verify):
+one LOW finding FIXED — `fault_detail_dialog._diagnosis_rows` flagged a leaky backend on the env value
+ALONE, so a sysv_shm COMPILED default with the P0 env pin disabled (env "") showed unflagged; now the
+suspect check keys on the EFFECTIVE backend (`env or compiled`), so the leaky compiled default is caught
+in exactly the config where sysv is active (regression test added). **NEXT — Phase 2** (cross-repo): the
 "Restart" button (gated on `task-rf-health`) + resync/replay.
 
 ## Current state — schedule timeline: a countdown pill on the now-line: COMPLETE (branch `claude/system-familiarization-f5mezz`, client-only)
