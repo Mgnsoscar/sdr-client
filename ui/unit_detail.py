@@ -124,10 +124,29 @@ class _TaskRow(QFrame):
     def update_status(self, task: m.ProcessStatus) -> None:
         st = task.state
         self._state = st
-        self._pill.set_status(st.value, st.value)
+        # RF health is a SEPARATE axis from state (docs/rf-fault-recovery.md §5.3): a halted-but-
+        # alive flowgraph still reads RUNNING, so an rf_fault OVERRIDES the state pill (red, "RF
+        # FAULT") until the task is restarted. The durable poll backstop for the loud SSE alarm.
+        health = getattr(task, "health", None)
+        self._faulted = health == m.TaskHealth.RF_FAULT
+        if self._faulted:
+            self._pill.set_status("RF FAULT", "rf_fault")
+            detail = getattr(task, "health_detail", "") or "radio silent — flowgraph halted"
+            self._pill.setToolTip(f"RF fault: {detail}")
+        else:
+            self._pill.set_status(st.value, st.value)
+            self._pill.setToolTip("")
 
-        # Info line
-        if st == m.ProcessState.RUNNING and task.pid:
+        # Log button reflects a fault so the operator knows where to look.
+        self._logs.setText("Fault log" if self._faulted else "Log")
+        self._logs.setToolTip(
+            "Open the task's log at the RF fault (the radio went silent)"
+            if self._faulted else "Open this task's log in a window")
+
+        # Info line — the fault reason wins over the ordinary pid/exit line.
+        if self._faulted:
+            self._info.setText(getattr(task, "health_detail", "") or "radio silent")
+        elif st == m.ProcessState.RUNNING and task.pid:
             self._info.setText(f"pid {task.pid}")
         elif st == m.ProcessState.CRASHED:
             code = task.exit_code if task.exit_code is not None else "?"

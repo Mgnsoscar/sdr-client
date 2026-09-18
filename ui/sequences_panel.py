@@ -275,6 +275,12 @@ class _SequenceRow(QFrame):
             state_word = active_run.state.value if active else "idle"
             self._pill = StatusPill(state_word, state_word)
             lay.addWidget(self._pill, alignment=Qt.AlignmentFlag.AlignTop)
+            # An RF fault coupled into the run (a task it owns went silent, §5.3) overrides the
+            # state pill: a still-RUNNING run whose radio died reads "RF FAULT" (red), not
+            # "running". Purely reflects run.fault from the poll — no capability gate.
+            if active and getattr(active_run, "fault", ""):
+                self._pill.set_status("RF FAULT", "rf_fault")
+                self._pill.setToolTip(f"RF fault: {active_run.fault}")
 
         # While HOLDING the Arm button becomes Proceed (schedule window B / resume).
         self._start = QPushButton("Proceed" if holding else "Arm")

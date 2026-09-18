@@ -23,7 +23,9 @@ from api import models as m
 from .theme import Palette
 
 # Event types we treat as "needs attention" (red + optional sound/flash).
-_ALERT_TYPES = {"crash", "event_aborted", "sequence_aborted"}
+# task_health = a dead-but-alive RF fault (docs/rf-fault-recovery.md §5.3) — the loudest of all.
+_ALERT_TYPES = {"crash", "event_aborted", "sequence_aborted", "task_health",
+                "sequence_rf_fault"}
 
 
 def _now_hms() -> str:
@@ -38,6 +40,11 @@ def _describe(ev) -> tuple[str, bool]:
     if isinstance(ev, m.CrashEvent):
         return (f"{ev.unit_id} · {ev.task_name} CRASHED "
                 f"(exit {ev.exit_code})", True)
+
+    if isinstance(ev, m.TaskHealthEvent):
+        # A halted-but-alive flowgraph: the SDR is silent while the task looks RUNNING.
+        reason = f" — {ev.detail}" if ev.detail else ""
+        return (f"{ev.unit_id} · {ev.task_name} RF FAULT (radio silent){reason}", True)
 
     if isinstance(ev, m.EventWebhook):
         verb = {
@@ -59,6 +66,10 @@ def _describe(ev) -> tuple[str, bool]:
             "sequence_stopped":  "complete",    # every step (incl. cool-down) has fired
             "sequence_aborted":  "ABORTED",
             "sequence_modified": "window changed",
+            "sequence_hold":     "HOLDING",
+            "sequence_proceed":  "resumed",
+            "sequence_hold_timeout": "hold TIMED OUT — aborted",
+            "sequence_rf_fault": "RF FAULT (radio silent)",
         }.get(ev.type, ev.type)
         extra = f" — {ev.detail}" if ev.detail else ""
         return (f"{ev.unit_id} · {ev.sequence_name}: {verb}{extra}",
@@ -83,6 +94,12 @@ class AlertFeed(QWidget):
     # Emitted when an alert-level event arrives, so the main window can react
     # (sound, flash, etc.). Carries the descriptive line.
     alert_raised = pyqtSignal(str)
+
+    # Emitted ONLY for an RF-fault TaskHealthEvent (§5.3), carrying the full event, so the
+    # main window can raise the loudest, fault-specific alarm (a persistent tray notification
+    # with the fault detail + a route to the fault log). Distinct from alert_raised so a
+    # routine crash/abort doesn't trigger the fault-only extras.
+    fault_raised = pyqtSignal(object)
 
     MAX_ITEMS = 500
 
@@ -121,6 +138,7 @@ class AlertFeed(QWidget):
         self._list = QListWidget()
         self._list.setObjectName("alertList")
         self._list.setMaximumHeight(150)
+        self._list.itemDoubleClicked.connect(self._on_item_activated)
         outer.addWidget(self._list)
 
     # ── Public API ─────────────────────────────────────────────────────────────
@@ -133,6 +151,10 @@ class AlertFeed(QWidget):
         item = QListWidgetItem(text)
         if is_alert:
             item.setForeground(Qt.GlobalColor.red)
+        # Keep the event on the row so an RF-fault line opens its diagnosis on double-click.
+        if isinstance(ev, m.TaskHealthEvent):
+            item.setData(Qt.ItemDataRole.UserRole, ev)
+            item.setToolTip("Double-click for the fault diagnosis (backend, /dev/shm, maps, log)")
         self._list.insertItem(0, item)
 
         # Trim
@@ -143,6 +165,15 @@ class AlertFeed(QWidget):
 
         if is_alert:
             self.alert_raised.emit(line)
+        if isinstance(ev, m.TaskHealthEvent):
+            self.fault_raised.emit(ev)
+
+    def _on_item_activated(self, item: QListWidgetItem) -> None:
+        """Double-clicking an RF-fault row opens its self-diagnosis (the captured snapshot)."""
+        ev = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(ev, m.TaskHealthEvent):
+            from .fault_detail_dialog import FaultDetailDialog
+            FaultDetailDialog(ev, parent=self.window()).exec()
 
     def clear(self) -> None:
         self._list.clear()

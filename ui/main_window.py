@@ -21,8 +21,8 @@ import logging
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QLabel, QMessageBox, QPushButton, QStackedWidget,
-    QVBoxLayout, QWidget, QMainWindow,
+    QApplication, QHBoxLayout, QLabel, QMessageBox, QPushButton, QStackedWidget,
+    QStyle, QSystemTrayIcon, QVBoxLayout, QWidget, QMainWindow,
 )
 
 from api import models as m
@@ -154,6 +154,8 @@ class MainWindow(QMainWindow):
     def _build_alertfeed(self, outer: QVBoxLayout) -> None:
         self.alert_feed = AlertFeed()
         self.alert_feed.alert_raised.connect(self._on_alert)
+        self.alert_feed.fault_raised.connect(self._on_fault)
+        self._tray = None            # lazily built on the first RF fault (guarded)
         outer.addWidget(self.alert_feed)
 
     # ── Signal wiring ───────────────────────────────────────────────────────────
@@ -193,10 +195,68 @@ class MainWindow(QMainWindow):
         self.alert_feed.add_event(ev)
 
     def _on_alert(self, line: str) -> None:
-        # An attention-worthy event arrived. Make sure the feed is visible.
+        # An attention-worthy event arrived (a crash, an abort, or an RF fault). Make the
+        # feed visible and raise a NON-focus-stealing attention cue: a beep + a taskbar flash.
+        # Every guarded so a headless / no-audio environment never breaks event handling.
+        # (The aggressive, focus-stealing alarm is reserved for RF faults — see _on_fault.)
         self.alert_feed.expand()
-        # (Sound / window flash can be added here later.)
         logger.warning("ALERT: %s", line)
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.beep()
+            except Exception:  # noqa: BLE001 — no audio device / headless
+                pass
+            try:
+                app.alert(self, 0)          # flash the taskbar entry until focused (0 = until active)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _on_fault(self, ev) -> None:
+        """The loudest alarm — an RF fault (a halted-but-alive flowgraph: the radio is silent
+        while the task still shows RUNNING). This is the invisible failure the whole feature
+        targets, so unlike a routine alert it STEALS attention: un-minimise + raise + activate
+        the window, and post a persistent system-tray notification carrying the fault detail.
+        All guarded so headless/offscreen (and no system tray) is a clean no-op."""
+        unit = getattr(ev, "unit_id", "?")
+        task = getattr(ev, "task_name", "?")
+        detail = getattr(ev, "detail", "") or "flowgraph halted"
+        logger.error("RF FAULT: %s · %s — %s", unit, task, detail)
+        try:
+            # Un-minimise, then bring to front and take focus.
+            self.setWindowState(
+                (self.windowState() & ~Qt.WindowState.WindowMinimized)
+                | Qt.WindowState.WindowActive
+            )
+            self.show()
+            self.raise_()
+            self.activateWindow()
+        except Exception:  # noqa: BLE001
+            pass
+        self._notify_tray(
+            "RF FAULT — radio silent",
+            f"{unit} · {task}\n{detail}\nRF was auto-dropped. See the unit's fault log.",
+        )
+
+    def _notify_tray(self, title: str, body: str) -> None:
+        """Post a persistent system-tray balloon (best-effort). No-op where no tray exists
+        (headless, offscreen, or a desktop without a notification area)."""
+        try:
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                return
+            if self._tray is None:
+                icon = self.windowIcon()
+                if icon.isNull():
+                    icon = self.style().standardIcon(
+                        QStyle.StandardPixmap.SP_MessageBoxCritical)
+                self._tray = QSystemTrayIcon(icon, self)
+                self._tray.setToolTip("SDR Broadcaster Control")
+                self._tray.show()
+            self._tray.showMessage(
+                title, body,
+                QSystemTrayIcon.MessageIcon.Critical, 15000)   # 15 s balloon
+        except Exception:  # noqa: BLE001 — tray unsupported / platform quirk
+            pass
 
     def _on_fast_update(self, snap) -> None:
         # Update the clock indicator from the latest system snapshot.

@@ -124,6 +124,10 @@ _STATUS_MAP = {
     "cancelled": (Palette.IDLE,   Palette.IDLE_SOFT),
     "crashed":   (Palette.CRASH,  Palette.CRASH_SOFT),
     "aborted":   (Palette.CRASH,  Palette.CRASH_SOFT),
+    # RF fault — a halted-but-alive flowgraph (radio silent). Red, like a crash.
+    "rf_fault":  (Palette.CRASH,  Palette.CRASH_SOFT),
+    "rf fault":  (Palette.CRASH,  Palette.CRASH_SOFT),
+    "fault":     (Palette.CRASH,  Palette.CRASH_SOFT),
 }
 
 

@@ -204,7 +204,16 @@ class UnitCard(QFrame):
     def update_tasks(self, tasks: list[m.ProcessStatus]) -> None:
         running = sum(1 for t in tasks if t.state == m.ProcessState.RUNNING)
         crashed = sum(1 for t in tasks if t.state == m.ProcessState.CRASHED)
-        if crashed:
+        # An RF fault (a halted-but-alive flowgraph — radio silent while the task reads RUNNING,
+        # docs/rf-fault-recovery.md §5.3) is worse than a crash and easy to miss, so it wins the
+        # card's task line, called out loudest.
+        faulted = sum(1 for t in tasks
+                      if getattr(t, "health", None) == m.TaskHealth.RF_FAULT)
+        if faulted:
+            self._tasks.setText(f"{running} run · {faulted} RF FAULT")
+            self._tasks.setStyleSheet(
+                f"font-size: 12px; font-weight: 600; color: {Palette.CRASH};")
+        elif crashed:
             self._tasks.setText(f"{running} run · {crashed} crash")
             self._tasks.setStyleSheet(f"font-size: 12px; color: {Palette.CRASH};")
         else:

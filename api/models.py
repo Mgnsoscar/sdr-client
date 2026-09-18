@@ -50,6 +50,17 @@ class ProcessState(str, Enum):
     CRASHED  = "crashed"
 
 
+class TaskHealth(str, Enum):
+    """A task's RF / flowgraph health — a SEPARATE axis from the exit-driven ProcessState
+    (mirrors agent/models.py; docs/rf-fault-recovery.md §5.3). A halted GNU Radio flowgraph
+    is still process-RUNNING, so its fault is this field, never a ProcessState value. Phase 1
+    only ever sets OK and RF_FAULT; STALLED/UNKNOWN are reserved for the follow-ups."""
+    OK       = "ok"
+    STALLED  = "stalled"     # sustained underflow / degraded (reserved; not set in Phase 1)
+    RF_FAULT = "rf_fault"    # the flowgraph halted / a GR buffer fault — dead-but-alive
+    UNKNOWN  = "unknown"
+
+
 class EventState(str, Enum):
     ARMED     = "armed"
     RUNNING   = "running"
@@ -131,6 +142,12 @@ class ProcessStatus(BaseModel):
     stopped_at: Optional[str] = None
     restart_count: int = 0
     log_file: str = ""
+    # RF / flowgraph health — a separate axis from `state` (§5.3). Defaulted so an older
+    # agent (no health field) parses unchanged. The durable poll backstop for the fault pill;
+    # the loud, instant path is the TaskHealthEvent over SSE.
+    health: TaskHealth = TaskHealth.OK
+    health_detail: str = ""            # short reason, e.g. the fault signature that matched
+    last_output_at: Optional[str] = None   # ISO-8601 of the task's last log output (advisory)
 
 
 class StartRequest(BaseModel):
@@ -236,6 +253,45 @@ class CrashEvent(BaseModel):
     last_log_lines: List[str]
 
 
+class FaultSnapshot(BaseModel):
+    """Machine + per-task resource state captured at RF-fault detection (mirrors
+    agent/models.py; docs/rf-fault-recovery.md §6.3) so the next vmcircbuf failure is
+    self-diagnosing. All optional/best-effort — a field is blank when its source was
+    unavailable on the unit. The client renders it on the fault log, never computes it."""
+    captured_at: str = ""
+    shm_used_bytes: Optional[int] = None
+    shm_total_bytes: Optional[int] = None
+    map_count: Optional[int] = None            # /proc/<pid>/maps line count (VMAs)
+    map_max: Optional[int] = None              # /proc/sys/vm/max_map_count
+    rss_bytes: Optional[int] = None
+    nofile_soft: Optional[int] = None          # the task's RLIMIT_NOFILE
+    nofile_hard: Optional[int] = None
+    vmcircbuf_backend_env: str = ""            # the task's effective GR_CONF_VMCIRCBUF_DEFAULT_FACTORY
+    vmcircbuf_backend_compiled: str = ""       # gnuradio-config-info [vmcircbuf] default_factory
+    task_home: str = ""
+    ipcs_summary: str = ""                     # only captured when a SysV backend is implicated
+    uhd_log_tail: List[str] = []               # tail of the per-task UHD log
+    snapshot_path: str = ""                    # where the full JSON was written on the unit
+    log_path: str = ""                         # the task's current.log at detection
+    notes: List[str] = []                      # 'pid gone' / 'gnuradio-config-info absent' / …
+
+
+class TaskHealthEvent(BaseModel):
+    """SSE event fired when a task's RF/flowgraph health turns to a fault (§5.3; mirrors
+    agent/models.py). Same shape + dispatch as CrashEvent, but routed to a LOUD client alarm.
+    `type` starts with 'task_', so classify() needs an explicit branch BEFORE its generic
+    'task_' → TaskEvent rule."""
+    type: str = "task_health"          # discriminator (classify() matches this exact value)
+    unit_id: str
+    task_name: str
+    task_description: str = ""
+    health: TaskHealth = TaskHealth.RF_FAULT
+    detail: str = ""                   # the fault signature / reason
+    at: str                            # ISO-8601
+    last_log_lines: List[str] = []     # log tail at detection (immediate on-screen context)
+    snapshot: Optional[FaultSnapshot] = None
+
+
 class EventWebhook(BaseModel):
     type: str
     unit_id: str
@@ -259,7 +315,7 @@ class TaskEvent(BaseModel):
 
 
 class SequenceWebhook(BaseModel):
-    # sequence_started | sequence_on_air | sequence_step | sequence_off_air | sequence_stopped | sequence_aborted | sequence_modified
+    # sequence_started | sequence_on_air | sequence_step | sequence_off_air | sequence_stopped | sequence_aborted | sequence_modified | sequence_hold | sequence_proceed | sequence_hold_timeout | sequence_rf_fault
     type: str
     unit_id: str
     run_id: str
@@ -407,6 +463,13 @@ class SequenceRun(BaseModel):
     resumed_actual: Optional[str] = None       # wall-clock (UTC ISO) the operator proceeded
     hold_aware: bool = False                   # interactive (Library) arm only; False = no-op Hold
     max_hold_s: float = 1800.0                 # auto-abort deadman while HOLDING; 0 = unlimited
+    # RF-fault coupling (docs/rf-fault-recovery.md §5.3; mirrors agent/models.py): when a task an
+    # active run owns is detected dead-but-alive, the run is stamped here (an rf_fault FIELD on a
+    # still-RUNNING run, not a terminal SequenceState). Defaulted so pre-feature runs deserialize
+    # unchanged. The Phase-2 restart reads the crash-time state; Phase 1 only surfaces the pill.
+    fault: str = ""                    # "" = healthy; else the faulted task + reason
+    fault_task: str = ""               # the specific task name that faulted (a run may own several)
+    fault_at: str = ""                 # ISO-8601 of detection
 
 
 class StepOverride(BaseModel):

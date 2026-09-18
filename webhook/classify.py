@@ -9,6 +9,7 @@ so the classification logic lives here in a neutral module both can import.
 
 The agent's event payloads all carry a "type" discriminator:
     crash
+    task_health
     event_started | event_stopped | event_aborted | event_modified
     sequence_started | sequence_step | sequence_stopped | sequence_aborted | sequence_modified
     task_started | task_stopped | task_restarted
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 # A classified event is one of these model types (already parsed), or the raw
 # dict if the type is unknown / the payload didn't match its model.
 ReceivedEvent = Union[
-    m.CrashEvent, m.EventWebhook, m.SequenceWebhook, m.TaskEvent, dict
+    m.CrashEvent, m.TaskHealthEvent, m.EventWebhook, m.SequenceWebhook, m.TaskEvent, dict
 ]
 
 # Callback signature: fn(event) -> None
@@ -38,6 +39,9 @@ def classify(payload: dict) -> ReceivedEvent:
     try:
         if etype == "crash":
             return m.CrashEvent(**payload)
+        # Must precede the generic "task_" → TaskEvent rule: task_health has its own model + alarm.
+        if etype == "task_health":
+            return m.TaskHealthEvent(**payload)
         if etype.startswith("event_"):
             return m.EventWebhook(**payload)
         if etype.startswith("sequence_"):

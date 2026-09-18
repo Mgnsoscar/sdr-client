@@ -61,6 +61,14 @@ SEQUENCE_STEP_ANCHOR_MIN_VERSION = (1, 24, 0)
 SEQUENCE_STEP_ANCHOR_NEG_CAPABILITY = "sequence-step-anchor-negative"
 SEQUENCE_STEP_ANCHOR_NEG_MIN_VERSION = (1, 25, 0)
 
+# Agent >= 1.28.0 detects a dead-but-alive RF fault (a halted GNU Radio flowgraph), stamps
+# ProcessStatus.health / fires a TaskHealthEvent, couples it into an owning run, and auto-drops RF
+# (docs/rf-fault-recovery.md §5). The client renders the fault pill + alarm UNCONDITIONALLY — those
+# only reflect data an agent chooses to send, so an older agent simply never sends it (no gate
+# needed). This capability is reserved for the Phase-2 "Restart" affordance (which the agent must
+# understand); Phase 1 exposes it only so that button can gate on it later.
+TASK_RF_HEALTH_CAPABILITY = "task-rf-health"
+
 # The `sequence-hold` capability is advertised from agent 1.16.0, but 1.16.0 shipped the Hold
 # DATA MODEL ONLY — a hold-aware arm was refused (the Phase-0 guard). The HOLDING RUNTIME (park →
 # proceed) only works from 1.17.0, behind the SAME capability string, so the capability alone can't
@@ -179,6 +187,18 @@ def step_anchor_negative_supported(client) -> bool:
         return True
     ver = ver + (0,) * (len(SEQUENCE_STEP_ANCHOR_NEG_MIN_VERSION) - len(ver))
     return ver >= SEQUENCE_STEP_ANCHOR_NEG_MIN_VERSION
+
+
+def task_rf_health_supported(client) -> bool:
+    """True iff the unit's agent advertises `task-rf-health` — it detects a dead-but-alive RF
+    fault, stamps ProcessStatus.health, fires a TaskHealthEvent, and auto-drops RF. The Phase-1
+    fault PILL + ALARM never gate on this (they only reflect data an older agent won't send); this
+    is for the Phase-2 "Restart" affordance the agent must understand. Capability-only (no version
+    floor — the string is added at 1.28.0 alongside the behaviour)."""
+    try:
+        return bool(client.supports(TASK_RF_HEALTH_CAPABILITY))
+    except Exception:  # noqa: BLE001
+        return False
 
 # ── Geometry constants ───────────────────────────────────────────────────────
 SCALE = 3.0            # px per second in the warm-up / cool-down zones
