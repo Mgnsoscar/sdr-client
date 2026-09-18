@@ -71,6 +71,33 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — RF-fault RECOVERY Phase 2 (client Restart button + resync/replay): COMPLETE (branch `claude/system-familiarization-f5mezz`, cross-repo with agent 1.29.0)
+Client half of RF-fault recovery (`../sdr-agent/docs/rf-fault-recovery.md` §7/§14c). The agent (1.29.0,
+capability `sequence-restart`) recovers a faulted run via `POST /sequence-runs/{id}/restart` — relaunch
+the faulted task at its crash-time level (RF on) and re-instate the ramp remainder + STOP, on the
+original schedule (resync) or shifted later (replay). Client-only; drift-guarded files untouched. Suite
+1129 → 1136 offscreen. The UNATTENDED auto-restart trigger + fast-warm cache are Phase 3.
+- **`api/models.py`** — `RestartRunRequest{mode='resync'|'replay'}` (mirrors agent `RestartRequest`;
+  `restart_at` is server-set so the client omits it).
+- **`api/client.py`** — `restart_sequence_run(run_id, request)` POSTs to `/sequence-runs/{id}/restart`.
+- **`ui/timeline_model.py`** — `SEQUENCE_RESTART_CAPABILITY = "sequence-restart"` +
+  `sequence_restart_supported(client)` (capability-only).
+- **`ui/sequences_panel.py`** — a **"Restart"** button on a FAULTED active run row (`_SequenceRow`),
+  gated on BOTH `task-rf-health` (the fault must be detectable) AND `sequence-restart` (the agent must
+  understand recovery); shown only when `run.fault` is set (the pill already reads RF FAULT). `_on_restart`
+  finds the faulted run, poses the **resync/replay** choice (a two-accept-button `QMessageBox`), and
+  fires `seq_restart:{host}:{seq}` → `_on_task_done` shows the agent's refusal reason verbatim + refreshes.
+- **`ui/plans_tab.py`** — the plan row (`_PlanRow`) gains the **RF-FAULT pill override it was missing**
+  (any faulted run in the plan → red pill) plus the same Restart button, `_fault_run_for(plan)`,
+  `_on_restart(plan)`, and the `plan_restart` router branch. **KNOWN LIMITATION**: a multi-unit plan
+  recovers the FIRST faulted unit's run (single-unit is exact); per-unit `run_id` fan-out is the known
+  TODO, mirroring the plan-export run-id TODO.
+Tests: `tests/test_restart_ui.py` (the model + wrapper post; the capability gate; the Restart button
+visibility on both rows — only a faulted run with both caps, pill red regardless of the cap; the
+resync/replay/cancel routing; the plan fault pill + `_fault_run_for`). **NEXT — Phase 3** (cross-repo):
+the task Auto-restart-on-fault checkbox + the sequence/plan auto-restart policy (unattended, budget 2)
+and the fast-warm IQ cache.
+
 ## Current state — RF-fault DETECTION Phase 1 (client alarm + pills + diagnosis): COMPLETE (branch `claude/system-familiarization-f5mezz`, cross-repo with agent 1.28.0)
 Client half of the RF-fault detection layer (`../sdr-agent/docs/rf-fault-recovery.md` §5-6/§14b). The
 agent (1.28.0, capability `task-rf-health`) detects a dead-but-alive flowgraph (radio silent while the
