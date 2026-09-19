@@ -24,7 +24,7 @@ import yaml
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from api import models as m
@@ -34,7 +34,19 @@ from .scope_selector import ScopeSelector
 from .theme import Palette
 from .timeline_editor import TimelineEditor, task_signals_from_yaml
 from . import timeline_model as tlm
-from .timeline_model import step_anchor_supported, step_anchor_negative_supported
+from .timeline_model import (
+    step_anchor_supported, step_anchor_negative_supported, sequence_auto_restart_supported,
+)
+
+
+# The recovery-policy combo entries: (label, policy, mode). "manual" leaves an rf-fault for a
+# Phase-2 operator Restart; "auto" hands the agent the unattended budget-limited restart with a
+# resync (rejoin the schedule) or replay (restart from the crash point, shifted later) mode.
+_RECOVERY_CHOICES = [
+    ("On RF fault: operator restart", "manual", "resync"),
+    ("On RF fault: auto-restart (resync)", "auto", "resync"),
+    ("On RF fault: auto-restart (replay)", "auto", "replay"),
+]
 
 
 class SequenceEditorDialog(QDialog):
@@ -57,6 +69,8 @@ class SequenceEditorDialog(QDialog):
             self._timeline.set_steps(sequence.steps)
             if self._scope is not None:
                 self._scope.set_from_types(getattr(sequence, "types", []) or [])
+            self._set_recovery(getattr(sequence, "recovery_policy", "manual") or "manual",
+                               getattr(sequence, "recovery_mode", "resync") or "resync")
         elif self._scope is not None and self._default_types is not None:
             # New sequence opened from a unit-type view — default its scope to that type.
             self._scope.set_from_types(self._default_types)
@@ -96,6 +110,20 @@ class SequenceEditorDialog(QDialog):
         except Exception:  # noqa: BLE001
             pass
         left.addWidget(self._desc)
+
+        # ── Recovery policy (RF-fault Phase 3): a compact combo choosing what happens when a
+        # task in this sequence RF-faults unattended — an operator Restart (default) or the
+        # agent's budget-limited auto-restart (resync / replay). Only shown/effective on a unit
+        # whose agent advertises `sequence-auto-restart`; on the Library it's authored freely.
+        self._recovery = QComboBox()
+        for label, _pol, _mode in _RECOVERY_CHOICES:
+            self._recovery.addItem(label)
+        self._recovery.setStyleSheet(
+            f"QComboBox {{ font-size:11px; color:{Palette.TEXT_MUTED}; border:1px solid "
+            f"{Palette.BORDER}; border-radius:7px; padding:3px 8px; background:{Palette.SURFACE}; }}"
+            f"QComboBox:hover {{ background:{Palette.SURFACE_ALT}; }}")
+        self._recovery.currentIndexChanged.connect(lambda _=0: self._revalidate())
+        left.addWidget(self._recovery, alignment=Qt.AlignmentFlag.AlignLeft)
         header.addLayout(left, stretch=1)
 
         right = QVBoxLayout(); right.setSpacing(9)
@@ -213,7 +241,7 @@ class SequenceEditorDialog(QDialog):
         # Include the capability gates (_step_anchor_block / _hold_enter_block) so the Ready/
         # Needs-correction pill can't say "Ready" while _on_save would refuse the save.
         err = (self._current_error() or self._step_anchor_block() or self._hold_enter_block()
-               or self._hold_ramp_pause_block())
+               or self._hold_ramp_pause_block() or self._auto_restart_block())
         if err:
             self._set_status(err, warn=True)
             self._set_ready("warn", "Needs correction")
@@ -290,19 +318,61 @@ class SequenceEditorDialog(QDialog):
                     "the ramp at the pause and continue it from resume.")
         return None
 
+    # ── Recovery policy (RF-fault Phase 3) ─────────────────────────────────────
+    def _recovery_choice(self) -> tuple[str, str]:
+        """(policy, mode) currently selected in the recovery combo."""
+        idx = self._recovery.currentIndex() if self._recovery is not None else 0
+        if idx < 0 or idx >= len(_RECOVERY_CHOICES):
+            idx = 0
+        _label, pol, mode = _RECOVERY_CHOICES[idx]
+        return pol, mode
+
+    def _set_recovery(self, policy: str, mode: str) -> None:
+        """Select the combo entry matching (policy, mode); default to operator-restart (index 0)."""
+        want = (policy or "manual", mode or "resync")
+        for i, (_label, pol, m_) in enumerate(_RECOVERY_CHOICES):
+            # A "manual"/"confirm" policy ignores its mode (index 0); "auto" keys on the mode.
+            if pol == "auto" and want[0] == "auto" and m_ == want[1]:
+                self._recovery.setCurrentIndex(i); return
+            if pol != "auto" and want[0] != "auto":
+                self._recovery.setCurrentIndex(i); return
+        self._recovery.setCurrentIndex(0)
+
+    def _auto_restart_block(self) -> Optional[str]:
+        """A safety gate: block saving a sequence set to AUTO-restart to a UNIT whose agent can't
+        act on it (< 1.30.0 / no `sequence-auto-restart`) — the arm would silently fall back to a
+        manual (operator-restart) fault, so the authored autonomy would be lost without warning.
+        The Library holds only a definition, so it's never blocked; a manual policy needs no agent
+        support and is never blocked."""
+        pol, _mode = self._recovery_choice()
+        if pol != "auto" or self.hostname == LIBRARY_HOST:
+            return None
+        try:
+            client = self.hub.fleet.get(self.hostname)
+        except Exception:  # noqa: BLE001 — undiscovered unit → let the agent be the backstop
+            return None
+        if not sequence_auto_restart_supported(client):
+            return ("this sequence is set to auto-restart on an RF fault, which needs a newer "
+                    "agent (≥ 1.30.0). Update the unit’s agent, or set recovery to operator "
+                    "restart.")
+        return None
+
     def _on_save(self) -> None:
         if self._saving:
             return
         err = (self._current_error() or self._step_anchor_block() or self._hold_enter_block()
-               or self._hold_ramp_pause_block())
+               or self._hold_ramp_pause_block() or self._auto_restart_block())
         if err:
             self._set_status(err, error=True)
             return
+        pol, mode = self._recovery_choice()
         req = m.CreateSequenceRequest(
             name=self._name.text().strip(),
             description=self._desc.toPlainText().strip(),
             steps=self._timeline.steps(),
             types=self._scope.types() if self._scope is not None else [],
+            recovery_policy=pol,
+            recovery_mode=mode,
         )
         self._saving = True
         self._buttons.setEnabled(False)

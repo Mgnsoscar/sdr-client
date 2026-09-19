@@ -46,6 +46,7 @@ from .plan_editor import PlanEditorDialog
 from .plan_log_dialog import PlanLogDialog
 from .qt_adapter import DataHub
 from . import run_conflict
+from . import timeline_model as tlm
 from .theme import Palette
 from .timeline_model import (
     SEQUENCE_HOLD_EDIT_CAPABILITY, SEQUENCE_HOLD_NOW_CAPABILITY, SEQUENCE_LOG_TABLE_CAPABILITY,
@@ -223,6 +224,26 @@ def _collapsed_arm_steps(fleet: Fleet, item: m.PlanItem):
     return None
 
 
+def _item_recovery(fleet: Fleet, client, item: m.PlanItem) -> tuple:
+    """The (restart_policy, restart_mode) to arm a plan ITEM with (RF-fault Phase 3). The item's
+    own `recovery_policy` OVERRIDES when set; a blank policy INHERITS the seeded sequence's
+    authored `recovery_policy`/`recovery_mode` (best-effort stored fetch — a failure inherits
+    nothing → manual). The result is downgraded to manual if the unit can't act on it, so a
+    plan run never over-claims autonomy. Worker thread."""
+    pol = (item.recovery_policy or "").strip()
+    mode = (item.recovery_mode or "").strip()
+    if not pol:
+        try:
+            stored = fleet.get(item.hostname).get_sequence(item.sequence_id)
+        except Exception:  # noqa: BLE001 — best-effort; no stored policy → manual
+            stored = None
+        if stored is not None:
+            pol = getattr(stored, "recovery_policy", "") or "manual"
+            if not mode:
+                mode = getattr(stored, "recovery_mode", "") or "resync"
+    return tlm.resolve_arm_recovery(client, pol or "manual", mode or "resync")
+
+
 def _proceed_run(client, run_id: str, resume_laptop: datetime,
                  steps: Optional[List[m.SequenceStep]] = None) -> m.SequenceRun:
     """Resume a HOLDING plan run at the operator-chosen instant, translated to the unit's
@@ -281,6 +302,9 @@ def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
         # does), so a skewed unit still goes on air at the intended wall-clock time.
         on_air_at_iso = (t0 + timedelta(seconds=item.on_air_offset_s + _off(item.hostname))
                          ).isoformat()
+        # RF-fault Phase 3: the item's auto-restart policy (its own override, else the seeded
+        # sequence's), downgraded to manual if the unit can't act on it.
+        r_pol, r_mode = _item_recovery(fleet, fleet.get(item.hostname), item)
         if hold_aware:
             # The Hold is real here: send the steps AS AUTHORED (Hold intact, NOT collapsed). The
             # agent refuses step_overrides alongside a Hold, so a steps-less item's legacy overrides
@@ -306,6 +330,8 @@ def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
                 step_overrides=[],             # never sent with a Hold (baked in above)
                 hold_aware=True,
                 max_hold_s=max_hold_s,
+                restart_policy=r_pol,
+                restart_mode=r_mode,
             )
         else:
             # A Hold has no effect in a plan run this way (multi-unit / unattended-style):
@@ -322,6 +348,8 @@ def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
                 # no copy falls back to the stored sequence with legacy per-arg overrides.
                 steps=(armed_steps or None),
                 step_overrides=([] if armed_steps else item.overrides),
+                restart_policy=r_pol,
+                restart_mode=r_mode,
             )
         try:
             run = fleet.get(item.hostname).arm_sequence(item.sequence_id, req)
@@ -367,6 +395,11 @@ class _PlanRow(QFrame):
         # An RF-faulted run anywhere in the plan → the recovery action + a red pill override.
         faulted = next((r for r in runs if getattr(r, "fault", "")), None)
         can_restart = bool(can_restart and on_restart is not None and faulted is not None)
+        # Phase 3: a fault wins the pill; else an unattended auto-recovery (a run that healed
+        # itself) is surfaced amber. `pill_run` is whichever the pill should reflect.
+        _recovered = next((r for r in runs
+                           if int(getattr(r, "auto_restart_count", 0) or 0) > 0), None)
+        pill_run = faulted or _recovered
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(12, 10, 12, 10)
@@ -414,10 +447,14 @@ class _PlanRow(QFrame):
         else:
             word, status = "idle", "idle"
         self._pill = StatusPill(word, status)
-        # A fault anywhere in the plan overrides the pill (red "RF FAULT"), like the sequence row.
-        if faulted is not None:
-            self._pill.set_status("RF FAULT", "rf_fault")
-            self._pill.setToolTip(f"RF fault: {faulted.fault}")
+        # A fault anywhere in the plan overrides the pill (red "RF FAULT"); an auto-recovered run
+        # reads amber "AUTO-RESTART ×n" — like the sequence row (tlm.fault_pill).
+        if pill_run is not None:
+            _p = tlm.fault_pill(pill_run)
+            if _p is not None:
+                _label, _kind, _tip = _p
+                self._pill.set_status(_label, _kind)
+                self._pill.setToolTip(_tip)
         lay.addWidget(self._pill, alignment=Qt.AlignmentFlag.AlignTop)
 
         # While HOLDING the Arm button becomes Proceed (schedule window B / resume).

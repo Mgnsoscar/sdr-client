@@ -414,6 +414,14 @@ class Sequence(BaseModel):
     # unit, so its tasks must exist there — the plan editor offers a sequence only for
     # a unit whose type matches (or a shared sequence).
     types: List[str] = []
+    # ── RF-fault RECOVERY Phase 3 (docs/rf-fault-recovery.md §11/§14d) — the sequence-authored
+    # UNATTENDED auto-restart policy, carried to the arm as ArmSequenceRequest.restart_policy/mode.
+    # "manual" (default) = an rf-fault leaves the run faulted for an operator Restart (Phase 2);
+    # "auto" = the agent auto-restarts (budget-limited); "confirm" is reserved (treated as manual
+    # by the runtime today). "resync" rejoins the schedule, "replay" restarts from the crash point.
+    # Defaulted so a library from before this feature deserializes unchanged.
+    recovery_policy: str = "manual"
+    recovery_mode: str = "resync"
 
 
 class CreateSequenceRequest(BaseModel):
@@ -424,6 +432,10 @@ class CreateSequenceRequest(BaseModel):
     # library's create/update so a sequence keeps its scope. Only the library uses
     # it; a live unit's agent ignores the field (it holds only its own sequences).
     types: List[str] = []
+    # ── RF-fault RECOVERY Phase 3 — the authored auto-restart policy (see Sequence). Carried
+    # through the library's create/update so a sequence keeps its recovery choice.
+    recovery_policy: str = "manual"
+    recovery_mode: str = "resync"
 
 
 class StepFire(BaseModel):
@@ -470,6 +482,15 @@ class SequenceRun(BaseModel):
     fault: str = ""                    # "" = healthy; else the faulted task + reason
     fault_task: str = ""               # the specific task name that faulted (a run may own several)
     fault_at: str = ""                 # ISO-8601 of detection
+    # ── RF-fault RECOVERY Phase 3 (docs/rf-fault-recovery.md §11/§14d; mirrors agent/models.py):
+    # the run's UNATTENDED auto-restart policy + the breaker counters, so the row can show
+    # "auto-restarting (n/N)" vs a tripped RF FAULT. All defaulted (skew-safe: a run from a
+    # pre-Phase-3 agent has restart_policy="manual", auto_restart_count=0).
+    restart_policy: str = "manual"     # "auto" | "confirm" | "manual" — who triggers recovery
+    restart_mode: str = "resync"       # "resync" | "replay" — the mode the auto-trigger uses
+    auto_restart_count: int = 0        # auto-restart attempts consumed (the budget counter)
+    auto_restart_task: str = ""        # the task the auto-restart relaunched (watched for the reset)
+    auto_restart_healthy_since: str = ""  # ISO when that task was first observed healthy (settle)
 
 
 class StepOverride(BaseModel):
@@ -496,6 +517,13 @@ class ArmSequenceRequest(BaseModel):
     # is today's behavior. Phase 0 carries the fields; the arm surfaces are Phase 2.
     hold_aware: bool = False
     max_hold_s: float = 1800.0                    # auto-abort deadman while HOLDING; 0 = unlimited
+    # ── RF-fault RECOVERY Phase 3 — the UNATTENDED auto-restart policy sent at arm (mirrors
+    # agent/models.py ArmSequenceRequest). "manual" (default) = no unattended restart, so a
+    # pre-Phase-3 client or a Hold-free arm never grants autonomy; the client sends "auto"
+    # (with a resync/replay mode) explicitly only when the sequence authored it and the unit
+    # advertises `sequence-auto-restart`. An older agent ignores the fields (defaulted → manual).
+    restart_policy: str = "manual"
+    restart_mode: str = "resync"
 
 
 class PatchSequenceRunRequest(BaseModel):
@@ -693,6 +721,12 @@ class PlanItem(BaseModel):
     # its off-air away from the plan's off-air (T_end).
     on_air_offset_s: float = 0.0
     off_air_offset_s: float = 0.0
+    # ── RF-fault RECOVERY Phase 3 — the item's auto-restart policy override. "" (default) =
+    # INHERIT the seeded sequence's `recovery_policy`/`recovery_mode`; a non-empty value
+    # overrides it (a plan may want one unit's sequence to auto-restart and another's not).
+    # Blank-means-inherit keeps an older plan (no field) tracking its sequences' policy.
+    recovery_policy: str = ""
+    recovery_mode: str = ""
 
 
 class Plan(BaseModel):

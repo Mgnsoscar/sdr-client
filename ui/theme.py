@@ -128,6 +128,10 @@ _STATUS_MAP = {
     "rf_fault":  (Palette.CRASH,  Palette.CRASH_SOFT),
     "rf fault":  (Palette.CRASH,  Palette.CRASH_SOFT),
     "fault":     (Palette.CRASH,  Palette.CRASH_SOFT),
+    # Auto-restart in progress — the agent is unattended-recovering a fault (Phase 3). Amber
+    # (in-flight, not a settled red): the breaker hasn't tripped, recovery is underway.
+    "auto_restart": (Palette.ARMED, Palette.ARMED_SOFT),
+    "auto restart": (Palette.ARMED, Palette.ARMED_SOFT),
 }
 
 

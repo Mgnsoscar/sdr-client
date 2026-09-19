@@ -71,6 +71,44 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — RF-fault RECOVERY Phase 3 (client UNATTENDED auto-restart policy + pill): COMPLETE (branch `claude/system-familiarization-f5mezz`, cross-repo with agent 1.30.0)
+Client half of the unattended recovery (`../sdr-agent/docs/rf-fault-recovery.md` §7.1/§14d). The agent
+(1.30.0, capability `sequence-auto-restart`) auto-fires `restart_run` for a faulted run armed with
+`restart_policy="auto"` (budget-limited, breaker trips loudly when exhausted). This authors the policy,
+sends it at arm, and surfaces the recovery state. Client-only; drift-guarded files untouched. Suite
+1136 → 1149 offscreen. The standalone-task Auto-restart checkbox + fast-warm cache are Phase 3b.
+- **`api/models.py`** — mirrors the agent wire FIELD-FOR-FIELD (all defaulted, skew-safe):
+  `Sequence`/`CreateSequenceRequest` gain `recovery_policy`/`recovery_mode` (authored); `ArmSequenceRequest`
+  gains `restart_policy`/`restart_mode` (the AGENT wire names, sent at arm); `SequenceRun` mirrors
+  `restart_policy`/`restart_mode`/`auto_restart_count`/`auto_restart_task`/`auto_restart_healthy_since`;
+  `PlanItem` gains `recovery_policy`/`recovery_mode` (`""` = INHERIT its seeded sequence).
+- **`ui/timeline_model.py`** — `SEQUENCE_AUTO_RESTART_CAPABILITY` + `sequence_auto_restart_supported(client)`;
+  **`resolve_arm_recovery(client, policy, mode)`** DOWNGRADES `"auto"` → `"manual"` when the unit lacks the
+  capability (so a run's pill never over-claims autonomy a unit can't perform); **`fault_pill(run)`** decides
+  the row pill from the run fields — red **RF FAULT** on a fault (an auto fault that gave up names the attempt
+  count in its tooltip), amber **AUTO-RESTART ×n** on a recovered run (`auto_restart_count>0`, no fault; the
+  agent's healthy-settle reset zeroes the count ~60 s after recovery, so the amber pill is transient), else
+  None.
+- **`ui/sequence_editor.py`** — a compact **recovery combo** (`_RECOVERY_CHOICES`: operator-restart /
+  auto-resync / auto-replay) in the header; `_recovery_choice`/`_set_recovery` read/seed it; `_on_save`
+  writes `recovery_policy`/`recovery_mode` onto the `CreateSequenceRequest`; **`_auto_restart_block()`** is a
+  save/Ready-pill gate (like the Hold gates) — an auto policy authored for a UNIT lacking the capability is
+  blocked (the Library / a manual policy is never blocked).
+- **Arm paths carry the resolved policy** — `sequences_panel._arm_at` (from `seq.recovery_policy`, resolved;
+  covers Library + hold-aware); `plans_tab._item_recovery(fleet, client, item)` (item override else INHERIT
+  the stored sequence's authored policy, then resolve) wired into `_arm_plan` (both branches); and
+  **`timeline_tab._arm_scheduled`** (the schedule — the PRIMARY unattended surface, also via `_arm_scheduled_many`
+  "Arm all"). `AgentClient.supports` reads cached `/info` caps (no worker-thread network).
+- **`ui/theme.py`** — an amber `auto_restart` status (`Palette.ARMED`); **`_SequenceRow`** (`sequences_panel`)
+  + **`_PlanRow`** (`plans_tab`) route their pill through `tlm.fault_pill` (a plan picks the first faulted run,
+  else the first recovered run). The Phase-2 Restart button still gates on `run.fault` (a tripped auto run
+  shows RF FAULT + Restart).
+Tests: `tests/test_auto_restart_ui.py` (13: model defaults + round-trip; the capability gate; the
+auto→manual downgrade; the fault/recovery pill decision; the theme; `_arm_at` / `_item_recovery` / the plan
++ schedule arm paths carry the resolved policy; the sequence-editor combo load/save + the save gate blocks
+an unsupported unit; the row pills). **NEXT — Phase 3b** (cross-repo): the standalone-task Auto-restart
+checkbox + the fast-warm IQ cache.
+
 ## Current state — RF-fault RECOVERY Phase 2 (client Restart button + resync/replay): COMPLETE (branch `claude/system-familiarization-f5mezz`, cross-repo with agent 1.29.0)
 Client half of RF-fault recovery (`../sdr-agent/docs/rf-fault-recovery.md` §7/§14c). The agent (1.29.0,
 capability `sequence-restart`) recovers a faulted run via `POST /sequence-runs/{id}/restart` — relaunch

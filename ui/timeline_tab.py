@@ -52,7 +52,8 @@ from api import Fleet
 from api import models as m
 from state import PlanStore, ScheduleStore, new_scheduled_id
 from .plan_editor import PlanEditorDialog
-from .plans_tab import _collapsed_arm_steps, _plan_has_hold, _step_anchor_block_lines
+from .plans_tab import (
+    _collapsed_arm_steps, _item_recovery, _plan_has_hold, _step_anchor_block_lines)
 from .qt_adapter import DataHub
 from .theme import Palette, mono_font
 
@@ -131,6 +132,9 @@ def _arm_scheduled(fleet: Fleet, plan: m.Plan, start_utc: datetime,
         # reference (else a stored Hold-bearing sequence would be armed without hold_aware and
         # the agent would refuse it).
         sched_steps = _collapsed_arm_steps(fleet, item)
+        # RF-fault Phase 3: the schedule is the PRIMARY unattended surface — carry the item's
+        # auto-restart policy (its own, else the seeded sequence's), downgraded if unsupported.
+        r_pol, r_mode = _item_recovery(fleet, fleet.get(item.hostname), item)
         req = m.ArmSequenceRequest(
             on_air_at=on_air,
             on_air_end=off_air,
@@ -139,6 +143,8 @@ def _arm_scheduled(fleet: Fleet, plan: m.Plan, start_utc: datetime,
             plan_name=plan.name,
             steps=(sched_steps or None),
             step_overrides=([] if sched_steps else item.overrides),
+            restart_policy=r_pol,
+            restart_mode=r_mode,
         )
         try:
             run = fleet.get(item.hostname).arm_sequence(item.sequence_id, req)

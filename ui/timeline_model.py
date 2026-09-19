@@ -217,6 +217,67 @@ def sequence_restart_supported(client) -> bool:
     except Exception:  # noqa: BLE001
         return False
 
+
+# Agent >= 1.30.0 auto-restarts a faulted run whose arm carried restart_policy="auto" (UNATTENDED,
+# budget-limited) — Phase 3. The client gates its per-sequence "auto-restart" policy control + the
+# "auto-restarting (n/N)" pill on this string; without it the arm sends "manual" and a fault stays
+# a Phase-2 operator Restart. Capability-only (added at 1.30.0 with the behaviour).
+SEQUENCE_AUTO_RESTART_CAPABILITY = "sequence-auto-restart"
+
+
+def sequence_auto_restart_supported(client) -> bool:
+    """True iff the unit's agent advertises `sequence-auto-restart` — it auto-fires the Phase-2
+    restart for a faulted run armed with restart_policy="auto", budget-limited, and trips loudly
+    when the breaker is exhausted. The policy control (sequence editor) + the auto-restart pill
+    gate on this. Capability-only (no version floor — the string is added at 1.30.0 with the
+    behaviour). Falls back to False on any client error / unknown capability set."""
+    try:
+        return bool(client.supports(SEQUENCE_AUTO_RESTART_CAPABILITY))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def fault_pill(run) -> tuple:
+    """Decide the (label, status_kind, tooltip) a run row should show for its RF-fault / recovery
+    state, or None when there's nothing to flag (RF-fault Phase 1–3; pure, off the run fields).
+
+    - A PERSISTENT fault (`run.fault` set) → red "RF FAULT" — a manual-policy fault awaiting an
+      operator Restart, OR an auto-policy run whose breaker TRIPPED (it gave up after its budget).
+      When auto tried first, the tooltip names how many attempts were spent before giving up.
+    - No fault but `auto_restart_count > 0` (the run RECOVERED unattended and is healthy again) →
+      amber "AUTO-RESTART ×n" — the RF glitched and the agent auto-recovered it; worth surfacing so
+      an unattended recovery isn't invisible.
+    - Otherwise → None (the ordinary state pill stands).
+
+    All reads are defaulted so a run from a pre-feature agent (no fields) yields None cleanly."""
+    fault = getattr(run, "fault", "") or ""
+    policy = getattr(run, "restart_policy", "manual") or "manual"
+    count = int(getattr(run, "auto_restart_count", 0) or 0)
+    if fault:
+        if policy == "auto" and count > 0:
+            return ("RF FAULT", "rf_fault",
+                    f"RF fault — auto-restart gave up after {count} attempt(s): {fault}")
+        return ("RF FAULT", "rf_fault", f"RF fault: {fault}")
+    if count > 0:
+        return (f"AUTO-RESTART ×{count}", "auto_restart",
+                f"recovered unattended by auto-restart ({count}×)")
+    return None
+
+
+def resolve_arm_recovery(client, policy: str, mode: str) -> tuple:
+    """Resolve the (restart_policy, restart_mode) to SEND at arm from an authored policy.
+
+    DOWNGRADES an "auto" policy to "manual" when the unit's agent lacks `sequence-auto-restart`
+    (< 1.30.0), so the client never claims unattended recovery a unit can't perform — the row
+    would otherwise show "auto-restarting" for a run the agent leaves faulted. A "manual"/"confirm"
+    policy passes through unchanged (mode is irrelevant to it, but is carried for round-tripping).
+    Pure but for the capability probe; any client error → treat as unsupported (downgrade)."""
+    pol = (policy or "manual")
+    md = (mode or "resync")
+    if pol == "auto" and not sequence_auto_restart_supported(client):
+        return "manual", md
+    return pol, md
+
 # ── Geometry constants ───────────────────────────────────────────────────────
 SCALE = 3.0            # px per second in the warm-up / cool-down zones
 MIDDLE_GAP = 220       # base px between ON-AIR and OFF-AIR (the on-air band)

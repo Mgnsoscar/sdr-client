@@ -139,6 +139,10 @@ def _arm_at(client, seq: m.Sequence, t0_laptop: datetime,
     docs/sequence-hold-step.md §6.2.
     """
     on_air_at = t0_laptop + timedelta(seconds=client.clock_offset_s())
+    # RF-fault Phase 3: carry the sequence's authored auto-restart policy to the arm, downgraded
+    # to manual if this unit's agent can't act on it (so the run's pill never over-claims).
+    r_pol, r_mode = tlm.resolve_arm_recovery(
+        client, getattr(seq, "recovery_policy", "manual"), getattr(seq, "recovery_mode", "resync"))
     req = m.ArmSequenceRequest(
         on_air_at=on_air_at.isoformat(),
         open_ended=(hold_aware or duration_s is None),
@@ -146,6 +150,8 @@ def _arm_at(client, seq: m.Sequence, t0_laptop: datetime,
         note="manual test",
         hold_aware=hold_aware,
         max_hold_s=max_hold_s,
+        restart_policy=r_pol,
+        restart_mode=r_mode,
     )
     return client.arm_sequence(seq.id, req)
 
@@ -280,12 +286,16 @@ class _SequenceRow(QFrame):
             state_word = active_run.state.value if active else "idle"
             self._pill = StatusPill(state_word, state_word)
             lay.addWidget(self._pill, alignment=Qt.AlignmentFlag.AlignTop)
-            # An RF fault coupled into the run (a task it owns went silent, §5.3) overrides the
-            # state pill: a still-RUNNING run whose radio died reads "RF FAULT" (red), not
-            # "running". Purely reflects run.fault from the poll — no capability gate.
-            if active and getattr(active_run, "fault", ""):
-                self._pill.set_status("RF FAULT", "rf_fault")
-                self._pill.setToolTip(f"RF fault: {active_run.fault}")
+            # An RF fault coupled into the run (a task it owns went silent, §5.3) — or an
+            # unattended auto-restart (Phase 3) — overrides the state pill: a still-RUNNING run
+            # whose radio died reads "RF FAULT" (red); one that auto-recovered reads
+            # "AUTO-RESTART ×n" (amber). Purely reflects the run fields from the poll.
+            if active:
+                pill = tlm.fault_pill(active_run)
+                if pill is not None:
+                    label, kind, tip = pill
+                    self._pill.set_status(label, kind)
+                    self._pill.setToolTip(tip)
 
         # While HOLDING the Arm button becomes Proceed (schedule window B / resume).
         self._start = QPushButton("Proceed" if holding else "Arm")
