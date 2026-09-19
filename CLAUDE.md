@@ -82,6 +82,9 @@ sends it at arm, and surfaces the recovery state. Client-only; drift-guarded fil
   gains `restart_policy`/`restart_mode` (the AGENT wire names, sent at arm); `SequenceRun` mirrors
   `restart_policy`/`restart_mode`/`auto_restart_count`/`auto_restart_task`/`auto_restart_healthy_since`;
   `PlanItem` gains `recovery_policy`/`recovery_mode` (`""` = INHERIT its seeded sequence).
+- **`state/library_client.py`** — `create_sequence`/`update_sequence` CARRY `recovery_policy`/
+  `recovery_mode` (the offline library is the primary plan-authoring surface; dropping them made a plan
+  item inheriting from a library sequence resolve to "manual" — a review HIGH, fixed).
 - **`ui/timeline_model.py`** — `SEQUENCE_AUTO_RESTART_CAPABILITY` + `sequence_auto_restart_supported(client)`;
   **`resolve_arm_recovery(client, policy, mode)`** DOWNGRADES `"auto"` → `"manual"` when the unit lacks the
   capability (so a run's pill never over-claims autonomy a unit can't perform); **`fault_pill(run)`** decides
@@ -103,11 +106,15 @@ sends it at arm, and surfaces the recovery state. Client-only; drift-guarded fil
   + **`_PlanRow`** (`plans_tab`) route their pill through `tlm.fault_pill` (a plan picks the first faulted run,
   else the first recovered run). The Phase-2 Restart button still gates on `run.fault` (a tripped auto run
   shows RF FAULT + Restart).
-Tests: `tests/test_auto_restart_ui.py` (13: model defaults + round-trip; the capability gate; the
+Tests: `tests/test_auto_restart_ui.py` (15: model defaults + round-trip; the capability gate; the
 auto→manual downgrade; the fault/recovery pill decision; the theme; `_arm_at` / `_item_recovery` / the plan
-+ schedule arm paths carry the resolved policy; the sequence-editor combo load/save + the save gate blocks
-an unsupported unit; the row pills). **NEXT — Phase 3b** (cross-repo): the standalone-task Auto-restart
-checkbox + the fast-warm IQ cache.
++ schedule arm paths carry the resolved policy; the LibraryClient policy round-trip; the sequence-editor
+combo load/save + `_on_save` copies the policy + the save gate blocks an unsupported unit; the row pills).
+**Adversarial review** (find→verify, cross-repo): the `LibraryClient` recovery-policy DROP (HIGH) fixed +
+pinned; `fault_pill`'s tooltip softened to not over-claim "gave up" (the client can't know the agent's
+budget). The agent-side review fixes (the restart-race guard, the RF-safety pre-stop defer, the agent
+`Sequence` policy round-trip, the breaker-state resets) are in `sdr-agent` 1.30.0. Suite 1149 → 1151.
+**NEXT — Phase 3b** (cross-repo): the standalone-task Auto-restart checkbox + the fast-warm IQ cache.
 
 ## Current state — RF-fault RECOVERY Phase 2 (client Restart button + resync/replay): COMPLETE (branch `claude/system-familiarization-f5mezz`, cross-repo with agent 1.29.0)
 Client half of RF-fault recovery (`../sdr-agent/docs/rf-fault-recovery.md` §7/§14c). The agent (1.29.0,

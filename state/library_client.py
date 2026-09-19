@@ -99,16 +99,21 @@ class LibraryClient:
 
     def create_sequence(self, request: m.CreateSequenceRequest) -> m.Sequence:
         self._validate_steps(request.steps)
+        # Carry the authored auto-restart policy (RF-fault Phase 3) — dropping it here would lose it
+        # for the OFFLINE library (the primary authoring surface for plans), so a plan item inheriting
+        # from a library sequence would resolve to "manual".
         seq = m.Sequence(id="seq_" + secrets.token_hex(4), name=request.name,
                          description=request.description, steps=list(request.steps),
-                         types=list(request.types))
+                         types=list(request.types),
+                         recovery_policy=request.recovery_policy, recovery_mode=request.recovery_mode)
         self._store.upsert_sequence(seq)
         return seq
 
     def update_sequence(self, seq_id: str, request: m.CreateSequenceRequest) -> m.Sequence:
         self._validate_steps(request.steps)
         seq = m.Sequence(id=seq_id, name=request.name, description=request.description,
-                         steps=list(request.steps), types=list(request.types))
+                         steps=list(request.steps), types=list(request.types),
+                         recovery_policy=request.recovery_policy, recovery_mode=request.recovery_mode)
         self._store.upsert_sequence(seq)
         return seq
 

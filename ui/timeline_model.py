@@ -255,8 +255,11 @@ def fault_pill(run) -> tuple:
     count = int(getattr(run, "auto_restart_count", 0) or 0)
     if fault:
         if policy == "auto" and count > 0:
+            # A faulted auto run has spent >=1 attempt; the client can't know the agent's budget, so
+            # don't assert finality ("gave up") — a re-faulted run still within budget will restart
+            # again. State the attempt count truthfully; the loud give-up alarm is a separate event.
             return ("RF FAULT", "rf_fault",
-                    f"RF fault — auto-restart gave up after {count} attempt(s): {fault}")
+                    f"RF fault — {count} auto-restart attempt(s) used: {fault}")
         return ("RF FAULT", "rf_fault", f"RF fault: {fault}")
     if count > 0:
         return (f"AUTO-RESTART ×{count}", "auto_restart",

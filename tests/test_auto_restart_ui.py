@@ -92,10 +92,12 @@ def test_fault_pill_decision():
     # A plain (manual-policy) fault → red RF FAULT.
     label, kind, tip = tlm.fault_pill(_run(fault="tx: vmcircbuf"))
     assert label == "RF FAULT" and kind == "rf_fault" and "vmcircbuf" in tip
-    # An auto-policy fault that spent attempts → red, tooltip names the give-up count.
+    # An auto-policy fault that spent attempts → red, tooltip names the attempt count (no
+    # over-claim of finality — the client can't know the agent's budget).
     label, kind, tip = tlm.fault_pill(
         _run(fault="tx: vmcircbuf", restart_policy="auto", auto_restart_count=2))
-    assert label == "RF FAULT" and kind == "rf_fault" and "gave up after 2" in tip
+    assert label == "RF FAULT" and kind == "rf_fault" and "2 auto-restart attempt" in tip
+    assert "gave up" not in tip
     # Recovered (no fault, count>0) → amber AUTO-RESTART ×n.
     label, kind, tip = tlm.fault_pill(_run(restart_policy="auto", auto_restart_count=3))
     assert label == "AUTO-RESTART ×3" and kind == "auto_restart" and "3" in tip
@@ -116,6 +118,7 @@ class _Client:
         self._seq = seq
         self.skew = 0.0
         self.armed = []
+        self.created = []
 
     def supports(self, cap): return cap in self._caps
     def clock_offset_s(self): return self.skew
@@ -124,6 +127,11 @@ class _Client:
     def arm_sequence(self, seq_id, req):
         self.armed.append((seq_id, req))
         return _run(id="run-armed", plan_id=req.plan_id)
+
+    def create_sequence(self, req):
+        self.created.append(req)
+        return m.Sequence(id="s2", name=req.name, steps=req.steps,
+                          recovery_policy=req.recovery_policy, recovery_mode=req.recovery_mode)
 
 
 class _Fleet:
@@ -292,3 +300,47 @@ def test_plan_row_shows_auto_restart_pill():
     recovered = _run(restart_policy="auto", auto_restart_count=1, plan_id="p")
     row = pt._PlanRow(plan, [recovered], 1, 0, **_plan_kw())
     assert row._pill.text() == "AUTO-RESTART ×1"
+
+
+# ── the authored policy survives the round-trip (persistence — the feature-defeating gaps) ──
+
+def test_library_client_round_trips_recovery_policy():
+    """The offline LibraryClient must persist recovery_policy/recovery_mode — dropping them here
+    would lose the authored policy for the primary plan-authoring surface (a plan item inheriting
+    from a library sequence would resolve to 'manual')."""
+    import tempfile
+    from state.library_client import LibraryClient
+    from state.library_store import LibraryStore
+    with tempfile.TemporaryDirectory() as d:
+        store = LibraryStore(f"{d}/lib.json")
+        store.upsert_task(m.TaskConfig(name="tx", command=["python3", "tx.py"]))
+        client = LibraryClient(store)
+        req = m.CreateSequenceRequest(name="sweep", steps=[
+            m.SequenceStep(anchor="start", offset_s=0.0, action="start", task_name="tx"),
+            m.SequenceStep(anchor="stop", offset_s=0.0, action="stop", task_name="tx"),
+        ], recovery_policy="auto", recovery_mode="replay")
+        seq = client.create_sequence(req)
+        assert seq.recovery_policy == "auto" and seq.recovery_mode == "replay"
+        # And it survives a fetch back (the inherit path reads it from the stored sequence).
+        back = client.get_sequence(seq.id)
+        assert back.recovery_policy == "auto" and back.recovery_mode == "replay"
+        # An update preserves it too.
+        upd = client.update_sequence(seq.id, m.CreateSequenceRequest(
+            name="sweep", steps=req.steps, recovery_policy="auto", recovery_mode="resync"))
+        assert upd.recovery_policy == "auto" and upd.recovery_mode == "resync"
+
+
+def test_sequence_editor_on_save_copies_recovery_policy_onto_the_request(monkeypatch):
+    """The editor's _on_save must copy the chosen recovery policy onto the CreateSequenceRequest —
+    else the authored auto policy never reaches the store."""
+    dlg = _seq_editor(LIBRARY_HOST, _Client(), sequence=None)
+    try:
+        dlg._name.setText("sweep")
+        dlg._set_recovery("auto", "replay")
+        monkeypatch.setattr(dlg, "_current_error", lambda: None)   # bypass step validation
+        dlg._on_save()
+        dlg.hub._last_fn()                                         # run the queued create
+        req = dlg.hub.fleet.get(LIBRARY_HOST).created[-1]
+        assert req.recovery_policy == "auto" and req.recovery_mode == "replay"
+    finally:
+        dlg.deleteLater()
