@@ -237,6 +237,25 @@ def sequence_auto_restart_supported(client) -> bool:
         return False
 
 
+# Agent >= 1.31.0 relaunches a STANDALONE task (one NOT owned by an active run) whose TaskConfig
+# carries auto_restart_on_fault when it RF-faults — Phase 3b, budget-limited. The client gates its
+# task-editor / Run-form "Auto-restart on fault" checkbox on this string; an older agent would drop
+# the field on store, so a task would silently never auto-restart. Capability-only (added at 1.31.0).
+TASK_AUTO_RESTART_CAPABILITY = "task-auto-restart"
+
+
+def task_auto_restart_supported(client) -> bool:
+    """True iff the unit's agent advertises `task-auto-restart` — it relaunches a standalone
+    (non-run-owned) task with auto_restart_on_fault set when it RF-faults, budget-limited. The
+    "Auto-restart on fault" checkbox gates on this so it is offered only where it actually works
+    (an older agent silently drops the field). Capability-only (no version floor — added at 1.31.0
+    with the behaviour). Falls back to False on any client error / unknown capability set."""
+    try:
+        return bool(client.supports(TASK_AUTO_RESTART_CAPABILITY))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def fault_pill(run) -> tuple:
     """Decide the (label, status_kind, tooltip) a run row should show for its RF-fault / recovery
     state, or None when there's nothing to flag (RF-fault Phase 1–3; pure, off the run fields).

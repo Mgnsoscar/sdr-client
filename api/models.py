@@ -123,6 +123,12 @@ class TaskConfig(BaseModel):
     autostart: bool = False
     restart_on_crash: bool = False
     restart_delay_s: float = 3.0
+    # RF-fault RECOVERY (Phase 3b, ../sdr-agent/docs/rf-fault-recovery.md §7.1/§14e). A STANDALONE
+    # task's own "Auto-restart on fault" — when set, the agent relaunches the task with the same
+    # parameters if it RF-faults AND is not owned by an active run (budget max_fault_restarts). Mirrors
+    # the agent wire field-for-field; defaulted so an older agent that drops it just never auto-restarts.
+    auto_restart_on_fault: bool = False
+    max_fault_restarts: int = 2
     resumable: bool = False
     resume_offset_mode: str = "arg"
     resume_offset_flag: str = "--start-offset"
@@ -159,6 +165,9 @@ class StartRequest(BaseModel):
     # for one run without touching the deployed task definition. Mirrors the
     # agent's StartRequest.replace_args.
     replace_args: bool = False
+    # RF-fault RECOVERY (Phase 3b): a per-launch override of the task's auto_restart_on_fault, so the
+    # Run… form can turn Auto-restart-on-fault on/off for just this run. None = use the task default.
+    auto_restart_on_fault: Optional[bool] = None
 
 
 class ExitRecord(BaseModel):

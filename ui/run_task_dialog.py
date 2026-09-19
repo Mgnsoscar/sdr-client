@@ -25,7 +25,7 @@ import yaml
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+    QCheckBox, QDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
@@ -38,6 +38,7 @@ from .param_form import (
 from .dialog_style import scrollbar_qss
 from .qt_adapter import DataHub
 from .theme import Palette, mono_font
+from .timeline_model import TASK_AUTO_RESTART_CAPABILITY
 from .widgets import fit_dialog_to_screen
 
 
@@ -266,6 +267,16 @@ class RunTaskDialog(QDialog):
         self._extra_btn.setAutoDefault(False)    # don't let Enter in a field open this
         self._extra_btn.clicked.connect(self._toggle_extra)
         lay.addWidget(self._extra_btn)
+        # RF-fault RECOVERY (Phase 3b): auto-restart THIS launch on an RF fault (with these exact
+        # parameters). Shown only when the unit advertises `task-auto-restart` and the task isn't
+        # being restarted while running; the per-launch override rides on StartRequest.
+        self._auto_restart = QCheckBox("Auto-restart on fault")
+        self._auto_restart.setToolTip(
+            "If this run's flowgraph RF-faults, relaunch it with these parameters (when it is not "
+            "part of a running sequence/plan). Needs agent ≥ 1.31.0.")
+        self._auto_restart_supported = self._supports_auto_restart()
+        self._auto_restart.setVisible(self._auto_restart_supported)
+        lay.addWidget(self._auto_restart)
         lay.addStretch(1)
         cancel = QPushButton("Cancel")
         cancel.setAutoDefault(False)
@@ -280,6 +291,14 @@ class RunTaskDialog(QDialog):
         # Kept as the handle _on_run/_on_task_done enable/disable during a start.
         self._buttons = foot
         return foot
+
+    def _supports_auto_restart(self) -> bool:
+        """True iff this unit's agent advertises `task-auto-restart` (Phase 3b) — read from the
+        fleet client's cached /info, no network. False (checkbox hidden) if the unit is unknown."""
+        try:
+            return bool(self.hub.fleet.get(self.hostname).supports(TASK_AUTO_RESTART_CAPABILITY))
+        except Exception:  # noqa: BLE001
+            return False
 
     def _toggle_extra(self) -> None:
         self._extra_section.setVisible(not self._extra_section.isVisible())
@@ -389,6 +408,10 @@ class RunTaskDialog(QDialog):
                 self._quick_plain_start()                # can't inspect it — start as-is
             return
         self._task_entry = dict(entry)                   # kept for persisting a gain default
+        # Seed the Auto-restart-on-fault checkbox from the stored task's default (Phase 3b); the
+        # operator can still flip it for this launch (the override rides on StartRequest).
+        if self._auto_restart_supported:
+            self._auto_restart.setChecked(bool(entry.get("auto_restart_on_fault")))
 
         # The task opts into calibration by setting this env to the script's signal id.
         self._cal_signal_id = (entry.get("env") or {}).get("SDR_CAL_SIGNAL_ID")
@@ -624,6 +647,9 @@ class RunTaskDialog(QDialog):
         # this run only. With no args (script has no params, nothing added) the
         # agent falls back to the task's configured command, so Start still works.
         req = m.StartRequest(args=args, replace_args=True)
+        # Per-launch Auto-restart-on-fault override (Phase 3b) — only when the unit understands it.
+        if self._auto_restart_supported:
+            req.auto_restart_on_fault = self._auto_restart.isChecked()
         self._starting = True
         self._buttons.setEnabled(False)
         self._set_status("starting…")

@@ -71,6 +71,36 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — RF-fault RECOVERY Phase 3b (client STANDALONE-task auto-restart checkbox): COMPLETE (branch `claude/system-familiarization-f5mezz`, cross-repo with agent 1.31.0)
+Client half of the standalone-task auto-restart (`../sdr-agent/docs/rf-fault-recovery.md` §7.1/§14e). The
+agent (1.31.0, capability `task-auto-restart`) relaunches a standalone (non-run-owned) task whose
+`TaskConfig.auto_restart_on_fault` is set when it RF-faults, budget-limited; the Run… form can override it
+per launch via `StartRequest`. This authors the flag, gated on the capability so a task never claims an
+auto-restart an older agent would silently drop. Client-only; drift-guarded files untouched. Suite
+1151 → 1166 offscreen.
+- **`api/models.py`** — `TaskConfig` mirrors `auto_restart_on_fault` (bool=False) + `max_fault_restarts`
+  (int=2); `StartRequest` mirrors `auto_restart_on_fault` (`Optional[bool]`=None, the per-launch override).
+  All defaulted (skew-safe).
+- **`ui/timeline_model.py`** — `TASK_AUTO_RESTART_CAPABILITY = "task-auto-restart"` +
+  `task_auto_restart_supported(client)` (capability-only, no version floor).
+- **`ui/task_editor.py`** — an **"Auto-restart on fault"** checkbox by Autostart/Restart-on-crash. The
+  offline library ALWAYS offers it (a stored definition; the agent is the deploy-time backstop); a live
+  unit gates it on the capability from `/info` (`_apply_auto_restart_support`, with `_auto_restart_want`
+  from the stored task + `_auto_restart_supported` from `/info` kept apart so the two async loads converge
+  in any order). `_on_save` writes the flag **only when the box is enabled** — so editing an unrelated
+  field on an unsupported / unreachable (`/info` failed) unit preserves a flag set for capable units
+  (a review MEDIUM), rather than clobbering it via `{**_orig_entry, **edited}`.
+- **`ui/run_task_dialog.py`** — the same checkbox in the Run… footer, shown only when the unit advertises
+  the capability (`_supports_auto_restart` reads the cached `/info`, no network), seeded from the stored
+  task, sending `StartRequest.auto_restart_on_fault` on `_on_run` only when supported.
+Tests: `tests/test_task_auto_restart_ui.py` (15: model mirror + StartRequest override; the capability
+gate; the task-editor checkbox — library / supported / unsupported / edit-seed / edit-on-old-unit / save
+round-trip / preserve-on-unsupported / preserve-when-info-fails; the Run-form checkbox — hidden / shown+
+seeded / sends the override / None when unsupported). **Adversarial review**: the client clobber (MEDIUM)
+fixed + pinned; the agent-side review fixes (persistence, wedge-relaunch concurrency, the armed-run
+double-TX gate, the attenuator-positioning launch hook) are in `sdr-agent` 1.31.0. **NEXT — Phase 3b other
+half** (cross-repo): the fast-warm IQ cache.
+
 ## Current state — RF-fault RECOVERY Phase 3 (client UNATTENDED auto-restart policy + pill): COMPLETE (branch `claude/system-familiarization-f5mezz`, cross-repo with agent 1.30.0)
 Client half of the unattended recovery (`../sdr-agent/docs/rf-fault-recovery.md` §7.1/§14d). The agent
 (1.30.0, capability `sequence-auto-restart`) auto-fires `restart_run` for a faulted run armed with

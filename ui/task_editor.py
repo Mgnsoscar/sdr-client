@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
 
 from api.fleet import LIBRARY_HOST
 from .param_form import ParamForm
+from .timeline_model import TASK_AUTO_RESTART_CAPABILITY
 from .qt_adapter import DataHub
 from .scope_selector import ScopeSelector
 from .theme import Palette
@@ -68,6 +69,10 @@ class TaskEditorDialog(QDialog):
         self._edit_script: Optional[str] = None            # script to select once loaded
         self._params_inflight: set = set()         # scripts whose params fetch is in flight
         self._saving = False
+        # Auto-restart-on-fault (Phase 3b): the desired checked state (from the stored task / default)
+        # and whether the target agent supports it — kept apart so info + yaml can arrive in any order.
+        self._auto_restart_want = False
+        self._auto_restart_supported = False
         # Set to the task's name on a successful save, so a caller that opened this
         # dialog to create a task inline can learn which task was created.
         self.created_name: Optional[str] = None
@@ -173,11 +178,26 @@ class TaskEditorDialog(QDialog):
         toggles = QHBoxLayout()
         self._autostart = QCheckBox("Autostart")
         self._restart = QCheckBox("Restart on crash")
+        # RF-fault RECOVERY (Phase 3b): a standalone task's own auto-restart-on-fault. Gated on the
+        # unit advertising `task-auto-restart` — a live unit that lacks it disables the box (an older
+        # agent silently drops the field). The offline library always offers it (it holds a definition;
+        # the agent is the deploy-time backstop). See _apply_auto_restart_support.
+        self._auto_restart = QCheckBox("Auto-restart on fault")
+        self._auto_restart.setToolTip(
+            "If this task's flowgraph RF-faults, the unit relaunches it with the same parameters "
+            "(when it is not part of a running sequence/plan). Needs agent ≥ 1.31.0.")
         toggles.addWidget(self._autostart)
         toggles.addWidget(self._restart)
+        toggles.addWidget(self._auto_restart)
         toggles.addStretch(1)
         extra_form.addRow("", self._wrap(toggles))
         outer.addLayout(extra_form)
+        # A live unit's support is unknown until /info arrives — disable until then; the library
+        # (no live unit) always offers it.
+        if self.hostname == LIBRARY_HOST:
+            self._apply_auto_restart_support(True)
+        else:
+            self._apply_auto_restart_support(False)
 
         # Advanced
         adv = QGroupBox("Advanced")
@@ -307,14 +327,19 @@ class TaskEditorDialog(QDialog):
         # /info just leaves the Pi defaults in place. Never touches an EDIT (its paths
         # come from the existing command via _prefill_from_yaml).
         if op == "taskdlg_info":
-            if not isinstance(result, Exception) and not self.existing_name:
-                sdir = getattr(result, "scripts_dir", "") or ""
-                interp = getattr(result, "task_interpreter", "") or ""
-                if sdir and self._scripts_dir.text().strip() == DEFAULT_SCRIPTS_DIR:
-                    self._scripts_dir.setText(sdir)
-                if interp and self._interp.text().strip() == DEFAULT_INTERPRETER:
-                    self._interp.setText(interp)
-                self._update_preview()
+            if not isinstance(result, Exception):
+                # Gate the Auto-restart-on-fault checkbox on the unit advertising `task-auto-restart`
+                # (Phase 3b) — for both New and Edit (an Edit onto an old unit must disable it too).
+                caps = getattr(result, "capabilities", None) or []
+                self._apply_auto_restart_support(TASK_AUTO_RESTART_CAPABILITY in caps)
+                if not self.existing_name:
+                    sdir = getattr(result, "scripts_dir", "") or ""
+                    interp = getattr(result, "task_interpreter", "") or ""
+                    if sdir and self._scripts_dir.text().strip() == DEFAULT_SCRIPTS_DIR:
+                        self._scripts_dir.setText(sdir)
+                    if interp and self._interp.text().strip() == DEFAULT_INTERPRETER:
+                        self._interp.setText(interp)
+                    self._update_preview()
             return
 
         if op == "taskdlg_save":
@@ -413,6 +438,8 @@ class TaskEditorDialog(QDialog):
             self._scope.set_from_types(entry.get("types") or [])
         self._autostart.setChecked(bool(entry.get("autostart")))
         self._restart.setChecked(bool(entry.get("restart_on_crash")))
+        self._auto_restart_want = bool(entry.get("auto_restart_on_fault"))
+        self._apply_auto_restart_support(self._auto_restart_supported)
         env = entry.get("env") or {}
         self._env.setPlainText("\n".join(f"{k}={v}" for k, v in env.items()))
         wd = entry.get("working_dir")
@@ -587,6 +614,13 @@ class TaskEditorDialog(QDialog):
             "autostart": self._autostart.isChecked(),
             "restart_on_crash": self._restart.isChecked(),
         }
+        # Only WRITE the auto-restart flag when the checkbox is actually usable (the library, or a
+        # unit that confirmed the capability). When it's disabled — an unsupported unit, or one whose
+        # /info never arrived — omit it so the stored value in _orig_entry is preserved rather than
+        # clobbered to False (a review MEDIUM: editing an unrelated field on an unreachable/old unit
+        # must not silently strip an auto-restart the operator set for capable units).
+        if self._auto_restart.isEnabled():
+            edited["auto_restart_on_fault"] = self._auto_restart.isChecked()
         if self._scope is not None:
             edited["types"] = self._scope.types()
         # Preserve any stored fields the form doesn't edit (restart tuning, resume
@@ -609,6 +643,15 @@ class TaskEditorDialog(QDialog):
             )
 
     # ── Misc ─────────────────────────────────────────────────────────────────
+
+    def _apply_auto_restart_support(self, supported: bool) -> None:
+        """Gate the Auto-restart-on-fault checkbox on the target agent understanding it (Phase 3b).
+        A supported unit (or the offline library) enables it and reflects the desired state; an
+        unsupported live unit disables + unchecks it, so a task can't claim an auto-restart the agent
+        would silently drop on store."""
+        self._auto_restart_supported = supported
+        self._auto_restart.setEnabled(supported)
+        self._auto_restart.setChecked(self._auto_restart_want if supported else False)
 
     def _set_status(self, text: str, error: bool = False) -> None:
         color = Palette.CRASH if error else Palette.TEXT_FAINT
