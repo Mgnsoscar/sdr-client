@@ -19,6 +19,7 @@ from .argspec import extract_params
 SCRIPT_MARKER_CAPABILITIES: Dict[str, str] = {
     "is_elapsed": "paramkit-is-elapsed",         # agent 1.32.0: number/integer(..., is_elapsed=True)
     "resets_elapsed": "paramkit-resets-elapsed", # agent 1.33.0: flag(..., resets_elapsed=True)
+    "is_clock_origin": "paramkit-clock-origin",  # agent 1.34.0: number(..., is_clock_origin=True)
 }
 
 

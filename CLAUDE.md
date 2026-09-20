@@ -79,18 +79,21 @@ Review finding (HIGH, cross-repo): paramkit ships INSIDE the agent release, so `
 **`api/script_markers.py`** maps each marker key the static argspec exposes (`is_elapsed` →
 `paramkit-is-elapsed`, agent 1.32.0) to the agent capability that proves its paramkit takes the kwarg;
 (and `resets_elapsed` → `paramkit-resets-elapsed`, agent 1.33.0 — the `--restart` trigger that resets the
-drift's clock); `AgentClient.upload_script` (the Scripts panel save/upload) and `AgentClient.deploy_library` (the fleet
+drift's clock; and `is_clock_origin` → `paramkit-clock-origin`, agent 1.34.0 — the ABSOLUTE origin that makes
+the RF-fault resume exact, `../sdr-agent/docs/rf-fault-recovery.md` §14j); `AgentClient.upload_script` (the Scripts panel save/upload) and `AgentClient.deploy_library` (the fleet
 deploy) call `_check_script_markers` and raise an `AgentError` naming the script, the marker, the
 capability and the unit's version ("update the unit's agent first, then deploy the library") BEFORE any
 request — the same shape as the `CAL_*`/`SEQUENCE_*` gates. Cached `/info` capabilities are used;
 never-read ones are fetched once. A plain script is never gated. Also: the fault dialog's "no pref file"
 hint names the pin knob (it said a ≥ 1.31.1 agent always writes the file); the run-form hidden-checkbox
 test asserts `isHidden()` (the `isVisible()` form was vacuous on an unshown dialog). Tests:
-`tests/test_script_marker_gate.py` (6). Suite 1179 → 1185.
+`tests/test_script_marker_gate.py` (6; the gate test now uses a script carrying all three markers and asserts
+each capability is required). Suite 1179 → 1185.
 
-## Current state — argspec mirror: the `is_elapsed` param marker (agent 1.32.0): COMPLETE (branch `claude/system-familiarization-f5mezz`, mirror-only)
+## Current state — argspec mirror: the `is_elapsed` / `resets_elapsed` / `is_clock_origin` param markers (agent 1.32.0 → 1.34.0): COMPLETE (branch `claude/system-familiarization-f5mezz`, mirror-only)
 `api/argspec.py` re-mirrored byte-for-byte from `sdr-agent/agent/argspec.py` (drift guard): every param dict
-now carries **`is_elapsed`** (paramkit `Param.is_elapsed` — the ONE parameter of a time-dependent script that
+now carries **`is_elapsed`** (plus `resets_elapsed` and `is_clock_origin`, re-mirrored at 1.33.0 / 1.34.0 — the client
+reads nothing off them either) (paramkit `Param.is_elapsed` — the ONE parameter of a time-dependent script that
 takes the seconds already elapsed on its own timeline; cw_drift's `--elapsed`). The agent bakes it on an
 RF-fault restart so the drift resumes at the right point (`../sdr-agent/docs/rf-fault-recovery.md` §14g). The
 client reads nothing off it — the param renders as an ordinary launch number field (default 0; an operator

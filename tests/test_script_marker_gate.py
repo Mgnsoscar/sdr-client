@@ -26,6 +26,7 @@ args = s.parse()
 RESET = '''\
 from paramkit import Script
 s = (Script("d")
+     .number("-Clock-origin", "--clock-origin", unit="s", min=0.0, default=0.0, is_clock_origin=True)
      .number("-Elapsed", "--elapsed", unit="s", min=0.0, default=0.0, is_elapsed=True)
      .flag("-Restart", "--restart", live=True, resets_elapsed=True))
 args = s.parse()
@@ -62,10 +63,12 @@ def test_script_marker_capabilities_reads_the_static_argspec():
     assert sm.missing_marker_capabilities(MARKED, ["paramkit-is-elapsed"]) == []
     assert sm.missing_marker_capabilities(PLAIN, []) == []
     # a script using BOTH markers needs both capabilities (a 1.32.0 unit lacks the second)
-    assert sm.script_marker_capabilities(RESET) == {"paramkit-is-elapsed", "paramkit-resets-elapsed"}
+    assert sm.script_marker_capabilities(RESET) == {"paramkit-is-elapsed", "paramkit-resets-elapsed",
+                                                    "paramkit-clock-origin"}
     assert sm.missing_marker_capabilities(RESET, ["paramkit-is-elapsed"]) == \
-        [("resets_elapsed", "paramkit-resets-elapsed")]
-    assert sm.missing_marker_capabilities(RESET, ["paramkit-is-elapsed", "paramkit-resets-elapsed"]) == []
+        [("is_clock_origin", "paramkit-clock-origin"), ("resets_elapsed", "paramkit-resets-elapsed")]
+    assert sm.missing_marker_capabilities(RESET, ["paramkit-is-elapsed", "paramkit-resets-elapsed",
+                                                  "paramkit-clock-origin"]) == []
 
 
 def test_upload_refuses_a_marked_script_on_a_unit_without_the_capability():
