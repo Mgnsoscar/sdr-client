@@ -57,20 +57,32 @@ def _diagnosis_rows(snap: m.FaultSnapshot) -> list:
 
     env = snap.vmcircbuf_backend_env or ""
     compiled = snap.vmcircbuf_backend_compiled or ""
-    backend = env or compiled or "—"
-    # The EFFECTIVE backend is the env pin when set, else the COMPILED default — GR falls back to the
-    # compiled default when no GR_CONF_* env is pinned (e.g. when the P0 pin knob is disabled). A
-    # non-mmap effective backend is the leaky-fallback suspect whichever supplies it, so a sysv_shm
-    # COMPILED default with no env pin is flagged too (env-only would miss it, in exactly the config
-    # where sysv is active). A mismatch env≠compiled is named below even when both are mmap.
-    effective = env or compiled
-    backend_suspect = bool(effective) and effective != _SAFE_BACKEND
-    backend_val = backend
-    if env and compiled and env != compiled:
-        backend_val = f"{env}  (compiled default: {compiled})"
-    rows.append(_Row("GR buffer backend", backend_val, backend_suspect,
-                     "a SysV-shm fallback leaks segments on SIGKILL — pin mmap_shm_open"
-                     if backend_suspect else ""))
+    pref = getattr(snap, "vmcircbuf_backend_pref", "") or ""
+    # The EFFECTIVE backend is what GR ACTUALLY selects: the `vmcircbuf_default_factory` PREF FILE
+    # under the task HOME (a factory name like gr::vmcircbuf_mmap_shm_open_factory), which an agent
+    # >= 1.31.1 writes before every launch and reads back into the snapshot. GR never consults the
+    # GR_CONF_* env var (agent review fix #1), so the env value is informational only; with NO pref
+    # file GR probes for itself — sysv_shm first on Linux, the leaky suspect — so a missing pref is
+    # flagged as such (that is also what every pre-1.31.1 snapshot shows: the pin was inert there).
+    effective = pref or env or compiled
+    is_mmap = _SAFE_BACKEND in effective
+    backend_suspect = (not pref) or not is_mmap
+    backend_val = pref or env or compiled or "—"
+    extras = []
+    if env and env not in backend_val:
+        extras.append(f"env: {env}")
+    if compiled and compiled not in backend_val:
+        extras.append(f"compiled default: {compiled}")
+    if extras:
+        backend_val = f"{backend_val}  ({'; '.join(extras)})"
+    if not pref:
+        hint = ("no GR pref file on the unit — GR chose its own backend (SysV-shm first on Linux); "
+                "the GR_CONF env var alone is inert. Agent ≥ 1.31.1 writes the pref file per launch")
+    elif not is_mmap:
+        hint = "a SysV-shm backend leaks segments on SIGKILL — pin mmap_shm_open"
+    else:
+        hint = ""
+    rows.append(_Row("GR buffer backend", backend_val, backend_suspect, hint))
 
     shm_pct = _pct(snap.shm_used_bytes, snap.shm_total_bytes)
     if snap.shm_total_bytes is not None:

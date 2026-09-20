@@ -71,6 +71,19 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — fault diagnosis reads GR's pref-file backend (agent review fix #1, client half): COMPLETE (branch `claude/system-familiarization-f5mezz`, cross-repo with agent 1.31.1)
+The agent review (`../sdr-agent/docs/rf-fault-recovery.md` §14f) established — against the upstream GNU Radio
+3.8/3.10 sources — that GR selects its vmcircbuf backend from a **pref FILE** (`vmcircbuf_default_factory`
+under the task HOME), never from the `GR_CONF_VMCIRCBUF_DEFAULT_FACTORY` env var the P0 pin exported; agent
+1.31.1 now writes that file per launch and reports its content as **`FaultSnapshot.vmcircbuf_backend_pref`**
+(the EFFECTIVE backend). Client: `api/models.py` mirrors the field (defaulted, skew-safe);
+`ui/fault_detail_dialog._diagnosis_rows` keys the "GR buffer backend" row on it — an mmap pref is clean, a
+SysV pref is the leaky suspect (whatever the env var says, which is shown as `env: …`), and a MISSING pref
+(every pre-1.31.1 snapshot, or an unreadable HOME) is flagged with a "no GR pref file — GR chose its own
+backend" hint, because that is exactly the inert-pin condition. Tests: `tests/test_rf_fault_ui.py` (the
+healthy case now carries the pref; the env-unset case is suspect without a pref and clean with one; a new
+pref-driven test). Client-only; drift-guarded files untouched.
+
 ## Current state — library drift fingerprints include the recovery policy + auto-restart flag (review fix #21): COMPLETE (branch `claude/system-familiarization-f5mezz`, client-only)
 Review finding (MEDIUM): `state/library_sync.py`'s `_seq_fingerprint` / `_task_fingerprint` — what
 `diff_library`/`diff_state` (the Library tab's drift check + reconcile) compare a unit's deployed

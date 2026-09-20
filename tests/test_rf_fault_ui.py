@@ -250,15 +250,40 @@ def test_diagnosis_rows_flag_a_leaky_compiled_default_when_env_unset():
     snap = m.FaultSnapshot(vmcircbuf_backend_env="", vmcircbuf_backend_compiled="sysv_shm")
     row = {r.label: r for r in _diagnosis_rows(snap)}["GR buffer backend"]
     assert row.suspect is True and "sysv_shm" in row.value and row.hint
-    # env "" + a mmap compiled default is NOT suspect.
+    # env "" + a mmap compiled default but NO pref file: GR chose for itself (sysv first on Linux) —
+    # flagged, with the pref-file hint (agent review fix #1: the env var alone never pinned anything).
     snap2 = m.FaultSnapshot(vmcircbuf_backend_env="", vmcircbuf_backend_compiled="mmap_shm_open")
-    assert {r.label: r for r in _diagnosis_rows(snap2)}["GR buffer backend"].suspect is False
+    row2 = {r.label: r for r in _diagnosis_rows(snap2)}["GR buffer backend"]
+    assert row2.suspect is True and "no GR pref file" in row2.hint
+    # …and the same with the pref file naming mmap is NOT suspect.
+    snap3 = m.FaultSnapshot(vmcircbuf_backend_env="", vmcircbuf_backend_compiled="mmap_shm_open",
+                            vmcircbuf_backend_pref="gr::vmcircbuf_mmap_shm_open_factory")
+    assert {r.label: r for r in _diagnosis_rows(snap3)}["GR buffer backend"].suspect is False
+
+
+def test_diagnosis_rows_read_the_pref_file_as_the_effective_backend():
+    """Agent >= 1.31.1 reports GR's vmcircbuf_default_factory pref file — what GR ACTUALLY selects —
+    and the dialog keys on it: a SysV pref is the leaky suspect even with a mmap env var; an mmap pref
+    is clean even when the env var is unset; a missing pref means GR probed for itself (agent review
+    fix #1 — the GR_CONF env var was always inert)."""
+    from ui.fault_detail_dialog import _diagnosis_rows
+    sysv = m.FaultSnapshot(vmcircbuf_backend_env="mmap_shm_open",
+                           vmcircbuf_backend_pref="gr::vmcircbuf_sysv_shm_factory")
+    row = {r.label: r for r in _diagnosis_rows(sysv)}["GR buffer backend"]
+    assert row.suspect is True and "sysv_shm" in row.value and "SysV-shm" in row.hint
+    assert "env: mmap_shm_open" in row.value                   # the inert env var is shown as such
+    clean = m.FaultSnapshot(vmcircbuf_backend_pref="gr::vmcircbuf_mmap_shm_open_factory")
+    assert {r.label: r for r in _diagnosis_rows(clean)}["GR buffer backend"].suspect is False
+    missing = m.FaultSnapshot(vmcircbuf_backend_env="mmap_shm_open", vmcircbuf_backend_compiled="")
+    row = {r.label: r for r in _diagnosis_rows(missing)}["GR buffer backend"]
+    assert row.suspect is True and "no GR pref file" in row.hint
 
 
 def test_diagnosis_rows_healthy_backend_not_flagged():
     from ui.fault_detail_dialog import _diagnosis_rows
     snap = m.FaultSnapshot(vmcircbuf_backend_env="mmap_shm_open",
                            vmcircbuf_backend_compiled="mmap_shm_open",
+                           vmcircbuf_backend_pref="gr::vmcircbuf_mmap_shm_open_factory",
                            shm_used_bytes=10, shm_total_bytes=1000,
                            map_count=1000, map_max=262144)
     by = {r.label: r for r in _diagnosis_rows(snap)}

@@ -275,7 +275,9 @@ class FaultSnapshot(BaseModel):
     rss_bytes: Optional[int] = None
     nofile_soft: Optional[int] = None          # the task's RLIMIT_NOFILE
     nofile_hard: Optional[int] = None
-    vmcircbuf_backend_env: str = ""            # the task's effective GR_CONF_VMCIRCBUF_DEFAULT_FACTORY
+    vmcircbuf_backend_env: str = ""            # the task's GR_CONF_VMCIRCBUF_DEFAULT_FACTORY env var (informational)
+    vmcircbuf_backend_pref: str = ""           # the EFFECTIVE backend: GR's vmcircbuf_default_factory pref file
+                                                # under the task HOME (agent >= 1.31.1 writes + reads it)
     vmcircbuf_backend_compiled: str = ""       # gnuradio-config-info [vmcircbuf] default_factory
     task_home: str = ""
     ipcs_summary: str = ""                     # only captured when a SysV backend is implicated
