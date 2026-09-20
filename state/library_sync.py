@@ -26,16 +26,41 @@ logger = logging.getLogger(__name__)
 
 # ── Drift detection ────────────────────────────────────────────────────────────
 
+# The model defaults the RF-fault recovery fields normalise to. Read off the models (not
+# hard-coded) so the fingerprint can never disagree with what a unit that omits a field —
+# an agent from before the feature, whose /library and tasks.yaml carry neither — parses
+# to on the client: such a unit must fingerprint IDENTICALLY to an explicit default, or
+# every already-deployed, unchanged task/sequence would read as drifted the moment the
+# fields were added here.
+_SEQ_POLICY_DEFAULT = m.Sequence.model_fields["recovery_policy"].default          # "manual"
+_SEQ_MODE_DEFAULT = m.Sequence.model_fields["recovery_mode"].default              # "resync"
+_TASK_AUTO_RESTART_DEFAULT = m.TaskConfig.model_fields["auto_restart_on_fault"].default  # False
+_TASK_BUDGET_DEFAULT = m.TaskConfig.model_fields["max_fault_restarts"].default    # 2
+
+
 def _task_fingerprint(t: m.TaskConfig) -> tuple:
     """The meaningful, deploy-relevant fields of a task (ignores schema-default
     noise so two equivalent definitions compare equal)."""
+    auto = t.auto_restart_on_fault
+    budget = t.max_fault_restarts
     return (t.description, tuple(t.command), tuple(sorted(t.env.items())),
-            bool(t.autostart), bool(t.restart_on_crash))
+            bool(t.autostart), bool(t.restart_on_crash),
+            # RF-fault RECOVERY (Phase 3b): the standalone Auto-restart-on-fault flag + its
+            # budget are deployed with the task and change what the unit does unattended, so a
+            # policy-only edit (ticking the box; auto → off) must read as drift and reconcile.
+            bool(_TASK_AUTO_RESTART_DEFAULT if auto is None else auto),
+            int(_TASK_BUDGET_DEFAULT if budget is None else budget))
 
 
 def _seq_fingerprint(s: m.Sequence) -> tuple:
     return (s.name, s.description,
-            tuple(tuple(st.model_dump(mode="json").items()) for st in s.steps))
+            tuple(tuple(st.model_dump(mode="json").items()) for st in s.steps),
+            # RF-fault RECOVERY (Phase 3): the authored recovery policy is armed from the unit's
+            # stored sequence (a plan/schedule item inherits it), so flipping operator-restart ↔
+            # auto-resync/replay in the library is real drift — and the reverse (auto → manual)
+            # must reconcile too, else autonomy stays ON on the unit. "" / missing → the default.
+            (s.recovery_policy or _SEQ_POLICY_DEFAULT),
+            (s.recovery_mode or _SEQ_MODE_DEFAULT))
 
 
 def _norm_script(content: str) -> str:

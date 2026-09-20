@@ -71,6 +71,24 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — library drift fingerprints include the recovery policy + auto-restart flag (review fix #21): COMPLETE (branch `claude/system-familiarization-f5mezz`, client-only)
+Review finding (MEDIUM): `state/library_sync.py`'s `_seq_fingerprint` / `_task_fingerprint` — what
+`diff_library`/`diff_state` (the Library tab's drift check + reconcile) compare a unit's deployed
+definitions against — ignored `Sequence.recovery_policy`/`recovery_mode` (Phase 3) and
+`TaskConfig.auto_restart_on_fault`/`max_fault_restarts` (Phase 3b). A POLICY-ONLY library edit (operator-
+restart → auto-resync; ticking "Auto-restart on fault") read as "in sync" and never reconciled, and the
+reverse (auto → manual) left autonomy ON on the unit. Fixed: both tuples APPEND `(policy or "manual",
+mode or "resync")` / `(bool(auto_restart), int(budget))` — the leading elements are byte-identical — with
+the defaults read off `model_fields` so an OLD unit that never sends the fields (`m.Library(**json)` /
+`parse_tasks_yaml` default them) fingerprints identically to an explicit default: adding the fields makes
+no unchanged deployment read drifted. The deploy already sends `library.model_dump()` (both fields) and
+the agent persists them, so a policy drift converges on the next deploy. Tests:
+`tests/test_library_sync_policy.py` (12: policy-only / mode-only / flag-only / budget-only changes are
+drift in BOTH directions; explicit defaults == omitted fields; an old-agent `/library` payload and an
+old `tasks.yaml` without the fields are in sync while a real change against them still surfaces; blank
+fields normalise; the pre-existing tuple prefix is unchanged; the `diff_state` consumer path). Suite
+1166 → 1178 offscreen.
+
 ## Current state — RF-fault RECOVERY Phase 3b (client STANDALONE-task auto-restart checkbox): COMPLETE (branch `claude/system-familiarization-f5mezz`, cross-repo with agent 1.31.0)
 Client half of the standalone-task auto-restart (`../sdr-agent/docs/rf-fault-recovery.md` §7.1/§14e). The
 agent (1.31.0, capability `task-auto-restart`) relaunches a standalone (non-run-owned) task whose
