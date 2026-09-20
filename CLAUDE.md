@@ -71,6 +71,14 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — argspec mirror: the `is_elapsed` param marker (agent 1.32.0): COMPLETE (branch `claude/system-familiarization-f5mezz`, mirror-only)
+`api/argspec.py` re-mirrored byte-for-byte from `sdr-agent/agent/argspec.py` (drift guard): every param dict
+now carries **`is_elapsed`** (paramkit `Param.is_elapsed` — the ONE parameter of a time-dependent script that
+takes the seconds already elapsed on its own timeline; cw_drift's `--elapsed`). The agent bakes it on an
+RF-fault restart so the drift resumes at the right point (`../sdr-agent/docs/rf-fault-recovery.md` §14g). The
+client reads nothing off it — the param renders as an ordinary launch number field (default 0; an operator
+may set it to start part-way). No UI/model change; suite 1179 unchanged.
+
 ## Current state — fault diagnosis reads GR's pref-file backend (agent review fix #1, client half): COMPLETE (branch `claude/system-familiarization-f5mezz`, cross-repo with agent 1.31.1)
 The agent review (`../sdr-agent/docs/rf-fault-recovery.md` §14f) established — against the upstream GNU Radio
 3.8/3.10 sources — that GR selects its vmcircbuf backend from a **pref FILE** (`vmcircbuf_default_factory`
