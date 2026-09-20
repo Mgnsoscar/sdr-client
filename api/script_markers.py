@@ -17,7 +17,8 @@ from .argspec import extract_params
 
 # marker key on a param dict → the agent capability that proves the unit's paramkit takes the kwarg
 SCRIPT_MARKER_CAPABILITIES: Dict[str, str] = {
-    "is_elapsed": "paramkit-is-elapsed",     # agent 1.32.0: number/integer(..., is_elapsed=True)
+    "is_elapsed": "paramkit-is-elapsed",         # agent 1.32.0: number/integer(..., is_elapsed=True)
+    "resets_elapsed": "paramkit-resets-elapsed", # agent 1.33.0: flag(..., resets_elapsed=True)
 }
 
 

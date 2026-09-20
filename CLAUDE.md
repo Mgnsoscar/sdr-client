@@ -78,7 +78,8 @@ Review finding (HIGH, cross-repo): paramkit ships INSIDE the agent release, so `
 (the old reader ignores an unknown kwarg). Nothing in the deploy path checked the ordering. Now
 **`api/script_markers.py`** maps each marker key the static argspec exposes (`is_elapsed` →
 `paramkit-is-elapsed`, agent 1.32.0) to the agent capability that proves its paramkit takes the kwarg;
-`AgentClient.upload_script` (the Scripts panel save/upload) and `AgentClient.deploy_library` (the fleet
+(and `resets_elapsed` → `paramkit-resets-elapsed`, agent 1.33.0 — the `--restart` trigger that resets the
+drift's clock); `AgentClient.upload_script` (the Scripts panel save/upload) and `AgentClient.deploy_library` (the fleet
 deploy) call `_check_script_markers` and raise an `AgentError` naming the script, the marker, the
 capability and the unit's version ("update the unit's agent first, then deploy the library") BEFORE any
 request — the same shape as the `CAL_*`/`SEQUENCE_*` gates. Cached `/info` capabilities are used;
