@@ -221,8 +221,11 @@ def _run_dialog(client):
 
 
 def test_run_form_hides_the_checkbox_on_an_old_unit():
+    # isHidden(), not isVisible(): a child of an unshown top-level is never "visible", so the old
+    # assertion held whatever the gate did (tests-as-spec critic).
     dlg = _run_dialog(_RunClient(caps=[]))
-    assert dlg._auto_restart.isVisible() is False
+    assert dlg._auto_restart.isHidden() is True
+    assert _run_dialog(_RunClient(caps=["task-auto-restart"]))._auto_restart.isHidden() is False
 
 
 def test_run_form_shows_and_seeds_the_checkbox_when_supported():

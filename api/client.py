@@ -621,8 +621,30 @@ class AgentClient:
         return self._request("GET", "/scripts")
 
     def upload_script(self, filename: str, content: bytes) -> dict:
+        self._check_script_markers(filename, content)
         files = {"file": (filename, content, "text/x-python")}
         return self._request("POST", "/scripts/upload", files=files)
+
+    def _check_script_markers(self, filename: str, content) -> None:
+        """Refuse to ship a script whose paramkit MARKERS (builder kwargs such as `is_elapsed=`)
+        this unit's agent does not advertise support for: its paramkit would raise a TypeError at
+        build_script() on every launch (see api.script_markers). Reads the cached /info
+        capabilities, fetching /info once when they were never read; raises AgentError."""
+        from . import script_markers as _sm
+        need = _sm.script_marker_capabilities(content)
+        if not need:
+            return
+        if not self.capabilities:
+            self.info()                                  # never read: a network fetch (raises if down)
+        missing = _sm.missing_marker_capabilities(content, self.capabilities)
+        if missing:
+            what = ", ".join(f"'{k}' (agent capability '{c}')" for k, c in missing)
+            ver = self.agent_version or "an older agent"
+            raise AgentError(
+                self.hostname,
+                f"cannot deploy '{filename}': it declares the paramkit marker {what}, which this "
+                f"unit's agent ({ver}) does not support — its paramkit would crash the script at "
+                f"launch. Update the unit's agent first, then deploy the library.")
 
     def get_script(self, name: str) -> str:
         """Return a script's source text."""
@@ -821,6 +843,8 @@ class AgentClient:
         """Converge this unit to `library`. Definition-only and safe on air: the
         agent keeps running tasks alive and never deletes a sequence with an active
         run. prune=True makes the unit match exactly; prune=False only adds/updates."""
+        for sc in library.scripts or []:
+            self._check_script_markers(sc.name, sc.content)
         body = {"library": library.model_dump(), "prune": prune}
         return m.DeployLibraryResult(**self._request("PUT", "/library", json=body))
 

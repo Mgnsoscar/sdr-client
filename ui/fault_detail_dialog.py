@@ -77,7 +77,8 @@ def _diagnosis_rows(snap: m.FaultSnapshot) -> list:
         backend_val = f"{backend_val}  ({'; '.join(extras)})"
     if not pref:
         hint = ("no GR pref file on the unit — GR chose its own backend (SysV-shm first on Linux); "
-                "the GR_CONF env var alone is inert. Agent ≥ 1.31.1 writes the pref file per launch")
+                "the GR_CONF env var alone is inert. Agent ≥ 1.31.1 writes the pref file per launch "
+                "while its GR_VMCIRCBUF_FACTORY pin is set")
     elif not is_mmap:
         hint = "a SysV-shm backend leaks segments on SIGKILL — pin mmap_shm_open"
     else:
