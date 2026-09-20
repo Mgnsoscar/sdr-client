@@ -392,6 +392,13 @@ class SequenceStep(BaseModel):
     # agent carries through (≥ 1.25.3; an older agent drops it and the ramp reloads start-tied at
     # the same timing).
     anchor_own_edge: str = "start"
+    # PLAN-level anchoring (client authoring metadata, stored on the plan's copy of the step and
+    # replicated to the units' plan store; NEVER sent to an agent's arm as-is): when anchor ==
+    # "step" and `anchor_item` names ANOTHER plan item (its PlanItem.id), the target lives in that
+    # item — `anchor_step_id` is a step id inside it, or "" for the item's own window edge
+    # (`anchor_edge` "start" = that item's on-air, "end" = its off-air). The plan editor resolves
+    # it across sequences/units; the arm path compiles it to a plain on-air offset (plan_graph).
+    anchor_item: str = ""
     action: StepAction
     task_name: str
     args: List[str] = []               # CLI args for this step's start/run
@@ -732,6 +739,30 @@ class PlanItem(BaseModel):
     # its off-air away from the plan's off-air (T_end).
     on_air_offset_s: float = 0.0
     off_air_offset_s: float = 0.0
+    # ── Plan-level anchoring (the plan editor redesign). Each of the item's two edges hangs off
+    # SOMETHING, and the offset above is measured from it:
+    #   on_air_anchor / off_air_anchor:  "plan" (the plan's own anchors — the default, and the
+    #        pre-anchoring meaning of the offsets) | "item" (another plan item's on-/off-air edge)
+    #        | "step" (a step's start/end edge inside another item — any unit).
+    #   *_anchor_item:  the target PlanItem.id (for "item" / "step"; "" = self for "item", e.g. a
+    #        FIXED-LENGTH sequence whose off-air hangs off its own on-air).
+    #   *_anchor_edge:  which edge of the target: "on" | "off" for "plan" / "item" (the plan clock
+    #        or the target item's edge), "start" | "end" for "step".
+    #   *_anchor_step:  the target step id (for "step").
+    # Defaults reproduce the old meaning exactly: on-air = plan on-air + on_air_offset_s (≥ 0),
+    # off-air = plan off-air + off_air_offset_s (≤ 0). Resolved by ui/plan_graph.py; compiled to
+    # absolute times at arm. Replicated to the units' plan store (agent ≥ 1.35.0 keeps the fields).
+    id: str = ""                        # stable item id (assigned by the plan editor)
+    on_air_anchor: str = "plan"
+    on_air_anchor_item: str = ""
+    on_air_anchor_edge: str = "on"
+    on_air_anchor_step: str = ""
+    off_air_anchor: str = "plan"
+    off_air_anchor_item: str = ""
+    off_air_anchor_edge: str = "off"
+    off_air_anchor_step: str = ""
+    # Editor presentation only (replicated so every client shows the plan the same way).
+    expanded: bool = True
     # ── RF-fault RECOVERY Phase 3 — the item's auto-restart policy override. "" (default) =
     # INHERIT the seeded sequence's `recovery_policy`/`recovery_mode`; a non-empty value
     # overrides it (a plan may want one unit's sequence to auto-restart and another's not).

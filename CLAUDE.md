@@ -71,6 +71,69 @@ script, `in`/`out` families abs↔density) convert between quantities. A single 
 the source stage's **limits list** caps every signal (each signal's limiting reading is dBm).
 The agent's resolver publishes a per-signal **artifact** the client/script re-fold at runtime.
 
+## Current state — PLAN EDITOR REDESIGN: the sequence editor with one more level (agent 1.35.0, capability `plan-item-anchors`): COMPLETE (branch `claude/system-familiarization-f5mezz`, cross-repo)
+Owner ask: make the plan editor look and work like the sequence editor — every unit's sequences on ONE
+timeline, each sequence collapsible to a pill or opened to show its steps (colour by task, clear which
+sequence/unit a step belongs to), steps edited IN the plan editor, overlapping sequences on a unit never
+drawn on top of each other, warm-up/cool-down visible with each sequence's own on-/off-air anchors obvious,
+and "anything anchorable to anything" (a sequence to another sequence / task / step of another unit); unit
+banners stay visible when scrolling. Holds are deferred (owner). Mockup approved (v2) → **`docs/plan-editor-
+mockup.html`** is the visual spec; the anchor lines are drawn by the SEQUENCE EDITOR'S OWN ROUTER.
+- **Model (`api/models.py`)** — `PlanItem` gains `id` (stable, `pi-xxxxxxxx`, assigned by the editor; blank
+  on old plans) + `on_air_anchor`/`off_air_anchor` (`"plan"` default | `"item"` | `"step"`) with
+  `*_anchor_item` (target item id; `""` = self for `"item"` — a FIXED-LENGTH sequence hangs its off-air off
+  its own on-air), `*_anchor_edge` (`on`/`off` for plan/item, `start`/`end` for step), `*_anchor_step`, and
+  `expanded` (presentation). The two offsets keep their names, now measured from the anchor — defaults
+  reproduce the old meaning exactly. `SequenceStep.anchor_item` (non-empty = a step anchored INTO another
+  plan item; `anchor_step_id` a step id there or `""` = that item's window edge via `anchor_edge`
+  start=on-air/end=off-air). Mirrored on the agent (`agent/models.py`, 1.35.0, `plan-item-anchors`) so the
+  plan REPLICA round-trips; an older unit drops the fields → a plan using anchors reads as drifted until OTA.
+- **`ui/plan_graph.py`** (pure) — `PlanGraph(items)` resolves every item edge / wire-step edge to `(clock, t)`
+  on the plan's ON/OFF clocks (memoised, loop-safe → `None` + `describe_fault`); `extents()` (minute-rounded
+  defined regions), `earliest_on_clock_s` (the preflight lead-in), `pack_lanes`, `channel_conflicts`, and
+  **`compile_plan(items, t0, t_end)`** → per-item absolute `on_air_at`/`off_air_at` + steps with every
+  CROSS-ITEM anchor rewritten to a plain on-air offset of its own sequence (the agent only ever sees one
+  sequence); raises `PlanResolveError` (loop / missing target / an on-air timed from the plan's off-air in
+  an open-ended arm).
+- **`ui/timeline_model.py`** — `RunItem.anchor_item` / `BarItem.start_anchor_item` (+ `anchor_item_of`,
+  `is_cross_item`), carried by `items_to_steps`/`steps_to_items`/`TimelineEditor.steps()/set_steps()`;
+  `_resolve_step_clocked`/`resolve_step_offsets(_off)`/`validate` take an `ext` `{uid: (clock, offset)}` for
+  cross-item sources (the plan stage supplies it on the sequence's own clocks); `_reaches`/`step_anchor_fault`
+  stop at a cross-item source. Byte-identical without cross-item anchors.
+- **`ui/timeline_editor.py`** — `TimelineEditor.CANVAS_CLS` (a subclass swaps its canvas), the canvas's
+  `_ext_bases`, `_paint_connectors` skips cross-item sources (the stage draws them), the anchor makers/
+  `_revert_to_root` clear `anchor_item`, `_RowHeader(embedded=True)` (rows only, indented). Drift-guarded
+  files untouched.
+- **`ui/plan_editor.py`** (rewritten) — `_EmbeddedCanvas(_TimelineCanvas)` (plan-dictated on/off x, rows-only
+  paint on top of `stage.paint_under` — the sequence's window tint/guide lines + every cross connector,
+  translated to its row; a connect-drag that finds no local target asks the stage for an external one;
+  selection/zoom/wheel forwarded), `_EmbeddedEditor(TimelineEditor)` (the full editor "brain" — context,
+  calibration, params, dialogs, achievability — with its canvas + an embedded `_RowHeader` taken out and
+  hosted on the stage; never shown; Hold authoring off), `_SeqNode`, **`_PlanStage`** (unit bands with sticky
+  labels, collapsed pills / expanded slim window bars with offset chips + green/red edge handles, hatched
+  warm-up/cool-down ears, the dashed group frame + per-sequence on/off-air guide lines + tint, the plan's
+  three windows + ON-AIR/OFF-AIR + axis, cross-sequence connectors via the canvas router
+  (`_connector_points`/`_ortho_path`/`_draw_connector_path`/`_draw_connector_head`, obstacles from the rows
+  between, an expanded target's edge leaves from the group edge nearest the dependent), drag-to-anchor from
+  any handle onto any handle / step edge / guide line (`external_target`, `apply_cross_anchor` — offset = the
+  pixel gap, a loop refused), `detach_edge`/fixed-length, sequence body drag (clamped at the plan's anchors),
+  channel conflicts (red outline + pill), folding into lanes, dangling refs healed in place,
+  context menus), `_PlanHeaderColumn` (sticky; hosts the embedded row headers), `_PlanSheet`,
+  `PlanTimelineEditor` (toolbar: Add sequence…, Duration/One-shot/Tune/Ramp on the SELECTED sequence,
+  Expand/Collapse all, Fit, zoom; legend; `set_items/items/is_empty/validate`), `PlanItemDialog` (now the
+  unit + source + recovery picker; steps are edited on the stage), `PlanEditorDialog` (refuses to save an
+  untimeable plan). `PlanBar`/`_bar_from_item`/`_item_from_bar` kept as round-trip shims.
+- **Arm paths** — `plans_tab._arm_plan` and `timeline_tab._arm_scheduled` COMPILE the graph first (direct
+  arm: `T_end = T0 + duration`, each sequence runs its resolved window — a plain item the whole window as
+  before; open-ended: a fixed-length sequence keeps its duration, an off-clock on-air is refused);
+  `_finish_arm_preflight` derives the lead-in from `earliest_on_clock_s` and blocks an untimeable plan;
+  `_step_anchor_block_lines` ignores cross-item anchors (compiled away).
+Tests: `tests/test_plan_graph.py` (11), `tests/test_plan_editor_stage.py` (10), `tests/test_plan_canvas_paint.py`
+(rewritten, 3), `test_plan_hold_arm.py` (updated: Hold authoring deferred, a Hold survives). Suite 1185 →
+1206 offscreen; agent 711 → 713. **Rollout:** OTA units to 1.35.0 before deploying an anchored plan (else the
+replica drifts); `docs/plan-editor-mockup.html` is the spec. Deferred: Holds in the plan editor, plan-level
+undo for sequence moves, per-unit online state from a live fleet (bands show the cached state).
+
 ## Current state — paramkit MARKER deploy gate (`api/script_markers.py`): a script needing a newer paramkit is refused, not shipped: COMPLETE (branch `claude/system-familiarization-f5mezz`, client-only)
 Review finding (HIGH, cross-repo): paramkit ships INSIDE the agent release, so `cw_drift_tx.py`'s new
 `number(..., is_elapsed=True)` CRASHES at `build_script()` on every launch on a unit still running agent

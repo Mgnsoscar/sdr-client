@@ -46,6 +46,7 @@ from .plan_editor import PlanEditorDialog
 from .plan_log_dialog import PlanLogDialog
 from .qt_adapter import DataHub
 from . import run_conflict
+from . import plan_graph as pg
 from . import timeline_model as tlm
 from .theme import Palette
 from .timeline_model import (
@@ -156,7 +157,10 @@ def _step_anchor_block_lines(items_steps, fleet) -> List[str]:
     agent stays the backstop)."""
     out: List[str] = []
     for host, label, steps in items_steps:
-        step_steps = [s for s in steps if getattr(s, "anchor", "") == "step"]
+        # A step anchored into ANOTHER plan item is compiled to a plain on-air offset before the
+        # arm (plan_graph.compile_plan), so only same-sequence step anchors reach the agent.
+        step_steps = [s for s in steps if getattr(s, "anchor", "") == "step"
+                      and not (getattr(s, "anchor_item", "") or "")]
         if not step_steps:
             continue
         try:
@@ -277,11 +281,15 @@ def _stop_tasks_on_hosts(fleet: Fleet, conflicts: Dict[str, list]) -> List[tuple
 def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
               duration_s: Optional[float], hold_aware: bool = False,
               max_hold_s: float = DEFAULT_MAX_HOLD_S) -> List[tuple]:
-    """Arm every item of a plan around one operator-chosen on-air anchor (T0). Each
-    sequence is armed at T0 + its on_air_offset (absolute UTC), so a plan can stagger
-    units relative to the anchor. When duration_s is set every sequence runs that
-    long from its own on-air (skew-robust, and stop-anchored steps then fire);
-    otherwise it's open-ended and runs until stopped. Worker thread.
+    """Arm every item of a plan around one operator-chosen on-air anchor (T0). The plan's timing
+    graph (ui/plan_graph.py — each sequence's on-/off-air hangs off the plan's anchors, another
+    sequence's edge or a step's edge; steps may anchor across sequences) is COMPILED to absolute
+    instants first: with `duration_s` the plan's off-air is T0 + duration and every sequence
+    runs its resolved window (a plain item runs the whole window, as before); without it the arm
+    is open-ended (a fixed-length sequence still gets its own duration), and a sequence timed
+    from the plan's off-air is refused. Cross-sequence step anchors are rewritten to on-air
+    offsets of their own sequence, so each agent receives a self-contained step list. Each
+    sequence is armed at its absolute on-air translated to ITS unit's clock. Worker thread.
 
     hold_aware=True is the single-unit operator-present case (exactly one Hold-bearing item,
     checked by the caller): the item's steps are sent VERBATIM (the Hold intact, not collapsed),
@@ -297,11 +305,22 @@ def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
             _offsets[host] = fleet.get(host).clock_offset_s()
         return _offsets[host]
 
-    for item in plan.items:
-        # Translate the laptop-UTC anchor to THIS unit's clock (as single-sequence arm
-        # does), so a skewed unit still goes on air at the intended wall-clock time.
-        on_air_at_iso = (t0 + timedelta(seconds=item.on_air_offset_s + _off(item.hostname))
-                         ).isoformat()
+    t_end = (t0 + timedelta(seconds=duration_s)) if duration_s is not None else None
+    try:
+        compiled = pg.compile_plan(plan.items, t0, t_end)
+    except pg.PlanResolveError as exc:
+        return [(item, None, str(exc)) for item in plan.items]
+
+    for item, ci in zip(plan.items, compiled):
+        # Translate the absolute anchor to THIS unit's clock (as single-sequence arm does), so a
+        # skewed unit still goes on air at the intended wall-clock time.
+        skew = _off(item.hostname)
+        on_air_at_iso = (ci.on_air_at + timedelta(seconds=skew)).isoformat()
+        # the item's window: its resolved length when both edges are known, else open-ended
+        item_dur = ((ci.off_air_at - ci.on_air_at).total_seconds()
+                    if ci.off_air_at is not None else None)
+        # the plan-local step copy with cross-sequence anchors compiled away
+        a_item = item.model_copy(update={"steps": ci.steps}) if ci.steps is not None else item
         # RF-fault Phase 3: the item's auto-restart policy (its own override, else the seeded
         # sequence's), downgraded to manual if the unit can't act on it.
         r_pol, r_mode = _item_recovery(fleet, fleet.get(item.hostname), item)
@@ -311,8 +330,8 @@ def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
             # are baked into the stored sequence's steps and sent inline (mirrors the collapse path's
             # override-baking, minus the collapse). If the stored fetch fails, fall back to the
             # stored sequence with no overrides rather than risk an override+Hold refusal.
-            if item.steps:
-                hold_steps = list(item.steps)
+            if a_item.steps:
+                hold_steps = list(a_item.steps)
             else:
                 try:
                     stored = fleet.get(item.hostname).get_sequence(item.sequence_id)
@@ -337,11 +356,11 @@ def _arm_plan(fleet: Fleet, plan: m.Plan, t0: datetime,
             # A Hold has no effect in a plan run this way (multi-unit / unattended-style):
             # compile it out to a straight-through two-anchor list before arming — for a
             # plan-local copy AND a stored-sequence reference — and never send hold_aware (§7).
-            armed_steps = _collapsed_arm_steps(fleet, item)
+            armed_steps = _collapsed_arm_steps(fleet, a_item)
             req = m.ArmSequenceRequest(
                 on_air_at=on_air_at_iso,
-                open_ended=(duration_s is None),
-                on_air_duration_s=(duration_s if duration_s is not None else None),
+                open_ended=(item_dur is None),
+                on_air_duration_s=item_dur,
                 plan_id=plan.id,
                 plan_name=plan.name,
                 # A plan-local (or collapsed stored) step copy runs as-is; a no-Hold item with
@@ -829,6 +848,7 @@ class PlansTab(QWidget):
         missing_seq = []
         has_hold = False     # any item carries an operator-gated Hold
         resolved: Dict[int, list] = {}   # item index → its resolved (uncollapsed) steps
+        graph_items: list = []           # the plan's timing graph over the resolved steps
         for idx, item in enumerate(plan.items):
             # A plan-local copy carries its own steps; otherwise the source
             # sequence must still exist on the unit.
@@ -848,9 +868,21 @@ class PlansTab(QWidget):
             # the same offset, so the warm-up lead-in and minimum window are identical whether
             # the Hold is honoured (single-unit) or compiled out (multi-unit / schedule).
             csteps = m.collapse_hold(steps)
-            eff = _lead_in(csteps) + clock_off.get(item.hostname, 0.0) - item.on_air_offset_s
-            max_eff_lead = max(max_eff_lead, eff)
+            graph_items.append(item.model_copy(update={"steps": csteps, "id": item.id or f"#{idx}"}))
             plan_min_dur = max(plan_min_dur, _ramp.min_on_air_duration(csteps))
+        # Earliest instant T0 is valid, through the plan's timing graph: for every item the
+        # earliest thing it fires on the on-air clock (its own on-air, or a warm-up step before
+        # it — wherever its on-air is anchored) must land in the unit's future.
+        graph = pg.PlanGraph(graph_items)
+        fault = graph.first_fault()
+        if fault:
+            QMessageBox.warning(self, "Cannot arm plan", f"This plan can't be timed:\n{fault}")
+            self._set_status("arm blocked — plan can't be timed", error=True)
+            return
+        for gi in graph_items:
+            earliest = graph.earliest_on_clock_s(gi.id)
+            if earliest is not None:
+                max_eff_lead = max(max_eff_lead, -earliest + clock_off.get(gi.hostname, 0.0))
         if missing_seq:
             QMessageBox.warning(
                 self, "Cannot arm plan",

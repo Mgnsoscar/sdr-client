@@ -339,6 +339,11 @@ class BarItem:
     step_id: str = ""
     start_anchor_step_id: str = ""
     start_anchor_edge: str = "end"
+    # Plan-level anchoring: the OTHER plan item the start hangs off (start_anchor="step" with a
+    # target in another sequence — its step `start_anchor_step_id`, or "" for that item's own
+    # window edge: start_anchor_edge "start" = its on-air, "end" = its off-air). Resolved by the
+    # plan editor (an `ext` base handed to resolve_step_offsets); "" = a same-sequence target.
+    start_anchor_item: str = ""
     # If the run is armed with a resume offset, pass it to this task's start (only a
     # resumable duration task honours it). Carried through edit so it isn't reset.
     inject_resume_offset: bool = False
@@ -392,6 +397,9 @@ class RunItem:
     # runs BACKWARD from there; `offset` is then the END's offset). On the wire `offset_s` is always
     # the START's offset (= offset − duration for an end tie), so the agent needs no new logic.
     anchor_own_edge: str = "start"
+    # Plan-level anchoring: the OTHER plan item the target lives in (anchor="step" across
+    # sequences/units — see BarItem.start_anchor_item). "" = a same-sequence target.
+    anchor_item: str = ""
     uid: int = 0
     kind: str = "run"
 
@@ -461,6 +469,22 @@ def is_step_source(it) -> bool:
     if getattr(it, "kind", None) == "bar":
         return getattr(it, "start_anchor", "start") == "step"
     return getattr(it, "anchor", "start") == "step"
+
+
+def anchor_item_of(it) -> str:
+    """The OTHER plan item a step-anchor source hangs off ("" = a same-sequence target, or not
+    a step source): a run via `anchor_item`, a bar via `start_anchor_item`."""
+    if not is_step_source(it):
+        return ""
+    if getattr(it, "kind", None) == "bar":
+        return getattr(it, "start_anchor_item", "") or ""
+    return getattr(it, "anchor_item", "") or ""
+
+
+def is_cross_item(it) -> bool:
+    """True when `it` hangs off a step / window edge in ANOTHER plan item — resolved by the plan
+    editor, not by this sequence's own step graph."""
+    return bool(anchor_item_of(it))
 
 
 def step_source_ref(it) -> Tuple[str, str]:
@@ -736,7 +760,9 @@ def ramp_crosses_hold_steps(steps) -> bool:
 _ANCHOR_ON_AIR = ("start", "hold", "enter", "step")   # anchors whose edges live in on-air-offset space
 
 
-def _resolve_step_clocked(items, h_off: Optional[float]) -> Dict[int, Tuple[str, float]]:
+def _resolve_step_clocked(items, h_off: Optional[float],
+                          ext: Optional[Dict[int, Tuple[str, float]]] = None
+                          ) -> Dict[int, Tuple[str, float]]:
     """Resolve every step-anchored item to a (clock, offset) — clock 'start' = ON-AIR, 'stop' =
     OFF-AIR — by hanging it off its target step's referenced edge (+ its own offset). A chain
     inherits its ROOT's clock: a dependent whose chain roots at on-air is placed relative to
@@ -744,8 +770,13 @@ def _resolve_step_clocked(items, h_off: Optional[float]) -> Dict[int, Tuple[str,
     to off-air (its absolute time isn't known until arm, but its OFF-AIR-relative position is).
 
     Resolution is TOPOLOGICAL (mirrors the agent's `_resolve_steps`): a target may itself be
-    step-anchored, so chains resolve. A cyclic/unknown target is left UNRESOLVED and omitted."""
+    step-anchored, so chains resolve. A cyclic/unknown target is left UNRESOLVED and omitted.
+
+    `ext` — {uid: (clock, offset)} for items anchored OUTSIDE this sequence (a plan-level anchor
+    into another item; `is_cross_item`), as the plan editor resolved them on this sequence's own
+    clocks. A cross-item source without an `ext` entry is unresolved."""
     by_id = {getattr(it, "step_id", "") or "": it for it in items if getattr(it, "step_id", "")}
+    ext = ext or {}
 
     def own_base(it, seen: set) -> Optional[Tuple[str, float]]:
         """(clock, offset) of the item's OWN start edge. A bar hangs off `start_anchor`, a run
@@ -786,6 +817,8 @@ def _resolve_step_clocked(items, h_off: Optional[float]) -> Dict[int, Tuple[str,
         uid = getattr(it, "uid", None)
         if uid in seen:
             return None                               # cycle
+        if is_cross_item(it):
+            return ext.get(uid)                       # placed by the plan editor (another item)
         # A bar SOURCE hangs its start off a step; a run its start too — except a ramp tied by its
         # END, whose start sits `duration` before the tied point (step_wire_offset folds that in).
         ref, edge = step_source_ref(it)
@@ -807,20 +840,22 @@ def _resolve_step_clocked(items, h_off: Optional[float]) -> Dict[int, Tuple[str,
     return out
 
 
-def resolve_step_offsets(items, h_off: Optional[float]) -> Dict[int, float]:
+def resolve_step_offsets(items, h_off: Optional[float],
+                         ext: Optional[Dict[int, Tuple[str, float]]] = None) -> Dict[int, float]:
     """{uid: on-air base offset} for every step-anchored item whose chain roots at ON-AIR
     (a point's start==end==offset; a ramp's end == start+duration). Off-air-rooted chains and
     cyclic/unknown targets are omitted (see resolve_step_offsets_off / the agent backstop).
     Kept as plain floats — the shape most consumers (ordering, in-task checks) rely on."""
-    return {uid: off for uid, (clock, off) in _resolve_step_clocked(items, h_off).items()
+    return {uid: off for uid, (clock, off) in _resolve_step_clocked(items, h_off, ext).items()
             if clock == "start"}
 
 
-def resolve_step_offsets_off(items, h_off: Optional[float]) -> Dict[int, float]:
+def resolve_step_offsets_off(items, h_off: Optional[float],
+                             ext: Optional[Dict[int, Tuple[str, float]]] = None) -> Dict[int, float]:
     """{uid: off-air base offset} for every step-anchored item whose chain roots at OFF-AIR
     (anchored to a stop step, a bar's off-air stop edge, or a chain that reaches one). The
     offset is relative to off-air; its absolute time is set at arm."""
-    return {uid: off for uid, (clock, off) in _resolve_step_clocked(items, h_off).items()
+    return {uid: off for uid, (clock, off) in _resolve_step_clocked(items, h_off, ext).items()
             if clock == "stop"}
 
 
@@ -835,6 +870,8 @@ def _reaches(src_uid, target_it, by_sid, seen=None) -> bool:
     seen.add(uid)
     if uid == src_uid:
         return True
+    if is_cross_item(target_it):
+        return False                    # its chain leaves this sequence (the plan editor's graph)
     if getattr(target_it, "kind", None) == "bar":
         if getattr(target_it, "start_anchor", "start") != "step":
             return False
@@ -866,6 +903,8 @@ def step_anchor_fault(item, by_sid: Dict[str, object]) -> Optional[str]:
     cur = item
     while getattr(cur, "anchor", "start") == "step":
         uid = getattr(cur, "uid", None)
+        if is_cross_item(cur):
+            return None                             # rooted in another plan item (plan editor)
         if uid in seen:
             return (f"{label} is part of a step-anchor loop (a step ends up anchored back "
                     f"to itself) — re-anchor one of the steps to break the cycle")
@@ -1189,6 +1228,8 @@ def item_to_steps(it) -> List[dict]:
         if getattr(it, "anchor", "start") == "step":
             step["anchor_step_id"] = asid
             step["anchor_edge"] = aedge
+            if getattr(it, "anchor_item", "") or "":
+                step["anchor_item"] = getattr(it, "anchor_item")
             # A ramp tied by its END: the wire offset is the START's (offset − duration) — the
             # agent runs the ramp forward from there unchanged; the tie is carried as metadata so
             # the client redraws/edits it by its end (emitted only when set, plain wire unchanged).
@@ -1217,6 +1258,8 @@ def item_to_steps(it) -> List[dict]:
         if start_anchor == "step":
             start["anchor_step_id"] = getattr(it, "start_anchor_step_id", "") or ""
             start["anchor_edge"] = getattr(it, "start_anchor_edge", "end") or "end"
+            if getattr(it, "start_anchor_item", "") or "":
+                start["anchor_item"] = getattr(it, "start_anchor_item")
         return [start, stop]
     if getattr(it, "action", "run") == "hold":
         # The Hold boundary marker (docs/sequence-hold-step.md): anchor="start" at the
@@ -1284,7 +1327,7 @@ def items_to_steps(items) -> List[dict]:
         for step in item_to_steps(it):
             # Re-point a reference to a bar TARGET at the correct wire step (its start or stop).
             ref = step.get("anchor_step_id")
-            if ref:
+            if ref and not step.get("anchor_item"):
                 step["anchor_step_id"], step["anchor_edge"] = _encode_anchor_ref(
                     ref, step.get("anchor_edge", "end") or "end", bar_ids)
             out.append(step)
@@ -1295,11 +1338,15 @@ def _step_anchor_fields(s: dict) -> dict:
     """The step-to-step anchoring fields carried from a wire step onto a RunItem (blank when
     absent, so a plain step round-trips unchanged). A reference to a bar's stop wire step
     (id + suffix) decodes back to the bar id + the 'end' edge."""
-    asid, aedge = _decode_anchor_ref(str(s.get("anchor_step_id") or ""),
-                                     str(s.get("anchor_edge") or "end"))
+    aitem = str(s.get("anchor_item") or "")
+    if aitem:                                       # a cross-item ref: the other item decodes it
+        asid, aedge = str(s.get("anchor_step_id") or ""), str(s.get("anchor_edge") or "end")
+    else:
+        asid, aedge = _decode_anchor_ref(str(s.get("anchor_step_id") or ""),
+                                         str(s.get("anchor_edge") or "end"))
     own = "end" if str(s.get("anchor_own_edge") or "start") == "end" else "start"
     return {"step_id": str(s.get("id") or ""), "anchor_step_id": asid, "anchor_edge": aedge,
-            "anchor_own_edge": own}
+            "anchor_own_edge": own, "anchor_item": aitem}
 
 
 def _ramp_item_offset(s: dict) -> float:
@@ -1359,8 +1406,12 @@ def steps_to_items(steps: List[dict]) -> List:
         # The bar's cross-reference id comes from its START step's id; its start may hang off
         # another step (anchor="step" → start_anchor + start_anchor_step_id/edge, bar-ref decoded).
         sanc = st.get("anchor", "start")
-        sasid, saedge = _decode_anchor_ref(str(st.get("anchor_step_id") or ""),
-                                           str(st.get("anchor_edge") or "end"))
+        saitem = str(st.get("anchor_item") or "")
+        if saitem:
+            sasid, saedge = str(st.get("anchor_step_id") or ""), str(st.get("anchor_edge") or "end")
+        else:
+            sasid, saedge = _decode_anchor_ref(str(st.get("anchor_step_id") or ""),
+                                               str(st.get("anchor_edge") or "end"))
         items.append(BarItem(
             task_name=task, args=list(st.get("args") or []),
             replace_args=bool(st.get("replace_args", True)),
@@ -1368,7 +1419,7 @@ def steps_to_items(steps: List[dict]) -> List:
             stop_offset=float(stop["offset_s"]) if stop else 0.0,
             start_anchor=sanc,                        # "hold" → window-B; "step" → hung off a step
             step_id=str(st.get("id") or ""),
-            start_anchor_step_id=sasid, start_anchor_edge=saedge,
+            start_anchor_step_id=sasid, start_anchor_edge=saedge, start_anchor_item=saitem,
             inject_resume_offset=bool(st.get("inject_resume_offset", False)),
             power_view=st.get("power_view")))
 
@@ -1545,8 +1596,13 @@ def _step_conflict_error(items) -> Optional[str]:
     return None
 
 
-def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
-    """Return an error string if the item set wouldn't make a valid sequence."""
+def validate(items, known_tasks: Optional[List[str]] = None,
+             ext: Optional[Dict[int, Tuple[str, float]]] = None) -> Optional[str]:
+    """Return an error string if the item set wouldn't make a valid sequence.
+
+    `ext` — the plan editor's resolution of any CROSS-ITEM anchored step ({uid: (clock, offset)}
+    on this sequence's clocks, see `_resolve_step_clocked`); a cross-item source it can't place
+    is an error. A plain sequence (no cross-item anchors) never needs it."""
     if not items:
         return "add at least one duration or one-shot task"
     steps = items_to_steps(items)
@@ -1585,10 +1641,17 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
         by_sid = {getattr(it, "step_id", "") or "": it for it in items if getattr(it, "step_id", "")}
         for it in step_items:
             tgt_id, aedge = step_source_ref(it)
-            if not tgt_id:
-                return f"a step anchored to another step needs a target (on '{it.task_name}')"
             if aedge not in ("start", "end"):
                 return "a step anchor's edge must be ‘start’ or ‘end’"
+            if is_cross_item(it):
+                # Anchored into ANOTHER plan item: the plan editor resolves it (ext); a blank
+                # target id there means that item's own window edge.
+                if getattr(it, "uid", None) not in (ext or {}):
+                    return (f"a step on '{it.task_name}' anchors to another sequence's step / "
+                            f"window, which can't be timed — re-anchor it")
+                continue
+            if not tgt_id:
+                return f"a step anchored to another step needs a target (on '{it.task_name}')"
             # A negative offset is allowed (fire BEFORE the target's edge — like a start/stop anchor's
             # lead-in); the agent accepts it from 1.25.0. Saving/arming with a negative step offset is
             # gated on `sequence-step-anchor-negative` in sequence_editor/sequences_panel, not here.
@@ -1598,8 +1661,8 @@ def validate(items, known_tasks: Optional[List[str]] = None) -> Optional[str]:
                 return f"a step on '{it.task_name}' anchors to a step that no longer exists"
         # Resolution catches cycles and a chain rooted at a window-filling ('both') ramp (no single
         # edge). A chain that resolves on EITHER clock — on-air or off-air (set at arm) — is valid.
-        bases = resolve_step_offsets(items, None)
-        off = resolve_step_offsets_off(items, None)
+        bases = resolve_step_offsets(items, None, ext)
+        off = resolve_step_offsets_off(items, None, ext)
         for it in step_items:
             uid = getattr(it, "uid", None)
             if uid not in bases and uid not in off:

@@ -109,16 +109,20 @@ def test_plan_item_bar_round_trip_preserves_a_hold():
     assert any(s.anchor == "hold" for s in back.steps)
 
 
-def test_plan_item_dialog_enables_hold_authoring():
-    # plan_editor no longer calls set_hold_authoring(False): the ARM path now decides whether a
-    # Hold pauses, so authoring one in a plan-local sequence is meaningful.
+def test_plan_editor_defers_hold_authoring_but_keeps_a_hold():
+    # The plan editor redesign embeds the sequence editor per plan sequence; Hold AUTHORING is
+    # deferred there (owner: "wait with holds" — the '+ Hold' tool is hidden), but a plan-local
+    # sequence that already carries a Hold keeps it through the editor (the ARM path still decides
+    # whether it pauses).
     from tests.test_step_editor_power_units import FakeHub
-    dlg = pe.PlanItemDialog(FakeHub(), {}, parent=None)
+    ed = pe.PlanTimelineEditor(FakeHub(), {"u": []})
     try:
-        assert dlg._timeline._hold_authoring is True
-        assert dlg._timeline._add_hold.isVisibleTo(dlg._timeline) is True
+        ed.set_items([_item(steps=_hold_steps(150.0))])
+        node = ed._stage.nodes()[0]
+        assert node.editor._hold_authoring is False
+        assert m.has_hold(ed.items()[0].steps)
     finally:
-        dlg.deleteLater()
+        ed.deleteLater()
 
 
 # ── item 2 + §10: single-unit hold-aware eligibility ──────────────────────────

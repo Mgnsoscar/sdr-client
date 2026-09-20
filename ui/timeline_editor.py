@@ -324,6 +324,9 @@ class _TimelineCanvas(QWidget):
         self._hold_off: Optional[float] = None       # the Hold marker's on-air offset (None = none)
         self._step_bases: dict = {}                   # uid -> resolved on-air base for step anchors
         self._step_off_bases: dict = {}               # uid -> resolved OFF-AIR base (chain roots off-air)
+        # Plan editor: {uid: (clock, offset)} for steps anchored into ANOTHER plan item, resolved
+        # by the plan stage on this sequence's own clocks (tlm.is_cross_item). Empty elsewhere.
+        self._ext_bases: dict = {}
         # Hold-window geometry (set in relayout/_place when a Hold is present): the Hold draws as a
         # fixed-width WINDOW [enter_x, resume_x]; everything after it is one off-air-styled window
         # [resume_x, off_x] whose axis counts FORWARD from resume; off-air FLOATS to just past the
@@ -771,8 +774,8 @@ class _TimelineCanvas(QWidget):
         # The Hold marker's position (window A's end) governs where window-B items sit,
         # so resolve it before geometry (compute_anchors reads it too).
         self._hold_off = tlm.hold_offset(self._items)
-        self._step_bases = tlm.resolve_step_offsets(self._items, self._hold_off)
-        self._step_off_bases = tlm.resolve_step_offsets_off(self._items, self._hold_off)
+        self._step_bases = tlm.resolve_step_offsets(self._items, self._hold_off, self._ext_bases)
+        self._step_off_bases = tlm.resolve_step_offsets_off(self._items, self._hold_off, self._ext_bases)
         # Un-centered content anchors + intrinsic content width. Factored into a
         # hook so a subclass (the plan timeline) can supply a window-only geometry.
         self._c_on, self._c_off, self._content_w = self._compute_anchors()
@@ -1933,6 +1936,8 @@ class _TimelineCanvas(QWidget):
         conns = []
         for it in self._rows:
             if not tlm.is_step_source(it):          # a run/tune/ramp, or a bar via its START
+                continue
+            if tlm.is_cross_item(it):               # anchored into another plan item: the plan stage draws it
                 continue
             ref, edge = tlm.step_source_ref(it)
             tgt = by_sid.get(ref)
@@ -3335,12 +3340,14 @@ class _TimelineCanvas(QWidget):
             src.start_anchor = "step"
             src.start_anchor_step_id = sid
             src.start_anchor_edge = edge
+            src.start_anchor_item = ""            # a same-sequence target
             src.start_offset = off
         else:
             src.anchor = "step"
             src.anchor_step_id = sid
             src.anchor_edge = edge
             src.anchor_own_edge = "end" if end_tied else "start"
+            src.anchor_item = ""
             src.offset = off
         self._select_only(src_uid)
         self.relayout()
@@ -3371,6 +3378,7 @@ class _TimelineCanvas(QWidget):
             src.start_anchor = kind
             src.start_anchor_step_id = ""
             src.start_anchor_edge = "end"
+            src.start_anchor_item = ""
             src.start_offset = max(0.0, off) if kind == "hold" else off
             self._select_only(src_uid)
             self.relayout()
@@ -3389,6 +3397,7 @@ class _TimelineCanvas(QWidget):
         src.anchor_step_id = ""
         src.anchor_edge = "end"
         src.anchor_own_edge = "start"
+        src.anchor_item = ""
         src.offset = self._clamp_tune_offset(src, off)
         self._select_only(src_uid)
         self.relayout()
@@ -3408,6 +3417,7 @@ class _TimelineCanvas(QWidget):
             it.start_anchor = "start"
             it.start_anchor_step_id = ""
             it.start_anchor_edge = "end"
+            it.start_anchor_item = ""
             return
         if base is not None:
             it.anchor, it.offset = "start", base
@@ -3419,6 +3429,7 @@ class _TimelineCanvas(QWidget):
         it.anchor_step_id = ""
         it.anchor_edge = "end"
         it.anchor_own_edge = "start"
+        it.anchor_item = ""
 
     def _detach_anchor(self, uid: Optional[int]) -> None:
         """Remove a step anchor (the "Remove anchor" chip / a UI detach): revert the item (a
@@ -4916,9 +4927,12 @@ class _RowHeader(QWidget):
 
     HDR_W = 210
 
-    def __init__(self, canvas: "_TimelineCanvas"):
+    def __init__(self, canvas: "_TimelineCanvas", embedded: bool = False):
         super().__init__()
         self._canvas = canvas
+        # Embedded (the plan editor): rows only — no caption, no right border (the plan's own
+        # header column frames it), and the rows are indented one level under their sequence.
+        self._embedded = embedded
         self.setFixedWidth(self.HDR_W)
 
     def sizeHint(self) -> QSize:  # noqa: N802
@@ -4965,14 +4979,17 @@ class _RowHeader(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.fillRect(self.rect(), QColor(Palette.SURFACE))
-        p.setPen(QPen(QColor(Palette.HAIRLINE if hasattr(Palette, "HAIRLINE") else Palette.BORDER), 1))
-        p.drawLine(self.width() - 1, 0, self.width() - 1, self.height())
-        # caption
-        f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPixelSize(10); f.setBold(True)
-        p.setFont(f); p.setPen(QColor(Palette.TEXT_FAINT))
-        p.drawText(16, 6, self.width() - 24, 12,
-                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                   "TASKS & STEPS")
+        if not self._embedded:
+            p.setPen(QPen(QColor(Palette.HAIRLINE if hasattr(Palette, "HAIRLINE") else Palette.BORDER), 1))
+            p.drawLine(self.width() - 1, 0, self.width() - 1, self.height())
+            # caption
+            f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPixelSize(10); f.setBold(True)
+            p.setFont(f); p.setPen(QColor(Palette.TEXT_FAINT))
+            p.drawText(16, 6, self.width() - 24, 12,
+                       int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                       "TASKS & STEPS")
+        ind = 14 if self._embedded else 0          # embedded rows sit one level under the sequence
+        p.translate(ind, 0)
         for row in self._canvas.row_layout():
             it, y, hue, child = row["item"], row["y"], row["hue"], row["child"]
             known = self._canvas.task_known(getattr(it, "task_name", ""))
@@ -5001,9 +5018,9 @@ class _RowHeader(QWidget):
             fm = QFontMetrics(fn)
             badge_w = self._type_badge(p, typ, base, known, y)   # draws + returns width
             if locked:                                           # a small padlock before the badge
-                self._paint_lock(p, self.width() - badge_w - 24, cy, QColor(ELAPSED_INK))
+                self._paint_lock(p, self.width() - ind - badge_w - 24, cy, QColor(ELAPSED_INK))
                 badge_w += 18
-            avail = self.width() - nx - badge_w - 16
+            avail = self.width() - ind - nx - badge_w - 16
             if sub:
                 p.setFont(fn)
                 p.setPen(QColor(ELAPSED_INK if locked else (Palette.TEXT if known else Palette.CRASH)))
@@ -5027,7 +5044,8 @@ class _RowHeader(QWidget):
         f = QFont(Fonts.SANS.split(",")[0].strip('"')); f.setPixelSize(8); f.setBold(True)
         p.setFont(f); fm = QFontMetrics(f)
         w = fm.horizontalAdvance(text) + 10
-        r = QRectF(self.width() - w - 12, y + (LANE_H - 14) / 2, w, 14)
+        ind = 14 if getattr(self, "_embedded", False) else 0
+        r = QRectF(self.width() - ind - w - 12, y + (LANE_H - 14) / 2, w, 14)
         p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(Palette.INSET))
         p.drawRoundedRect(r, 4, 4)
         p.setPen(QColor(Palette.TEXT_MUTED))
@@ -5135,6 +5153,9 @@ class TimelineEditor(QWidget):
     """Toolbar (add buttons) above a horizontally-scrollable timeline canvas."""
 
     changed = pyqtSignal()
+    # The canvas class this editor builds — a subclass (the plan editor's embedded canvas) swaps
+    # in its own while keeping the whole editor "brain" (context, calibration, dialogs, caches).
+    CANVAS_CLS = _TimelineCanvas
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -5272,7 +5293,7 @@ class TimelineEditor(QWidget):
             f"border: 1px solid #cfe0ee; border-radius: 8px; padding: 7px 10px;")
         outer.addWidget(self._cal_stale_banner)
 
-        self._canvas = _TimelineCanvas(self)
+        self._canvas = self.CANVAS_CLS(self)
         self._canvas.changed.connect(self.changed.emit)
         self._canvas.changed.connect(self._update_mindur)
         self._canvas.changed.connect(self._update_achievability)
@@ -5839,6 +5860,7 @@ class TimelineEditor(QWidget):
                 "anchor_step_id": getattr(s, "anchor_step_id", "") or "",
                 "anchor_edge": getattr(s, "anchor_edge", "end") or "end",
                 "anchor_own_edge": getattr(s, "anchor_own_edge", "start") or "start",
+                "anchor_item": getattr(s, "anchor_item", "") or "",
                 # power_hold_dest is deliberately NOT carried onto the canvas item — the injected
                 # --power was just stripped, so the authored item is clean and re-derived on save.
             })
@@ -5874,10 +5896,12 @@ class TimelineEditor(QWidget):
                 id=d.get("id", "") or "",
                 anchor_step_id=d.get("anchor_step_id", "") or "",
                 anchor_edge=d.get("anchor_edge", "end") or "end",
-                anchor_own_edge=d.get("anchor_own_edge", "start") or "start"))
+                anchor_own_edge=d.get("anchor_own_edge", "start") or "start",
+                anchor_item=d.get("anchor_item", "") or ""))
         return out
 
     # ── Validation (mirrors the agent's _validate_steps) ─────────────────────
 
     def validate(self) -> Optional[str]:
-        return tlm.validate(self._canvas.items(), self._tasks or None)
+        return tlm.validate(self._canvas.items(), self._tasks or None,
+                            getattr(self._canvas, "_ext_bases", None) or None)

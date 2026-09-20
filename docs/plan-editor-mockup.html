@@ -1,0 +1,750 @@
+<title>Plan Editor Mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Deliberately single-theme (light): mirrors the shipped client's Palette so it reads as the same app. */
+:root{
+  color-scheme: light;
+  --ground:#EEF0F3; --surface:#FFFFFF; --surface-alt:#FAFBFC; --inset:#F1F4F7;
+  --border:#E2E5EA; --border-strong:#CDD2DA; --hairline:#ECEEF1;
+  --text:#1E2530; --muted:#5C6675; --faint:#8A93A2;
+  --accent:#2C6E9B; --accent-soft:#E8F0F6; --accent-ink:#1F5476;
+  --online:#1D9E75; --online-soft:#E1F5EE;
+  --armed:#BA7517; --armed-soft:#FAEEDA;
+  --crash:#C23B3B; --crash-soft:#FBE9E9;
+  --idle:#8A93A2; --idle-soft:#EDEFF2;
+  --sans:"IBM Plex Sans","Segoe UI",system-ui,sans-serif;
+  --mono:"IBM Plex Mono","DejaVu Sans Mono",ui-monospace,monospace;
+  --r:14px; --r-sm:9px; --r-xs:6px;
+  --shadow-sm:0 1px 2px rgba(22,32,48,.06), 0 1px 3px rgba(22,32,48,.05);
+  --shadow-md:0 2px 6px rgba(22,32,48,.07), 0 8px 24px rgba(22,32,48,.09);
+  --shadow-lg:0 10px 40px rgba(22,32,48,.16);
+  --hdrw:320px;
+}
+*{box-sizing:border-box}
+body{margin:0; background:radial-gradient(1200px 500px at 15% -10%, #F6F8FB, transparent 60%), var(--ground);
+  color:var(--text); font-family:var(--sans); -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  padding-block:22px; padding-inline:16px; min-height:100%}
+.wrap{max-width:1240px; margin:0 auto}
+.app{background:var(--surface); border:1px solid var(--border); border-radius:var(--r); box-shadow:var(--shadow-md); overflow:hidden}
+
+.title{display:flex; align-items:center; gap:14px; padding:13px 18px; border-bottom:1px solid var(--hairline);
+  background:linear-gradient(180deg,#FFFFFF,#FAFBFC)}
+.dot-grp{display:flex;gap:6px} .wd{width:11px;height:11px;border-radius:50%;background:#D9DDE3}
+.title h1{font-size:13px; font-weight:500; margin:0; color:var(--muted); letter-spacing:.1px} .title h1 b{color:var(--text); font-weight:600}
+.sp{flex:1}
+.pill{display:inline-flex;align-items:center;gap:7px;height:24px;padding:0 10px 0 8px;border-radius:999px;font-size:11.5px;font-weight:600}
+.pill .led{width:7px;height:7px;border-radius:50%}
+.pill.ready{background:var(--online-soft); color:#137257} .pill.ready .led{background:var(--online); box-shadow:0 0 0 3px rgba(29,158,117,.16)}
+.pill.warn{background:var(--crash-soft); color:#9E2B2B} .pill.warn .led{background:var(--crash); box-shadow:0 0 0 3px rgba(194,59,59,.16)}
+
+.head{display:flex; align-items:center; gap:12px; padding:14px 18px 12px; flex-wrap:wrap}
+.field{flex:1; min-width:240px}
+.field label{display:block; font-size:10.5px; font-weight:600; letter-spacing:.7px; text-transform:uppercase; color:var(--faint); margin-bottom:5px}
+.field .name{font-size:16px; font-weight:600; color:var(--text); border:1px solid transparent; border-radius:var(--r-sm); padding:5px 9px; margin:-5px -9px;
+  background:transparent; width:100%; letter-spacing:-.1px; font-family:inherit}
+.field .name:hover{background:var(--surface-alt)}
+.field .name:focus{outline:none; background:#fff; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
+.chip{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 10px;border-radius:999px;background:var(--inset);border:1px solid var(--border);
+  font-size:12px;color:var(--muted);font-weight:500;white-space:nowrap}
+.btn{height:32px;padding:0 14px;border-radius:var(--r-sm);border:1px solid var(--border-strong);background:#fff;font:inherit;font-size:12.5px;font-weight:600;color:var(--text);cursor:pointer}
+.btn:hover{background:var(--surface-alt)} .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff} .btn.primary:hover{background:#25597E}
+.btn:focus-visible,.tool:focus-visible,.ghost:focus-visible,.zoom button:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+
+.toolbar{display:flex; align-items:center; gap:6px; padding:0 18px 12px; flex-wrap:wrap}
+.tool{display:inline-flex; align-items:center; gap:7px; height:30px; padding:0 11px 0 9px; border-radius:999px; border:1px solid var(--border); background:#fff;
+  cursor:pointer; font:inherit; font-size:12.5px; font-weight:600; color:var(--muted); transition:.13s}
+.tool:hover:not([disabled]){color:var(--text); border-color:var(--border-strong); box-shadow:var(--shadow-sm)}
+.tool[disabled]{opacity:.45; cursor:not-allowed}
+.tool svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.8}
+.tool.add{color:var(--accent-ink); border-color:#BFD3E3; background:var(--accent-soft)}
+.tsep{width:1px;height:22px;background:var(--border);margin:0 4px}
+.hint{font-size:11px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:320px} .hint b{color:var(--muted);font-weight:600}
+.tbar-sp{flex:1}
+.zoom{display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:999px;background:#fff;height:30px;overflow:hidden}
+.zoom button{width:30px;height:30px;border:0;background:#fff;cursor:pointer;color:var(--muted);font-size:15px;line-height:1}
+.zoom button:hover{background:var(--surface-alt);color:var(--text)}
+.zoom .lvl{padding:0 8px;font-family:var(--mono);font-size:11.5px;color:var(--muted);border-left:1px solid var(--border);border-right:1px solid var(--border);
+  height:100%;display:flex;align-items:center;font-variant-numeric:tabular-nums}
+.ghost{border:1px solid var(--border);background:#fff;height:30px;border-radius:999px;padding:0 12px;font:inherit;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer}
+.ghost:hover{color:var(--text);border-color:var(--border-strong)}
+
+.legend{display:flex;gap:14px;align-items:center;padding:10px 18px 12px;flex-wrap:wrap;border-top:1px solid var(--hairline);background:var(--surface-alt)}
+.lg{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)} .lg .sw{width:10px;height:10px;border-radius:3px}
+.lg .frame{width:22px;height:11px;border:1px solid var(--border-strong);border-radius:4px;background:#fff;position:relative}
+.lg .frame::before,.lg .frame::after{content:"";position:absolute;top:1px;bottom:1px;width:3px;border-radius:2px}
+.lg .frame::before{left:1px;background:var(--online)} .lg .frame::after{right:1px;background:var(--crash)}
+.lg .ear{width:12px;height:11px;border:1px dashed var(--border-strong);border-radius:4px;
+  background:repeating-linear-gradient(45deg,rgba(92,102,117,.22) 0 2px,transparent 2px 5px)}
+
+.stage{background:linear-gradient(180deg,#FCFDFE, #F8FAFC)}
+.grid{display:grid; grid-template-columns:var(--hdrw) 1fr}
+.rowhdr{border-right:1px solid var(--hairline); padding:14px 0 0; min-width:0}
+.rowhdr .hcap{font-size:10.5px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--faint);padding:0 16px 10px;display:flex;align-items:center;gap:8px}
+.hcap .crumb{color:var(--border-strong);font-weight:500;letter-spacing:0}
+.hrow{display:flex; align-items:center; gap:8px; padding:0 12px; cursor:default; min-width:0}
+.hrow .sw{width:9px;height:9px;border-radius:3px;flex:none}
+.hrow .rl{min-width:0; flex:1}
+.hrow .rn{font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.1px}
+.hrow .rt{font-size:10.5px;color:var(--faint);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rtype{margin-left:auto;font-size:9px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);background:var(--inset);border-radius:4px;padding:2px 5px;flex:none}
+.hrow.unit{background:linear-gradient(90deg,#EEF2F6,#F6F8FA 80%,transparent); border-top:1px solid var(--border); border-bottom:1px solid var(--hairline); padding-left:10px}
+.hrow.unit .rn{font-size:12px;letter-spacing:.2px}
+.hrow.unit .host{font-family:var(--mono);font-size:10px}
+.hrow.unit .led{width:7px;height:7px;border-radius:50%;background:var(--online);box-shadow:0 0 0 3px rgba(29,158,117,.16);flex:none}
+.hrow.unit .led.off{background:var(--idle);box-shadow:0 0 0 3px rgba(138,147,162,.18)}
+.hrow.unit .cnt{margin-left:auto;font-size:10px;color:var(--faint);font-weight:600;white-space:nowrap}
+.hrow.seq{padding-left:16px; cursor:pointer; border-radius:8px; margin:0 6px}
+.hrow.seq:hover{background:rgba(44,110,155,.06)} .hrow.seq.sel{background:var(--accent-soft)}
+.hrow.seq .rn{font-weight:700}
+.chev{width:16px;height:16px;flex:none;display:inline-flex;align-items:center;justify-content:center;color:var(--faint);border-radius:4px;transition:transform .15s}
+.chev svg{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+.chev.open{transform:rotate(90deg);color:var(--muted)}
+.pol{font-size:9px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;border-radius:4px;padding:2px 5px;flex:none;white-space:nowrap}
+.pol.auto{color:#7A4E0F;background:var(--armed-soft)} .pol.op{color:var(--muted);background:var(--inset)}
+.hrow.task{padding-left:34px}
+.hrow.child{padding-left:52px; position:relative} .hrow.child .rn{font-weight:500}
+.hrow.child::before{content:"";position:absolute;left:42px;top:-4px;bottom:50%;width:8px;border-left:1.5px solid var(--kin);border-bottom:1.5px solid var(--kin);
+  border-bottom-left-radius:6px;opacity:.5}
+.hrow.lane .rt{padding-left:22px}
+
+.canvas-scroll{overflow-x:auto; overflow-y:hidden; padding-top:14px}
+.canvas-scroll::-webkit-scrollbar{height:10px}
+.canvas-scroll::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:6px;border:2px solid var(--surface)}
+.canvas{position:relative; touch-action:none}
+.svgL{position:absolute;inset:0;overflow:visible;pointer-events:none}
+
+/* task steps — the sequence editor's language */
+.bar{position:absolute; height:30px; border-radius:9px; display:flex; align-items:center; gap:7px; padding:0 10px; cursor:grab; user-select:none;
+  transition:box-shadow .12s; box-shadow:var(--shadow-sm)}
+.bar:hover{box-shadow:var(--shadow-md)}
+.bar .lab{font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink)}
+.bar .tm{margin-left:auto;font-family:var(--mono);font-size:10.5px;font-weight:500;opacity:0;transition:.12s;white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--ink)}
+.bar:hover .tm,.bar.sel .tm{opacity:.85}
+.bar.dur{border:1px solid var(--edge);background:linear-gradient(180deg,var(--fill-a),var(--fill-b))}
+.bar.dur::before{content:"";position:absolute;left:0;top:6px;bottom:6px;width:3px;border-radius:2px;background:var(--hue)}
+.bar.ramp{border:1px solid var(--edge);overflow:hidden;background:linear-gradient(180deg,var(--fill-a),var(--fill-b))}
+.bar.ramp .slope{position:absolute;inset:0;opacity:.5}
+/* warm-up / cool-down stubs: the part of a task that runs OUTSIDE its sequence's on-air window (muted) */
+.ear{position:absolute;height:30px;border:1px dashed var(--edge);background:repeating-linear-gradient(45deg,var(--fill-a) 0 2px,transparent 2px 5px);
+  pointer-events:none;opacity:.9}
+.ear.lead{border-right:0;border-radius:9px 0 0 9px} .ear.tail{border-left:0;border-radius:0 9px 9px 0}
+.node{position:absolute; height:30px; display:flex; align-items:center; gap:7px; cursor:grab; transform:translateX(-7px); user-select:none}
+.node .dot{width:13px;height:13px;border-radius:50%;background:var(--hue);border:2.5px solid #fff;box-shadow:0 0 0 1px var(--edge), var(--shadow-sm);flex:none;transition:.12s}
+.node:hover .dot{transform:scale(1.14)}
+.node .nl{font-size:11.5px;font-weight:600;color:var(--ink);white-space:nowrap;letter-spacing:-.1px}
+.node .nl.left{order:-1; margin-right:2px}
+.handle{position:absolute; width:11px;height:11px;border-radius:50%;background:#fff;border:2px solid var(--hue);transform:translate(-50%,-50%);
+  cursor:crosshair; z-index:4; box-shadow:var(--shadow-sm); transition:transform .12s}
+.handle:hover,.handle.hot{transform:translate(-50%,-50%) scale(1.3); background:var(--hue)}
+.handle.linked{background:var(--hue); box-shadow:0 0 0 4px var(--halo)}
+.handle.seqh{--hue:var(--muted); --halo:rgba(92,102,117,.22)} .handle.seqh.on{--hue:var(--online);--halo:rgba(29,158,117,.22)} .handle.seqh.off{--hue:var(--crash);--halo:rgba(194,59,59,.22)}
+.sel{outline:2px solid var(--accent); outline-offset:2px; box-shadow:0 0 0 4px var(--accent-soft), var(--shadow-md)!important}
+.node.sel .dot{outline:2px solid var(--accent);outline-offset:3px}
+
+/* the sequence as a NEUTRAL frame: green edge = its on-air, red edge = its off-air */
+.spill{position:absolute; height:36px; border-radius:11px; border:1px solid var(--border-strong);
+  background:linear-gradient(180deg,#FFFFFF,#F5F7FA); box-shadow:var(--shadow-sm); cursor:grab; user-select:none;
+  display:flex; flex-direction:column; justify-content:space-between; padding:4px 11px 3px 12px; overflow:hidden; transition:box-shadow .12s}
+.spill:hover{box-shadow:var(--shadow-md)} .spill:active{cursor:grabbing}
+.spill::before,.spill::after{content:"";position:absolute;top:6px;bottom:6px;width:3px;border-radius:2px}
+.spill::before{left:2px;background:var(--online)} .spill::after{right:2px;background:var(--crash)}
+.spill .top{display:flex;align-items:center;gap:7px;min-width:0}
+.spill .lab{font-size:11.5px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.1px}
+.spill .cnt{font-size:9.5px;font-weight:600;color:var(--muted);white-space:nowrap;margin-left:auto;font-family:var(--mono)}
+.spill .mini{position:relative;height:9px;width:100%} .spill .mini svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.inchip{font-family:var(--mono);font-size:9px;font-weight:600;border-radius:999px;padding:0 5px;border:1px solid;white-space:nowrap;font-variant-numeric:tabular-nums;flex:none;line-height:14px;background:rgba(255,255,255,.75)}
+.inchip.on{color:#137257;border-color:rgba(29,158,117,.45)} .inchip.off{color:#9E2B2B;border-color:rgba(194,59,59,.4)} .inchip.anc{color:var(--accent-ink);border-color:rgba(44,110,155,.45)}
+.spill.conflict,.winbar.conflict{border-color:var(--crash);box-shadow:0 0 0 3px rgba(194,59,59,.18)}
+.winbar{position:absolute; height:14px; border-radius:7px; border:1px solid var(--border-strong); background:linear-gradient(180deg,#FFFFFF,#F1F4F7);
+  cursor:grab; user-select:none; transition:box-shadow .12s}
+.winbar:hover{box-shadow:var(--shadow-md)} .winbar:active{cursor:grabbing}
+.winbar::before,.winbar::after{content:"";position:absolute;top:2px;bottom:2px;width:3px;border-radius:2px}
+.winbar::before{left:1px;background:var(--online)} .winbar::after{right:1px;background:var(--crash)}
+.pear{position:absolute;height:22px;border:1px dashed var(--border-strong);pointer-events:none;opacity:.7;
+  background:repeating-linear-gradient(45deg,rgba(92,102,117,.18) 0 2px,transparent 2px 5px)}
+.pear.lead{border-right:0;border-radius:8px 0 0 8px} .pear.tail{border-left:0;border-radius:0 8px 8px 0}
+.offchip{position:absolute; transform:translate(-50%,-50%); font-family:var(--mono); font-size:9.5px; font-weight:600; background:var(--surface);
+  border:1px solid; border-radius:999px; padding:1px 6px; white-space:nowrap; font-variant-numeric:tabular-nums; pointer-events:none; z-index:3}
+.offchip.on{color:#137257;border-color:rgba(29,158,117,.45)} .offchip.off{color:#9E2B2B;border-color:rgba(194,59,59,.4)} .offchip.anc{color:var(--accent-ink);border-color:rgba(44,110,155,.45)}
+.gband{position:absolute;border:1px dashed rgba(92,102,117,.38);border-radius:12px;background:rgba(92,102,117,.045);pointer-events:none}
+/* unit band: the label STICKS to the left edge while the canvas scrolls */
+.uband{position:absolute; left:0; right:0; border-top:1px solid var(--border); border-bottom:1px solid var(--hairline);
+  background:linear-gradient(90deg,rgba(238,242,246,.9),rgba(246,248,250,.55) 60%,rgba(246,248,250,.2)); display:flex; align-items:center}
+.uband .un{position:sticky; left:12px; margin-left:12px; font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--faint);white-space:nowrap;
+  background:rgba(240,243,246,.92); padding:2px 8px 2px 0; border-radius:4px}
+.uband .un .note{font-weight:500;letter-spacing:0;text-transform:none;color:var(--faint)}
+
+.guide-lab{position:absolute;top:-2px;font-size:9.5px;font-weight:700;letter-spacing:.7px;padding:2px 7px;border-radius:5px;white-space:nowrap;transform:translateX(-50%);z-index:5}
+.guide-lab.on{color:#fff;background:var(--online)} .guide-lab.off{color:#fff;background:var(--crash)}
+.zone-lab{position:absolute;font-size:9.5px;font-weight:600;color:var(--faint);letter-spacing:.4px;white-space:nowrap;transform:translateX(-50%)}
+.axis{position:absolute; height:34px}
+.tick{position:absolute;top:0;width:1px;height:6px;background:var(--border-strong)} .tick.major{height:9px;background:var(--faint)}
+.tlab{position:absolute;top:11px;font-family:var(--mono);font-size:10px;color:var(--muted);transform:translateX(-50%);white-space:nowrap;font-variant-numeric:tabular-nums}
+.tlab.anchor{font-weight:600}
+.gapchip{position:absolute;transform:translate(-50%,-50%);z-index:6;display:inline-flex;align-items:center;gap:5px;background:var(--surface);border:1px solid var(--gc);
+  color:var(--gci);font-family:var(--mono);font-size:10.5px;font-weight:600;border-radius:999px;padding:2px 9px;box-shadow:var(--shadow-sm);white-space:nowrap;font-variant-numeric:tabular-nums}
+
+.minimap{display:flex;align-items:center;gap:10px;padding:11px 18px;border-top:1px solid var(--hairline);background:var(--surface-alt)}
+.mm-cap{font-size:10px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;color:var(--faint)}
+.mm{position:relative;flex:1;height:26px;background:#fff;border:1px solid var(--border);border-radius:7px;overflow:hidden}
+.mm .seg2{position:absolute;height:4px;border-radius:3px}
+.mm .view{position:absolute;top:0;bottom:0;border:1.5px solid var(--accent);border-radius:6px;background:rgba(44,110,155,.07)}
+.mm .mline{position:absolute;top:0;bottom:0;width:1px}
+.foot{display:flex;align-items:center;gap:16px;padding:9px 18px;border-top:1px solid var(--hairline);color:var(--faint);font-size:11px;flex-wrap:wrap}
+.kbd{font-family:var(--mono);font-size:10px;background:var(--inset);border:1px solid var(--border);border-bottom-width:2px;border-radius:5px;padding:1px 5px;color:var(--muted)}
+.foot .k{display:inline-flex;align-items:center;gap:5px}
+
+.menu{position:fixed; z-index:20; min-width:220px; background:var(--surface); border:1px solid var(--border); border-radius:11px; box-shadow:var(--shadow-lg); padding:6px; font-size:12.5px}
+.menu .mh{font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--faint);padding:5px 9px 6px;display:flex;align-items:center;gap:7px}
+.menu .mh .sw{width:8px;height:8px;border-radius:3px}
+.mi{display:flex;align-items:center;gap:10px;padding:7px 9px;border-radius:7px;color:var(--text);cursor:pointer}
+.mi:hover{background:var(--accent-soft);color:var(--accent-ink)} .mi .ic{width:15px;text-align:center;color:var(--faint);font-size:12px} .mi:hover .ic{color:var(--accent)}
+.mi.danger{color:var(--crash)} .mi.danger .ic{color:var(--crash)} .mi.danger:hover{background:var(--crash-soft)}
+.mi .sc{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--faint)}
+.msep{height:1px;background:var(--hairline);margin:5px 4px}
+.tip{position:fixed;z-index:30;pointer-events:none;background:var(--text);color:#fff;border-radius:8px;padding:7px 10px;font-size:11px;box-shadow:var(--shadow-md);opacity:0;
+  transition:opacity .1s;transform:translate(-50%,-100%);white-space:nowrap;line-height:1.5}
+.tip .tt{font-weight:600;margin-bottom:2px} .tip .tr{color:#C9D2DE;font-family:var(--mono);font-size:10px;font-variant-numeric:tabular-nums}
+.tip::after{content:"";position:absolute;left:50%;bottom:-5px;transform:translateX(-50%);border:5px solid transparent;border-top-color:var(--text)}
+.toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,8px);z-index:40;background:var(--text);color:#fff;border-radius:10px;padding:9px 14px;font-size:12px;
+  box-shadow:var(--shadow-lg);opacity:0;transition:.18s;pointer-events:none;max-width:calc(100vw - 32px)}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+
+.notes{max-width:1240px;margin:16px auto 0;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:16px 18px;box-shadow:var(--shadow-sm)}
+.card h2{font-size:12px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--faint);margin:0 0 10px}
+.card p,.card li{font-size:12.5px;line-height:1.6;color:var(--muted);margin:0}
+.card ul,.card ol{padding-left:18px;margin:0;display:flex;flex-direction:column;gap:7px}
+.card b{color:var(--text)} .card .q{font-weight:600;color:var(--text)}
+@media (max-width:720px){ :root{--hdrw:160px} .notes{grid-template-columns:1fr} .head{gap:8px} .hint{display:none} }
+@media (prefers-reduced-motion:reduce){ *{transition:none!important} }
+</style>
+
+<div class="wrap">
+ <div class="app">
+  <div class="title">
+    <div class="dot-grp"><span class="wd"></span><span class="wd"></span><span class="wd"></span></div>
+    <h1><b>Plan editor</b> &nbsp;·&nbsp; library</h1>
+    <div class="sp"></div>
+    <span class="pill ready" id="readypill"><span class="led"></span>Ready · no channel conflicts</span>
+  </div>
+
+  <div class="head">
+    <div class="field">
+      <label for="planname">Plan name</label>
+      <input id="planname" class="name" value="Day 3 · L1 reacquisition + CW drift" spellcheck="false">
+    </div>
+    <span class="chip" id="scopechip">3 units · 4 sequences</span>
+    <button class="btn" type="button">Cancel</button>
+    <button class="btn primary" type="button">Save plan</button>
+  </div>
+
+  <div class="toolbar">
+    <button class="tool add" type="button" id="addseq"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>Add sequence…</button>
+    <span class="tsep"></span>
+    <button class="tool steptool" type="button" data-kind="Duration task"><svg viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="8" rx="2"/></svg>Duration</button>
+    <button class="tool steptool" type="button" data-kind="One-shot"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/></svg>One-shot</button>
+    <button class="tool steptool" type="button" data-kind="Tune"><svg viewBox="0 0 24 24"><path d="M4 15h5l3-9 3 12 2-6h3"/></svg>Tune</button>
+    <button class="tool steptool" type="button" data-kind="Ramp"><svg viewBox="0 0 24 24"><path d="M4 18 L20 6"/><path d="M4 18h16"/></svg>Ramp</button>
+    <span class="hint" id="hint">select a sequence to add steps to it</span>
+    <div class="tbar-sp"></div>
+    <button class="tool" type="button" id="expall"><svg viewBox="0 0 24 24"><path d="M4 9l8-6 8 6M4 15l8 6 8-6"/></svg>Expand all</button>
+    <button class="tool" type="button" id="colall"><svg viewBox="0 0 24 24"><path d="M4 4l8 6 8-6M4 20l8-6 8 6"/></svg>Collapse all</button>
+    <button class="ghost" type="button" id="fit">Fit</button>
+    <div class="zoom"><button type="button" id="zo" aria-label="Zoom out">−</button><span class="lvl" id="zl">100%</span><button type="button" id="zi" aria-label="Zoom in">+</button></div>
+  </div>
+
+  <div class="stage">
+    <div class="grid">
+      <div class="rowhdr" id="rowhdr">
+        <div class="hcap">Units <span class="crumb">›</span> sequences <span class="crumb">›</span> tasks &amp; steps</div>
+      </div>
+      <div class="canvas-scroll" id="scroll">
+        <div class="canvas" id="canvas">
+          <svg class="svgL" id="svg"></svg>
+          <div class="axis" id="axis"></div>
+        </div>
+      </div>
+    </div>
+    <div class="legend" id="legend"></div>
+    <div class="minimap"><span class="mm-cap">Overview</span><div class="mm" id="mm"></div></div>
+    <div class="foot">
+      <span class="k">Click a sequence to expand it · drag a pill or window bar to move the whole sequence · drag a step to move it</span>
+      <span class="k">drag a handle <span style="color:var(--muted)">◦</span> onto another handle to anchor — across units too</span>
+      <span class="k"><span class="kbd">dbl-click</span> edit</span>
+      <span style="margin-left:auto">Right-click any element for actions</span>
+    </div>
+  </div>
+ </div>
+</div>
+
+<div class="notes">
+  <div class="card">
+    <h2>What changed in this round</h2>
+    <ul>
+      <li><b>Colour = the task</b>, as in the sequence editor (GPS C/A is teal wherever it runs). A sequence is now a <b>neutral frame</b>: the slate group band, and a pill or window bar whose <b>green left edge is its on-air</b> and <b>red right edge its off-air</b>. Expanded, the same green and red lines run down through all of its rows.</li>
+      <li><b>Warm-up and cool-down are drawn.</b> The hatched stubs on a task bar (and on the pill) are the part of the task that runs outside the sequence's on-air window — the muted pre-roll launch 1–5 s before on-air and the stop after off-air. They get a minimum width so a 1 s lead-in is still visible.</li>
+      <li><b>Steps are edited here.</b> The step tools add to the selected sequence; drag a tune or ramp to move it; double-click opens the same step / ramp editor the sequence editor uses; the right-click menus are the sequence editor's.</li>
+      <li><b>Anything anchors to anything.</b> A sequence's on-air or off-air edge can hang off another sequence's edge, a task's edge or a step — on any unit. Here the CW drift's on-air is anchored to the reacquisition sweep's off-air (+0:30), and Galileo E1 on Broadcaster 3 is anchored to the chirp's up-ramp end on Broadcaster 2 (+1:00). Drag a handle onto another handle to make one; the connector's chip is the offset.</li>
+      <li><b>Overlap on one unit</b> is no longer drawn on top of itself: a collapsed unit packs its pills into sub-lanes, and an overlap is flagged (red outline + header) rather than hidden. Drag the CW drift left to see it.</li>
+      <li><b>Unit banners stick</b> to the left edge while the canvas scrolls.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2>Open questions for this round</h2>
+    <ol>
+      <li><span class="q">Is the neutral frame enough to say "this task belongs to that sequence"?</span> The band, the row header hierarchy and the green/red edges carry it now. The alternative is a small sequence tag on every task bar, which the sequence editor deliberately dropped as clutter.</li>
+      <li><span class="q">Cross-unit anchors at arm time.</span> The plan resolves the whole anchor graph into each unit's absolute on-air / off-air when it is scheduled or armed, then arms every unit with plain absolute times — the units' clocks are already NTP-synced and checked at arm. A cycle (A after B after A) is refused at save, like step cycles are today.</li>
+      <li><span class="q">The sequence's own off-air.</span> With anchoring in place, a fixed-length sequence is just "off-air anchored to my own on-air + 7:30" (the reacquisition sweep here), so no separate "fixed length" switch is needed. Agree?</li>
+      <li><span class="q">Conflict rule.</span> Two sequences on one unit conflict when their drawn spans (steps, warm-up and cool-down included) overlap. Should the plan refuse to save with a conflict, or only warn and let the unit refuse at arm?</li>
+      <li><span class="q">Holds</span> — parked for later, as agreed.</li>
+    </ol>
+  </div>
+</div>
+
+<div class="menu" id="menu" hidden></div>
+<div class="tip" id="tip"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  // ── palette per TASK (first-seen order, as timeline_model.task_hue_map does) ──
+  const TASK_HUES=['#1E8FA3','#6D5AC4','#B5487E','#3F63C4','#157F93','#7E4FB0','#B06A2E','#2E7D57'];
+  const INKS     =['#12707F','#54449B','#8E3763','#2E4A99','#0F6272','#5E3A87','#84501F','#215E41'];
+  function rgba(hex,a){ const n=parseInt(hex.slice(1),16); return `rgba(${n>>16&255},${n>>8&255},${n&255},${a})`; }
+  function hueSet(i){ const h=TASK_HUES[i%8]; return {hue:h, ink:INKS[i%8], fa:rgba(h,.16), fb:rgba(h,.05), edge:rgba(h,.42), halo:rgba(h,.20)}; }
+
+  const units = [
+    {id:'u1', name:'Broadcaster 1', host:'sdr-b1.local', online:true,  note:'1 TX channel · two sequences in series'},
+    {id:'u2', name:'Broadcaster 2', host:'sdr-b2.local', online:true,  note:'1 TX channel'},
+    {id:'u3', name:'Broadcaster 3', host:'sdr-b3.local', online:false, note:'offline · last seen 2 d ago · calibration from cache'},
+  ];
+  // A sequence's two edges each hang off something: the plan's on-air / off-air, another sequence's edge,
+  // or a step's edge — on any unit. Steps hang off their own sequence's edges, a step, or a sequence edge.
+  const seqs = [
+    {id:'s1', unit:'u1', name:'GPS C/A reacquisition sweep', policy:'auto',
+      onRef:{kind:'plan-on', off:0}, offRef:{kind:'seq', to:'s1', edge:'on', off:450},
+      steps:[
+        {id:'s1-ca',   kind:'dur',  task:'GPS C/A',  name:'GPS C/A',         anchor:'start', t0:-1, end:{anchor:'stop', t:1}, sub:'1575.42 MHz · launches 1 s early, muted'},
+        {id:'s1-rfon', kind:'tune', task:'GPS C/A',  name:'RF on',           parent:'s1-ca', anchor:'start', t0:0,   sub:'gate → on'},
+        {id:'s1-up',   kind:'ramp', task:'GPS C/A',  name:'Power up-ramp',   parent:'s1-ca', anchor:'start', t0:0,   dur:150, dir:'up',   sub:'−90 → −50 dBm'},
+        {id:'s1-dn',   kind:'ramp', task:'GPS C/A',  name:'Power down-ramp', parent:'s1-ca', anchor:'step',  ref:{to:'s1-up', edge:'end', off:120}, dur:150, dir:'down', sub:'−50 → −90 dBm'},
+        {id:'s1-rfoff',kind:'tune', task:'GPS C/A',  name:'RF off',          parent:'s1-ca', anchor:'stop',  t0:0,   sub:'gate → off'},
+      ]},
+    {id:'s2', unit:'u1', name:'CW drift 1600 → 1300 MHz', policy:'auto',
+      onRef:{kind:'seq', to:'s1', edge:'off', off:30}, offRef:{kind:'plan-off', off:0},
+      steps:[
+        {id:'s2-cw',   kind:'dur',  task:'CW drift', name:'CW drift',        anchor:'start', t0:-5, end:{anchor:'stop', t:1}, sub:'1600 → 1300 MHz · launches 5 s early, muted'},
+        {id:'s2-go',   kind:'tune', task:'CW drift', name:'RF on + restart', parent:'s2-cw', anchor:'start', t0:0, sub:'gate → on · drift starts at its on-air'},
+        {id:'s2-rfoff',kind:'tune', task:'CW drift', name:'RF off',          parent:'s2-cw', anchor:'stop',  t0:0, sub:'gate → off'},
+      ]},
+    {id:'s3', unit:'u2', name:'Chirp power ramp', policy:'operator',
+      onRef:{kind:'plan-on', off:0}, offRef:{kind:'plan-off', off:0},
+      steps:[
+        {id:'s3-ch',   kind:'dur',  task:'Chirp sweep', name:'Chirp sweep',     anchor:'start', t0:-1, end:{anchor:'stop', t:1}, sub:'1575.42 MHz · 20 MHz sweep'},
+        {id:'s3-rfon', kind:'tune', task:'Chirp sweep', name:'RF on',           parent:'s3-ch', anchor:'start', t0:0, sub:'gate → on'},
+        {id:'s3-up',   kind:'ramp', task:'Chirp sweep', name:'Power up-ramp',   parent:'s3-ch', anchor:'start', t0:0,    dur:240, dir:'up',   sub:'−80 → −40 dBm'},
+        {id:'s3-dn',   kind:'ramp', task:'Chirp sweep', name:'Power down-ramp', parent:'s3-ch', anchor:'stop',  t0:-240, dur:240, dir:'down', sub:'−40 → −80 dBm'},
+        {id:'s3-rfoff',kind:'tune', task:'Chirp sweep', name:'RF off',          parent:'s3-ch', anchor:'stop',  t0:0, sub:'gate → off'},
+      ]},
+    {id:'s4', unit:'u3', name:'Galileo E1 carrier', policy:'operator',
+      onRef:{kind:'step', to:'s3-up', edge:'end', off:60}, offRef:{kind:'plan-off', off:-60},
+      steps:[
+        {id:'s4-e1',   kind:'dur',  task:'Galileo E1', name:'Galileo E1', anchor:'start', t0:-1, end:{anchor:'stop', t:1}, sub:'1575.42 MHz'},
+        {id:'s4-rfon', kind:'tune', task:'Galileo E1', name:'RF on',      parent:'s4-e1', anchor:'start', t0:0, sub:'gate → on'},
+        {id:'s4-rfoff',kind:'tune', task:'Galileo E1', name:'RF off',     parent:'s4-e1', anchor:'stop',  t0:0, sub:'gate → off'},
+      ]},
+  ];
+  const byUnit=Object.fromEntries(units.map(u=>[u.id,u])), bySeq=Object.fromEntries(seqs.map(s=>[s.id,s]));
+  const stepOf={}; seqs.forEach(s=>s.steps.forEach(st=>{ st.seq=s.id; stepOf[st.id]=st; }));
+  const taskOrder=[]; seqs.forEach(s=>s.steps.forEach(st=>{ if(!taskOrder.includes(st.task)) taskOrder.push(st.task); }));
+  const hueOf = st => hueSet(taskOrder.indexOf(st.task));
+
+  const state = { expanded:new Set(['s1','s3']), collapsedUnits:new Set(), sel:null, zoom:1 };
+
+  // ── time resolution: every edge → (clock, seconds) on the PLAN's on-air or off-air clock ──
+  function refT(ref, d=0){
+    if(d>32) return {clock:'on', t:0};
+    if(ref.kind==='plan-on')  return {clock:'on',  t:ref.off};
+    if(ref.kind==='plan-off') return {clock:'off', t:ref.off};
+    const base = ref.kind==='seq' ? seqEdgeT(bySeq[ref.to], ref.edge, d+1) : stepEdgeT(stepOf[ref.to], ref.edge, d+1);
+    return {clock:base.clock, t:base.t+ref.off};
+  }
+  function seqEdgeT(s, edge, d=0){ return refT(edge==='on'?s.onRef:s.offRef, d); }
+  function stepStartT(st, d=0){
+    const s=bySeq[st.seq];
+    if(st.anchor==='start'){ const b=seqEdgeT(s,'on',d+1);  return {clock:b.clock, t:b.t+st.t0}; }
+    if(st.anchor==='stop'){  const b=seqEdgeT(s,'off',d+1); return {clock:b.clock, t:b.t+st.t0}; }
+    return refT(st.ref, d+1);                        // 'step' or 'seq'
+  }
+  function stepEdgeT(st, edge, d=0){
+    if(edge==='start' || st.kind==='tune') return stepStartT(st,d);
+    if(st.kind==='dur'){ const b=seqEdgeT(bySeq[st.seq], st.end.anchor==='stop'?'off':'on', d+1); return {clock:b.clock, t:b.t+st.end.t}; }
+    const b=stepStartT(st,d); return {clock:b.clock, t:b.t+(st.dur||0)};
+  }
+  const PPS0=1.0, PAD=34, WARM=60, COOL=60, HATCH=150, GAP=6, TOP=22, MIN_EAR=10;
+  const H={unit:38, seqc:46, seqx:34, step:44};
+  function pps(){ return PPS0*state.zoom; }
+  function allTimes(){ const out=[]; seqs.forEach(s=>{ out.push(seqEdgeT(s,'on'), seqEdgeT(s,'off'));
+    s.steps.forEach(st=>{ out.push(stepEdgeT(st,'start'), stepEdgeT(st,'end')); }); }); return out; }
+  function defFwd(){ const m=Math.max(0,...allTimes().filter(t=>t.clock==='on').map(t=>t.t)); return Math.ceil((m+30)/60)*60; }
+  function defBwd(){ const m=Math.max(0,...allTimes().filter(t=>t.clock==='off').map(t=>-t.t)); return Math.ceil((m+30)/60)*60; }
+  function onAirX(){ return PAD + WARM*pps(); }
+  function defEndX(){ return onAirX() + defFwd()*pps(); }
+  function bwdStartX(){ return defEndX() + HATCH*state.zoom; }
+  function offAirX(){ return bwdStartX() + defBwd()*pps(); }
+  function totalW(){ return offAirX() + COOL*pps() + PAD; }
+  function xOf(ct){ return (ct.clock==='on'?onAirX():offAirX()) + ct.t*pps(); }
+  const seqOnX = s=>xOf(seqEdgeT(s,'on')), seqOffX = s=>xOf(seqEdgeT(s,'off'));
+  const stepX = st=>xOf(stepEdgeT(st,'start')), stepEndX = st=>xOf(stepEdgeT(st,'end'));
+  function seqSpan(s){ const xs=[seqOnX(s), seqOffX(s), ...s.steps.map(stepX), ...s.steps.map(stepEndX)]; return [Math.min(...xs), Math.max(...xs)]; }
+  function fmtC(t){ const neg=t<0; t=Math.abs(t); return (neg?'−':'')+`${Math.floor(t/60)}:${String(Math.round(t%60)).padStart(2,'0')}`; }
+  function fmtOff(t){ return (t>=0?'+':'')+fmtC(t); }
+  function refText(ref){
+    if(ref.kind==='plan-on') return `${fmtOff(ref.off)} from the plan's on-air`;
+    if(ref.kind==='plan-off') return `${fmtOff(ref.off)} from the plan's off-air`;
+    if(ref.kind==='seq'){ const t=bySeq[ref.to]; return `${fmtOff(ref.off)} after ${t.name}'s ${ref.edge}-air (${byUnit[t.unit].name})`; }
+    const t=stepOf[ref.to]; return `${fmtOff(ref.off)} after ${t.name}'s ${ref.edge} (${byUnit[bySeq[t.seq].unit].name})`;
+  }
+  function chipOf(ref){ return ref.kind==='plan-on'?['on',fmtOff(ref.off)] : ref.kind==='plan-off'?['off',fmtOff(ref.off)] : ['anc','⚓ '+fmtOff(ref.off)]; }
+
+  // ── rows ──
+  let rows=[];
+  function packLanes(list){                        // greedy sub-lane assignment by drawn span overlap
+    const lanes=[]; const sorted=[...list].map(s=>({s, span:seqSpan(s)})).sort((a,b)=>a.span[0]-b.span[0]);
+    sorted.forEach(e=>{ let i=lanes.findIndex(l=>l.every(o=>o.span[1]+6<=e.span[0]||e.span[1]+6<=o.span[0])); if(i<0){ lanes.push([e]); } else lanes[i].push(e); e.lane=lanes.indexOf(lanes.find(l=>l.includes(e))); });
+    return {lanes:lanes.length, items:sorted};
+  }
+  function buildRows(){
+    rows=[]; let y=TOP;
+    units.forEach(u=>{
+      rows.push({type:'unit', u, h:H.unit, y}); y+=H.unit+GAP;
+      const mine=seqs.filter(s=>s.unit===u.id);
+      if(state.collapsedUnits.has(u.id)){ const p=packLanes(mine); const h=p.lanes*(H.seqc-6)+6; rows.push({type:'ulane', u, pack:p, h, y}); y+=h+GAP; return; }
+      mine.forEach(s=>{
+        if(state.expanded.has(s.id)){ rows.push({type:'seqx', s, h:H.seqx, y}); y+=H.seqx+GAP;
+          s.steps.forEach(st=>{ rows.push({type:'step', s, st, h:H.step, y}); y+=H.step+GAP; }); }
+        else { rows.push({type:'seqc', s, h:H.seqc, y}); y+=H.seqc+GAP; }
+      });
+    });
+    return y;
+  }
+  const rowOfStep = id => rows.find(r=>r.type==='step'&&r.st.id===id);
+  const rowOfSeq  = id => rows.find(r=>(r.type==='seqx'||r.type==='seqc')&&r.s.id===id) || rows.find(r=>r.type==='ulane'&&r.pack.items.some(e=>e.s.id===id));
+  const laneCY = r => r.y + r.h/2;
+  function seqCY(s){ const r=rowOfSeq(s.id); if(!r) return 0; if(r.type==='ulane'){ const e=r.pack.items.find(e=>e.s.id===s.id); return r.y+3+e.lane*(H.seqc-6)+18; }
+    return r.type==='seqx' ? r.y+r.h-9 : r.y+r.h/2; }
+  function pointOfRef(ref){                        // where a connector starts: the target's edge
+    if(ref.kind==='seq'){ const s=bySeq[ref.to]; return {x:ref.edge==='on'?seqOnX(s):seqOffX(s), y:seqCY(s)}; }
+    const st=stepOf[ref.to], r=rowOfStep(st.id); return {x:ref.edge==='end'?stepEndX(st):stepX(st), y:r?laneCY(r):seqCY(bySeq[st.seq])}; }
+
+  const hdr=document.getElementById('rowhdr'), canvas=document.getElementById('canvas'), svg=document.getElementById('svg'), axis=document.getElementById('axis');
+  const SVGNS='http://www.w3.org/2000/svg';
+  const chev='<span class="chev"><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></span>';
+
+  function buildHeader(){
+    [...hdr.querySelectorAll('.hrow')].forEach(e=>e.remove());
+    rows.forEach(r=>{
+      const el=document.createElement('div'); el.style.height=(r.h+GAP)+'px';
+      if(r.type==='unit'){
+        el.className='hrow unit'; const n=seqs.filter(s=>s.unit===r.u.id).length;
+        el.innerHTML=`${chev}<span class="led ${r.u.online?'':'off'}"></span><div class="rl"><div class="rn">${r.u.name}</div><div class="rt host">${r.u.host} · ${r.u.online?'online':'offline'}</div></div><span class="cnt">${n} seq${n===1?'':'s'}</span>`;
+        el.querySelector('.chev').classList.toggle('open', !state.collapsedUnits.has(r.u.id));
+        el.querySelector('.chev').addEventListener('click',(e)=>{ e.stopPropagation(); toggleUnit(r.u.id); });
+        el.addEventListener('contextmenu',(e)=>{ e.preventDefault(); openMenu(e.clientX,e.clientY,'unit',r.u); });
+      } else if(r.type==='ulane'){
+        el.className='hrow lane'; el.innerHTML=`<div class="rl"><div class="rt">${r.pack.items.length} sequences folded into ${r.pack.lanes} lane${r.pack.lanes===1?'':'s'} — click ▸ to unfold</div></div>`;
+      } else if(r.type==='seqc'||r.type==='seqx'){
+        const s=r.s, open=r.type==='seqx';
+        el.className='hrow seq'+(state.sel==='seq:'+s.id?' sel':'');
+        el.innerHTML=`${chev}<div class="rl"><div class="rn">${s.name}</div><div class="rt">${chipOf(s.onRef)[1]} → ${chipOf(s.offRef)[1]} · ${s.steps.length} steps · ${byUnit[s.unit].name}</div></div>
+          <span class="pol ${s.policy==='auto'?'auto':'op'}" title="Recovery policy">${s.policy==='auto'?'↻ auto':'operator'}</span>`;
+        el.querySelector('.chev').classList.toggle('open', open);
+        el.addEventListener('click',()=>toggleSeq(s.id));
+        el.addEventListener('contextmenu',(e)=>{ e.preventDefault(); state.sel='seq:'+s.id; render(); openMenu(e.clientX,e.clientY,'seq',s); });
+      } else {
+        const st=r.st, h=hueOf(st);
+        el.className='hrow '+(st.parent?'child':'task'); el.style.setProperty('--kin',h.hue);
+        const type = st.kind==='dur'?'Duration':st.kind==='ramp'?'Ramp':'Tune';
+        el.innerHTML=(st.parent?'':`<span class="sw" style="background:${h.hue}"></span>`)+`<div class="rl"><div class="rn">${st.name}</div><div class="rt">${st.sub}</div></div><span class="rtype">${type}</span>`;
+        el.addEventListener('click',()=>{ state.sel='step:'+st.id; render(); });
+        el.addEventListener('contextmenu',(e)=>{ e.preventDefault(); state.sel='step:'+st.id; render(); openMenu(e.clientX,e.clientY,'step',st); });
+        el.addEventListener('dblclick',()=>editStep(st));
+      }
+      hdr.appendChild(el);
+    });
+  }
+
+  // ── canvas ──
+  function clearCanvas(){ [...canvas.querySelectorAll('.bar,.node,.handle,.guide-lab,.zone-lab,.spill,.winbar,.offchip,.uband,.gapchip,.gband,.ear,.pear')].forEach(e=>e.remove()); while(svg.firstChild) svg.removeChild(svg.firstChild); }
+  function rect(x,y,w,h,fill,rx){ const r=document.createElementNS(SVGNS,'rect'); r.setAttribute('x',x);r.setAttribute('y',y);r.setAttribute('width',Math.max(0,w));r.setAttribute('height',h);
+    r.setAttribute('fill',fill); if(rx)r.setAttribute('rx',rx); svg.appendChild(r); return r; }
+  function line(x1,y1,x2,y2,stroke,w,dash){ const l=document.createElementNS(SVGNS,'line'); l.setAttribute('x1',x1);l.setAttribute('y1',y1);l.setAttribute('x2',x2);l.setAttribute('y2',y2);
+    l.setAttribute('stroke',stroke);l.setAttribute('stroke-width',w||1); if(dash)l.setAttribute('stroke-dasharray',dash); svg.appendChild(l); return l; }
+  function slopeSVG(dir,hue){ const d=dir==='up'?'M6 22 L54 8':'M6 8 L54 22';
+    return `<svg class="slope" viewBox="0 0 60 30" preserveAspectRatio="none" aria-hidden="true"><path d="${d}" stroke="${hue}" stroke-width="2" fill="none" opacity=".55"/><circle cx="54" cy="${dir==='up'?8:22}" r="2.4" fill="${hue}"/></svg>`; }
+  function setHue(el,h){ el.style.setProperty('--hue',h.hue); el.style.setProperty('--ink',h.ink); el.style.setProperty('--edge',h.edge); el.style.setProperty('--fill-a',h.fa); el.style.setProperty('--fill-b',h.fb); el.style.setProperty('--halo',h.halo); }
+  function handle(x,y,h,key,cls,linked){ const d=document.createElement('div'); d.className='handle '+(cls||'')+(linked?' linked':''); d.style.left=x+'px'; d.style.top=y+'px'; if(h) setHue(d,h); d.dataset.h=key; canvas.appendChild(d); return d; }
+  function isTarget(ref, kind, id, edge){ return ref && ref.kind===kind && ref.to===id && ref.edge===edge; }
+  function anyLinked(kind,id,edge){ return seqs.some(s=>isTarget(s.onRef,kind,id,edge)||isTarget(s.offRef,kind,id,edge)||s.steps.some(st=>st.ref&&isTarget(st.ref,kind,id,edge))); }
+
+  function miniSVG(s,w,h){
+    const x0=seqOnX(s), span=Math.max(1,seqOffX(s)-x0); const px=x=>Math.max(0,Math.min(w,(x-x0)/span*w)); let out='';
+    s.steps.forEach(st=>{ const c=hueOf(st).hue;
+      if(st.kind==='dur') out+=`<line x1="${px(stepX(st))}" y1="${h-1.5}" x2="${px(stepEndX(st))}" y2="${h-1.5}" stroke="${c}" stroke-width="2" opacity=".4"/>`;
+      else if(st.kind==='ramp'){ const a=px(stepX(st)), b=px(stepEndX(st)); out+=`<line x1="${a}" y1="${st.dir==='up'?h-2:1}" x2="${b}" y2="${st.dir==='up'?1:h-2}" stroke="${c}" stroke-width="1.6" opacity=".8"/>`; }
+      else { const x=px(stepX(st)); out+=`<line x1="${x}" y1="0" x2="${x}" y2="${h}" stroke="${c}" stroke-width="1.6" opacity=".75"/>`; } });
+    return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">${out}</svg>`;
+  }
+  function ears(x1,x2,onx,offx,y,h,cls,hueObj){        // hatched stubs for the part outside the sequence's window
+    if(x1<onx-0.5){ const w=Math.max(MIN_EAR,onx-x1); const e=document.createElement('div'); e.className=cls+' lead'; if(hueObj)setHue(e,hueObj); e.style.left=(onx-w)+'px'; e.style.top=y+'px'; e.style.width=w+'px'; e.style.height=h+'px'; canvas.appendChild(e); return onx-w; }
+    return null; }
+  function tails(x2,offx,y,h,cls,hueObj){ if(x2>offx+0.5){ const w=Math.max(MIN_EAR,x2-offx); const e=document.createElement('div'); e.className=cls+' tail'; if(hueObj)setHue(e,hueObj); e.style.left=offx+'px'; e.style.top=y+'px'; e.style.width=w+'px'; e.style.height=h+'px'; canvas.appendChild(e); } }
+
+  function seqPill(s, y, slim){
+    const x=seqOnX(s), x2=seqOffX(s), w=Math.max(60,x2-x), [span0,span1]=seqSpan(s);
+    const el=document.createElement('div'); el.className=(slim?'winbar':'spill')+(state.sel==='seq:'+s.id?' sel':'')+(conflicts.has(s.id)?' conflict':'');
+    el.dataset.seq=s.id; el.style.left=x+'px'; el.style.width=w+'px'; el.style.top=y+'px';
+    const on=chipOf(s.onRef), off=chipOf(s.offRef);
+    if(!slim){
+      ears(span0,span1,x,x2,y+7,22,'pear'); tails(span1,x2,y+7,22,'pear');
+      el.innerHTML=`<div class="top"><span class="inchip ${on[0]}">${on[1]}</span><span class="lab">${s.name}</span><span class="cnt">${s.steps.length} steps</span><span class="inchip ${off[0]}">${off[1]}</span></div><div class="mini">${miniSVG(s,w-24,9)}</div>`;
+    } else { chip(x, y-11, on[1], on[0]); chip(x2, y-11, off[1], off[0]); }
+    canvas.appendChild(el);
+    const cy=y+(slim?7:18);
+    handle(x, cy, null, `seq:${s.id}:on`, 'seqh on', s.onRef.kind!=='plan-on'||anyLinked('seq',s.id,'on'));
+    handle(x2, cy, null, `seq:${s.id}:off`, 'seqh off', s.offRef.kind!=='plan-off'||anyLinked('seq',s.id,'off'));
+  }
+  function chip(x,y,txt,cls){ const c=document.createElement('div'); c.className='offchip '+cls; c.style.left=x+'px'; c.style.top=y+'px'; c.textContent=txt; canvas.appendChild(c); }
+  function glab(x,text,cls){ const d=document.createElement('div'); d.className='guide-lab '+cls; d.style.left=x+'px'; d.textContent=text; canvas.appendChild(d); }
+  function zlab(x,y,text){ const d=document.createElement('div'); d.className='zone-lab'; d.style.left=x+'px'; d.style.top=y+'px'; d.textContent=text; canvas.appendChild(d); }
+
+  let conflicts=new Set();
+  function computeConflicts(){
+    conflicts=new Set();
+    units.forEach(u=>{ const mine=seqs.filter(s=>s.unit===u.id);
+      for(let i=0;i<mine.length;i++) for(let j=i+1;j<mine.length;j++){ const a=seqSpan(mine[i]), b=seqSpan(mine[j]); if(a[0]<b[1]&&b[0]<a[1]){ conflicts.add(mine[i].id); conflicts.add(mine[j].id); } } });
+    const pill=document.getElementById('readypill');
+    if(conflicts.size){ pill.className='pill warn'; pill.innerHTML=`<span class="led"></span>Channel conflict on ${[...new Set([...conflicts].map(id=>byUnit[bySeq[id].unit].name))].join(', ')} — overlapping sequences`; }
+    else { pill.className='pill ready'; pill.innerHTML='<span class="led"></span>Ready · no channel conflicts'; }
+  }
+  function drawConnector(x1,y1,x2,y2,hue,sel){
+    const r=7, xm=x1+Math.max(14,(x2-x1)*0.45), dy=y2>y1?1:-1;
+    const d=`M ${x1} ${y1} H ${xm-r} Q ${xm} ${y1} ${xm} ${y1+r*dy} V ${y2-r*dy} Q ${xm} ${y2} ${xm+r} ${y2} H ${x2}`;
+    if(sel){ const g=document.createElementNS(SVGNS,'path'); g.setAttribute('d',d); g.setAttribute('fill','none'); g.setAttribute('stroke','rgba(44,110,155,.22)'); g.setAttribute('stroke-width','7'); g.setAttribute('stroke-linecap','round'); svg.appendChild(g); }
+    const p=document.createElementNS(SVGNS,'path'); p.setAttribute('d',d); p.setAttribute('fill','none'); p.setAttribute('stroke',sel?'#2C6E9B':hue); p.setAttribute('stroke-width',sel?2.4:2);
+    p.setAttribute('stroke-linecap','round'); p.setAttribute('stroke-linejoin','round'); p.setAttribute('opacity',sel?1:.85); svg.appendChild(p);
+    const a=document.createElementNS(SVGNS,'path'); a.setAttribute('d',`M ${x2-6} ${y2-4} L ${x2} ${y2} L ${x2-6} ${y2+4}`); a.setAttribute('fill','none'); a.setAttribute('stroke',sel?'#2C6E9B':hue);
+    a.setAttribute('stroke-width',sel?2.4:2); a.setAttribute('stroke-linecap','round'); a.setAttribute('stroke-linejoin','round'); svg.appendChild(a);
+    return {xm};
+  }
+  function gapChip(x,y,txt,hue,ink,title){ const c=document.createElement('div'); c.className='gapchip'; c.style.left=x+'px'; c.style.top=y+'px'; c.style.setProperty('--gc',hue); c.style.setProperty('--gci',ink); c.title=title||''; c.textContent=txt; canvas.appendChild(c); }
+
+  function render(){
+    const bottom=buildRows(); computeConflicts();
+    const W=Math.round(totalW()), Hc=bottom+2;
+    canvas.style.width=W+'px'; canvas.style.height=(Hc+48)+'px'; svg.setAttribute('width',W); svg.setAttribute('height',Hc+48); svg.setAttribute('viewBox',`0 0 ${W} ${Hc+48}`);
+    clearCanvas();
+    const oa=onAirX(), de=defEndX(), bs=bwdStartX(), off=offAirX(), top=TOP-2;
+    const defs=document.createElementNS(SVGNS,'defs');
+    defs.innerHTML=`<pattern id="hatch" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><rect width="7" height="7" fill="#F3F5F8"/><line x1="0" y1="0" x2="0" y2="7" stroke="#DDE2E8" stroke-width="1.4"/></pattern>`;
+    svg.appendChild(defs);
+    rect(oa,top,de-oa,Hc-top,'rgba(29,158,117,.04)'); rect(de,top,bs-de,Hc-top,'url(#hatch)'); rect(bs,top,off-bs,Hc-top,'rgba(194,59,59,.035)');
+    line(de,top,de,Hc+6,'#CDD2DA',1.5,'5 4'); line(bs,top,bs,Hc+6,'#CDD2DA',1.5,'5 4');
+
+    // unit bands (sticky label) + group frames + each sequence's own on-air / off-air lines
+    rows.forEach(r=>{
+      if(r.type==='unit'){ const b=document.createElement('div'); b.className='uband'; b.style.top=r.y+'px'; b.style.height=r.h+'px';
+        b.innerHTML=`<span class="un">${r.u.name} <span class="note">· ${r.u.note}</span></span>`;
+        b.addEventListener('contextmenu',(e)=>{ e.preventDefault(); openMenu(e.clientX,e.clientY,'unit',r.u); }); canvas.appendChild(b); }
+      if(r.type==='seqx'){
+        const s=r.s, last=rows.filter(q=>q.type==='step'&&q.s===s).pop(), [x1,x2]=seqSpan(s), y1=r.y-3, y2=last.y+last.h+3;
+        const g=document.createElement('div'); g.className='gband'; g.style.left=(x1-MIN_EAR-6)+'px'; g.style.top=y1+'px'; g.style.width=(x2-x1+2*MIN_EAR+12)+'px'; g.style.height=(y2-y1)+'px'; canvas.appendChild(g);
+        const on=seqOnX(s), of=seqOffX(s);
+        rect(on, y1+1, of-on, y2-y1-2, 'rgba(29,158,117,.05)', 10);
+        line(on, y1, on, y2, '#1D9E75', 1.5, '4 3'); line(of, y1, of, y2, '#C23B3B', 1.5, '4 3');
+      }
+    });
+    line(oa,top-6,oa,Hc+6,'#1D9E75',2); line(off,top-6,off,Hc+6,'#C23B3B',2);
+
+    // connectors: sequence edges anchored elsewhere, and step anchors
+    seqs.forEach(s=>{ [['on',s.onRef],['off',s.offRef]].forEach(([edge,ref])=>{
+      if(ref.kind==='plan-on'||ref.kind==='plan-off') return;
+      if(ref.kind==='seq'&&ref.to===s.id) return;                          // self-anchored (fixed length): chip only
+      const p=pointOfRef(ref), x2=edge==='on'?seqOnX(s):seqOffX(s), y2=seqCY(s);
+      const c=ref.kind==='seq'?'#5C6675':hueOf(stepOf[ref.to]).hue, ink=ref.kind==='seq'?'#1E2530':hueOf(stepOf[ref.to]).ink;
+      const g=drawConnector(p.x,p.y,x2,y2,c,state.sel==='seq:'+s.id); gapChip((p.x+g.xm)/2,p.y,fmtOff(ref.off),c,ink,`${s.name}'s ${edge}-air: ${refText(ref)}`); }); });
+    rows.filter(r=>r.type==='step'&&(r.st.anchor==='step'||r.st.anchor==='seq')).forEach(r=>{
+      const st=r.st, h=hueOf(st), p=pointOfRef(st.ref), g=drawConnector(p.x,p.y,stepX(st),laneCY(r),h.hue,state.sel==='step:'+st.id);
+      gapChip((p.x+g.xm)/2,p.y,fmtOff(st.ref.off),h.hue,h.ink,`${st.name}: ${refText(st.ref)}`); });
+
+    rows.forEach(r=>{
+      if(r.type==='seqc') seqPill(r.s, r.y+5, false);
+      else if(r.type==='seqx') seqPill(r.s, r.y+r.h-16, true);
+      else if(r.type==='ulane') r.pack.items.forEach(e=>seqPill(e.s, r.y+3+e.lane*(H.seqc-6)+2, false));
+      else if(r.type==='step'){
+        const s=r.s, st=r.st, h=hueOf(st), y=r.y+(r.h-30)/2, onx=seqOnX(s), offx=seqOffX(s);
+        if(st.kind==='dur'||st.kind==='ramp'){
+          let x=stepX(st), x2=stepEndX(st);
+          if(st.kind==='dur'){ const lx=ears(x,x2,onx,offx,y,30,'ear',h); if(lx!=null) x=Math.min(x,lx); tails(x2,offx,y,30,'ear',h); if(x2>offx) x2=offx; if(x<onx) x=onx; }
+          const w=Math.max(st.kind==='ramp'?40:26,x2-x);
+          const b=document.createElement('div'); b.className='bar '+(st.kind==='dur'?'dur':'ramp')+(state.sel==='step:'+st.id?' sel':''); b.dataset.step=st.id; setHue(b,h);
+          b.style.left=x+'px'; b.style.top=y+'px'; b.style.width=w+'px';
+          b.innerHTML=(st.kind==='ramp'?slopeSVG(st.dir,h.hue):'')+`<span class="lab">${st.name}</span>${st.kind==='ramp'?`<span class="tm">${fmtC(st.dur)}</span>`:''}`;
+          canvas.appendChild(b);
+          handle(x, laneCY(r), h, `step:${st.id}:start`, '', st.kind==='ramp'&&(st.anchor==='step'||st.anchor==='seq')||anyLinked('step',st.id,'start'));
+          handle(x+w, laneCY(r), h, `step:${st.id}:end`, '', anyLinked('step',st.id,'end'));
+        } else {
+          const n=document.createElement('div'); n.className='node'+(state.sel==='step:'+st.id?' sel':''); n.dataset.step=st.id; setHue(n,h); n.style.left=stepX(st)+'px'; n.style.top=y+'px';
+          n.innerHTML=`<span class="dot"></span><span class="nl${st.anchor==='stop'?' left':''}">${st.name}</span>`; canvas.appendChild(n);
+          handle(stepX(st), laneCY(r), h, `step:${st.id}:start`, '', st.anchor==='step'||st.anchor==='seq'||anyLinked('step',st.id,'start')).style.opacity='0';
+        }
+      }
+    });
+    glab(oa,'ON-AIR','on'); glab(off,'OFF-AIR','off');
+    zlab(PAD/2+WARM*pps()/2-4,Hc+30,'pre-roll'); zlab(off+COOL*pps()/2,Hc+30,'cool-down');
+    buildAxis(Hc); buildHeader(); buildLegend(); buildMinimap(); syncTools();
+  }
+  function buildAxis(Hc){
+    axis.innerHTML=''; axis.style.top=(Hc+6)+'px'; axis.style.left='0'; axis.style.right='0';
+    for(let t=0;t<=defFwd();t+=30){ const x=onAirX()+t*pps(); mkTick(x,t%60===0); if(t%60===0) mkLab(x,t===0?'0':fmtC(t),t===0); }
+    for(let t=0;t<=defBwd();t+=30){ const x=offAirX()-t*pps(); mkTick(x,t%60===0); if(t%60===0) mkLab(x,t===0?'0':'−'+fmtC(t),t===0); }
+    mkTick(onAirX()-WARM*pps(),false); mkLab(onAirX()-WARM*pps(),'−1:00',false); mkTick(offAirX()+COOL*pps(),false); mkLab(offAirX()+COOL*pps(),'+1:00',false);
+  }
+  function mkTick(x,major){ const t=document.createElement('div'); t.className='tick'+(major?' major':''); t.style.left=x+'px'; axis.appendChild(t); }
+  function mkLab(x,txt,anchor){ const l=document.createElement('div'); l.className='tlab'+(anchor?' anchor':''); l.style.left=x+'px'; l.textContent=txt; axis.appendChild(l); }
+  function buildLegend(){
+    const lg=document.getElementById('legend'); let html='';
+    taskOrder.forEach((t,i)=>{ html+=`<span class="lg"><span class="sw" style="background:${TASK_HUES[i%8]}"></span>${t}</span>`; });
+    html+=`<span class="lg" style="margin-left:auto"><span class="frame"></span>sequence · green edge = its on-air, red = its off-air</span><span class="lg"><span class="ear"></span>warm-up / cool-down outside the window</span>`;
+    lg.innerHTML=html;
+  }
+  function buildMinimap(){
+    const mm=document.getElementById('mm'); mm.innerHTML=''; const W=totalW(); const scale=mm.clientWidth?mm.clientWidth/W:0.28;
+    [[onAirX(),'#1D9E75'],[offAirX(),'#C23B3B']].forEach(([x,c])=>{ const l=document.createElement('div'); l.className='mline'; l.style.left=(x*scale)+'px'; l.style.background=c; mm.appendChild(l); });
+    seqs.forEach((s,i)=>{ const d=document.createElement('div'); d.className='seg2'; const [x1,x2]=seqSpan(s); d.style.left=(x1*scale)+'px'; d.style.width=Math.max(3,(x2-x1)*scale)+'px'; d.style.top=(3+i*5)+'px';
+      d.style.background=hueOf(s.steps[0]).hue; mm.appendChild(d); });
+    const v=document.createElement('div'); v.className='view'; const sc=document.getElementById('scroll'); v.style.left=(sc.scrollLeft*scale)+'px'; v.style.width=(sc.clientWidth*scale)+'px'; mm.appendChild(v);
+  }
+  function targetSeq(){ if(!state.sel) return null; const [k,id]=state.sel.split(':'); return k==='seq'?bySeq[id]:bySeq[stepOf[id].seq]; }
+  function syncTools(){ const s=targetSeq(); document.querySelectorAll('.steptool').forEach(b=>b.disabled=!s);
+    document.getElementById('hint').innerHTML = s ? `adds to <b>${s.name}</b> · ${byUnit[s.unit].name}` : 'select a sequence to add steps to it';
+    document.getElementById('scopechip').textContent=`${units.length} units · ${seqs.length} sequences`; }
+
+  // ── interaction ──
+  function toggleSeq(id){ if(state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id); state.sel='seq:'+id; render(); }
+  function toggleUnit(id){ if(state.collapsedUnits.has(id)) state.collapsedUnits.delete(id); else state.collapsedUnits.add(id); render(); }
+  let toastT; function toast(msg){ const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),2800); }
+  function editStep(st){ toast(`Would open the ${st.kind==='ramp'?'ramp':'step'} editor for “${st.name}” — the same dialog as in the sequence editor`); }
+
+  let drag=null, connect=null, rubber=null;
+  canvas.addEventListener('pointerdown',(e)=>{
+    if(e.button!==0) return;
+    const hd=e.target.closest('.handle');
+    if(hd){ const [kind,id,edge]=hd.dataset.h.split(':'); const r=hd.getBoundingClientRect(), cr=canvas.getBoundingClientRect();
+      connect={kind,id,edge,x:r.left+r.width/2-cr.left,y:r.top+r.height/2-cr.top}; canvas.setPointerCapture(e.pointerId); e.preventDefault(); return; }
+    const sq=e.target.closest('.spill,.winbar'); const st=e.target.closest('.bar,.node');
+    if(sq){ const s=bySeq[sq.dataset.seq]; drag={kind:'seq',s,x0:e.clientX,on0:s.onRef.off,off0:s.offRef.off,moved:false}; }
+    else if(st){ const step=stepOf[st.dataset.step]; drag={kind:'step',st:step,x0:e.clientX,t0:step.anchor==='step'||step.anchor==='seq'?step.ref.off:step.t0,moved:false}; }
+    if(drag) canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointermove',(e)=>{
+    if(connect){ const cr=canvas.getBoundingClientRect(); const x=e.clientX-cr.left, y=e.clientY-cr.top;
+      if(!rubber){ rubber=document.createElementNS(SVGNS,'line'); rubber.setAttribute('stroke','#2C6E9B'); rubber.setAttribute('stroke-width','2'); rubber.setAttribute('stroke-dasharray','5 4'); svg.appendChild(rubber); }
+      rubber.setAttribute('x1',connect.x); rubber.setAttribute('y1',connect.y); rubber.setAttribute('x2',x); rubber.setAttribute('y2',y);
+      canvas.querySelectorAll('.handle.hot').forEach(h=>h.classList.remove('hot')); const under=document.elementFromPoint(e.clientX,e.clientY); const hh=under&&under.closest('.handle'); if(hh&&hh.dataset.h!==`${connect.kind}:${connect.id}:${connect.edge}`) hh.classList.add('hot');
+      return; }
+    if(!drag) return; const dx=e.clientX-drag.x0; if(!drag.moved&&Math.abs(dx)<4) return; drag.moved=true; const ds=Math.round(dx/pps());
+    if(drag.kind==='seq'){ const s=drag.s; let d=ds;
+      if(s.onRef.kind==='plan-on') d=Math.max(-drag.on0,d); if(s.offRef.kind==='plan-off') d=Math.min(-drag.off0,d);
+      s.onRef.off=drag.on0+d; if(!(s.offRef.kind==='seq'&&s.offRef.to===s.id)) s.offRef.off=drag.off0+d; }
+    else { const st=drag.st; if(st.anchor==='step'||st.anchor==='seq') st.ref.off=drag.t0+ds; else st.t0=drag.t0+ds; }
+    render();
+  });
+  function endPointer(e){
+    if(connect){ const under=document.elementFromPoint(e.clientX,e.clientY); const hh=under&&under.closest('.handle'); if(rubber){ rubber.remove(); rubber=null; }
+      if(hh){ const [tk,tid,tedge]=hh.dataset.h.split(':'); if(!(tk===connect.kind&&tid===connect.id)) applyAnchor(connect, tk, tid, tedge); }
+      connect=null; render(); return; }
+    if(!drag) return; const d=drag; drag=null;
+    if(!d.moved){ if(d.kind==='seq'){ if(e.target.closest('.spill')) toggleSeq(d.s.id); else { state.sel='seq:'+d.s.id; render(); } } else { state.sel='step:'+d.st.id; render(); } }
+  }
+  canvas.addEventListener('pointerup',endPointer); canvas.addEventListener('pointercancel',()=>{ drag=null; connect=null; if(rubber){rubber.remove();rubber=null;} render(); });
+  function applyAnchor(src, tk, tid, tedge){
+    const tgtX = tk==='seq' ? (tedge==='on'?seqOnX(bySeq[tid]):seqOffX(bySeq[tid])) : (tedge==='end'?stepEndX(stepOf[tid]):stepX(stepOf[tid]));
+    const off=Math.round((src.x-tgtX)/pps());
+    if(src.kind==='seq'){ const s=bySeq[src.id]; const ref={kind:tk==='seq'?'seq':'step', to:tid, edge:tedge, off}; if(src.edge==='on') s.onRef=ref; else s.offRef=ref; state.sel='seq:'+s.id;
+      toast(`${s.name}'s ${src.edge}-air now ${refText(ref)}`); }
+    else if(src.edge==='start'){ const st=stepOf[src.id]; if(st.kind==='dur'){ toast('A duration task is positioned by its sequence — anchor the sequence instead'); return; }
+      st.anchor= tk==='seq'?'seq':'step'; st.ref={kind:st.anchor, to:tid, edge:tedge, off}; state.sel='step:'+st.id; toast(`${st.name} now ${refText(st.ref)}`); }
+    else toast('Anchor from a start edge or a sequence edge; an end edge can only be a target');
+  }
+  function removeAnchor(obj, edge){
+    if(edge){ const ct=seqEdgeT(obj,edge); const ref = ct.clock==='on'?{kind:'plan-on',off:ct.t}:{kind:'plan-off',off:ct.t}; if(edge==='on') obj.onRef=ref; else obj.offRef=ref; }
+    else { const s=bySeq[obj.seq], ct=stepStartT(obj), son=seqEdgeT(s,'on'), soff=seqEdgeT(s,'off');
+      if(ct.clock===son.clock){ obj.anchor='start'; obj.t0=ct.t-son.t; } else { obj.anchor='stop'; obj.t0=ct.t-soff.t; } delete obj.ref; }
+    render();
+  }
+  canvas.addEventListener('dblclick',(e)=>{ const st=e.target.closest('.bar,.node'); if(st) editStep(stepOf[st.dataset.step]); });
+
+  const MENUS={
+    unit:u=>({title:u.name, hue:'#8A93A2', items:[['＋','Add sequence to this unit…',''],[state.collapsedUnits.has(u.id)?'▾':'▸',state.collapsedUnits.has(u.id)?'Unfold unit':'Fold unit into one lane',''],'sep',['⤢','Expand all its sequences',''],['⤡','Collapse all its sequences','']]}),
+    seq:s=>({title:s.name, hue:'#5C6675', items:[[state.expanded.has(s.id)?'▾':'▸',state.expanded.has(s.id)?'Collapse':'Expand',''],['✎','Rename / recovery policy…',''],'sep',
+      ['⚓','Anchor on-air to…',''],['⚓','Anchor off-air to…',''],['✂','Detach on-air (keep in place)','',s.onRef.kind==='plan-on'?'dim':''],['✂','Detach off-air (keep in place)','',s.offRef.kind==='plan-off'?'dim':''],'sep',
+      ['↳','Add tune…',''],['◹','Add ramp…',''],['▬','Add duration task…',''],'sep',['⇄','Move to another unit…',''],['⧉','Duplicate onto another unit…',''],'sep',['🗑','Remove from plan','⌦','danger']]}),
+    step:st=>({title:st.name, hue:hueOf(st).hue, items:[['✎','Edit…','↵'],['⧉','Duplicate','⌘D'],'sep',['⚓','Anchor to…',''],['✂','Remove anchor','',(st.anchor==='step'||st.anchor==='seq')?'':'dim'],'sep',['⤴','Select its sequence',''],'sep',['🗑','Delete','⌦','danger']]}),
+  };
+  const menu=document.getElementById('menu');
+  function openMenu(cx,cy,kind,obj){
+    const spec=MENUS[kind](obj); let html=`<div class="mh"><span class="sw" style="background:${spec.hue}"></span>${spec.title}</div>`;
+    spec.items.forEach(it=>{ if(it==='sep'){ html+='<div class="msep"></div>'; return; } const [ic,lab,sc,cls]=it; html+=`<div class="mi ${cls||''}" data-act="${lab}"><span class="ic">${ic}</span>${lab}<span class="sc">${sc||''}</span></div>`; });
+    menu.innerHTML=html; menu.hidden=false; const mw=menu.offsetWidth||220, mh=menu.offsetHeight||200; let x=cx,y=cy;
+    if(x+mw>window.innerWidth-8) x=window.innerWidth-mw-8; if(y+mh>window.innerHeight-8) y=window.innerHeight-mh-8; menu.style.left=x+'px'; menu.style.top=y+'px';
+    menu.querySelectorAll('.mi:not(.dim)').forEach(mi=>mi.addEventListener('click',()=>{ const a=mi.dataset.act; closeMenu();
+      if(a==='Expand'||a==='Collapse') toggleSeq(obj.id);
+      else if(a.startsWith('Fold unit')||a==='Unfold unit') toggleUnit(obj.id);
+      else if(a==='Expand all its sequences'){ seqs.filter(s=>s.unit===obj.id).forEach(s=>state.expanded.add(s.id)); render(); }
+      else if(a==='Collapse all its sequences'){ seqs.filter(s=>s.unit===obj.id).forEach(s=>state.expanded.delete(s.id)); render(); }
+      else if(a==='Select its sequence'){ state.sel='seq:'+obj.seq; render(); }
+      else if(a==='Edit…') editStep(obj);
+      else if(a==='Detach on-air (keep in place)') removeAnchor(obj,'on');
+      else if(a==='Detach off-air (keep in place)') removeAnchor(obj,'off');
+      else if(a==='Remove anchor') removeAnchor(obj);
+      else if(a.startsWith('Anchor')) toast(`“${a}” — or just drag the handle onto another handle`);
+      else toast(`“${a}” — a dialog in the real editor`); })); }
+  function closeMenu(){ menu.hidden=true; }
+  canvas.addEventListener('contextmenu',(e)=>{ e.preventDefault(); const st=e.target.closest('.bar,.node'), sq=e.target.closest('.spill,.winbar');
+    if(st){ state.sel='step:'+st.dataset.step; render(); openMenu(e.clientX,e.clientY,'step',stepOf[st.dataset.step]); }
+    else if(sq){ state.sel='seq:'+sq.dataset.seq; render(); openMenu(e.clientX,e.clientY,'seq',bySeq[sq.dataset.seq]); } });
+  canvas.addEventListener('click',(e)=>{ if(!e.target.closest('.bar,.node,.spill,.winbar,.handle')){ state.sel=null; render(); } closeMenu(); });
+  document.addEventListener('click',(e)=>{ if(!menu.contains(e.target)) closeMenu(); });
+  document.addEventListener('keydown',(e)=>{ if(e.key==='Escape') closeMenu(); });
+
+  const tip=document.getElementById('tip');
+  canvas.addEventListener('mouseover',(e)=>{
+    const el=e.target.closest('.bar,.spill,.winbar,.node'); if(!el) return; const rr=el.getBoundingClientRect(); let tt='',tr='';
+    if(el.dataset.seq){ const s=bySeq[el.dataset.seq]; tt=`${s.name} · ${byUnit[s.unit].name}`; tr=`on-air ${refText(s.onRef)} · off-air ${refText(s.offRef)}`; }
+    else { const st=stepOf[el.dataset.step], s=bySeq[st.seq]; tt=`${st.name} · ${s.name}`;
+      if(st.kind==='dur') tr=`launches ${fmtC(-st.t0)} before the sequence's on-air (muted) · stops ${fmtC(st.end.t)} after its off-air`;
+      else if(st.anchor==='start') tr=`${fmtOff(st.t0)} from the sequence's on-air${st.dur?' · dur '+fmtC(st.dur):''}`;
+      else if(st.anchor==='stop') tr=`${fmtOff(st.t0)} from the sequence's off-air${st.dur?' · dur '+fmtC(st.dur):''}`;
+      else tr=refText(st.ref)+(st.dur?' · dur '+fmtC(st.dur):''); }
+    tip.innerHTML=`<div class="tt">${tt}</div><div class="tr">${tr}</div>`; tip.style.left=(rr.left+rr.width/2)+'px'; tip.style.top=(rr.top-8)+'px'; tip.style.opacity='1';
+  });
+  canvas.addEventListener('mouseout',(e)=>{ if(e.target.closest('.bar,.spill,.winbar,.node')) tip.style.opacity='0'; });
+
+  function setZoom(z){ state.zoom=Math.max(.5,Math.min(3,z)); document.getElementById('zl').textContent=Math.round(state.zoom*100)+'%'; closeMenu(); render(); }
+  document.getElementById('zi').onclick=()=>setZoom(state.zoom+.15); document.getElementById('zo').onclick=()=>setZoom(state.zoom-.15);
+  function fit(){ const sc=document.getElementById('scroll'); setZoom(Math.max(.5,Math.min(1.6,(sc.clientWidth-6)/(totalW()/state.zoom)))); }
+  document.getElementById('fit').onclick=fit;
+  document.getElementById('expall').onclick=()=>{ seqs.forEach(s=>state.expanded.add(s.id)); state.collapsedUnits.clear(); render(); };
+  document.getElementById('colall').onclick=()=>{ state.expanded.clear(); render(); };
+  document.getElementById('addseq').onclick=()=>toast('Would open the unit + sequence picker (today’s Add sequence dialog)');
+  document.querySelectorAll('.steptool').forEach(b=>b.addEventListener('click',()=>{ const s=targetSeq(); if(s) toast(`Would add a ${b.dataset.kind.toLowerCase()} to “${s.name}” (${byUnit[s.unit].name}) — opens the step editor`); }));
+  document.getElementById('scroll').addEventListener('scroll',buildMinimap);
+  window.addEventListener('resize',()=>{ closeMenu(); buildMinimap(); });
+
+  render(); fit();
+})();
+</script>

@@ -52,6 +52,7 @@ from api import Fleet
 from api import models as m
 from state import PlanStore, ScheduleStore, new_scheduled_id
 from .plan_editor import PlanEditorDialog
+from . import plan_graph as pg
 from .plans_tab import (
     _collapsed_arm_steps, _item_recovery, _plan_has_hold, _step_anchor_block_lines)
 from .qt_adapter import DataHub
@@ -109,9 +110,12 @@ def _to_utc(local_iso: str) -> Optional[datetime]:
 
 def _arm_scheduled(fleet: Fleet, plan: m.Plan, start_utc: datetime,
                    stop_utc: datetime) -> List[tuple]:
-    """Arm every item of a plan at its absolute scheduled window (fixed, not
-    open-ended): on-air = start + the item's on-air offset, off-air = stop + its
-    off-air offset. Worker thread. Returns [(item, SequenceRun|None, error|None)]."""
+    """Arm every item of a plan at its absolute scheduled window (fixed, not open-ended). The
+    plan's timing graph is compiled against the slot: each sequence's on-/off-air resolve from
+    the plan's on-air (start) / off-air (stop), another sequence's edge or a step's edge, and
+    cross-sequence step anchors become on-air offsets of their own sequence (ui/plan_graph.py).
+    A plain item still runs the whole slot + its offsets, as before. Worker thread. Returns
+    [(item, SequenceRun|None, error|None)]."""
     out = []
     _offsets: dict = {}   # per-unit clock skew, fetched once per host
 
@@ -120,18 +124,24 @@ def _arm_scheduled(fleet: Fleet, plan: m.Plan, start_utc: datetime,
             _offsets[host] = fleet.get(host).clock_offset_s()
         return _offsets[host]
 
-    for item in plan.items:
+    try:
+        compiled = pg.compile_plan(plan.items, start_utc, stop_utc)
+    except pg.PlanResolveError as exc:
+        return [(item, None, str(exc)) for item in plan.items]
+
+    for item, ci in zip(plan.items, compiled):
         # Translate to the unit's clock so a skewed unit still fires at the intended
         # wall-clock window (matches single-sequence and manual-plan arming).
         skew = _off(item.hostname)
-        on_air = (start_utc + timedelta(seconds=item.on_air_offset_s + skew)).isoformat()
-        off_air = (stop_utc + timedelta(seconds=item.off_air_offset_s + skew)).isoformat()
+        on_air = (ci.on_air_at + timedelta(seconds=skew)).isoformat()
+        off_air = (ci.off_air_at + timedelta(seconds=skew)).isoformat()
+        a_item = item.model_copy(update={"steps": ci.steps}) if ci.steps is not None else item
         # Compile any Hold OUT for the unattended schedule (docs/sequence-hold-step.md §7):
         # the run passes straight through, never pausing, and hold_aware stays False so the
         # agent runs its normal two-anchor path — for a plan-local copy AND a stored-sequence
         # reference (else a stored Hold-bearing sequence would be armed without hold_aware and
         # the agent would refuse it).
-        sched_steps = _collapsed_arm_steps(fleet, item)
+        sched_steps = _collapsed_arm_steps(fleet, a_item)
         # RF-fault Phase 3: the schedule is the PRIMARY unattended surface — carry the item's
         # auto-restart policy (its own, else the seeded sequence's), downgraded if unsupported.
         r_pol, r_mode = _item_recovery(fleet, fleet.get(item.hostname), item)
