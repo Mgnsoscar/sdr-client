@@ -1930,7 +1930,8 @@ class _TimelineCanvas(QWidget):
         chip = f"{root_name} {self._offset_chip_text(float(getattr(it, 'offset', 0.0)))}"
         self._paint_tag(p, (base_x + item_x) / 2.0, y - 15, chip, True)
 
-    def _paint_connectors(self, p):
+    def _routed_connectors(self) -> list:
+        """Every step-anchor connector this canvas draws, with its routed waypoints (`pts`)."""
         by_sid = {getattr(it, "step_id", "") or "": it for it in self._rows
                   if getattr(it, "step_id", "")}
         conns = []
@@ -1980,6 +1981,10 @@ class _TimelineCanvas(QWidget):
                                          anchor_cap, entry_from_right, two_sided=two_sided)
             conns.append(dict(pts=pts, base=base, ink=ink, sel=sel, x2=x2, y2=y2,
                               entry_from_right=entry_from_right, text=text, chip_w=chip_w))
+        return conns
+
+    def _paint_connectors(self, p):
+        conns = self._routed_connectors()
         # 1) draw every path first, so the lines sit UNDER every arrowhead + offset chip.
         for c in conns:
             self._draw_connector_path(p, c)

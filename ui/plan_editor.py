@@ -1163,8 +1163,8 @@ class _PlanStage(QWidget):
 
     # ── painting ──────────────────────────────────────────────────────────────
     def _paint_under_layer(self, p, with_bands: bool) -> None:
-        """Everything that sits UNDER the rows: the unit bands, the expanded groups' frames + their
-        own windows + guide lines, the plan's anchor lines and every cross-sequence
+        """Everything that sits UNDER the rows: the unit bands, the expanded groups' frames + guide
+        lines, the plan's anchor lines and every cross-sequence
         connector. Shared by the stage's own paint and each embedded canvas (which paints it
         translated to its row, so the layering is identical on and off a canvas)."""
         top = STAGE_TOP - 4
@@ -1258,11 +1258,15 @@ class _PlanStage(QWidget):
         p.drawText(QRectF(x + fm.horizontalAdvance(label) + 8, y, 600, h),
                    int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), note)
 
-    def _paint_regions(self, p, node: _SeqNode, top: float, bottom: float, clip=None) -> None:
-        """A sequence's OWN three windows between its on-air and off-air: the defined on-air region
-        (green, up to its last on-clock item), the relative middle whose length is set at arm
-        (hatched), and the defined off-air region (red, from its first off-clock item). A sequence
-        with nothing on one clock has no relative region — a fixed-length sequence is all green."""
+    def _paint_regions(self, p, node: _SeqNode, top: float, bottom: float, clip=None,
+                       x_map=None, alpha: int = 34) -> None:
+        """A sequence's OWN three windows between its on-air and off-air, on a THIN strip (its slim
+        window bar when expanded, its pill's mini strip when collapsed — never washed across the
+        whole frame): the defined on-air region (green, up to its last on-clock item), the relative
+        middle whose length is set at arm (hatched), and the defined off-air region (red, from its
+        first off-clock item). A sequence with nothing on one clock has no relative region — a
+        fixed-length sequence is all green. `x_map` maps stage x onto the strip (the pill's strip is
+        inset); `alpha` is the tint strength."""
         x0, x1 = node.on_x, node.off_x
         if x1 - x0 <= 1.0:
             return
@@ -1276,22 +1280,24 @@ class _PlanStage(QWidget):
         else:
             g_end = max(x0, min(x1, de)); r_start = max(g_end, min(x1, bs))
             h_lo, h_hi = g_end, r_start
+        mp = x_map or (lambda v: v)
+        x0, x1, g_end, h_lo, h_hi, r_start = (mp(v) for v in (x0, x1, g_end, h_lo, h_hi, r_start))
         p.save()
         if clip is not None:
             p.setClipPath(clip)
         p.setPen(Qt.PenStyle.NoPen)
-        gt = QColor(Palette.ONLINE); gt.setAlpha(13); p.setBrush(gt)
+        gt = QColor(Palette.ONLINE); gt.setAlpha(alpha); p.setBrush(gt)
         p.drawRect(QRectF(x0, top, max(0.0, g_end - x0), bottom - top))
-        rt = QColor(Palette.CRASH); rt.setAlpha(13); p.setBrush(rt)
+        rt = QColor(Palette.CRASH); rt.setAlpha(alpha); p.setBrush(rt)
         p.drawRect(QRectF(r_start, top, max(0.0, x1 - r_start), bottom - top))
         if h_hi - h_lo > 2.0:
             hb = QColor("#F4F6F9"); hb.setAlpha(170); p.setBrush(hb)
             p.drawRect(QRectF(h_lo, top, h_hi - h_lo, bottom - top))
             p.setClipRect(QRectF(h_lo, top, h_hi - h_lo, bottom - top), Qt.ClipOperation.IntersectClip)
-            p.setPen(QPen(QColor("#DFE4EA"), 1)); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor("#CDD3DB"), 1)); p.setBrush(Qt.BrushStyle.NoBrush)
             h = bottom - top; xx = h_lo - h
             while xx < h_hi:
-                p.drawLine(QPointF(xx, bottom), QPointF(xx + h, top)); xx += 7
+                p.drawLine(QPointF(xx, bottom), QPointF(xx + h, top)); xx += 5
             p.setClipRect(QRectF(x0 - 20, top - 20, x1 - x0 + 40, bottom - top + 40), Qt.ClipOperation.ReplaceClip)
             if clip is not None:
                 p.setClipPath(clip, Qt.ClipOperation.IntersectClip)
@@ -1306,11 +1312,15 @@ class _PlanStage(QWidget):
         y1 = node.row_y - 3
         y2 = node.canvas_y + c.content_height() + 3
         frame = QColor(SEQ_FRAME); frame.setAlpha(170)
+        band = QRectF(x1 - MIN_EAR - 6, y1, (x2 - x1) + 2 * MIN_EAR + 12, y2 - y1)
+        # The mockup's neutral group band: a faint grey wash + a dashed frame. The sequence's own
+        # windows are NOT washed across it — they sit on its slim window bar (_paint_pill).
+        fill = QColor(SEQ_INK); fill.setAlpha(11)
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(fill)
+        p.drawRoundedRect(band, 10, 10)
         pen = QPen(frame, 1.2); pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRoundedRect(QRectF(x1 - MIN_EAR - 6, y1, (x2 - x1) + 2 * MIN_EAR + 12, y2 - y1), 10, 10)
-        clip = QPainterPath(); clip.addRoundedRect(QRectF(node.on_x, y1 + 1, max(0.0, node.off_x - node.on_x), y2 - y1 - 2), 8, 8)
-        self._paint_regions(p, node, y1 + 1, y2 - 1, clip)
+        p.drawRoundedRect(band, 10, 10)
         gpen = QPen(QColor(Palette.ONLINE), 1.5); gpen.setStyle(Qt.PenStyle.DashLine); p.setPen(gpen)
         p.drawLine(int(node.on_x), int(y1), int(node.on_x), int(y2))
         rpen = QPen(QColor(Palette.CRASH), 1.5); rpen.setStyle(Qt.PenStyle.DashLine); p.setPen(rpen)
@@ -1352,8 +1362,10 @@ class _PlanStage(QWidget):
         frame = QColor(Palette.CRASH) if conflict else (QColor(Palette.ACCENT) if sel else QColor(SEQ_FRAME))
         if slim:
             r = QRectF(x, y + 2, w, 14)
-            p.setPen(QPen(frame, 1.5 if (sel or conflict) else 1)); p.setBrush(QColor(Palette.INSET))
+            p.setPen(QPen(frame, 1.5 if (sel or conflict) else 1)); p.setBrush(QColor(Palette.SURFACE))
             p.drawRoundedRect(r, 5, 5)
+            bclip = QPainterPath(); bclip.addRoundedRect(r, 5, 5)
+            self._paint_regions(p, node, y + 2, y + 16, bclip)     # its own defined / relative windows
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(Palette.ONLINE)); p.drawRoundedRect(QRectF(x, y + 2, 4, 14), 2, 2)
             p.setBrush(QColor(Palette.CRASH)); p.drawRoundedRect(QRectF(x + w - 4, y + 2, 4, 14), 2, 2)
@@ -1366,8 +1378,6 @@ class _PlanStage(QWidget):
             r = QRectF(x, y, w, 36)
             p.setPen(QPen(frame, 1.5 if (sel or conflict) else 1)); p.setBrush(QColor(Palette.SURFACE))
             p.drawRoundedRect(r, 9, 9)
-            pclip = QPainterPath(); pclip.addRoundedRect(r, 9, 9)
-            self._paint_regions(p, node, y, y + 36, pclip)          # its own defined / relative windows
             p.save(); clip = QPainterPath(); clip.addRoundedRect(r, 9, 9); p.setClipPath(clip)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(Palette.ONLINE)); p.drawRect(QRectF(x, y, 4, 36))
@@ -1386,6 +1396,11 @@ class _PlanStage(QWidget):
             p.setPen(QColor(Palette.TEXT))
             p.drawText(QRectF(x + 9 + cw1 + 6, y + 3, avail, 16),
                        int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), txt)
+            strip = QRectF(x + 12, y + 22, w - 24, 11)
+            span = max(1.0, x2 - x)
+            sclip = QPainterPath(); sclip.addRoundedRect(strip, 3, 3)
+            self._paint_regions(p, node, strip.top(), strip.bottom(), sclip,   # its own windows, on the strip
+                                x_map=lambda v: strip.left() + max(0.0, min(strip.width(), (v - x) / span * strip.width())))
             self._paint_mini(p, node, x + 12, y + 23, w - 24, 9)
             cy = y + 18
         node.cy = cy
@@ -1586,15 +1601,34 @@ class _PlanStage(QWidget):
         return keep
 
     def _routed_connectors(self) -> List[dict]:
-        """Every cross-sequence connector with its routed waypoints (`pts`), as the painter draws it."""
+        """Every cross-sequence connector with its routed waypoints (`pts`), as the painter draws it.
+        Two passes: each wire is routed on its own first, then re-routed so its drop column also
+        steers clear of where the OTHER wires ENTER their dependents (the entry run + offset chip +
+        arrowhead) on the rows it drops through — the stage's other cross-sequence wires AND every
+        expanded sequence's own wires — so a line never drops through another line's chip."""
         rt = self._router
-        conns = []
-        for s in self._connector_specs():
-            obstacles = self._route_obstacles(self._obstacles_between(s["y1"], s["y2"]),
+        specs = self._connector_specs()
+
+        def route(s, extra):
+            obstacles = self._route_obstacles(self._obstacles_between(s["y1"], s["y2"]) + extra,
                                               s["x1"], s["x2"], s["entry_from_right"])
-            pts = rt._connector_points(s["x1"], s["y1"], s["x2"], s["y2"], s["exit_dir"], obstacles,
-                                       s["chip_w"] + 24.0, s["anchor_cap"], s["entry_from_right"],
-                                       two_sided=s["two_sided"])
+            return rt._connector_points(s["x1"], s["y1"], s["x2"], s["y2"], s["exit_dir"], obstacles,
+                                        s["chip_w"] + 24.0, s["anchor_cap"], s["entry_from_right"],
+                                        two_sided=s["two_sided"])
+        first = [route(s, []) for s in specs]
+        zones = [(s["y2"], pts[-2][0] if len(pts) >= 2 else s["x2"], s["x2"]) for s, pts in zip(specs, first)]
+        for n in self._nodes:
+            if not n.expanded:
+                continue
+            for c in n.canvas._routed_connectors():
+                pts = c["pts"]
+                zones.append((n.canvas_y + c["y2"], pts[-2][0] if len(pts) >= 2 else c["x2"], c["x2"]))
+        conns = []
+        for i, s in enumerate(specs):
+            lo, hi = sorted((s["y1"], s["y2"]))
+            extra = [(min(xd, ex) - 6.0, max(xd, ex) + 6.0)
+                     for j, (yz, xd, ex) in enumerate(zones) if j != i and lo + 2 < yz < hi - 2]
+            pts = route(s, extra) if extra else first[i]
             conns.append(dict(pts=pts, base=s["base"], ink=s["ink"], sel=s["sel"], x1=s["x1"], y1=s["y1"],
                               x2=s["x2"], y2=s["y2"], entry_from_right=s["entry_from_right"],
                               text=s["text"], chip_w=s["chip_w"], spec=s))

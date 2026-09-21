@@ -275,3 +275,70 @@ def test_each_sequence_carries_its_own_defined_and_relative_windows():
     g = pg.PlanGraph([n.graph_item() for n in st.nodes()])
     assert g.item_windows(na.item.id) == (301.0, None)
     assert g.item_windows(nb.item.id) == (600.0, 0.0)
+
+
+def test_a_cross_wire_drops_clear_of_another_wires_entry_run():
+    # A: an up-ramp + its OWN down-ramp hung off the up-ramp END +2:00 (a wire A's canvas draws);
+    # B (unit b): its ramp hung off A's up-ramp END +3:20 (a wire the stage draws). The stage wire
+    # drops past A's down-ramp row, where the +2:00 wire runs in: its column must not land on that
+    # entry run (chip + arrowhead) — the owner's "wires could be routed to avoid collision".
+    down = m.SequenceStep(id="down", anchor="step", anchor_step_id="up", anchor_edge="end", offset_s=120,
+                          action=m.StepAction.RAMP, task_name="tx",
+                          ramp=m.RampSpec(param="power", start=-50, stop=-90, steps=4, duration_s=120))
+    a = _item("a", "s1", "A", steps=_steps() + [down],
+              off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=450.0)
+    b = _item("b", "s2", "B", steps=_cross_ramp_steps())
+    ed = _editor([a, b])
+    st = ed._stage; na, nb = st.nodes()
+    intra = na.canvas._routed_connectors()
+    assert len(intra) == 1 and intra[0]["text"] == "+2:00"
+    zone_lo, zone_hi = intra[0]["pts"][-2][0] - 6.0, intra[0]["x2"] + 6.0   # the +2:00 entry run
+    cross = [c for c in st._routed_connectors() if c["text"] == "+3:20"]
+    assert len(cross) == 1
+    c = cross[0]; sp = c["spec"]
+    # with steps as the only obstacles the router lands its column ON that entry run…
+    naive = st._router._connector_points(
+        sp["x1"], sp["y1"], sp["x2"], sp["y2"], sp["exit_dir"],
+        st._route_obstacles(st._obstacles_between(sp["y1"], sp["y2"]), sp["x1"], sp["x2"], sp["entry_from_right"]),
+        sp["chip_w"] + 24.0, None, sp["entry_from_right"], two_sided=True)
+    assert zone_lo <= naive[-2][0] <= zone_hi
+    # …the stage drops LEFT of it, still right of the anchor (no loop back), entering horizontally
+    xd = c["pts"][-2][0]
+    assert sp["x1"] < xd < zone_lo - 8.0
+    assert c["pts"][-2][1] == sp["y2"] and c["pts"][-1] == (sp["x2"], sp["y2"])
+    # every other row the wire crosses is unchanged: it starts at the anchor and never goes left of it
+    assert c["pts"][0] == (sp["x1"], sp["y1"]) and min(x for x, _ in c["pts"]) >= sp["x1"] - 1.0
+
+
+def test_sequence_windows_sit_on_the_slim_bar_and_the_pill_strip_not_across_the_frame():
+    a = _item("a", "s1", "A", off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=300.0,
+              expanded=False)
+    b = _item("b", "s2", "B", on=480.0)
+    ed = _editor([a, b])
+    st = ed._stage; na, nb = st.nodes()
+    img = st.grab().toImage()
+
+    def px(x, y):
+        col = img.pixelColor(int(x), int(y))
+        return col.red(), col.green(), col.blue()
+
+    def neutral(rgb):                 # neither a green nor a red tint (a grey hatch hairline is blue-grey)
+        r, g, _b = rgb
+        return abs(g - r) <= 4
+    # B's slim window bar IS its axis: green over its defined on-air region, hatched (neutral grey)
+    # over its relative region
+    bar_y = nb.row_y + nb.row_h - 16 + 2
+    r, g, _b = px(nb.on_x + 30, bar_y + 7)
+    assert g - r >= 6, (r, g, _b)
+    assert neutral(px(nb.off_x - 20, bar_y + 7))
+    # the group's interior — a row gap inside B's canvas — is a neutral wash, no green across the frame
+    bar = next(it for it in nb.canvas.items() if it.kind == "bar")
+    gy = nb.canvas_y + nb.canvas._geom[bar.uid]["y"] + pe.LANE_H + 3
+    assert neutral(px(nb.on_x + 60, gy))
+    # A's collapsed pill: its (all-green, fixed length) windows sit on the thin mini strip…
+    w = max(float(pe.PILL_MIN_W), na.off_x - na.on_x)
+    y = na.row_y + 5
+    r, g, _b = px(na.on_x + 12 + (w - 24) * 0.75, y + 23)
+    assert g - r >= 6, (r, g, _b)
+    # …while the pill body above the strip stays plain
+    assert neutral(px(na.on_x + w * 0.5, y + 21))
