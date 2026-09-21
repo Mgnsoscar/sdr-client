@@ -37,7 +37,7 @@ from typing import Dict, List, Optional, Tuple
 import yaml
 
 from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen,
+from PyQt6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen,
                          QCursor)
 from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
@@ -1163,8 +1163,8 @@ class _PlanStage(QWidget):
 
     # ── painting ──────────────────────────────────────────────────────────────
     def _paint_under_layer(self, p, with_bands: bool) -> None:
-        """Everything that sits UNDER the rows: the unit bands, the expanded groups' frames + guide
-        lines, the plan's anchor lines and every cross-sequence
+        """Everything that sits UNDER the rows: the unit bands, the expanded groups' frames + their
+        own windows + guide lines, the plan's anchor lines and every cross-sequence
         connector. Shared by the stage's own paint and each embedded canvas (which paints it
         translated to its row, so the layering is identical on and off a canvas)."""
         top = STAGE_TOP - 4
@@ -1195,6 +1195,9 @@ class _PlanStage(QWidget):
 
     def paintEvent(self, _e):  # noqa: N802
         p = QPainter(self)
+        # The stage paints its whole background itself (the app's grey ground must never show
+        # through a sequence's header / collapsed row as a full-width stripe — owner).
+        p.fillRect(self.rect(), QColor(Palette.SURFACE))
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         top = STAGE_TOP - 4
         bottom = self._h - AXIS_H
@@ -1240,9 +1243,18 @@ class _PlanStage(QWidget):
 
     def _paint_unit_band(self, p, r):
         y, h = r["y"], r["h"]
-        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(Palette.SURFACE_ALT))
+        # The mockup's unit band: a soft grey that fades out to the right (anchored at the viewport's
+        # left edge, like the sticky label), between a border above and a hairline below.
+        x0 = float(self._hscroll)
+        grad = QLinearGradient(x0, 0.0, x0 + 1400.0, 0.0)
+        grad.setColorAt(0.0, QColor(238, 242, 246, 235))
+        grad.setColorAt(0.6, QColor(246, 248, 250, 140))
+        grad.setColorAt(1.0, QColor(246, 248, 250, 50))
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(grad))
         p.drawRect(QRectF(0, y, self._w, h))
         p.setPen(QPen(QColor(Palette.BORDER), 1))
+        p.drawLine(0, int(y), self._w, int(y))
+        hair = QColor(Palette.BORDER); hair.setAlpha(120); p.setPen(QPen(hair, 1))
         p.drawLine(0, int(y + h), self._w, int(y + h))
         label, status = self._unit_state(r["host"])
         x = max(8.0, float(self._hscroll) + 8.0)            # sticky: rides the viewport's left edge
@@ -1258,15 +1270,12 @@ class _PlanStage(QWidget):
         p.drawText(QRectF(x + fm.horizontalAdvance(label) + 8, y, 600, h),
                    int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), note)
 
-    def _paint_regions(self, p, node: _SeqNode, top: float, bottom: float, clip=None,
-                       x_map=None, alpha: int = 34) -> None:
-        """A sequence's OWN three windows between its on-air and off-air, on a THIN strip (its slim
-        window bar when expanded, its pill's mini strip when collapsed — never washed across the
-        whole frame): the defined on-air region (green, up to its last on-clock item), the relative
-        middle whose length is set at arm (hatched), and the defined off-air region (red, from its
-        first off-clock item). A sequence with nothing on one clock has no relative region — a
-        fixed-length sequence is all green. `x_map` maps stage x onto the strip (the pill's strip is
-        inset); `alpha` is the tint strength."""
+    def _paint_regions(self, p, node: _SeqNode, top: float, bottom: float, clip=None) -> None:
+        """A sequence's OWN three windows between its on-air and off-air, washed across its expanded
+        frame / its collapsed pill (the owner likes them): the defined on-air region (green, up to its
+        last on-clock item), the relative middle whose length is set at arm (hatched, dashed edges),
+        and the defined off-air region (red, from its first off-clock item). A sequence with nothing
+        on one clock has no relative region — a fixed-length sequence is all green."""
         x0, x1 = node.on_x, node.off_x
         if x1 - x0 <= 1.0:
             return
@@ -1280,24 +1289,22 @@ class _PlanStage(QWidget):
         else:
             g_end = max(x0, min(x1, de)); r_start = max(g_end, min(x1, bs))
             h_lo, h_hi = g_end, r_start
-        mp = x_map or (lambda v: v)
-        x0, x1, g_end, h_lo, h_hi, r_start = (mp(v) for v in (x0, x1, g_end, h_lo, h_hi, r_start))
         p.save()
         if clip is not None:
             p.setClipPath(clip)
         p.setPen(Qt.PenStyle.NoPen)
-        gt = QColor(Palette.ONLINE); gt.setAlpha(alpha); p.setBrush(gt)
+        gt = QColor(Palette.ONLINE); gt.setAlpha(13); p.setBrush(gt)
         p.drawRect(QRectF(x0, top, max(0.0, g_end - x0), bottom - top))
-        rt = QColor(Palette.CRASH); rt.setAlpha(alpha); p.setBrush(rt)
+        rt = QColor(Palette.CRASH); rt.setAlpha(13); p.setBrush(rt)
         p.drawRect(QRectF(r_start, top, max(0.0, x1 - r_start), bottom - top))
         if h_hi - h_lo > 2.0:
             hb = QColor("#F4F6F9"); hb.setAlpha(170); p.setBrush(hb)
             p.drawRect(QRectF(h_lo, top, h_hi - h_lo, bottom - top))
             p.setClipRect(QRectF(h_lo, top, h_hi - h_lo, bottom - top), Qt.ClipOperation.IntersectClip)
-            p.setPen(QPen(QColor("#CDD3DB"), 1)); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor("#DFE4EA"), 1)); p.setBrush(Qt.BrushStyle.NoBrush)
             h = bottom - top; xx = h_lo - h
             while xx < h_hi:
-                p.drawLine(QPointF(xx, bottom), QPointF(xx + h, top)); xx += 5
+                p.drawLine(QPointF(xx, bottom), QPointF(xx + h, top)); xx += 7
             p.setClipRect(QRectF(x0 - 20, top - 20, x1 - x0 + 40, bottom - top + 40), Qt.ClipOperation.ReplaceClip)
             if clip is not None:
                 p.setClipPath(clip, Qt.ClipOperation.IntersectClip)
@@ -1312,15 +1319,11 @@ class _PlanStage(QWidget):
         y1 = node.row_y - 3
         y2 = node.canvas_y + c.content_height() + 3
         frame = QColor(SEQ_FRAME); frame.setAlpha(170)
-        band = QRectF(x1 - MIN_EAR - 6, y1, (x2 - x1) + 2 * MIN_EAR + 12, y2 - y1)
-        # The mockup's neutral group band: a faint grey wash + a dashed frame. The sequence's own
-        # windows are NOT washed across it — they sit on its slim window bar (_paint_pill).
-        fill = QColor(SEQ_INK); fill.setAlpha(11)
-        p.setPen(Qt.PenStyle.NoPen); p.setBrush(fill)
-        p.drawRoundedRect(band, 10, 10)
         pen = QPen(frame, 1.2); pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRoundedRect(band, 10, 10)
+        p.drawRoundedRect(QRectF(x1 - MIN_EAR - 6, y1, (x2 - x1) + 2 * MIN_EAR + 12, y2 - y1), 10, 10)
+        clip = QPainterPath(); clip.addRoundedRect(QRectF(node.on_x, y1 + 1, max(0.0, node.off_x - node.on_x), y2 - y1 - 2), 8, 8)
+        self._paint_regions(p, node, y1 + 1, y2 - 1, clip)      # its own defined / relative / defined windows
         gpen = QPen(QColor(Palette.ONLINE), 1.5); gpen.setStyle(Qt.PenStyle.DashLine); p.setPen(gpen)
         p.drawLine(int(node.on_x), int(y1), int(node.on_x), int(y2))
         rpen = QPen(QColor(Palette.CRASH), 1.5); rpen.setStyle(Qt.PenStyle.DashLine); p.setPen(rpen)
@@ -1362,10 +1365,8 @@ class _PlanStage(QWidget):
         frame = QColor(Palette.CRASH) if conflict else (QColor(Palette.ACCENT) if sel else QColor(SEQ_FRAME))
         if slim:
             r = QRectF(x, y + 2, w, 14)
-            p.setPen(QPen(frame, 1.5 if (sel or conflict) else 1)); p.setBrush(QColor(Palette.SURFACE))
+            p.setPen(QPen(frame, 1.5 if (sel or conflict) else 1)); p.setBrush(QColor(Palette.INSET))
             p.drawRoundedRect(r, 5, 5)
-            bclip = QPainterPath(); bclip.addRoundedRect(r, 5, 5)
-            self._paint_regions(p, node, y + 2, y + 16, bclip)     # its own defined / relative windows
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(Palette.ONLINE)); p.drawRoundedRect(QRectF(x, y + 2, 4, 14), 2, 2)
             p.setBrush(QColor(Palette.CRASH)); p.drawRoundedRect(QRectF(x + w - 4, y + 2, 4, 14), 2, 2)
@@ -1378,6 +1379,8 @@ class _PlanStage(QWidget):
             r = QRectF(x, y, w, 36)
             p.setPen(QPen(frame, 1.5 if (sel or conflict) else 1)); p.setBrush(QColor(Palette.SURFACE))
             p.drawRoundedRect(r, 9, 9)
+            pclip = QPainterPath(); pclip.addRoundedRect(r, 9, 9)
+            self._paint_regions(p, node, y, y + 36, pclip)          # its own defined / relative windows
             p.save(); clip = QPainterPath(); clip.addRoundedRect(r, 9, 9); p.setClipPath(clip)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(Palette.ONLINE)); p.drawRect(QRectF(x, y, 4, 36))
@@ -1396,11 +1399,6 @@ class _PlanStage(QWidget):
             p.setPen(QColor(Palette.TEXT))
             p.drawText(QRectF(x + 9 + cw1 + 6, y + 3, avail, 16),
                        int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), txt)
-            strip = QRectF(x + 12, y + 22, w - 24, 11)
-            span = max(1.0, x2 - x)
-            sclip = QPainterPath(); sclip.addRoundedRect(strip, 3, 3)
-            self._paint_regions(p, node, strip.top(), strip.bottom(), sclip,   # its own windows, on the strip
-                                x_map=lambda v: strip.left() + max(0.0, min(strip.width(), (v - x) / span * strip.width())))
             self._paint_mini(p, node, x + 12, y + 23, w - 24, 9)
             cy = y + 18
         node.cy = cy

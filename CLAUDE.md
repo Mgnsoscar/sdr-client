@@ -140,19 +140,22 @@ mockup.html`** is the visual spec; the anchor lines are drawn by the SEQUENCE ED
   red from its first off-clock instant; a fixed-length sequence is all green, an all-off-clock one all red).
   The plan-wide tint/hatch that started at the LAST sequence's relative region is gone; the axis still spans
   the global extents.
-- **Owner follow-ups (round 3)** — (1) "each sequence has a great horizontal area, collapsed or not": the
-  windows are no longer WASHED across the whole group frame / the whole pill. Per the mockup a group is a
-  faint neutral band (`SEQ_INK` α11 + the dashed frame, `_paint_group`); the sequence's own green / hatch /
-  red windows sit ONLY on its slim window bar (`_paint_pill(slim=True)`, 14 px — the bar IS its axis) and,
-  collapsed, on the pill's thin mini strip under the name (`_paint_regions(x_map=…)` maps stage x onto the
-  inset strip; `_paint_mini` draws over it). (2) A wire dropping through another wire's ENTRY (its chip +
-  arrowhead into the dependent): `_routed_connectors` routes in two passes — every other wire's entry run
-  (`pts[-2].x .. x2` on its dependent's row, ±6 px), the stage's cross-sequence wires AND each expanded
+- **Owner follow-ups (round 3)** — (1) "each sequence has a great horizontal area, collapsed or not" was
+  NOT the hatched windows (the owner likes those; a first reading moved them onto the slim bar and was
+  reverted): it was a full-width GREY STRIPE on every sequence-level row (an expanded sequence's header row,
+  a collapsed sequence's row) — the stage never painted its own background, so the app's grey ground
+  (`Palette.BG`) showed through wherever no embedded canvas (white) covered it. `_PlanStage.paintEvent` now
+  fills the stage `SURFACE` first, and `_paint_unit_band` paints the mockup's soft grey gradient fading out
+  to the right (anchored at the viewport's left like the sticky label, border above / hairline below) so the
+  unit bands stay legible on the white ground. The round-2 windows are unchanged: washed across the expanded
+  frame and the collapsed pill by `_paint_regions`. (2) A wire dropping through another wire's ENTRY (its
+  chip + arrowhead into the dependent): `_routed_connectors` routes in two passes — every other wire's entry
+  run (`pts[-2].x .. x2` on its dependent's row, ±6 px), the stage's cross-sequence wires AND each expanded
   canvas's own step wires (`_TimelineCanvas._routed_connectors()`, factored out of its painter), is an
   obstacle for a wire dropping through that row, so its column lands left of the run instead of on the chip.
 Tests: `tests/test_plan_graph.py` (11), `tests/test_plan_editor_stage.py` (14; a wire clears another wire's
-entry run — the naive route is shown to land on it; a pixel test that the windows sit on the bar + strip and
-the frame interior stays neutral), `tests/test_plan_canvas_paint.py` (rewritten, 3), `test_plan_hold_arm.py`
+entry run — the naive route is shown to land on it; a pixel test that the windows wash the frame + pill and
+no sequence row is a grey stripe while the unit band keeps its wash), `tests/test_plan_canvas_paint.py` (rewritten, 3), `test_plan_hold_arm.py`
 (updated: Hold authoring deferred, a Hold survives). Suite 1185 → 1210 offscreen; agent 711 → 713. **Rollout:** OTA units to 1.35.0 before deploying an anchored plan (else the
 replica drifts); `docs/plan-editor-mockup.html` is the spec. Deferred: Holds in the plan editor, plan-level
 undo for sequence moves, per-unit online state from a live fleet (bands show the cached state).

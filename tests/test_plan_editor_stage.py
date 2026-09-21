@@ -310,7 +310,7 @@ def test_a_cross_wire_drops_clear_of_another_wires_entry_run():
     assert c["pts"][0] == (sp["x1"], sp["y1"]) and min(x for x, _ in c["pts"]) >= sp["x1"] - 1.0
 
 
-def test_sequence_windows_sit_on_the_slim_bar_and_the_pill_strip_not_across_the_frame():
+def test_sequence_windows_wash_across_the_frame_and_pill_and_no_row_is_a_grey_stripe():
     a = _item("a", "s1", "A", off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=300.0,
               expanded=False)
     b = _item("b", "s2", "B", on=480.0)
@@ -325,20 +325,22 @@ def test_sequence_windows_sit_on_the_slim_bar_and_the_pill_strip_not_across_the_
     def neutral(rgb):                 # neither a green nor a red tint (a grey hatch hairline is blue-grey)
         r, g, _b = rgb
         return abs(g - r) <= 4
-    # B's slim window bar IS its axis: green over its defined on-air region, hatched (neutral grey)
-    # over its relative region
-    bar_y = nb.row_y + nb.row_h - 16 + 2
-    r, g, _b = px(nb.on_x + 30, bar_y + 7)
-    assert g - r >= 6, (r, g, _b)
-    assert neutral(px(nb.off_x - 20, bar_y + 7))
-    # the group's interior — a row gap inside B's canvas — is a neutral wash, no green across the frame
+    # B's expanded frame carries ITS windows: green over its defined on-air region (a row gap inside its
+    # canvas), the hatched relative region (neutral grey) before its off-air
     bar = next(it for it in nb.canvas.items() if it.kind == "bar")
     gy = nb.canvas_y + nb.canvas._geom[bar.uid]["y"] + pe.LANE_H + 3
-    assert neutral(px(nb.on_x + 60, gy))
-    # A's collapsed pill: its (all-green, fixed length) windows sit on the thin mini strip…
+    r, g, _b = px(nb.on_x + 60, gy)
+    assert g - r >= 4, (r, g, _b)
+    assert neutral(px(nb.off_x - 20, gy))
+    # A's collapsed pill (fixed length) is washed green across its body
     w = max(float(pe.PILL_MIN_W), na.off_x - na.on_x)
-    y = na.row_y + 5
-    r, g, _b = px(na.on_x + 12 + (w - 24) * 0.75, y + 23)
-    assert g - r >= 6, (r, g, _b)
-    # …while the pill body above the strip stays plain
-    assert neutral(px(na.on_x + w * 0.5, y + 21))
+    r, g, _b = px(na.on_x + w * 0.5, na.row_y + 5 + 21)
+    assert g - r >= 4, (r, g, _b)
+    # …and NO sequence-level row is a full-width grey stripe (the stage paints its own white ground):
+    # B's header row and A's collapsed row are pure white left of any window
+    assert px(20, nb.row_y + 4) == (255, 255, 255)
+    assert px(20, na.row_y + 20) == (255, 255, 255)
+    # while the unit band above keeps a soft (not white) wash at its sticky left edge
+    unit = next(r_ for r_ in st._rows if r_["type"] == "unit")
+    r, g, b_ = px(st._on_x + 250, unit["y"] + unit["h"] / 2)          # clear of the label + anchor line
+    assert (r, g, b_) != (255, 255, 255) and 236 <= r <= 253 and g >= r
