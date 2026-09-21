@@ -212,3 +212,66 @@ def test_step_tools_act_on_the_selected_sequence():
     assert st.selected_node() is na and not nb.canvas._selection
     st.select_node(None)
     assert not na.canvas._selection and not ed._step_tools[0].isEnabled()
+
+
+def _cross_ramp_steps(target_item="pi-s1", offset=200.0):
+    """The paint fixture's steps, with the up-ramp hung off another item's `up` ramp END."""
+    out = []
+    for st in _steps():
+        if st.action == m.StepAction.RAMP:
+            st = st.model_copy(update=dict(anchor="step", anchor_item=target_item, anchor_step_id="up",
+                                           anchor_edge="end", offset_s=offset))
+        out.append(st)
+    return out
+
+
+def test_a_connector_under_a_window_spanning_bar_never_loops_back_to_the_anchors_on_air():
+    # A (unit a) fixed length; B (unit b) on the plan window, its ramp anchored to A's ramp END +3:20.
+    # The rows between hold B's bar, which spans B's WHOLE window (from before the anchor's x): the
+    # router must cross it, not push its drop column back past the anchor and wrap via B's on-air.
+    a = _item("a", "s1", "A", off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=300.0)
+    b = _item("b", "s2", "B", steps=_cross_ramp_steps())
+    ed = _editor([a, b])
+    st = ed._stage; na, nb = st.nodes(); eff = st.eff()
+    conns = [c for c in st._routed_connectors() if c["text"] == "+3:20"]
+    assert len(conns) == 1
+    c = conns[0]; sp = c["spec"]
+    assert sp["x1"] == pytest.approx(na.on_x + 120.0 * eff)                    # A's up-ramp end
+    assert sp["x2"] == pytest.approx(nb.on_x + 320.0 * eff, abs=1.0)           # B's ramp start
+    raw = st._obstacles_between(sp["y1"], sp["y2"])
+    assert any(lo <= sp["x1"] <= hi for lo, hi in raw)                         # B's bar spans the anchor x
+    # with the raw obstacles the sequence editor's router WOULD loop back left of the anchor…
+    looped = st._router._connector_points(sp["x1"], sp["y1"], sp["x2"], sp["y2"], sp["exit_dir"], raw,
+                                          sp["chip_w"] + 24.0, None, sp["entry_from_right"], two_sided=True)
+    assert min(x for x, _ in looped) < sp["x1"] - 20.0
+    # …the stage crosses such an obstacle instead: the drawn line never goes left of the anchor
+    assert min(x for x, _ in c["pts"]) >= sp["x1"] - 1.0
+    assert c["pts"][0] == (sp["x1"], sp["y1"]) and c["pts"][-1] == (sp["x2"], sp["y2"])
+    assert c["pts"][-2][1] == sp["y2"]                                          # horizontal entry
+    kept = st._route_obstacles(raw, sp["x1"], sp["x2"], False)
+    assert all(lo > sp["x1"] for lo, _ in kept)
+    # a genuine obstacle strictly between anchor and dependent is still routed around
+    assert st._route_obstacles([(sp["x1"] + 60.0, sp["x1"] + 80.0)], sp["x1"], sp["x2"], False) == \
+        [(sp["x1"] + 60.0, sp["x1"] + 80.0)]
+    # the right-entry mirror: an obstacle reaching the anchor from the left is crossed too
+    assert st._route_obstacles([(100.0, 500.0)], 480.0, 300.0, True) == []
+    assert st._route_obstacles([(340.0, 380.0)], 480.0, 300.0, True) == [(340.0, 380.0)]
+
+
+def test_each_sequence_carries_its_own_defined_and_relative_windows():
+    ed = _two()
+    st = ed._stage; na, nb = st.nodes(); eff = st.eff()
+    # A is fixed length: everything of it lives on the on clock → no off-clock content, no relative
+    # region (painted all green); its defined on-air region ends at its last on-clock instant (stop +1)
+    assert na.bwd_start_x is None
+    assert na.def_end_x == pytest.approx(st._on_x + 301.0 * eff)
+    # B hangs on the plan's two anchors: its defined on-air region ends at ITS up-ramp end (480 + 120),
+    # its defined off-air region begins at ITS first off-clock instant (the rf-off tune at off-air 0)
+    assert nb.def_end_x == pytest.approx(st._on_x + 600.0 * eff)
+    assert nb.bwd_start_x == pytest.approx(st._off_x)
+    # the plan-wide axis still reaches the furthest defined content of ANY sequence
+    assert st._def_end >= nb.def_end_x - 1.0
+    # the graph agrees, in seconds
+    g = pg.PlanGraph([n.graph_item() for n in st.nodes()])
+    assert g.item_windows(na.item.id) == (301.0, None)
+    assert g.item_windows(nb.item.id) == (600.0, 0.0)

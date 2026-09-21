@@ -573,6 +573,11 @@ class _SeqNode:
         self.row_h = 0.0
         self.canvas_y = 0.0
         self.fault: Optional[str] = None
+        # This sequence's OWN windows on the plan axis: its defined on-air region ends at def_end_x
+        # (None = nothing on the on clock), its defined off-air region begins at bwd_start_x (None =
+        # nothing on the off clock — a fixed-length sequence has no relative region at all).
+        self.def_end_x: Optional[float] = None
+        self.bwd_start_x: Optional[float] = None
 
     @property
     def canvas(self) -> _EmbeddedCanvas:
@@ -773,6 +778,9 @@ class _PlanStage(QWidget):
             off_c = tm.off if tm.off is not None else ("off", float(n.item.off_air_offset_s))
             n.on_x, n.off_x = self.xof(on_c), self.xof(off_c)
             self._last_timing[n.uid] = pg.ItemTiming(on_c, off_c)
+            on_last, off_first = g.item_windows(iid)
+            n.def_end_x = self.xof(("on", on_last)) if on_last is not None else None
+            n.bwd_start_x = self.xof(("off", off_first)) if off_first is not None else None
             c = n.canvas
             ext: Dict[int, Tuple[str, float]] = {}
             for it in c.items():
@@ -1155,22 +1163,16 @@ class _PlanStage(QWidget):
 
     # ── painting ──────────────────────────────────────────────────────────────
     def _paint_under_layer(self, p, with_bands: bool) -> None:
-        """Everything that sits UNDER the rows: the plan's three windows, the unit bands, the
-        expanded groups' frames + guide lines, the plan's anchor lines and every cross-sequence
+        """Everything that sits UNDER the rows: the unit bands, the expanded groups' frames + their
+        own windows + guide lines, the plan's anchor lines and every cross-sequence
         connector. Shared by the stage's own paint and each embedded canvas (which paints it
         translated to its row, so the layering is identical on and off a canvas)."""
         top = STAGE_TOP - 4
         bottom = self._h - AXIS_H
         on_x, off_x = self._on_x, self._off_x
-        de, bs = self._def_end, self._bwd_start
-        gt = QColor(Palette.ONLINE); gt.setAlpha(11)
-        p.fillRect(QRectF(on_x, top, max(0.0, de - on_x), bottom - top), gt)
-        rt = QColor(Palette.CRASH); rt.setAlpha(11)
-        p.fillRect(QRectF(bs, top, max(0.0, off_x - bs), bottom - top), rt)
-        self._router._paint_hatch(p, de, bs, top, bottom)
-        pen = QPen(QColor(Palette.BORDER_STRONG), 1); pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
-        p.drawLine(int(de), int(top), int(de), int(bottom + 4))
-        p.drawLine(int(bs), int(top), int(bs), int(bottom + 4))
+        # No plan-wide defined / relative / defined bands: every sequence paints ITS OWN three
+        # windows (its defined on-air region, its relative middle whose length is set at arm, its
+        # defined off-air region) inside its frame or pill — see _paint_regions.
         for r in self._rows:
             if r["type"] == "unit" and with_bands:
                 self._paint_unit_band(p, r)
@@ -1256,6 +1258,48 @@ class _PlanStage(QWidget):
         p.drawText(QRectF(x + fm.horizontalAdvance(label) + 8, y, 600, h),
                    int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), note)
 
+    def _paint_regions(self, p, node: _SeqNode, top: float, bottom: float, clip=None) -> None:
+        """A sequence's OWN three windows between its on-air and off-air: the defined on-air region
+        (green, up to its last on-clock item), the relative middle whose length is set at arm
+        (hatched), and the defined off-air region (red, from its first off-clock item). A sequence
+        with nothing on one clock has no relative region — a fixed-length sequence is all green."""
+        x0, x1 = node.on_x, node.off_x
+        if x1 - x0 <= 1.0:
+            return
+        de, bs = node.def_end_x, node.bwd_start_x
+        if de is None and bs is None:
+            return
+        if de is None:
+            g_end, h_lo, h_hi, r_start = x0, x0, x0, x0            # all off-clock: red only
+        elif bs is None:
+            g_end, h_lo, h_hi, r_start = x1, x1, x1, x1            # fixed length: green only
+        else:
+            g_end = max(x0, min(x1, de)); r_start = max(g_end, min(x1, bs))
+            h_lo, h_hi = g_end, r_start
+        p.save()
+        if clip is not None:
+            p.setClipPath(clip)
+        p.setPen(Qt.PenStyle.NoPen)
+        gt = QColor(Palette.ONLINE); gt.setAlpha(13); p.setBrush(gt)
+        p.drawRect(QRectF(x0, top, max(0.0, g_end - x0), bottom - top))
+        rt = QColor(Palette.CRASH); rt.setAlpha(13); p.setBrush(rt)
+        p.drawRect(QRectF(r_start, top, max(0.0, x1 - r_start), bottom - top))
+        if h_hi - h_lo > 2.0:
+            hb = QColor("#F4F6F9"); hb.setAlpha(170); p.setBrush(hb)
+            p.drawRect(QRectF(h_lo, top, h_hi - h_lo, bottom - top))
+            p.setClipRect(QRectF(h_lo, top, h_hi - h_lo, bottom - top), Qt.ClipOperation.IntersectClip)
+            p.setPen(QPen(QColor("#DFE4EA"), 1)); p.setBrush(Qt.BrushStyle.NoBrush)
+            h = bottom - top; xx = h_lo - h
+            while xx < h_hi:
+                p.drawLine(QPointF(xx, bottom), QPointF(xx + h, top)); xx += 7
+            p.setClipRect(QRectF(x0 - 20, top - 20, x1 - x0 + 40, bottom - top + 40), Qt.ClipOperation.ReplaceClip)
+            if clip is not None:
+                p.setClipPath(clip, Qt.ClipOperation.IntersectClip)
+            pen = QPen(QColor(Palette.BORDER_STRONG), 1); pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
+            p.drawLine(QPointF(h_lo, top), QPointF(h_lo, bottom))
+            p.drawLine(QPointF(h_hi, top), QPointF(h_hi, bottom))
+        p.restore()
+
     def _paint_group(self, p, node: _SeqNode):
         c = node.canvas
         x1, x2 = node.span
@@ -1265,9 +1309,8 @@ class _PlanStage(QWidget):
         pen = QPen(frame, 1.2); pen.setStyle(Qt.PenStyle.DashLine); p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRoundedRect(QRectF(x1 - MIN_EAR - 6, y1, (x2 - x1) + 2 * MIN_EAR + 12, y2 - y1), 10, 10)
-        tint = QColor(Palette.ONLINE); tint.setAlpha(13)
-        p.setPen(Qt.PenStyle.NoPen); p.setBrush(tint)
-        p.drawRoundedRect(QRectF(node.on_x, y1 + 1, max(0.0, node.off_x - node.on_x), y2 - y1 - 2), 8, 8)
+        clip = QPainterPath(); clip.addRoundedRect(QRectF(node.on_x, y1 + 1, max(0.0, node.off_x - node.on_x), y2 - y1 - 2), 8, 8)
+        self._paint_regions(p, node, y1 + 1, y2 - 1, clip)
         gpen = QPen(QColor(Palette.ONLINE), 1.5); gpen.setStyle(Qt.PenStyle.DashLine); p.setPen(gpen)
         p.drawLine(int(node.on_x), int(y1), int(node.on_x), int(y2))
         rpen = QPen(QColor(Palette.CRASH), 1.5); rpen.setStyle(Qt.PenStyle.DashLine); p.setPen(rpen)
@@ -1323,6 +1366,8 @@ class _PlanStage(QWidget):
             r = QRectF(x, y, w, 36)
             p.setPen(QPen(frame, 1.5 if (sel or conflict) else 1)); p.setBrush(QColor(Palette.SURFACE))
             p.drawRoundedRect(r, 9, 9)
+            pclip = QPainterPath(); pclip.addRoundedRect(r, 9, 9)
+            self._paint_regions(p, node, y, y + 36, pclip)          # its own defined / relative windows
             p.save(); clip = QPainterPath(); clip.addRoundedRect(r, 9, 9); p.setClipPath(clip)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(Palette.ONLINE)); p.drawRect(QRectF(x, y, 4, 36))
@@ -1522,16 +1567,42 @@ class _PlanStage(QWidget):
                 return it, edge
         return None
 
-    def _paint_connectors(self, p):
+    @staticmethod
+    def _route_obstacles(obstacles, x1: float, x2: float, entry_from_right: bool):
+        """The obstacles the router is asked to avoid. An obstacle it could only dodge by pushing the
+        drop column back PAST THE ANCHOR — a bar spanning its sequence's whole window, or a sequence
+        pill in between — is CROSSED instead (the line passes behind it), never routed around via
+        the far end of the window: a +3:20 line into a task's down-ramp must not loop back to that
+        sequence's on-air first."""
+        GAP = 14.0
+        keep = []
+        for lo, hi in obstacles:
+            if entry_from_right and x1 > x2:
+                if hi + GAP >= x1 - 8.0:
+                    continue
+            elif lo - GAP <= x1 + 8.0:
+                continue
+            keep.append((lo, hi))
+        return keep
+
+    def _routed_connectors(self) -> List[dict]:
+        """Every cross-sequence connector with its routed waypoints (`pts`), as the painter draws it."""
         rt = self._router
         conns = []
         for s in self._connector_specs():
-            obstacles = self._obstacles_between(s["y1"], s["y2"])
+            obstacles = self._route_obstacles(self._obstacles_between(s["y1"], s["y2"]),
+                                              s["x1"], s["x2"], s["entry_from_right"])
             pts = rt._connector_points(s["x1"], s["y1"], s["x2"], s["y2"], s["exit_dir"], obstacles,
                                        s["chip_w"] + 24.0, s["anchor_cap"], s["entry_from_right"],
                                        two_sided=s["two_sided"])
-            conns.append(dict(pts=pts, base=s["base"], ink=s["ink"], sel=s["sel"], x2=s["x2"], y2=s["y2"],
-                              entry_from_right=s["entry_from_right"], text=s["text"], chip_w=s["chip_w"]))
+            conns.append(dict(pts=pts, base=s["base"], ink=s["ink"], sel=s["sel"], x1=s["x1"], y1=s["y1"],
+                              x2=s["x2"], y2=s["y2"], entry_from_right=s["entry_from_right"],
+                              text=s["text"], chip_w=s["chip_w"], spec=s))
+        return conns
+
+    def _paint_connectors(self, p):
+        rt = self._router
+        conns = self._routed_connectors()
         for c in conns:
             rt._draw_connector_path(p, c)
         polylines = [c["pts"] for c in conns]

@@ -128,9 +128,21 @@ mockup.html`** is the visual spec; the anchor lines are drawn by the SEQUENCE ED
   before; open-ended: a fixed-length sequence keeps its duration, an off-clock on-air is refused);
   `_finish_arm_preflight` derives the lead-in from `earliest_on_clock_s` and blocks an untimeable plan;
   `_step_anchor_block_lines` ignores cross-item anchors (compiled away).
-Tests: `tests/test_plan_graph.py` (11), `tests/test_plan_editor_stage.py` (10), `tests/test_plan_canvas_paint.py`
+- **Owner follow-ups (round 2)** — (1) a cross-sequence wire no longer loops back left to the anchor's
+  on-air before heading right: `_PlanStage._route_obstacles` drops every intervening obstacle the router could
+  only dodge by pushing its drop column back PAST the anchor (a duration bar spanning its sequence's whole
+  window, a collapsed pill in between), so the line CROSSES it and leaves straight toward the dependent; a
+  genuine obstacle strictly between the two is still routed around. `_routed_connectors()` exposes the routed
+  polylines (the painter draws them). (2) Every sequence carries its OWN defined-on-air / relative / defined-
+  off-air windows: `PlanGraph.item_times` / `item_windows(item_id)` → `(last on-clock s, first off-clock s)`
+  → `_SeqNode.def_end_x` / `bwd_start_x`, painted by `_paint_regions` inside the expanded group frame AND the
+  collapsed pill (green up to its last on-clock instant, the hatched relative middle with dashed boundaries,
+  red from its first off-clock instant; a fixed-length sequence is all green, an all-off-clock one all red).
+  The plan-wide tint/hatch that started at the LAST sequence's relative region is gone; the axis still spans
+  the global extents.
+Tests: `tests/test_plan_graph.py` (11), `tests/test_plan_editor_stage.py` (12), `tests/test_plan_canvas_paint.py`
 (rewritten, 3), `test_plan_hold_arm.py` (updated: Hold authoring deferred, a Hold survives). Suite 1185 →
-1206 offscreen; agent 711 → 713. **Rollout:** OTA units to 1.35.0 before deploying an anchored plan (else the
+1208 offscreen; agent 711 → 713. **Rollout:** OTA units to 1.35.0 before deploying an anchored plan (else the
 replica drifts); `docs/plan-editor-mockup.html` is the spec. Deferred: Holds in the plan editor, plan-level
 undo for sequence moves, per-unit online state from a live fleet (bands show the cached state).
 

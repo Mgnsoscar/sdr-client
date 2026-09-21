@@ -227,6 +227,30 @@ class PlanGraph:
                         out.append(c)
         return out
 
+    def item_times(self, item_id: str) -> List[Clocked]:
+        """Every resolved instant of ONE item: its two edges + each of its steps' start/end."""
+        out: List[Clocked] = []
+        for e in ("on", "off"):
+            c = self.item_edge(item_id, e)
+            if c is not None:
+                out.append(c)
+        for i in range(len(self.steps_of(item_id))):
+            for e in ("start", "end"):
+                c = self.step_edge(item_id, i, e)
+                if c is not None:
+                    out.append(c)
+        return out
+
+    def item_windows(self, item_id: str) -> Tuple[Optional[float], Optional[float]]:
+        """(last on-clock second, first off-clock second) of an item's content — where ITS defined
+        on-air region ends and ITS defined off-air region begins; either is None when nothing of the
+        item lives on that clock (a fixed-length sequence has no off-clock content, so no relative
+        region at all)."""
+        times = self.item_times(item_id)
+        on = [t for c, t in times if c == "on"]
+        off = [t for c, t in times if c == "off"]
+        return (max(on) if on else None), (min(off) if off else None)
+
     def extents(self) -> Tuple[float, float]:
         """(forward_s, backward_s): how far the DEFINED regions reach — past the plan's on-air
         (everything on the on clock) and before its off-air (everything on the off clock) — rounded
