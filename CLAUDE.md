@@ -161,11 +161,22 @@ mockup.html`** is the visual spec; the anchor lines are drawn by the SEQUENCE ED
   chip rides the drop; `_draw_connector_head` backs the arrow + chip off along the short entry run), or jogs
   to the column with no stub when that column is blocked / the dependent sits behind the line; a far
   dependent keeps the general route (along the exit row, down, in).
-Tests: `tests/test_plan_graph.py` (11), `tests/test_plan_editor_stage.py` (15; a wire clears another wire's
+  (4) "Is chaining sequences on one unit disallowed?" — no: `pg.channel_conflicts` only flags sequences whose
+  TRUE extents (window + every step's lead-in / tail) OVERLAP on one unit, and touching spans are a legal
+  chain. Two things were wrong, though: a tune PIN's ±6 px drawing pad leaked into `_SeqNode.span`, so a
+  legal chain with exactly the lead-in + tail gap read red (and the verdict changed with zoom) — the span is
+  now the pin's instant; and the banner said only "overlapping sequences". `pg.channel_conflict_pairs`
+  (the set is derived from it) + `_PlanStage.conflict_message()` name the first clashing pair and its kind:
+  "“A” and “B” are on air at the same time" (their windows overlap) or "“B”'s warm-up starts before “A”'s
+  cool-down ends … leave ≥ N s between “A” off-air and “B” on-air" (N = tail + lead-in, the agent's arm rule),
+  "(+n more)" when several. The demo plan's red is a genuine overlap (Galileo anchored INTO the chirp's window).
+Tests: `tests/test_plan_graph.py` (11), `tests/test_plan_editor_stage.py` (16; a wire clears another wire's
 entry run — the naive route is shown to land on it; a pixel test that the windows wash the frame + pill and
 no sequence row is a grey stripe while the unit band keeps its wash; a line-anchored wire to a near dependent
-drops straight while the shared router would hook, and a far one keeps the general route), `tests/test_plan_canvas_paint.py` (rewritten, 3), `test_plan_hold_arm.py`
-(updated: Hold authoring deferred, a Hold survives). Suite 1185 → 1211 offscreen; agent 711 → 713. **Rollout:** OTA units to 1.35.0 before deploying an anchored plan (else the
+drops straight while the shared router would hook, and a far one keeps the general route; a 2 s-gap
+chain on one unit is clean, a touching chain names the warm-up / cool-down gap, a nested window reads "at the
+same time", other units never clash), `tests/test_plan_canvas_paint.py` (rewritten, 3), `test_plan_hold_arm.py`
+(updated: Hold authoring deferred, a Hold survives). Suite 1185 → 1212 offscreen; agent 711 → 713. **Rollout:** OTA units to 1.35.0 before deploying an anchored plan (else the
 replica drifts); `docs/plan-editor-mockup.html` is the spec. Deferred: Holds in the plan editor, plan-level
 undo for sequence moves, per-unit online state from a live fleet (bands show the cached state).
 

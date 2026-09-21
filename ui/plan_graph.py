@@ -324,19 +324,29 @@ def pack_lanes(spans: List[Tuple[str, float, float]], gap: float = 6.0) -> Dict[
     return out
 
 
-def channel_conflicts(spans: Dict[str, Tuple[float, float]], unit_of: Dict[str, str]) -> set:
-    """Ids of the sequences that OVERLAP another sequence on the SAME unit (one TX channel each):
-    a channel conflict. Spans are the sequences' drawn extents (their window plus every step's
-    warm-up / cool-down), in any common unit."""
-    out: set = set()
+def channel_conflict_pairs(spans: Dict[str, Tuple[float, float]],
+                           unit_of: Dict[str, str]) -> List[Tuple[str, str]]:
+    """The pairs of sequences that OVERLAP on the SAME unit (one TX channel each): channel
+    conflicts, in input order. Spans are the sequences' TRUE extents in time (their window plus
+    every step's lead-in / tail — never a drawing pad), in any common unit; spans that merely
+    TOUCH (one ends where the next begins) do not clash — that is a legal chain."""
+    out: List[Tuple[str, str]] = []
     ids = list(spans)
     for i, a in enumerate(ids):
         for b in ids[i + 1:]:
             if unit_of.get(a) != unit_of.get(b):
                 continue
             a0, a1 = spans[a]; b0, b1 = spans[b]
-            if a0 < b1 and b0 < a1:
-                out.add(a); out.add(b)
+            if a0 < b1 - 1e-6 and b0 < a1 - 1e-6:
+                out.append((a, b))
+    return out
+
+
+def channel_conflicts(spans: Dict[str, Tuple[float, float]], unit_of: Dict[str, str]) -> set:
+    """Ids of every sequence in a channel conflict (see channel_conflict_pairs)."""
+    out: set = set()
+    for a, b in channel_conflict_pairs(spans, unit_of):
+        out.add(a); out.add(b)
     return out
 
 

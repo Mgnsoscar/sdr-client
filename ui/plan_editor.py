@@ -30,6 +30,7 @@ draws as a plain divider and the arm paths still compile it out / honour it exac
 from __future__ import annotations
 
 import itertools
+import math
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
@@ -636,6 +637,7 @@ class _PlanStage(QWidget):
         self._on_x = self._off_x = self._def_end = self._bwd_start = 0.0
         self._w, self._h = 400, 200
         self._conflicts: set = set()
+        self._conflict_pairs: List[Tuple[str, str]] = []
         self._sel_node: Optional[int] = None         # uid of the selected sequence
         self._sel_canvas: Optional[_EmbeddedCanvas] = None
         self._drag: Optional[dict] = None
@@ -802,7 +804,7 @@ class _PlanStage(QWidget):
                 if "start_x" in gg:
                     xs += [gg["start_x"], gg["stop_x"]]
                 elif "cx" in gg:
-                    xs += [gg["cx"] - 6, gg["cx"] + 6]
+                    xs.append(gg["cx"])
             n.span = (min(xs), max(xs))
         # 2) rows
         rows: List[dict] = []
@@ -849,8 +851,9 @@ class _PlanStage(QWidget):
                     y += ROW_SEQC_H + ROW_GAP
         self._rows = rows
         self._h = int(y + AXIS_H)
-        self._conflicts = pg.channel_conflicts({str(n.uid): n.span for n in self._nodes},
-                                              {str(n.uid): n.item.hostname for n in self._nodes})
+        self._conflict_pairs = pg.channel_conflict_pairs({str(n.uid): n.span for n in self._nodes},
+                                                         {str(n.uid): n.item.hostname for n in self._nodes})
+        self._conflicts = {u for pair in self._conflict_pairs for u in pair}
         self.setFixedSize(self._w, self._h)
         self.update()
         self._owner._on_stage_relayout()
@@ -2002,6 +2005,33 @@ class _PlanStage(QWidget):
     def conflicts(self) -> set:
         return set(self._conflicts)
 
+    def conflict_message(self) -> str:
+        """The banner text for the channel conflicts ("" when there are none): the first clashing
+        pair, named, and the KIND of clash — the two on air at the same time, or only the later
+        one's warm-up (lead-in) starting before the earlier one's cool-down (tail) ends, with the
+        gap between the two windows that would clear it (the agent's arm rule: lead-in + tail)."""
+        pairs = self._conflict_pairs
+        if not pairs:
+            return ""
+        by = {str(n.uid): n for n in self._nodes}
+        a, b = by.get(pairs[0][0]), by.get(pairs[0][1])
+        if a is None or b is None:
+            return "⚠ Channel conflict — overlapping sequences on one unit"
+        first, second = (a, b) if a.on_x <= b.on_x else (b, a)
+        unit = first.item.unit_label or first.item.hostname
+        n1 = first.item.sequence_name or first.item.sequence_id
+        n2 = second.item.sequence_name or second.item.sequence_id
+        more = f" (+{len(pairs) - 1} more)" if len(pairs) > 1 else ""
+        if first.on_x < second.off_x and second.on_x < first.off_x:
+            return (f"⚠ Channel conflict on {unit} — “{n1}” and “{n2}” are on air at the same time "
+                    f"(one TX channel per unit){more}")
+        eff = self.eff()
+        tail = max(0.0, first.span[1] - first.off_x) / eff
+        lead = max(0.0, second.on_x - second.span[0]) / eff
+        need = int(math.ceil(tail + lead - 1e-6))
+        return (f"⚠ Channel conflict on {unit} — “{n2}”'s warm-up starts before “{n1}”'s cool-down ends "
+                f"(one TX channel per unit): leave ≥ {need} s between “{n1}” off-air and “{n2}” on-air{more}")
+
     def first_fault(self) -> Optional[str]:
         for n in self._nodes:
             if n.fault:
@@ -2326,10 +2356,7 @@ class PlanTimelineEditor(QWidget):
             self._ready.setText(f"⚠ {fault}")
             self._ready.setStyleSheet(f"font-size: 11px; color: {Palette.CRASH}; font-weight: 600;")
         elif conflicts:
-            units = sorted({n.item.unit_label or n.item.hostname for n in self._stage.nodes()
-                            if str(n.uid) in conflicts})
-            self._ready.setText(f"⚠ Channel conflict on {', '.join(units)} — overlapping sequences "
-                                f"on one unit")
+            self._ready.setText(self._stage.conflict_message())
             self._ready.setStyleSheet(f"font-size: 11px; color: {Palette.CRASH}; font-weight: 600;")
         else:
             n = len(self._stage.nodes())

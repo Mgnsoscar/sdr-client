@@ -371,3 +371,33 @@ def test_a_wire_from_a_sequence_line_to_a_near_dependent_drops_straight_and_neve
     ed2 = _editor([a, b2])
     c2 = ed2._stage._routed_connectors()[0]; sp2 = c2["spec"]
     assert len(c2["pts"]) == 4 and c2["pts"][1][1] == sp2["y1"] and sp2["x1"] < c2["pts"][1][0] < sp2["x2"]
+
+
+def test_chaining_sequences_on_one_unit_is_allowed_and_a_clash_names_its_kind():
+    def chain(gap):
+        a = _item("a", "s1", "A", off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=300.0)
+        b = _item("a", "s2", "B", on_air_anchor="item", on_air_anchor_item="pi-s1", on_air_anchor_edge="off",
+                  on_air_offset_s=gap, off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=200.0)
+        return _editor([a, b])
+    # the fixture's START fires 1 s before on-air and its STOP 1 s after off-air: B chained 2 s after
+    # A on the SAME unit merely touches it — no conflict (the drawing pad of a pin never counts)
+    ed = chain(2.0); st = ed._stage
+    assert st.conflicts() == set() and st.conflict_message() == ""
+    assert "no channel conflicts" in ed._ready.text()
+    na = st.nodes()[0]
+    assert (na.span[1] - na.off_x) / st.eff() == pytest.approx(1.0, abs=0.02)      # A's tail = its STOP
+    # touching windows: B's warm-up starts before A's cool-down ends → a conflict naming the gap
+    ed0 = chain(0.0); st0 = ed0._stage
+    assert len(st0.conflicts()) == 2
+    msg = st0.conflict_message()
+    assert "warm-up" in msg and "cool-down" in msg and "≥ 2 s" in msg and "“A”" in msg and "“B”" in msg
+    assert ed0._ready.text() == msg
+    # a genuine overlap (B's window inside A's) reads as on air at the same time
+    a = _item("a", "s1", "A", off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=300.0)
+    b = _item("a", "s2", "B", on=60.0, off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=100.0)
+    st2 = _editor([a, b])._stage
+    assert len(st2.conflicts()) == 2 and "are on air at the same time" in st2.conflict_message()
+    # different units never clash
+    a = _item("a", "s1", "A", off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=300.0)
+    b = _item("b", "s2", "B", on=60.0, off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=100.0)
+    assert _editor([a, b])._stage.conflicts() == set()
