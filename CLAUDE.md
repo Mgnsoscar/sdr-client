@@ -36,6 +36,73 @@ captured at import (`config.DEFAULT_UNITS_FILE`), so `screenshot.py` sets it BEF
 cable) so the unit is calibrated by default — `screenshot.py --tab calibration` drills into the unit's
 Calibration panel to render it.
 
+## Current state — live UI: Units tab + unit detail refresh on a pushed task/crash event: COMPLETE (branch `claude/synced-clock`, client-only)
+Owner ask (after confirming the SSE stream already exists): make the UI update as things happen instead
+of waiting up to a poll cycle. Survey finding: the alert feed, Sequences, Plans and the schedule Timeline
+already react to pushed events (`SequenceWebhook`); the one gap was the **Units tab + unit detail task
+rows / running-count**, which were fed only by the 3 s fast poll (`on_fast_update`). The agent already
+pushes `task_started`/`task_stopped`/`task_restarted` (`TaskEvent`) + `CrashEvent` over the existing SSE
+stream (`/events/stream`), and the client already receives them (`DataHub.event_received`) — that view
+just didn't listen. Fix (client-only; no agent/wire/capability change; drift-guarded files untouched):
+- **`ui/units_tab.py`** — new `UnitsTab.on_event(ev)`: on a `TaskEvent`/`CrashEvent`, map the event's
+  advertised `unit_id` to the Fleet's hostname key (`_host_for_unit_id`, iterates `fleet.units()`) and
+  call `hub.refresh_now(host)` — the existing scoped one-unit fast poll — so the change shows at once.
+  An unattributable event (no matching unit — shouldn't happen) falls back to a full `refresh_now()`.
+  This covers the EXTERNALLY-caused changes the poll lagged on: a crash, a task finishing, another
+  operator, or a schedule/sequence launching a task. A start/stop from THIS client already updated
+  optimistically via `_on_task_action_done`; the 3 s poll stays as the backstop.
+- **`ui/main_window.py`** — `_on_event` now also calls `self.units_tab.on_event(ev)` (it already fed the
+  alert feed). Sequences/Plans/Timeline keep reacting to sequence events on their own.
+Tests: `tests/test_units_live_refresh.py` (a task event refreshes only the matching unit; every lifecycle
+kind nudges; a crash refreshes; an unmatched unit_id → full refresh; non-lifecycle / junk events ignored).
+Suite 1108 → 1116 offscreen.
+
+## Current state — clock jitter: the seconds flip is pinned to the true boundary: COMPLETE (branch `claude/synced-clock`, client-only)
+Owner report: the synced clock kept correct time but "swings" every ~4–5 s vs time.is, then re-aligns.
+Cause: the display shows whole seconds but the redraw tick was a free-running `QTimer` at a fixed 200 ms,
+not aligned to the real second boundary — so each flip landed 0–200 ms late, and the 200 ms grid beat
+against the 1 s grid (nudged by GUI work from the poll / SSE) into a slow visible swing; re-applying the
+chip stylesheet (a Qt re-polish) + rebuilding the tooltip 5×/s added churn that delayed the very tick.
+Fix (`ui/clock_widget.py`, no behaviour change to the time source): the `_tick` is now **single-shot,
+re-armed each time to just after the next whole second** (`_schedule_tick` = ms to the next boundary +
+`TICK_GUARD_MS` 20 ms, from `clock.now()`), so the flip self-corrects onto the boundary every second
+regardless of timer slop or a momentary hitch; and `_render(full=False)` on a tick updates only the
+`HH:MM:SS` text — the sub-line, the source chip's text/stylesheet, and the tooltip are touched only when
+they actually change (or on a `full` redraw at init/sync/failure), so a plain tick does no re-polish.
+`refresh()` stays the full-redraw entry point (init + `_apply_sample`/`_apply_failure`). Tests:
+`tests/test_synced_clock.py` (the tick re-arms to ~the next boundary + guard and stays single-shot;
+`stop()` disarms it; a plain tick advances the time with zero chip-stylesheet re-applies + zero tooltip
+rebuilds; a real source change still restyles). Suite 1108 → 1116 offscreen (with the live-refresh work).
+
+## Current state — internet-synchronized clock in the top bar (NTP, PC-clock fallback): COMPLETE (branch `claude/synced-clock`, client-only)
+Owner ask: a clearly visible, internet-synchronized clock so an operator doesn't keep a `time.is`
+tab open; NTP-synced, not the PC clock, and falling back to the PC clock when NTP can't be reached.
+Client-only; no agent/scripts/wire/capability change; drift-guarded files untouched.
+- **`state/ntp_clock.py`** (new, pure stdlib, no Qt) — SNTP (RFC 4330): `query_ntp(server)` does one
+  UDP/123 exchange and `parse_ntp_response` derives the PC clock's OFFSET from true time via the
+  four-timestamp formula (rejecting an untrusted reply — wrong mode, leap-alarm `LI==3`, stratum 0
+  kiss-o'-death, empty transmit stamp); `sync(servers)` tries `pool.ntp.org` → Google → Cloudflare →
+  NIST, first to answer wins. **`SyncedClock`** stores only the offset (never a frozen time), so
+  `now()` = `time.time() + offset` advances smoothly between syncs; a failed re-sync KEEPS the last
+  good offset (the PC drifts far less than it's likely to be wrong outright). `source` is `"ntp"` or
+  `"local"`; `uncertainty_s()` = rtt/2; `status_text()`/`describe()` render the chip + tooltip.
+- **`ui/clock_widget.py`** (new) — `SyncedClockWidget` in the top bar: local `HH:MM:SS` (mono) + a
+  `ZONE · UTC hh:mm:ss · date` sub-line (UTC read-out suppressed when the PC's own zone is UTC — the
+  units + run timestamps are UTC, so it's worth pairing) + a source chip: green **`NTP ✓ ±N ms`**,
+  amber **`PC clock`**, muted **`syncing…`**. A daemon-thread `_NtpSyncer` runs `sync()` off the UI
+  thread and hands the result back over Qt signals (never blocks the GUI, a failure is a fallback not
+  a crash); re-sync every 600 s after success / 60 s after a failure; a click on the chip re-syncs now.
+  `autostart=False` keeps the timers + network off for tests.
+- **`ui/main_window.py`** — the widget sits in the top bar between the tab buttons and the existing
+  unit-vs-PC `clocks:` skew indicator (which is unchanged — that one compares each UNIT's clock to
+  this PC for scheduling; this one shows the true wall-clock time).
+Tests: `tests/test_synced_clock.py` (the four-timestamp math + every reject case; a real loopback fake
+NTP server measures a known offset; the closed-port fallback; first-answer-wins; `SyncedClock` keeps a
+good offset through a later failure; the widget shows NTP time + chip, falls back to the PC clock, and
+delivers an off-thread sync to the GUI). Suite 1095 → 1108 offscreen. NTP needs outbound UDP/123 (a
+locked-down LAN blocks it → the widget shows `PC clock` and keeps retrying, which is the intended
+fallback).
+
 ## Cross-repo invariants (do not break)
 - **Drift guard (enforced by `sdr-agent/tests/test_shared_source_drift.py`):**
   `api/argspec.py` and `api/ramp.py` MUST stay **byte-identical** to `sdr-agent/agent/argspec.py`

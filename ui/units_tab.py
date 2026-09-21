@@ -12,7 +12,7 @@ For this first pass the detail view is a placeholder; it's built next.
 from __future__ import annotations
 
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -478,3 +478,28 @@ class UnitsTab(QWidget):
             self._update_summary()
         # Also reflect on the detail header if this unit is open.
         self._detail.on_stream_status(hostname, connected)
+
+    def on_event(self, ev) -> None:
+        """A pushed lifecycle event (SSE) → refresh the affected unit NOW instead of waiting
+        up to a poll cycle. Task start/stop/restart or a crash change what the task rows and
+        the card's running-count show, and these are the EXTERNALLY-caused changes the poll
+        would otherwise lag on (a crash, a task finishing, another operator, or a schedule /
+        sequence launching a task; a start/stop from THIS client already updates optimistically).
+        A scoped refresh of just that unit stays snappy even with dead units in the fleet; the
+        poll remains the backstop for anything the stream misses."""
+        if not isinstance(ev, (m.TaskEvent, m.CrashEvent)):
+            return
+        host = self._host_for_unit_id(getattr(ev, "unit_id", ""))
+        # If we can't attribute it to a known unit (shouldn't happen — events only come from
+        # units we stream from), fall back to a full refresh rather than miss the change.
+        self.hub.refresh_now(host)   # host=None → whole-fleet refresh (the backstop path)
+
+    def _host_for_unit_id(self, unit_id: str) -> Optional[str]:
+        """Map an event's advertised unit_id to the Fleet's hostname key (what refresh_now
+        wants). None when unmatched."""
+        if not unit_id:
+            return None
+        for client in self.fleet.units():
+            if client.unit_id == unit_id:
+                return client.hostname
+        return None
