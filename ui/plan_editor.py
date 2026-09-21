@@ -638,6 +638,8 @@ class _PlanStage(QWidget):
         self._w, self._h = 400, 200
         self._conflicts: set = set()
         self._conflict_pairs: List[Tuple[str, str]] = []
+        self._stacked: set = set()                    # overlapping, but their tasks differ (information)
+        self._stacked_pairs: List[Tuple[str, str]] = []
         self._sel_node: Optional[int] = None         # uid of the selected sequence
         self._sel_canvas: Optional[_EmbeddedCanvas] = None
         self._drag: Optional[dict] = None
@@ -851,9 +853,16 @@ class _PlanStage(QWidget):
                     y += ROW_SEQC_H + ROW_GAP
         self._rows = rows
         self._h = int(y + AXIS_H)
-        self._conflict_pairs = pg.channel_conflict_pairs({str(n.uid): n.span for n in self._nodes},
-                                                         {str(n.uid): n.item.hostname for n in self._nodes})
+        pairs = pg.channel_conflict_pairs({str(n.uid): n.span for n in self._nodes},
+                                          {str(n.uid): n.item.hostname for n in self._nodes})
+        # two sequences overlapping on one unit are a CONFLICT only when both LAUNCH the same task
+        # (a task runs once — the agent's arm guard, 1.36.0); otherwise they merely STACK, which
+        # the owner allows (their tasks must be compatible — that is the operator's call for now)
+        launch = {str(n.uid): self._launched_tasks(n) for n in self._nodes}
+        self._conflict_pairs = [(a, b) for a, b in pairs if launch[a] & launch[b]]
+        self._stacked_pairs = [(a, b) for a, b in pairs if not (launch[a] & launch[b])]
         self._conflicts = {u for pair in self._conflict_pairs for u in pair}
+        self._stacked = {u for pair in self._stacked_pairs for u in pair} - self._conflicts
         self.setFixedSize(self._w, self._h)
         self.update()
         self._owner._on_stage_relayout()
@@ -1365,10 +1374,12 @@ class _PlanStage(QWidget):
         w = max(float(PILL_MIN_W), x2 - x)
         sel = node.uid == self._sel_node
         conflict = str(node.uid) in self._conflicts
-        frame = QColor(Palette.CRASH) if conflict else (QColor(Palette.ACCENT) if sel else QColor(SEQ_FRAME))
+        stacked = str(node.uid) in self._stacked
+        frame = (QColor(Palette.CRASH) if conflict else QColor(Palette.ARMED) if stacked
+                 else QColor(Palette.ACCENT) if sel else QColor(SEQ_FRAME))
         if slim:
             r = QRectF(x, y + 2, w, 14)
-            p.setPen(QPen(frame, 1.5 if (sel or conflict) else 1)); p.setBrush(QColor(Palette.INSET))
+            p.setPen(QPen(frame, 1.5 if (sel or conflict or stacked) else 1)); p.setBrush(QColor(Palette.INSET))
             p.drawRoundedRect(r, 5, 5)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(Palette.ONLINE)); p.drawRoundedRect(QRectF(x, y + 2, 4, 14), 2, 2)
@@ -1380,7 +1391,7 @@ class _PlanStage(QWidget):
         else:
             self._paint_ears(p, node, y + 7, 22)
             r = QRectF(x, y, w, 36)
-            p.setPen(QPen(frame, 1.5 if (sel or conflict) else 1)); p.setBrush(QColor(Palette.SURFACE))
+            p.setPen(QPen(frame, 1.5 if (sel or conflict or stacked) else 1)); p.setBrush(QColor(Palette.SURFACE))
             p.drawRoundedRect(r, 9, 9)
             pclip = QPainterPath(); pclip.addRoundedRect(r, 9, 9)
             self._paint_regions(p, node, y, y + 36, pclip)          # its own defined / relative windows
@@ -1881,7 +1892,11 @@ class _PlanStage(QWidget):
         if c.on is not None and c.off is not None:
             lines.append(f"resolves {self._clock_text(c.on)} → {self._clock_text(c.off)}")
         if str(node.uid) in self._conflicts:
-            lines.append(f"<span style='color:{Palette.CRASH}'>⚠ overlaps another sequence on this unit</span>")
+            lines.append(f"<span style='color:{Palette.CRASH}'>⚠ launches the same task as an overlapping "
+                         f"sequence on this unit — the unit refuses the arm</span>")
+        elif str(node.uid) in self._stacked:
+            lines.append(f"<span style='color:{Palette.ARMED}'>⚑ stacked with another sequence on this unit — "
+                         f"their tasks must be compatible</span>")
         QToolTip.showText(global_pt, "<br>".join(lines), self)
 
     def _clock_text(self, c: pg.Clocked) -> str:
@@ -2005,32 +2020,97 @@ class _PlanStage(QWidget):
     def conflicts(self) -> set:
         return set(self._conflicts)
 
-    def conflict_message(self) -> str:
-        """The banner text for the channel conflicts ("" when there are none): the first clashing
-        pair, named, and the KIND of clash — the two on air at the same time, or only the later
-        one's warm-up (lead-in) starting before the earlier one's cool-down (tail) ends, with the
-        gap between the two windows that would clear it (the agent's arm rule: lead-in + tail)."""
-        pairs = self._conflict_pairs
-        if not pairs:
-            return ""
+    def stacked(self) -> set:
+        """Sequences overlapping another on their unit WITHOUT launching a task it launches too —
+        allowed (information only, amber)."""
+        return set(self._stacked)
+
+    @staticmethod
+    def _launched_tasks(node: _SeqNode) -> set:
+        """The task names this sequence LAUNCHES (a duration bar, a one-shot run) — a tune / ramp
+        only drives a task somebody else launched."""
+        out: set = set()
+        for it in node.canvas.items():
+            if getattr(it, "kind", None) == "bar" or tlm._is_oneshot(it):
+                name = getattr(it, "task_name", "") or ""
+                if name:
+                    out.add(name)
+        return out
+
+    def _unit_supports_stacking(self, host: str) -> Optional[bool]:
+        """Whether the unit's agent admits stacked runs (`sequence-stacking`, agent ≥ 1.36.0);
+        None when the unit isn't in the fleet / its /info was never read."""
+        try:
+            client = self._owner._hub.fleet.get(host)
+            if not getattr(client, "capabilities", None):
+                return None
+            return bool(client.supports("sequence-stacking"))
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _pair_text(self, pair):
+        """(first, second, unit, n1, n2, same_time, need_s) for a pair of overlapping nodes, or
+        None when either left the stage."""
         by = {str(n.uid): n for n in self._nodes}
-        a, b = by.get(pairs[0][0]), by.get(pairs[0][1])
+        a, b = by.get(pair[0]), by.get(pair[1])
         if a is None or b is None:
-            return "⚠ Channel conflict — overlapping sequences on one unit"
+            return None
         first, second = (a, b) if a.on_x <= b.on_x else (b, a)
         unit = first.item.unit_label or first.item.hostname
         n1 = first.item.sequence_name or first.item.sequence_id
         n2 = second.item.sequence_name or second.item.sequence_id
-        more = f" (+{len(pairs) - 1} more)" if len(pairs) > 1 else ""
-        if first.on_x < second.off_x and second.on_x < first.off_x:
-            return (f"⚠ Channel conflict on {unit} — “{n1}” and “{n2}” are on air at the same time "
-                    f"(one TX channel per unit){more}")
+        same_time = first.on_x < second.off_x and second.on_x < first.off_x
         eff = self.eff()
         tail = max(0.0, first.span[1] - first.off_x) / eff
         lead = max(0.0, second.on_x - second.span[0]) / eff
         need = int(math.ceil(tail + lead - 1e-6))
+        return first, second, unit, n1, n2, same_time, need
+
+    def conflict_message(self) -> str:
+        """The banner text for a channel CONFLICT ("" when there is none): the first clashing
+        pair, named, the task both launch, and the KIND of clash — the two on air at the same
+        time, or only the later one's warm-up (lead-in) starting before the earlier one's
+        cool-down (tail) ends, with the gap between the two windows that would clear it (the
+        agent's arm rule: lead-in + tail). Sequences launching DIFFERENT tasks may overlap — that
+        is a stack (`stacked_message`), not a conflict."""
+        pairs = self._conflict_pairs
+        if not pairs:
+            return ""
+        info = self._pair_text(pairs[0])
+        if info is None:
+            return "⚠ Channel conflict — overlapping sequences on one unit launch the same task"
+        first, second, unit, n1, n2, same_time, need = info
+        shared = sorted(self._launched_tasks(first) & self._launched_tasks(second))
+        task = "”, “".join(shared) if shared else "?"
+        more = f" (+{len(pairs) - 1} more)" if len(pairs) > 1 else ""
+        if same_time:
+            return (f"⚠ Channel conflict on {unit} — “{n1}” and “{n2}” both launch “{task}” while on air "
+                    f"at the same time — a task runs once; the unit will refuse the arm{more}")
         return (f"⚠ Channel conflict on {unit} — “{n2}”'s warm-up starts before “{n1}”'s cool-down ends "
-                f"(one TX channel per unit): leave ≥ {need} s between “{n1}” off-air and “{n2}” on-air{more}")
+                f"and both launch “{task}” — a task runs once: leave ≥ {need} s between “{n1}” off-air "
+                f"and “{n2}” on-air{more}")
+
+    def stacked_message(self) -> str:
+        """The (amber, informational) banner for STACKED sequences ("" when none): the first
+        stacked pair, named, and a reminder that their tasks must be compatible — plus a note
+        when the unit's agent predates `sequence-stacking` and would still refuse the arm."""
+        pairs = self._stacked_pairs
+        if not pairs:
+            return ""
+        info = self._pair_text(pairs[0])
+        if info is None:
+            return "⚑ Stacked — overlapping sequences on one unit (their tasks must be compatible)"
+        first, second, unit, n1, n2, same_time, need = info
+        more = f" (+{len(pairs) - 1} more)" if len(pairs) > 1 else ""
+        if same_time:
+            msg = (f"⚑ Stacked on {unit} — “{n1}” and “{n2}” are on air at the same time · "
+                   f"make sure their tasks are compatible{more}")
+        else:
+            msg = (f"⚑ Stacked on {unit} — “{n2}”'s warm-up starts before “{n1}”'s cool-down ends · "
+                   f"fine if their tasks are compatible{more}")
+        if self._unit_supports_stacking(first.item.hostname) is False:
+            msg += f" · {unit}'s agent refuses stacked runs until updated (needs ≥ 1.36.0)"
+        return msg
 
     def first_fault(self) -> Optional[str]:
         for n in self._nodes:
@@ -2358,6 +2438,9 @@ class PlanTimelineEditor(QWidget):
         elif conflicts:
             self._ready.setText(self._stage.conflict_message())
             self._ready.setStyleSheet(f"font-size: 11px; color: {Palette.CRASH}; font-weight: 600;")
+        elif self._stage.stacked():
+            self._ready.setText(self._stage.stacked_message())
+            self._ready.setStyleSheet(f"font-size: 11px; color: {Palette.ARMED}; font-weight: 600;")
         else:
             n = len(self._stage.nodes())
             self._ready.setText(f"● Ready · {n} sequence{'' if n == 1 else 's'} · no channel conflicts"

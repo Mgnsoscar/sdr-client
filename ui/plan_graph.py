@@ -326,10 +326,12 @@ def pack_lanes(spans: List[Tuple[str, float, float]], gap: float = 6.0) -> Dict[
 
 def channel_conflict_pairs(spans: Dict[str, Tuple[float, float]],
                            unit_of: Dict[str, str]) -> List[Tuple[str, str]]:
-    """The pairs of sequences that OVERLAP on the SAME unit (one TX channel each): channel
-    conflicts, in input order. Spans are the sequences' TRUE extents in time (their window plus
-    every step's lead-in / tail — never a drawing pad), in any common unit; spans that merely
-    TOUCH (one ends where the next begins) do not clash — that is a legal chain."""
+    """The pairs of sequences that OVERLAP on the SAME unit, in input order. Spans are the
+    sequences' TRUE extents in time (their window plus every step's lead-in / tail — never a
+    drawing pad), in any common unit; spans that merely TOUCH (one ends where the next begins)
+    do not overlap — that is a legal chain. Whether an overlap is a CONFLICT (both launch the same
+    task — a task runs once, the unit refuses the arm) or a legal STACK (different tasks; the
+    owner decides what is compatible — agent 1.36.0, `sequence-stacking`) is the stage's call."""
     out: List[Tuple[str, str]] = []
     ids = list(spans)
     for i, a in enumerate(ids):
@@ -343,7 +345,7 @@ def channel_conflict_pairs(spans: Dict[str, Tuple[float, float]],
 
 
 def channel_conflicts(spans: Dict[str, Tuple[float, float]], unit_of: Dict[str, str]) -> set:
-    """Ids of every sequence in a channel conflict (see channel_conflict_pairs)."""
+    """Ids of every sequence that overlaps another on its unit (see channel_conflict_pairs)."""
     out: set = set()
     for a, b in channel_conflict_pairs(spans, unit_of):
         out.add(a); out.add(b)

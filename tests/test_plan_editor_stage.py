@@ -383,21 +383,93 @@ def test_chaining_sequences_on_one_unit_is_allowed_and_a_clash_names_its_kind():
     # A on the SAME unit merely touches it — no conflict (the drawing pad of a pin never counts)
     ed = chain(2.0); st = ed._stage
     assert st.conflicts() == set() and st.conflict_message() == ""
+    assert st.stacked() == set() and st.stacked_message() == ""
     assert "no channel conflicts" in ed._ready.text()
     na = st.nodes()[0]
     assert (na.span[1] - na.off_x) / st.eff() == pytest.approx(1.0, abs=0.02)      # A's tail = its STOP
     # touching windows: B's warm-up starts before A's cool-down ends → a conflict naming the gap
     ed0 = chain(0.0); st0 = ed0._stage
-    assert len(st0.conflicts()) == 2
+    assert len(st0.conflicts()) == 2 and st0.stacked() == set()   # both launch “tx” → a conflict, not a stack
     msg = st0.conflict_message()
     assert "warm-up" in msg and "cool-down" in msg and "≥ 2 s" in msg and "“A”" in msg and "“B”" in msg
+    assert "both launch “tx”" in msg
     assert ed0._ready.text() == msg
     # a genuine overlap (B's window inside A's) reads as on air at the same time
     a = _item("a", "s1", "A", off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=300.0)
     b = _item("a", "s2", "B", on=60.0, off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=100.0)
     st2 = _editor([a, b])._stage
-    assert len(st2.conflicts()) == 2 and "are on air at the same time" in st2.conflict_message()
+    assert len(st2.conflicts()) == 2 and "are on air at the same time" not in st2.conflict_message()
+    assert "both launch “tx” while on air at the same time" in st2.conflict_message()
+    assert "refuse the arm" in st2.conflict_message()
     # different units never clash
     a = _item("a", "s1", "A", off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=300.0)
     b = _item("b", "s2", "B", on=60.0, off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=100.0)
     assert _editor([a, b])._stage.conflicts() == set()
+
+
+def test_overlapping_sequences_with_different_tasks_stack_and_are_marked_amber_not_red():
+    """The owner allows STACKING: two sequences may overlap on one unit as long as they don't both
+    LAUNCH the same task (the agent's task-aware arm guard, 1.36.0). A stacked pair is amber
+    information — "make sure their tasks are compatible" — never a red conflict, and it does not
+    block the save."""
+    # B launches a DIFFERENT task (tx2) inside A's window on the same unit → stacked, not a conflict
+    a = _item("a", "s1", "A", off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=300.0)
+    b_steps = [st.model_copy(update={"task_name": "tx2"}) for st in _steps()]
+    b = _item("a", "s2", "B", on=60.0, off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=100.0,
+              steps=b_steps)
+    ed = _editor([a, b]); st = ed._stage
+    na, nb = st.nodes()
+    assert st._launched_tasks(na) == {"tx"} and st._launched_tasks(nb) == {"tx2"}
+    assert st.conflicts() == set() and st.conflict_message() == ""
+    assert st.stacked() == {str(na.uid), str(nb.uid)}
+    msg = st.stacked_message()
+    assert msg.startswith("⚑ Stacked on") and "“A”" in msg and "“B”" in msg
+    assert "are on air at the same time" in msg and "compatible" in msg
+    assert ed._ready.text() == msg
+    assert pe.Palette.ARMED in ed._ready.styleSheet() and pe.Palette.CRASH not in ed._ready.styleSheet()
+    # a stack never blocks the save (the stub library knows only task “tx”; teach B's editor tx2
+    # so the only thing left for `validate` to object to would be the overlap — and it doesn't)
+    nb.editor.set_tasks(["tx", "tx2"])
+    assert ed.validate() is None
+    # a TUNE-only sequence (no launch at all) over A stacks too — it only drives a task A launched
+    c_steps = [m.SequenceStep(anchor="start", offset_s=5, action=m.StepAction.TUNE, task_name="tx",
+                              params={"power": "-40"})] + [s for s in _steps() if s.action == m.StepAction.TUNE]
+    c = _item("a", "s3", "C", on=30.0, off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=60.0,
+              steps=c_steps)
+    ed3 = _editor([a, c]); st3 = ed3._stage
+    assert st3._launched_tasks(st3.nodes()[1]) == set()
+    assert st3.conflicts() == set() and len(st3.stacked()) == 2
+    assert "compatible" in st3.stacked_message()
+    # (the sequence validator's own, older rule still wants a tune to target a task the SAME
+    # sequence starts — that objection is about C's authoring, not about the stack)
+    assert "no duration task in this sequence starts" in (ed3.validate() or "")
+    # the fleet stub has no /info capabilities → no "agent refuses stacked runs" note (unknown ≠ old)
+    assert "refuses stacked runs" not in st3.stacked_message()
+    assert st3._unit_supports_stacking("a") is None
+
+
+def test_stacked_message_warns_when_the_units_agent_predates_sequence_stacking():
+    """A unit whose /info was read and lacks `sequence-stacking` (agent < 1.36.0) still refuses an
+    overlapping arm — the amber banner says so; a unit advertising it gets no such note."""
+    a = _item("a", "s1", "A", off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=300.0)
+    b_steps = [st.model_copy(update={"task_name": "tx2"}) for st in _steps()]
+    b = _item("a", "s2", "B", on=60.0, off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=100.0,
+              steps=b_steps)
+    ed = _editor([a, b]); st = ed._stage
+
+    class _Old:
+        capabilities = ["plan-item-anchors"]
+
+        def supports(self, cap):
+            return cap in self.capabilities
+
+    class _New(_Old):
+        capabilities = ["plan-item-anchors", "sequence-stacking"]
+
+    fleet = ed._hub.fleet
+    fleet.get = lambda host: _Old()
+    assert st._unit_supports_stacking("a") is False
+    assert "refuses stacked runs until updated" in st.stacked_message()
+    fleet.get = lambda host: _New()
+    assert st._unit_supports_stacking("a") is True
+    assert "refuses stacked runs" not in st.stacked_message()

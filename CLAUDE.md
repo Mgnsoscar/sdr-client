@@ -170,14 +170,34 @@ mockup.html`** is the visual spec; the anchor lines are drawn by the SEQUENCE ED
   "“A” and “B” are on air at the same time" (their windows overlap) or "“B”'s warm-up starts before “A”'s
   cool-down ends … leave ≥ N s between “A” off-air and “B” on-air" (N = tail + lead-in, the agent's arm rule),
   "(+n more)" when several. The demo plan's red is a genuine overlap (Galileo anchored INTO the chirp's window).
-Tests: `tests/test_plan_graph.py` (11), `tests/test_plan_editor_stage.py` (16; a wire clears another wire's
+  (5) **Stacking is ALLOWED** (owner: "right now the rule should allow stacking of sequences … I know what's
+  compatible"; a task-aware rule is the eventual goal). The agent's arm guard A is task-aware from 1.36.0
+  (capability `sequence-stacking`, `../sdr-agent/CLAUDE.md`): two overlapping runs on a unit are refused ONLY
+  when both LAUNCH the same task (a task runs once); runs launching different tasks, or a tune-only run, may
+  stack. The stage mirrors it in `_relayout`: `pg.channel_conflict_pairs` still finds every overlapping pair
+  (its docstring now says "overlap" — conflict vs stack is the stage's call), then `_PlanStage._launched_tasks`
+  (each node's bars + one-shots → task names) splits them into `_conflict_pairs` (a shared launched task →
+  RED, `conflict_message()` names the task: "“A” and “B” both launch “tx” while on air at the same time — a
+  task runs once; the unit will refuse the arm" / "…warm-up starts before…cool-down ends and both launch “tx”
+  … leave ≥ N s") and `_stacked_pairs` (`stacked()`, AMBER `Palette.ARMED` frame + banner via
+  `stacked_message()`: "⚑ Stacked on {unit} — “A” and “B” are on air at the same time · make sure their tasks
+  are compatible" / "…fine if their tasks are compatible", plus " · {unit}'s agent refuses stacked runs until
+  updated (needs ≥ 1.36.0)" when `_unit_supports_stacking(host)` reads a cached `/info` WITHOUT the
+  capability — None (never read / not in the fleet) adds nothing). A stack never blocks the save; the
+  tooltip reads "⚑ stacked with another sequence on this unit — their tasks must be compatible" (a conflict:
+  "⚠ launches the same task as an overlapping sequence … the unit refuses the arm"). The demo plan's
+  Galileo-inside-chirp overlap is now amber (different tasks).
+Tests: `tests/test_plan_graph.py` (11), `tests/test_plan_editor_stage.py` (18; a wire clears another wire's
 entry run — the naive route is shown to land on it; a pixel test that the windows wash the frame + pill and
 no sequence row is a grey stripe while the unit band keeps its wash; a line-anchored wire to a near dependent
 drops straight while the shared router would hook, and a far one keeps the general route; a 2 s-gap
 chain on one unit is clean, a touching chain names the warm-up / cool-down gap, a nested window reads "at the
-same time", other units never clash), `tests/test_plan_canvas_paint.py` (rewritten, 3), `test_plan_hold_arm.py`
-(updated: Hold authoring deferred, a Hold survives). Suite 1185 → 1212 offscreen; agent 711 → 713. **Rollout:** OTA units to 1.35.0 before deploying an anchored plan (else the
-replica drifts); `docs/plan-editor-mockup.html` is the spec. Deferred: Holds in the plan editor, plan-level
+same time" and names the task both launch, other units never clash; a different-task overlap and a tune-only
+overlap STACK — amber banner + frame, no conflict, the save not blocked; the old-agent note appears only for a
+unit whose cached `/info` lacks `sequence-stacking`), `tests/test_plan_canvas_paint.py` (rewritten, 3),
+`test_plan_hold_arm.py` (updated: Hold authoring deferred, a Hold survives). Suite 1185 → 1214 offscreen; agent
+711 → 714. **Rollout:** OTA units to 1.35.0 before deploying an anchored plan (else the replica drifts) and to
+1.36.0 before arming a STACKED plan (an older agent refuses the overlap); `docs/plan-editor-mockup.html` is the spec. Deferred: Holds in the plan editor, plan-level
 undo for sequence moves, per-unit online state from a live fleet (bands show the cached state).
 
 ## Current state — paramkit MARKER deploy gate (`api/script_markers.py`): a script needing a newer paramkit is refused, not shipped: COMPLETE (branch `claude/system-familiarization-f5mezz`, client-only)
