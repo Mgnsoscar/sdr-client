@@ -153,10 +153,19 @@ mockup.html`** is the visual spec; the anchor lines are drawn by the SEQUENCE ED
   run (`pts[-2].x .. x2` on its dependent's row, ±6 px), the stage's cross-sequence wires AND each expanded
   canvas's own step wires (`_TimelineCanvas._routed_connectors()`, factored out of its painter), is an
   obstacle for a wire dropping through that row, so its column lands left of the run instead of on the chip.
-Tests: `tests/test_plan_graph.py` (11), `tests/test_plan_editor_stage.py` (14; a wire clears another wire's
+  (3) A wire whose ANCHOR is a sequence's on-/off-air LINE (`line_anchor` in `_connector_specs`: a sequence
+  edge hung off another sequence's edge, or a step hung off another item's window edge) with a dependent
+  too close for the chip's entry run drew the shared router's near-zero-offset WRAP — a stub along the
+  group's bottom, a hook back over the line, a drop, then in. A guide line has no body at its exit point, so
+  `_PlanStage._line_anchor_route` drops STRAIGHT from the exit point to the dependent's row and runs in (the
+  chip rides the drop; `_draw_connector_head` backs the arrow + chip off along the short entry run), or jogs
+  to the column with no stub when that column is blocked / the dependent sits behind the line; a far
+  dependent keeps the general route (along the exit row, down, in).
+Tests: `tests/test_plan_graph.py` (11), `tests/test_plan_editor_stage.py` (15; a wire clears another wire's
 entry run — the naive route is shown to land on it; a pixel test that the windows wash the frame + pill and
-no sequence row is a grey stripe while the unit band keeps its wash), `tests/test_plan_canvas_paint.py` (rewritten, 3), `test_plan_hold_arm.py`
-(updated: Hold authoring deferred, a Hold survives). Suite 1185 → 1210 offscreen; agent 711 → 713. **Rollout:** OTA units to 1.35.0 before deploying an anchored plan (else the
+no sequence row is a grey stripe while the unit band keeps its wash; a line-anchored wire to a near dependent
+drops straight while the shared router would hook, and a far one keeps the general route), `tests/test_plan_canvas_paint.py` (rewritten, 3), `test_plan_hold_arm.py`
+(updated: Hold authoring deferred, a Hold survives). Suite 1185 → 1211 offscreen; agent 711 → 713. **Rollout:** OTA units to 1.35.0 before deploying an anchored plan (else the
 replica drifts); `docs/plan-editor-mockup.html` is the spec. Deferred: Holds in the plan editor, plan-level
 undo for sequence moves, per-unit online state from a live fleet (bands show the cached state).
 

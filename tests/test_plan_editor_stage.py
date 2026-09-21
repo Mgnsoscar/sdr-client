@@ -344,3 +344,30 @@ def test_sequence_windows_wash_across_the_frame_and_pill_and_no_row_is_a_grey_st
     unit = next(r_ for r_ in st._rows if r_["type"] == "unit")
     r, g, b_ = px(st._on_x + 250, unit["y"] + unit["h"] / 2)          # clear of the label + anchor line
     assert (r, g, b_) != (255, 255, 255) and 236 <= r <= 253 and g >= r
+
+
+def test_a_wire_from_a_sequence_line_to_a_near_dependent_drops_straight_and_never_hooks():
+    # B's on-air hangs 30 s off A's OFF-AIR line: too close for the chip's entry run, so the shared
+    # router would WRAP (a stub right, a hook back left over the line, a drop, then in) — on a guide
+    # line that is just a hook (owner report). The stage drops straight from the line instead.
+    a = _item("a", "s1", "A", off_air_anchor="item", off_air_anchor_edge="on", off_air_offset_s=300.0)
+    b = _item("b", "s2", "B", on_air_anchor="item", on_air_anchor_item="pi-s1", on_air_anchor_edge="off",
+              on_air_offset_s=30.0)
+    ed = _editor([a, b])
+    st = ed._stage; na, nb = st.nodes()
+    conns = st._routed_connectors()
+    assert len(conns) == 1
+    c = conns[0]; sp = c["spec"]
+    assert sp["line_anchor"] and sp["x1"] == pytest.approx(na.off_x) and sp["x2"] == pytest.approx(nb.on_x)
+    obs = st._route_obstacles(st._obstacles_between(sp["y1"], sp["y2"]), sp["x1"], sp["x2"], False)
+    naive = st._router._connector_points(sp["x1"], sp["y1"], sp["x2"], sp["y2"], sp["exit_dir"], obs,
+                                         sp["chip_w"] + 24.0, None, False, two_sided=True)
+    assert len(naive) >= 5                                                   # the wrap…
+    assert naive[1][0] > sp["x1"] + 8.0 and min(x for x, _ in naive) < sp["x1"] - 8.0   # …out right, back left
+    assert c["pts"] == [(sp["x1"], sp["y1"]), (sp["x1"], sp["y2"]), (sp["x2"], sp["y2"])]
+    # a dependent far enough for the chip keeps the general route: along the exit row, down, in
+    b2 = _item("b", "s2", "B", on_air_anchor="item", on_air_anchor_item="pi-s1", on_air_anchor_edge="off",
+               on_air_offset_s=180.0)
+    ed2 = _editor([a, b2])
+    c2 = ed2._stage._routed_connectors()[0]; sp2 = c2["spec"]
+    assert len(c2["pts"]) == 4 and c2["pts"][1][1] == sp2["y1"] and sp2["x1"] < c2["pts"][1][0] < sp2["x2"]

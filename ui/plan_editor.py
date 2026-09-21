@@ -1524,6 +1524,7 @@ class _PlanStage(QWidget):
                 specs.append(dict(x1=x1, y1=y1, x2=x2, y2=y2, exit_dir=exit_dir, two_sided=two_sided,
                                   entry_from_right=efr, text=rt._offset_chip_text(off), base=hue,
                                   ink=ink, sel=(n.uid == self._sel_node), anchor_cap=cap,
+                                  line_anchor=(anchor == "item"),
                                   chip_w=QFontMetrics(mono_font(10)).horizontalAdvance(
                                       rt._offset_chip_text(off)) + 14.0))
             if not n.expanded:
@@ -1563,7 +1564,7 @@ class _PlanStage(QWidget):
                 specs.append(dict(x1=x1, y1=y1, x2=x2, y2=y2, exit_dir=exit_dir, two_sided=two_sided,
                                   entry_from_right=efr, text=rt._offset_chip_text(off), base=QColor(base),
                                   ink=ink, sel=(st.uid == c._selected), anchor_cap=None,
-                                  chip_w=c._chip_w(st)))
+                                  line_anchor=(not ref), chip_w=c._chip_w(st)))
         return specs
 
     def _find_step(self, node: _SeqNode, wire_id: str):
@@ -1598,6 +1599,28 @@ class _PlanStage(QWidget):
             keep.append((lo, hi))
         return keep
 
+    def _line_anchor_route(self, s: dict, obstacles) -> Optional[List[Tuple[float, float]]]:
+        """A sequence's on-/off-air LINE as the anchor. The wire leaves the line at the group edge
+        nearest the dependent (or a pill's handle), so there is no body to stub away from — the
+        sequence editor's near-zero-offset WRAP (stub out, hook back over the line, drop, run in)
+        only draws a hook here (owner report). When the general route would wrap — the drop column
+        falls on the exit's far side because the dependent is too close for the chip's entry run —
+        drop STRAIGHT from the exit point to the dependent's row and run in (the chip rides the
+        drop), or, when that column is blocked or the dependent sits behind the line, jog to the
+        column with no stub. None = the general route is fine (no wrap)."""
+        rt = self._router
+        x1, y1, x2, y2 = s["x1"], s["y1"], s["x2"], s["y2"]
+        efr = s["entry_from_right"]
+        xd = rt._drop_column(x1, x2, efr, s["chip_w"] + 24.0, obstacles)
+        if abs(xd - x1) <= 1.0 or (xd - x1) * s["exit_dir"] > 0:
+            return None
+        beyond = (x2 <= x1 + 1.0) if efr else (x2 >= x1 - 1.0)
+        blocked = any(lo - 6.0 <= x1 <= hi + 6.0 for lo, hi in obstacles)
+        if beyond and not blocked:
+            return [(x1, y1), (x1, y2), (x2, y2)]
+        return rt._connector_points(x1, y1, x2, y2, 0.0, obstacles, s["chip_w"] + 24.0, None, efr,
+                                    two_sided=False)
+
     def _routed_connectors(self) -> List[dict]:
         """Every cross-sequence connector with its routed waypoints (`pts`), as the painter draws it.
         Two passes: each wire is routed on its own first, then re-routed so its drop column also
@@ -1610,6 +1633,10 @@ class _PlanStage(QWidget):
         def route(s, extra):
             obstacles = self._route_obstacles(self._obstacles_between(s["y1"], s["y2"]) + extra,
                                               s["x1"], s["x2"], s["entry_from_right"])
+            if s.get("line_anchor"):
+                pts = self._line_anchor_route(s, obstacles)
+                if pts is not None:
+                    return pts
             return rt._connector_points(s["x1"], s["y1"], s["x2"], s["y2"], s["exit_dir"], obstacles,
                                         s["chip_w"] + 24.0, s["anchor_cap"], s["entry_from_right"],
                                         two_sided=s["two_sided"])
